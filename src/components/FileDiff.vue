@@ -10,7 +10,14 @@ import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { getGitDiff } from "../lib/ipc";
 import { DIFF_ROW_HEIGHT, useLargeDiff } from "./use-large-diff";
 
-const props = defineProps<{ checkout: Checkout; gitSnapshot: ActiveGitSnapshot; path: string; active: boolean }>();
+const props = defineProps<{
+  checkout: Checkout;
+  gitSnapshot: ActiveGitSnapshot;
+  path: string;
+  active: boolean;
+  scrollTop: number;
+}>();
+const emit = defineEmits<{ scrollPositionChanged: [top: number] }>();
 
 const diff = shallowRef<GitFileDiff | null>(null);
 const diffHunks = shallowRef<Array<{ title: string; file: DiffFile }>>([]);
@@ -27,7 +34,7 @@ const showNoTextHunks = computed(
     !hasTextHunks.value,
 );
 const diffViewport = ref<HTMLElement | null>(null);
-const diffScrollTop = ref(0);
+const diffScrollTop = ref(props.scrollTop);
 const selectedPath = ref<string | null>(null);
 const largeDiff = useLargeDiff(() => props.checkout.id, selectedPath, diff, collapsedHunks, diffScrollTop);
 const { diffPageError, largeDiffLineCount, loadVisiblePages, visibleLargeDiffWindow } = largeDiff;
@@ -65,7 +72,7 @@ function createHunks(path: string, patch: string) {
 async function loadDiff(path: string, preservePosition = false) {
   const request = ++diffGeneration;
   const checkoutId = props.checkout.id;
-  const oldScrollTop = preservePosition ? diffScrollTop.value : 0;
+  const oldScrollTop = preservePosition ? diffScrollTop.value : props.scrollTop;
   if (selectedPath.value === path) largeDiff.reset();
   selectedPath.value = path;
   diff.value = null;
@@ -162,6 +169,7 @@ watch(
 
 function onDiffScroll(event: Event) {
   diffScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
+  emit("scrollPositionChanged", diffScrollTop.value);
   if (diff.value?.large) loadVisiblePages();
 }
 

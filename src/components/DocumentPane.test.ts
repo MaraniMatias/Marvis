@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import DOMPurify from "dompurify";
 import { defineComponent, reactive, ref } from "vue";
 import type { GitStatus } from "../domain/git";
 import type { MainDocument } from "../domain/main-document";
@@ -218,6 +219,44 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("highlights multiline source with one continuous syntax token and displays line numbers", async () => {
+    const sanitize = vi.spyOn(DOMPurify, "sanitize").mockImplementation((html) => html as string);
+    const document: MainDocument = {
+      checkoutId: "checkout:multiline-source",
+      path: "src/example.js",
+      source: "file",
+      mode: "code",
+    };
+    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: "/* first line\nsecond line */" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps(document) });
+    try {
+      await flushPromises();
+      const source = wrapper.get('[aria-label="Source code"]');
+      expect(source.findAll(".hljs-comment").map((span) => span.text())).toEqual(["/* first line", "second line */"]);
+      expect(source.findAll(".source-line-number").map((number) => number.text())).toEqual(["1", "2"]);
+    } finally {
+      wrapper.unmount();
+      sanitize.mockRestore();
+    }
+  });
+
+  it("uses compact source rendering above the line bound", async () => {
+    const document: MainDocument = {
+      checkoutId: "checkout:many-lines",
+      path: "logs/output.txt",
+      source: "file",
+      mode: "code",
+    };
+    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: Array(5001).fill("line").join("\n") });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps(document) });
+    await flushPromises();
+    const source = wrapper.get('[aria-label="Source code"]');
+    expect(source.findAll(".source-line-number")).toHaveLength(1);
+    expect(source.get(".source-line-number").text().split("\n")).toHaveLength(5001);
+    expect(wrapper.get('button[title^="Wrapping is unavailable"]').attributes("disabled")).toBeDefined();
+    wrapper.unmount();
+  });
+
   it("ignores an older file read after switching checkout and document", async () => {
     let resolveOld!: (value: { path: string; content: string }) => void;
     mocks.readCheckoutFile.mockImplementation((_checkoutId: string, path: string) => {
@@ -260,6 +299,53 @@ describe("DocumentPane", () => {
     expect((wrapper.get('[aria-label="File contents"]').element as HTMLElement).scrollTop).toBe(120);
     expect((wrapper.get('[aria-label="File contents"]').element as HTMLElement).scrollLeft).toBe(40);
     wrapper.unmount();
+  });
+
+  it("restores a diff position independently and reports later scrolling", async () => {
+    const checkoutId = "checkout:diff-position";
+    const document: MainDocument = { checkoutId, path: "src/app.ts", source: "change", mode: "diff" };
+    const wrapper = mount(DocumentPane, {
+      props: { ...documentPaneProps(document), diffScrollTop: 72 },
+    });
+    await flushPromises();
+    const viewport = wrapper.get('[aria-label="Diff contents"]');
+    expect((viewport.element as HTMLElement).scrollTop).toBe(72);
+    (viewport.element as HTMLElement).scrollTop = 144;
+    await viewport.trigger("scroll");
+    expect(wrapper.emitted("diffPositionChanged")).toEqual([[144]]);
+    wrapper.unmount();
+  });
+
+  it("restores Markdown reading position after relative images finish decoding", async () => {
+    const descriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "decode");
+    const decode = vi.fn(function (this: HTMLImageElement) {
+      const viewport = this.closest(".document-pane")?.querySelector('[aria-label="File contents"]') as HTMLElement;
+      viewport.scrollTop = 0;
+      return Promise.resolve();
+    });
+    Object.defineProperty(HTMLImageElement.prototype, "decode", { configurable: true, value: decode });
+    const document: MainDocument = {
+      checkoutId: "checkout:markdown-scroll",
+      path: "docs/readme.md",
+      source: "file",
+      mode: "view",
+    };
+    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: "![preview](image.png)" });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps(document),
+        readingPosition: { top: 240, left: 12 },
+      },
+    });
+    try {
+      await vi.waitFor(() => expect(decode).toHaveBeenCalledOnce());
+      expect((wrapper.get('[aria-label="File contents"]').element as HTMLElement).scrollTop).toBe(240);
+      expect((wrapper.get('[aria-label="File contents"]').element as HTMLElement).scrollLeft).toBe(12);
+    } finally {
+      wrapper.unmount();
+      if (descriptor) Object.defineProperty(HTMLImageElement.prototype, "decode", descriptor);
+      else delete (HTMLImageElement.prototype as { decode?: () => Promise<void> }).decode;
+    }
   });
 
   it("does not read the current file for a deleted change", async () => {
@@ -313,7 +399,7 @@ describe("DocumentPane", () => {
       ],
     });
     const wrapper = mount(FileDiff, {
-      props: { checkout: checkout(checkoutId), gitSnapshot, path: "large.txt", active: false },
+      props: { checkout: checkout(checkoutId), gitSnapshot, path: "large.txt", active: false, scrollTop: 0 },
     });
     await vi.waitFor(() => expect(wrapper.text()).toContain("+new line"));
     expect(mocks.getGitDiffPage).toHaveBeenCalledWith(checkoutId, "large.txt", 0, 32);
@@ -328,7 +414,7 @@ describe("DocumentPane", () => {
     const checkoutId = "checkout:diff-status";
     const gitSnapshot = snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]);
     const wrapper = mount(FileDiff, {
-      props: { checkout: checkout(checkoutId), gitSnapshot, path: "src/app.ts", active: true },
+      props: { checkout: checkout(checkoutId), gitSnapshot, path: "src/app.ts", active: true, scrollTop: 0 },
     });
     await flushPromises();
     expect(mocks.getGitDiff).toHaveBeenCalledTimes(1);
@@ -352,7 +438,13 @@ describe("DocumentPane", () => {
         hunks: [],
       });
       const special = mount(FileDiff, {
-        props: { checkout: checkout(checkoutId), gitSnapshot: isolatedSnapshot, path: "src/app.ts", active: true },
+        props: {
+          checkout: checkout(checkoutId),
+          gitSnapshot: isolatedSnapshot,
+          path: "src/app.ts",
+          active: true,
+          scrollTop: 0,
+        },
       });
       await vi.waitFor(() => expect(special.text()).toContain(result.message));
       expect(isolatedSnapshot.markViewed).not.toHaveBeenCalled();

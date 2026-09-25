@@ -24,8 +24,10 @@ export interface CheckoutUiState {
   selectedChangePath: string | null;
   expandedDirectories: string[];
   filesScrollTop: number;
+  changesScrollTop: number;
   documentScrollTop: number;
   documentScrollLeft: number;
+  diffScrollTop: number;
 }
 
 export const DEFAULT_APP_LAYOUT: AppLayoutState = {
@@ -49,8 +51,10 @@ export const DEFAULT_CHECKOUT_UI_STATE: CheckoutUiState = {
   selectedChangePath: null,
   expandedDirectories: [],
   filesScrollTop: 0,
+  changesScrollTop: 0,
   documentScrollTop: 0,
   documentScrollLeft: 0,
+  diffScrollTop: 0,
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -119,8 +123,10 @@ export function normalizeCheckoutUiState(value: unknown): CheckoutUiState {
     selectedChangePath: safePath(value.selectedChangePath) ? value.selectedChangePath : null,
     expandedDirectories: [...new Set(expandedDirectories)],
     filesScrollTop: boundedNumber(value.filesScrollTop, 0, 0, 10_000_000),
+    changesScrollTop: boundedNumber(value.changesScrollTop, 0, 0, 10_000_000),
     documentScrollTop: boundedNumber(value.documentScrollTop, 0, 0, 10_000_000),
     documentScrollLeft: boundedNumber(value.documentScrollLeft, 0, 0, 10_000_000),
+    diffScrollTop: boundedNumber(value.diffScrollTop, 0, 0, 10_000_000),
   };
 }
 

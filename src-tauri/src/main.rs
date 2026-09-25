@@ -128,7 +128,15 @@ mod security_tests {
             .iter()
             .map(|permission| permission.as_str().unwrap())
             .collect::<Vec<_>>();
-        assert_eq!(permissions, ["core:default", "dialog:allow-open"]);
+        assert_eq!(
+            permissions,
+            [
+                "core:default",
+                "core:window:allow-close",
+                "core:window:allow-start-dragging",
+                "dialog:allow-open"
+            ]
+        );
 
         let cargo_manifest = include_str!("../Cargo.toml");
         assert!(!cargo_manifest.contains("tauri-plugin-shell"));

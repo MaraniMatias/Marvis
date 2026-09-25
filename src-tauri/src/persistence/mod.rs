@@ -70,7 +70,7 @@ pub struct PersistedDocument {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct CheckoutUiState {
     pub version: u8,
     pub document: Option<PersistedDocument>,
@@ -80,8 +80,10 @@ pub struct CheckoutUiState {
     pub selected_change_path: Option<String>,
     pub expanded_directories: Vec<String>,
     pub files_scroll_top: u32,
+    pub changes_scroll_top: u32,
     pub document_scroll_top: u32,
     pub document_scroll_left: u32,
+    pub diff_scroll_top: u32,
 }
 
 impl Default for CheckoutUiState {
@@ -95,8 +97,10 @@ impl Default for CheckoutUiState {
             selected_change_path: None,
             expanded_directories: Vec::new(),
             files_scroll_top: 0,
+            changes_scroll_top: 0,
             document_scroll_top: 0,
             document_scroll_left: 0,
+            diff_scroll_top: 0,
         }
     }
 }
@@ -1278,8 +1282,10 @@ fn validate_checkout_ui_state(checkout_id: &str, state: &CheckoutUiState) -> boo
             .iter()
             .all(|path| safe_checkout_relative_path(path))
         && state.files_scroll_top <= 10_000_000
+        && state.changes_scroll_top <= 10_000_000
         && state.document_scroll_top <= 10_000_000
         && state.document_scroll_left <= 10_000_000
+        && state.diff_scroll_top <= 10_000_000
 }
 
 fn migrate(connection: &Connection) -> Result<(), String> {
@@ -1729,8 +1735,10 @@ mod tests {
             selected_change_path: Some("src/main.rs".into()),
             expanded_directories: vec!["docs".into(), "src".into()],
             files_scroll_top: 640,
+            changes_scroll_top: 480,
             document_scroll_top: 320,
             document_scroll_left: 4,
+            diff_scroll_top: 900,
             ..CheckoutUiState::default()
         };
         database
@@ -1798,6 +1806,32 @@ mod tests {
                 6
             );
         }
+    }
+
+    #[test]
+    fn checkout_ui_state_defaults_new_scroll_fields_for_existing_saved_state() {
+        let old_state = serde_json::json!({
+            "version": 1,
+            "document": null,
+            "mainView": "terminal",
+            "inspectorTab": "files",
+            "selectedFilePath": null,
+            "selectedChangePath": null,
+            "expandedDirectories": [],
+            "filesScrollTop": 64,
+            "documentScrollTop": 32,
+            "documentScrollLeft": 4
+        });
+        let state: CheckoutUiState = serde_json::from_value(old_state).unwrap();
+        assert_eq!(state.files_scroll_top, 64);
+        assert_eq!(state.changes_scroll_top, 0);
+        assert_eq!(state.diff_scroll_top, 0);
+
+        let invalid = CheckoutUiState {
+            changes_scroll_top: 10_000_001,
+            ..CheckoutUiState::default()
+        };
+        assert!(!super::validate_checkout_ui_state("checkout:one", &invalid));
     }
 
     #[test]

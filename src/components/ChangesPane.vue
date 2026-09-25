@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-self-closing, vue/html-indent, vue/html-closing-bracket-newline */
-import { computed, ref } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 
@@ -8,11 +8,16 @@ const props = defineProps<{
   checkout: Checkout;
   gitSnapshot: ActiveGitSnapshot;
   selectedPath: string | null;
+  scrollTop: number;
 }>();
-const emit = defineEmits<{ openChange: [value: { checkoutId: string; path: string }] }>();
+const emit = defineEmits<{
+  openChange: [value: { checkoutId: string; path: string }];
+  scrollPositionChanged: [top: number];
+}>();
 
 const query = ref("");
-const listScrollTop = ref(0);
+const listScrollTop = ref(props.scrollTop);
+const listViewport = ref<HTMLElement | null>(null);
 const status = computed(() => props.gitSnapshot.status);
 const statusState = computed(() => props.gitSnapshot.statusState);
 const statusError = computed(() => props.gitSnapshot.changesStatusError);
@@ -46,7 +51,20 @@ const visibleFileWindow = computed(() => {
 
 function onScroll(event: Event) {
   listScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
+  emit("scrollPositionChanged", listScrollTop.value);
 }
+
+watch(
+  () => [props.checkout.id, statusState.value] as const,
+  async ([checkoutId, state]) => {
+    if (state !== "ready") return;
+    const savedTop = props.scrollTop;
+    listScrollTop.value = savedTop;
+    await nextTick();
+    if (props.checkout.id === checkoutId && listViewport.value) listViewport.value.scrollTop = savedTop;
+  },
+  { immediate: true, flush: "post" },
+);
 
 function openChange(path: string) {
   emit("openChange", { checkoutId: props.checkout.id, path });
@@ -83,7 +101,7 @@ function openChange(path: string) {
         class="h-8 w-full rounded border border-white/8 bg-black/10 px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-400/50"
       />
     </div>
-    <div class="min-h-0 flex-1 overflow-auto p-2" aria-label="Changed files" @scroll="onScroll">
+    <div ref="listViewport" class="min-h-0 flex-1 overflow-auto p-2" aria-label="Changed files" @scroll="onScroll">
       <p v-if="statusState === 'loading'" role="status" class="px-2 py-3 text-xs text-zinc-500">Loading Git status…</p>
       <p v-else-if="statusState === 'error'" role="alert" class="px-2 py-3 text-xs text-red-300">
         {{ statusError || gitSnapshot.statusError }}

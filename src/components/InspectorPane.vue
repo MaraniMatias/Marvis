@@ -22,7 +22,12 @@ const emit = defineEmits<{
   updateUiState: [
     value: Pick<
       CheckoutUiState,
-      "inspectorTab" | "selectedFilePath" | "selectedChangePath" | "expandedDirectories" | "filesScrollTop"
+      | "inspectorTab"
+      | "selectedFilePath"
+      | "selectedChangePath"
+      | "expandedDirectories"
+      | "filesScrollTop"
+      | "changesScrollTop"
     >,
   ];
 }>();
@@ -53,6 +58,7 @@ const searchTruncated = ref(false);
 const searchState = ref<"idle" | "loading" | "ready" | "error">("idle");
 const searchError = ref("");
 const treeScrollTop = ref(0);
+const changesScrollTop = ref(0);
 const treeViewport = ref<HTMLElement | null>(null);
 let searchIndexCheckoutId: string | null = null;
 let searchIndexPromise: { checkoutId: string; promise: Promise<FileSearchResult> } | null = null;
@@ -126,6 +132,7 @@ watch(
     searchGeneration += 1;
     const saved = props.savedState;
     treeScrollTop.value = saved?.filesScrollTop ?? 0;
+    changesScrollTop.value = saved?.changesScrollTop ?? 0;
     expanded.value = saved?.expandedDirectories ?? [];
     activeTab.value = saved?.inspectorTab === "changes" && props.repo?.kind === "git" ? "changes" : "files";
     if (checkoutId && saved?.selectedFilePath)
@@ -157,7 +164,7 @@ watch(
   { immediate: true },
 );
 
-watch([activeTab, selectedPath, selectedChangedPath, expanded, treeScrollTop], () => {
+watch([activeTab, selectedPath, selectedChangedPath, expanded, treeScrollTop, changesScrollTop], () => {
   if (!props.checkout) return;
   emit("updateUiState", {
     inspectorTab: activeTab.value,
@@ -165,8 +172,37 @@ watch([activeTab, selectedPath, selectedChangedPath, expanded, treeScrollTop], (
     selectedChangePath: selectedChangedPath.value,
     expandedDirectories: expanded.value,
     filesScrollTop: Math.round(treeScrollTop.value),
+    changesScrollTop: Math.round(changesScrollTop.value),
   });
 });
+
+function onChangesScroll(top: number) {
+  changesScrollTop.value = top;
+}
+
+function onInspectorTabKeydown(event: KeyboardEvent) {
+  if (!(event.target instanceof HTMLElement) || event.target.getAttribute("role") !== "tab") return;
+  const tabs = [
+    "files",
+    ...(props.repo?.kind === "git" && props.checkout && !props.checkout.isMissing ? ["changes"] : []),
+  ];
+  const current = event.target.id === "inspector-tab-changes" ? "changes" : "files";
+  const index = tabs.indexOf(current);
+  const next =
+    event.key === "Home"
+      ? tabs[0]
+      : event.key === "End"
+        ? tabs[tabs.length - 1]
+        : event.key === "ArrowRight"
+          ? tabs[(index + 1) % tabs.length]
+          : event.key === "ArrowLeft"
+            ? tabs[(index + tabs.length - 1) % tabs.length]
+            : null;
+  if (!next) return;
+  event.preventDefault();
+  activeTab.value = next as "files" | "changes";
+  void nextTick(() => document.getElementById(`inspector-tab-${next}`)?.focus());
+}
 
 watch(
   () => props.commandRequest?.token,
@@ -403,11 +439,16 @@ function onTreeScroll(event: Event) {
       role="tablist"
       aria-label="Inspector sections"
       class="flex h-11 shrink-0 items-center gap-1 border-b border-white/8 px-3"
+      @keydown="onInspectorTabKeydown"
     >
       <button
         v-if="checkout"
+        id="inspector-tab-files"
         role="tab"
+        type="button"
         :aria-selected="activeTab === 'files'"
+        aria-controls="inspector-panel-files"
+        :tabindex="activeTab === 'files' ? 0 : -1"
         class="rounded px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em]"
         :class="activeTab === 'files' ? 'bg-white/8 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'"
         @click="activeTab = 'files'"
@@ -416,8 +457,12 @@ function onTreeScroll(event: Event) {
       </button>
       <button
         v-if="repo?.kind === 'git' && checkout && !checkout.isMissing"
+        id="inspector-tab-changes"
         role="tab"
+        type="button"
         :aria-selected="activeTab === 'changes'"
+        aria-controls="inspector-panel-changes"
+        :tabindex="activeTab === 'changes' ? 0 : -1"
         class="rounded px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em]"
         :class="activeTab === 'changes' ? 'bg-white/8 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'"
         @click="activeTab = 'changes'"
@@ -425,7 +470,14 @@ function onTreeScroll(event: Event) {
         Changes
       </button>
     </div>
-    <div v-show="activeTab === 'files'" class="flex min-h-0 flex-1 flex-col">
+    <div
+      v-show="activeTab === 'files'"
+      :id="checkout ? 'inspector-panel-files' : undefined"
+      :role="checkout ? 'tabpanel' : undefined"
+      :aria-labelledby="checkout ? 'inspector-tab-files' : undefined"
+      :tabindex="checkout ? 0 : undefined"
+      class="flex min-h-0 flex-1 flex-col"
+    >
       <div class="shrink-0 border-b border-white/8 p-2">
         <input
           v-if="rootState === 'ready'"
@@ -542,14 +594,24 @@ function onTreeScroll(event: Event) {
         </template>
       </section>
     </div>
-    <ChangesPane
+    <div
       v-if="checkout && !checkout.isMissing && repo?.kind === 'git'"
       v-show="activeTab === 'changes'"
-      :key="checkout.id"
-      :checkout="checkout"
-      :git-snapshot="gitSnapshot"
-      :selected-path="selectedChangedPath"
-      @open-change="selectChange"
-    />
+      id="inspector-panel-changes"
+      role="tabpanel"
+      aria-labelledby="inspector-tab-changes"
+      tabindex="0"
+      class="flex min-h-0 flex-1 flex-col"
+    >
+      <ChangesPane
+        :key="checkout.id"
+        :checkout="checkout"
+        :git-snapshot="gitSnapshot"
+        :selected-path="selectedChangedPath"
+        :scroll-top="changesScrollTop"
+        @open-change="selectChange"
+        @scroll-position-changed="onChangesScroll"
+      />
+    </div>
   </aside>
 </template>

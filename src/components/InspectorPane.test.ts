@@ -3,6 +3,8 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { reactive } from "vue";
 import type { GitStatus } from "../domain/git";
+import { DEFAULT_CHECKOUT_UI_STATE } from "../domain/ui-state";
+import type { CheckoutUiState } from "../domain/ui-state";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 
@@ -63,6 +65,7 @@ function mountInspector(props: {
   repo?: Repo;
   gitSnapshot?: ActiveGitSnapshot;
   commandRequest?: { action: "open-file" | "open-changes"; token: number } | null;
+  savedState?: CheckoutUiState | null;
 }) {
   return mount(InspectorPane, {
     props: { ...props, gitSnapshot: props.gitSnapshot ?? gitSnapshot(props.checkout.id) },
@@ -166,14 +169,50 @@ describe("InspectorPane", () => {
     await flushPromises();
     const sections = wrapper.get('[aria-label="Inspector sections"]').findAll("button");
     expect(sections.map((button) => button.text())).toEqual(["Files", "Changes"]);
+    expect(sections[0]!.attributes("aria-controls")).toBe("inspector-panel-files");
+    expect(sections[1]!.attributes("aria-controls")).toBe("inspector-panel-changes");
+    expect(wrapper.get("#inspector-panel-files").attributes("aria-labelledby")).toBe("inspector-tab-files");
+    expect(wrapper.get("#inspector-panel-changes").attributes("aria-labelledby")).toBe("inspector-tab-changes");
 
     await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
-    await wrapper.get('[aria-label="Inspector sections"]').findAll("button")[1].trigger("click");
+    await wrapper.get('[aria-label="Inspector sections"]').findAll("button")[0]!.trigger("keydown", { key: "End" });
+    await flushPromises();
+    expect(wrapper.get("#inspector-tab-changes").attributes("aria-selected")).toBe("true");
+    const changesViewport = wrapper.get('[aria-label="Changed files"]');
+    (changesViewport.element as HTMLElement).scrollTop = 72;
+    await changesViewport.trigger("scroll");
+    await flushPromises();
+    expect(wrapper.emitted("updateUiState")?.at(-1)?.[0]).toMatchObject({ changesScrollTop: 72 });
     await wrapper.get('[aria-label="Changed files"] button').trigger("click");
     expect(wrapper.emitted("openChange")).toEqual([[{ checkoutId: "git", path: "src/main.ts" }]]);
 
     await wrapper.get('[aria-label="Inspector sections"]').findAll("button")[0].trigger("click");
     expect(wrapper.get('[aria-label="Checkout files"] button').classes()).toContain("bg-white/8");
+    wrapper.unmount();
+  });
+
+  it("fetches every saved expanded directory, including nested paths", async () => {
+    mocks.listCheckoutFiles.mockImplementation(async (_checkoutId: string, path: string) => ({
+      entries:
+        path === "."
+          ? [{ name: "src", path: "src", kind: "directory" }]
+          : path === "src"
+            ? [{ name: "nested", path: "src/nested", kind: "directory" }]
+            : [{ name: "main.ts", path: "src/nested/main.ts", kind: "file" }],
+      truncated: false,
+    }));
+    const wrapper = mountInspector({
+      checkout: checkout("nested"),
+      savedState: {
+        ...DEFAULT_CHECKOUT_UI_STATE,
+        expandedDirectories: ["src", "src/nested"],
+      },
+    });
+    await flushPromises();
+    expect(mocks.listCheckoutFiles).toHaveBeenCalledWith("nested", ".");
+    expect(mocks.listCheckoutFiles).toHaveBeenCalledWith("nested", "src");
+    expect(mocks.listCheckoutFiles).toHaveBeenCalledWith("nested", "src/nested");
+    expect(wrapper.text()).toContain("main.ts");
     wrapper.unmount();
   });
 

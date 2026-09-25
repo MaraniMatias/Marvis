@@ -20,13 +20,21 @@ const props = withDefaults(
     active?: boolean;
     refreshRevision?: number;
     readingPosition?: { top: number; left: number };
+    diffScrollTop?: number;
     zedAvailable?: boolean;
   }>(),
-  { active: true, refreshRevision: 0, readingPosition: () => ({ top: 0, left: 0 }), zedAvailable: false },
+  {
+    active: true,
+    refreshRevision: 0,
+    readingPosition: () => ({ top: 0, left: 0 }),
+    diffScrollTop: 0,
+    zedAvailable: false,
+  },
 );
 const emit = defineEmits<{
   updateMode: [mode: MainDocumentMode];
   readingPositionChanged: [position: { top: number; left: number }];
+  diffPositionChanged: [top: number];
   openMarkdownLink: [path: string];
   openInZed: [];
 }>();
@@ -48,16 +56,51 @@ const { markdownHtml, markdownPreviewState, markdownImageWarning, isMarkdownPath
 const identity = computed(() => `${props.document.checkoutId}\0${props.document.source}\0${props.document.path}`);
 const isMarkdown = computed(() => isMarkdownPath(props.document.path));
 const sourceLines = computed(() => content.value.split(/\r?\n/));
-const highlightedLines = computed(() => {
+const sourceLineNumbers = computed(() => sourceLines.value.map((_, index) => index + 1).join("\n"));
+const compactSource = computed(() => sourceLines.value.length > 5000);
+const highlightedSource = computed(() => {
   const extension = props.document.path.split(".").pop()?.toLowerCase();
   const language = extension && hljs.getLanguage(extension) ? extension : undefined;
-  return sourceLines.value.map((line) => {
-    const html = language ? hljs.highlight(line, { language, ignoreIllegals: true }).value : undefined;
-    return html ? DOMPurify.sanitize(html, { ALLOWED_TAGS: ["span"], ALLOWED_ATTR: ["class"] }) : null;
+  if (!language) return null;
+  const html = hljs.highlight(content.value, { language, ignoreIllegals: true }).value;
+  const sanitized = DOMPurify.sanitize(html, {
+    ALLOWED_TAGS: ["span"],
+    ALLOWED_ATTR: ["class"],
   });
+  return sanitized;
 });
+const highlightedLines = computed(() =>
+  highlightedSource.value === null ? null : splitHighlightedLines(highlightedSource.value),
+);
 let requestGeneration = 0;
 let loadedIdentity: string | null = null;
+
+function splitHighlightedLines(html: string): string[] {
+  const lines: string[] = [];
+  const openSpans: string[] = [];
+  const tagsAndBreaks = /<span class="[^"]*">|<\/span>|\r?\n/g;
+  let line = "";
+  let cursor = 0;
+  for (const match of html.matchAll(tagsAndBreaks)) {
+    const token = match[0];
+    const index = match.index;
+    line += html.slice(cursor, index);
+    if (token === "\n" || token === "\r\n") {
+      lines.push(`${line}${"</span>".repeat(openSpans.length)}`);
+      line = openSpans.join("");
+    } else if (token.startsWith("</")) {
+      line += token;
+      openSpans.pop();
+    } else {
+      line += token;
+      openSpans.push(token);
+    }
+    cursor = index + token.length;
+  }
+  line += html.slice(cursor);
+  lines.push(line);
+  return lines;
+}
 
 function errorText(error: unknown): string {
   if (isIpcError(error)) {
@@ -115,15 +158,7 @@ async function loadFile(preservePosition = false) {
     readingPosition.value = previousPosition;
     if (props.document.mode === "view" && isMarkdown.value) {
       await load(checkoutId, path, result.content);
-      await nextTick();
-      const images = fileViewport.value?.querySelectorAll("img") ?? [];
-      await Promise.all(Array.from(images, (image) => image.decode?.().catch(() => undefined) ?? Promise.resolve()));
-      await nextTick();
-      if (request === requestGeneration && fileViewport.value) {
-        fileViewport.value.scrollTop = previousPosition.top;
-        fileViewport.value.scrollLeft = previousPosition.left;
-        readingPosition.value = previousPosition;
-      }
+      await restoreMarkdownReadingPosition(previousPosition, request, fileIdentity, checkoutId);
     }
   } catch (error) {
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
@@ -131,6 +166,29 @@ async function loadFile(preservePosition = false) {
     contentState.value = "error";
     loadedIdentity = fileIdentity;
     clear();
+  }
+}
+
+async function restoreMarkdownReadingPosition(
+  position: { top: number; left: number },
+  request: number,
+  fileIdentity: string,
+  checkoutId: string,
+) {
+  const isCurrent = () =>
+    request === requestGeneration &&
+    props.checkout?.id === checkoutId &&
+    identity.value === fileIdentity &&
+    props.document.mode === "view";
+  await nextTick();
+  if (!isCurrent()) return;
+  const images = fileViewport.value?.querySelectorAll("img") ?? [];
+  await Promise.all(Array.from(images, (image) => image.decode?.().catch(() => undefined) ?? Promise.resolve()));
+  await nextTick();
+  if (isCurrent() && fileViewport.value) {
+    fileViewport.value.scrollTop = position.top;
+    fileViewport.value.scrollLeft = position.left;
+    readingPosition.value = position;
   }
 }
 
@@ -171,7 +229,13 @@ watch(
     }
     if (mode === "view" && isMarkdown.value && contentState.value === "ready") {
       const checkoutId = props.checkout?.id;
-      if (checkoutId) await load(checkoutId, props.document.path, content.value);
+      if (checkoutId) {
+        const request = requestGeneration;
+        const fileIdentity = identity.value;
+        const position = readingPosition.value;
+        await load(checkoutId, props.document.path, content.value);
+        await restoreMarkdownReadingPosition(position, request, fileIdentity, checkoutId);
+      }
     } else clear();
   },
   { immediate: true, flush: "sync" },
@@ -256,8 +320,13 @@ function onMarkdownLink(event: MouseEvent) {
           v-if="document.mode !== 'diff'"
           type="button"
           :aria-pressed="wrapCode"
-          title="Toggle source line wrapping"
-          class="rounded px-2 py-1 text-[11px] text-zinc-500 hover:bg-white/8 hover:text-zinc-200"
+          :disabled="compactSource"
+          :title="
+            compactSource
+              ? 'Wrapping is unavailable for files with more than 5,000 lines'
+              : 'Toggle source line wrapping'
+          "
+          class="rounded px-2 py-1 text-[11px] text-zinc-500 hover:bg-white/8 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
           @click="wrapCode = !wrapCode"
         >
           Wrap
@@ -327,6 +396,8 @@ function onMarkdownLink(event: MouseEvent) {
       :git-snapshot="gitSnapshot"
       :path="document.path"
       :active="active"
+      :scroll-top="diffScrollTop"
+      @scroll-position-changed="$emit('diffPositionChanged', $event)"
     />
     <section
       v-else
@@ -365,28 +436,41 @@ function onMarkdownLink(event: MouseEvent) {
           <!-- eslint-enable vue/no-v-html -->
         </template>
         <div
+          v-else-if="compactSource"
+          class="flex py-3 font-mono text-[13px] leading-5 text-zinc-300"
+          aria-label="Source code"
+        >
+          <pre class="source-line-number" aria-hidden="true">{{ sourceLineNumbers }}</pre>
+          <pre class="source-code min-w-max whitespace-pre">
+            <!-- eslint-disable vue/no-v-html -- Code is generated by highlight.js and DOMPurify-sanitized. -->
+            <code v-if="highlightedSource !== null" class="hljs" v-html="highlightedSource" />
+            <!-- eslint-enable vue/no-v-html -->
+            <code v-else>{{ content }}</code>
+          </pre>
+        </div>
+        <div
           v-else
           class="py-3 font-mono text-[13px] leading-5 text-zinc-300"
           :class="wrapCode ? 'w-full min-w-0' : 'min-w-max'"
           aria-label="Source code"
         >
           <div
-            v-for="(line, index) in highlightedLines"
+            v-for="(line, index) in sourceLines"
             :key="index"
             class="flex min-h-5"
             :class="wrapCode ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'"
           >
             <span class="source-line-number">{{ index + 1 }}</span>
-            <!-- eslint-disable vue/no-v-html -- Code is generated by highlight.js and DOMPurify-sanitized. -->
+            <!-- eslint-disable vue/no-v-html -- Line fragments come from one sanitized highlight.js render. -->
             <code
-              v-if="line !== null"
+              v-if="highlightedLines !== null"
               class="hljs px-3"
               :class="wrapCode ? 'min-w-0 whitespace-pre-wrap break-all' : 'min-w-max'"
-              v-html="line"
+              v-html="highlightedLines[index]"
             />
             <!-- eslint-enable vue/no-v-html -->
             <code v-else class="px-3" :class="wrapCode ? 'min-w-0 whitespace-pre-wrap break-all' : 'min-w-max'">{{
-              sourceLines[index]
+              line
             }}</code>
           </div>
         </div>
@@ -473,6 +557,7 @@ function onMarkdownLink(event: MouseEvent) {
 .source-line-number {
   position: sticky;
   left: 0;
+  margin: 0;
   width: 3rem;
   flex-shrink: 0;
   user-select: none;
@@ -480,5 +565,11 @@ function onMarkdownLink(event: MouseEvent) {
   padding-right: 0.75rem;
   color: #52525b;
   text-align: right;
+  white-space: pre;
+}
+
+.source-code {
+  margin: 0;
+  padding-left: 0.75rem;
 }
 </style>

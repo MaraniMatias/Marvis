@@ -117,11 +117,15 @@ let unlistenFileActivity: (() => void) | undefined;
 let activityListenerDisposed = false;
 let unlistenCloseRequested: (() => void) | undefined;
 let allowWindowClose = false;
+let windowClosePromise: Promise<void> | null = null;
 let uiLayoutSaveTimer: number | undefined;
 const checkoutUiSaveTimers = new Map<string, number>();
 let uiStateWriteQueue: Promise<void> = Promise.resolve();
 const loadedCheckoutUiIds = new Set<string>();
+const pendingCheckoutUiPatches = new Map<string, Partial<CheckoutUiState>>();
 let checkoutUiLoadGeneration = 0;
+let userSplitterIntent = false;
+let userSplitterKeyDown = false;
 const activityExpiryTimers = new Map<string, number>();
 const lifecycleCheckout = computed<Checkout | null>(
   () =>
@@ -212,9 +216,9 @@ function activateCheckoutTerminal(checkoutId: string) {
 async function activateTerminalSession(sessionId: string) {
   const checkout = allCheckouts.value.find((item) => item.sessions.some((session) => session.id === sessionId));
   if (!checkout) return;
+  await selectWorkspaceSession(sessionId);
   mainViews.value = { ...mainViews.value, [checkout.id]: "terminal" };
   updateCheckoutUiState(checkout.id, { mainView: "terminal" });
-  await selectWorkspaceSession(sessionId);
   await nextTick();
   sessionPane.value?.focusActiveTerminal();
 }
@@ -223,6 +227,9 @@ function updateCheckoutUiState(checkoutId: string, patch: Partial<CheckoutUiStat
   const previous = checkoutUiStates.value[checkoutId] ?? { ...DEFAULT_CHECKOUT_UI_STATE };
   const state = normalizeCheckoutUiState({ ...previous, ...patch, version: 1 });
   checkoutUiStates.value = { ...checkoutUiStates.value, [checkoutId]: state };
+  if (!loadedCheckoutUiIds.has(checkoutId)) {
+    pendingCheckoutUiPatches.set(checkoutId, { ...pendingCheckoutUiPatches.get(checkoutId), ...patch });
+  }
   if (checkoutUiReady.value && loadedCheckoutUiIds.has(checkoutId)) scheduleCheckoutUiSave(checkoutId);
 }
 
@@ -233,11 +240,20 @@ function updateDocumentReadingPosition(checkoutId: string, position: { top: numb
   });
 }
 
+function updateDiffReadingPosition(checkoutId: string, top: number) {
+  updateCheckoutUiState(checkoutId, { diffScrollTop: Math.round(top) });
+}
+
 function updateInspectorUiState(
   checkoutId: string,
   patch: Pick<
     CheckoutUiState,
-    "inspectorTab" | "selectedFilePath" | "selectedChangePath" | "expandedDirectories" | "filesScrollTop"
+    | "inspectorTab"
+    | "selectedFilePath"
+    | "selectedChangePath"
+    | "expandedDirectories"
+    | "filesScrollTop"
+    | "changesScrollTop"
   >,
 ) {
   updateCheckoutUiState(checkoutId, patch);
@@ -317,7 +333,35 @@ function updateCollapsedRepos(repoIds: string[]) {
 }
 
 function onSplitterDragging(dragging: boolean) {
-  if (!dragging) void flushUiStateWrites();
+  userSplitterIntent = dragging || userSplitterKeyDown;
+  if (!dragging && !userSplitterKeyDown) flushAfterLayoutInteraction();
+}
+
+function onSplitterKeydown(event: KeyboardEvent) {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  userSplitterKeyDown = true;
+  userSplitterIntent = true;
+}
+
+function onSplitterKeyup(event: KeyboardEvent) {
+  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
+  userSplitterKeyDown = false;
+  userSplitterIntent = false;
+  flushAfterLayoutInteraction();
+}
+
+function onPanelCollapse(panel: "sidebar" | "inspector") {
+  if (!userSplitterIntent) return;
+  const key = panel === "sidebar" ? "sidebarVisible" : "inspectorVisible";
+  if (!appLayout.value[key]) return;
+  appLayout.value = { ...appLayout.value, [key]: false };
+}
+
+function onPanelExpand(panel: "sidebar" | "inspector") {
+  if (!userSplitterIntent) return;
+  const key = panel === "sidebar" ? "sidebarVisible" : "inspectorVisible";
+  if (appLayout.value[key]) return;
+  appLayout.value = { ...appLayout.value, [key]: true };
 }
 
 function ensureInspectorVisible() {
@@ -334,13 +378,41 @@ function ensureInspectorVisible() {
 }
 
 function onSplitterLayout(sizes: number[]) {
-  if (!appLayoutReady.value || sizes.length < 3) return;
+  if (!appLayoutReady.value || !userSplitterIntent || sizes.length < 3) return;
   let next = appLayout.value;
   if (sizes[0] > 0) next = resizeLayoutPanel(next, "sidebar", sizes[0]);
   if (!isNarrow.value && sizes[2] > 0) next = resizeLayoutPanel(next, "inspector", sizes[2]);
+  if (next.focusSnapshot) {
+    next = {
+      ...next,
+      focusSnapshot: {
+        ...next.focusSnapshot,
+        sidebarWidth: next.sidebarWidth,
+        inspectorWidth: next.inspectorWidth,
+      },
+    };
+  }
   if (next.sidebarWidth !== appLayout.value.sidebarWidth || next.inspectorWidth !== appLayout.value.inspectorWidth) {
     appLayout.value = next;
   }
+}
+
+function resetPanelWidth(panel: "sidebar" | "inspector") {
+  const width = panel === "sidebar" ? DEFAULT_APP_LAYOUT.sidebarWidth : DEFAULT_APP_LAYOUT.inspectorWidth;
+  (panel === "sidebar" ? sidebarPanel.value : inspectorPanel.value)?.resize(width);
+  appLayout.value = resizeLayoutPanel(appLayout.value, panel, width);
+  if (appLayout.value.focusSnapshot) {
+    appLayout.value = {
+      ...appLayout.value,
+      focusSnapshot: { ...appLayout.value.focusSnapshot, [`${panel}Width`]: width },
+    };
+  }
+  flushAfterLayoutInteraction();
+}
+
+function resetLayout() {
+  appLayout.value = { ...DEFAULT_APP_LAYOUT };
+  flushAfterLayoutInteraction();
 }
 
 function setMainView(view: "terminal" | "document") {
@@ -349,6 +421,28 @@ function setMainView(view: "terminal" | "document") {
   mainViews.value = { ...mainViews.value, [checkoutId]: view };
   updateCheckoutUiState(checkoutId, { mainView: view });
   if (view === "terminal") void nextTick(() => sessionPane.value?.focusActiveTerminal());
+}
+
+function onMainTabKeydown(event: KeyboardEvent) {
+  if (!(event.target instanceof HTMLElement) || event.target.getAttribute("role") !== "tab") return;
+  const tabs: Array<"terminal" | "document"> = ["terminal"];
+  if (activeDocument.value) tabs.push("document");
+  const current = event.target.id === "main-tab-document" ? "document" : "terminal";
+  const index = tabs.indexOf(current);
+  const next =
+    event.key === "Home"
+      ? tabs[0]
+      : event.key === "End"
+        ? tabs[tabs.length - 1]
+        : event.key === "ArrowRight"
+          ? tabs[(index + 1) % tabs.length]
+          : event.key === "ArrowLeft"
+            ? tabs[(index + tabs.length - 1) % tabs.length]
+            : null;
+  if (!next) return;
+  event.preventDefault();
+  setMainView(next);
+  void nextTick(() => document.getElementById(`main-tab-${next}`)?.focus());
 }
 
 watch(appLayout, () => scheduleAppLayoutSave(), { deep: true });
@@ -383,24 +477,25 @@ watch(
       checkoutUiReady.value = true;
       return;
     }
+    let state = { ...DEFAULT_CHECKOUT_UI_STATE };
     try {
-      const state = normalizeCheckoutUiState(await loadCheckoutUiState(checkoutId));
-      if (request !== checkoutUiLoadGeneration || activeCheckout.value?.id !== checkoutId) return;
-      checkoutUiStates.value = { ...checkoutUiStates.value, [checkoutId]: state };
-      if (state.document?.checkoutId === checkoutId)
-        documents.value = { ...documents.value, [checkoutId]: state.document };
-      mainViews.value = {
-        ...mainViews.value,
-        [checkoutId]:
-          state.mainView === "document" && state.document?.checkoutId === checkoutId ? "document" : "terminal",
-      };
+      state = normalizeCheckoutUiState(await loadCheckoutUiState(checkoutId));
     } catch (cause) {
       if (request === checkoutUiLoadGeneration) {
-        error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
-        checkoutUiStates.value = { ...checkoutUiStates.value, [checkoutId]: { ...DEFAULT_CHECKOUT_UI_STATE } };
+        showWindowError(cause);
       }
     } finally {
       if (request === checkoutUiLoadGeneration) {
+        state = normalizeCheckoutUiState({ ...state, ...pendingCheckoutUiPatches.get(checkoutId) });
+        pendingCheckoutUiPatches.delete(checkoutId);
+        checkoutUiStates.value = { ...checkoutUiStates.value, [checkoutId]: state };
+        if (state.document?.checkoutId === checkoutId)
+          documents.value = { ...documents.value, [checkoutId]: state.document };
+        mainViews.value = {
+          ...mainViews.value,
+          [checkoutId]:
+            state.mainView === "document" && state.document?.checkoutId === checkoutId ? "document" : "terminal",
+        };
         loadedCheckoutUiIds.add(checkoutId);
         checkoutUiReady.value = true;
       }
@@ -411,17 +506,16 @@ watch(
 
 onMounted(async () => {
   window.addEventListener("resize", onViewportResize);
+  window.addEventListener("keydown", onWindowKeydown);
   const currentWindow = getCurrentWindow();
   try {
     unlistenCloseRequested = await currentWindow.onCloseRequested(async (event) => {
       if (allowWindowClose) return;
       event.preventDefault();
-      await flushUiStateWrites();
-      allowWindowClose = true;
-      await currentWindow.close();
+      await requestWindowClose(currentWindow);
     });
-  } catch {
-    // The close flush is available only in the native Tauri window.
+  } catch (cause) {
+    showWindowError(cause);
   }
   try {
     appLayout.value = normalizeAppLayout(await loadAppLayout());
@@ -466,6 +560,7 @@ onUnmounted(() => {
   activityListenerDisposed = true;
   unlistenCloseRequested?.();
   window.removeEventListener("resize", onViewportResize);
+  window.removeEventListener("keydown", onWindowKeydown);
   unlistenFileActivity?.();
   for (const timer of activityExpiryTimers.values()) window.clearTimeout(timer);
   activityExpiryTimers.clear();
@@ -476,6 +571,34 @@ onUnmounted(() => {
 
 function onViewportResize() {
   viewportWidth.value = window.innerWidth;
+}
+
+function showWindowError(cause: unknown) {
+  error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+}
+
+function requestWindowClose(currentWindow: ReturnType<typeof getCurrentWindow>): Promise<void> {
+  if (allowWindowClose) return Promise.resolve();
+  if (windowClosePromise) return windowClosePromise;
+  windowClosePromise = (async () => {
+    await flushUiStateWrites();
+    allowWindowClose = true;
+    try {
+      await currentWindow.close();
+    } catch (cause) {
+      allowWindowClose = false;
+      showWindowError(cause);
+    } finally {
+      windowClosePromise = null;
+    }
+  })();
+  return windowClosePromise;
+}
+
+function onWindowKeydown(event: KeyboardEvent) {
+  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "q") return;
+  event.preventDefault();
+  void requestWindowClose(getCurrentWindow());
 }
 
 function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
@@ -659,6 +782,7 @@ async function closeCheckout(checkoutId: string) {
       @toggle-status-bar="toggleLayoutVisibility('statusBarVisible')"
       @toggle-focus="toggleFocusMode"
       @toggle-transparency="toggleTransparency"
+      @reset-layout="resetLayout"
       @open-commands="paletteRequestToken += 1"
     />
     <SplitterGroup direction="horizontal" class="app-splitter flex min-h-0 flex-1" @layout="onSplitterLayout">
@@ -672,6 +796,8 @@ async function closeCheckout(checkoutId: string) {
         collapsible
         size-unit="px"
         class="min-h-0 shrink-0"
+        @collapse="onPanelCollapse('sidebar')"
+        @expand="onPanelExpand('sidebar')"
       >
         <Sidebar
           v-show="appLayout.sidebarVisible"
@@ -697,18 +823,24 @@ async function closeCheckout(checkoutId: string) {
         aria-label="Resize navigation sidebar"
         class="splitter-handle"
         @dragging="onSplitterDragging"
-        @dblclick.stop="sidebarPanel?.resize(260)"
+        @keydown.capture="onSplitterKeydown"
+        @keyup.capture="onSplitterKeyup"
+        @dblclick.stop="resetPanelWidth('sidebar')"
       />
       <SplitterPanel id="main-panel" :min-size="420" size-unit="px" class="main-column min-h-0 min-w-0 flex-1">
         <nav
           role="tablist"
           aria-label="Main view"
           class="main-tabs flex h-10 shrink-0 items-center gap-1 border-b border-white/8 px-3"
+          @keydown="onMainTabKeydown"
         >
           <button
+            id="main-tab-terminal"
             role="tab"
             type="button"
             :aria-selected="activeMainView === 'terminal'"
+            aria-controls="main-view-terminal"
+            :tabindex="activeMainView === 'terminal' ? 0 : -1"
             class="rounded px-3 py-1.5 text-[13px]"
             :class="activeMainView === 'terminal' ? 'bg-white/8 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
             @click="setMainView('terminal')"
@@ -721,9 +853,12 @@ async function closeCheckout(checkoutId: string) {
             :class="activeMainView === 'document' ? 'border-sky-400/60' : 'border-transparent'"
           >
             <button
+              id="main-tab-document"
               role="tab"
               type="button"
               :aria-selected="activeMainView === 'document'"
+              aria-controls="main-view-document"
+              :tabindex="activeMainView === 'document' ? 0 : -1"
               class="max-w-64 truncate px-1 py-1.5 text-[13px]"
               :class="activeMainView === 'document' ? 'text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
               @click="setMainView('document')"
@@ -749,40 +884,58 @@ async function closeCheckout(checkoutId: string) {
           </span>
         </nav>
         <div class="relative min-h-0 flex-1" :aria-busy="!checkoutUiReady">
-          <SessionPane
+          <section
             v-show="activeMainView === 'terminal'"
-            ref="sessionPane"
+            id="main-view-terminal"
+            role="tabpanel"
+            aria-labelledby="main-tab-terminal"
+            tabindex="0"
             class="absolute inset-0"
-            :checkout="checkoutUiReady ? activeCheckout : null"
-            :active-session-id="workspace.activeSessionId"
-            :is-opening="isOpening || !checkoutUiReady"
-            :visible="checkoutUiReady && activeMainView === 'terminal'"
-            :shell-request="shellRequest"
-            :nvim-request="nvimRequest"
-            :registered-session-ids="registeredSessionIds"
-            @open-folder="chooseFolder"
-            @workspace-updated="updateWorkspace"
-            @session-status-changed="updateSessionStatus"
-          />
-          <DocumentPane
+          >
+            <SessionPane
+              v-show="activeMainView === 'terminal'"
+              ref="sessionPane"
+              class="absolute inset-0"
+              :checkout="checkoutUiReady ? activeCheckout : null"
+              :active-session-id="workspace.activeSessionId"
+              :is-opening="isOpening || !checkoutUiReady"
+              :visible="checkoutUiReady && activeMainView === 'terminal'"
+              :shell-request="shellRequest"
+              :nvim-request="nvimRequest"
+              :registered-session-ids="registeredSessionIds"
+              @open-folder="chooseFolder"
+              @workspace-updated="updateWorkspace"
+              @session-status-changed="updateSessionStatus"
+            />
+          </section>
+          <section
             v-if="activeDocument && checkoutUiReady"
             v-show="activeMainView === 'document'"
+            id="main-view-document"
+            role="tabpanel"
+            aria-labelledby="main-tab-document"
+            tabindex="0"
             class="absolute inset-0"
-            :checkout="activeCheckout"
-            :document="activeDocument"
-            :git-snapshot="gitSnapshot"
-            :active="activeMainView === 'document'"
-            :refresh-revision="documentRefreshRevisions[activeDocument.checkoutId] ?? 0"
-            :zed-available="editorAvailability.zed"
-            :reading-position="{
-              top: checkoutUiStates[activeDocument.checkoutId]?.documentScrollTop ?? 0,
-              left: checkoutUiStates[activeDocument.checkoutId]?.documentScrollLeft ?? 0,
-            }"
-            @update-mode="setDocumentMode"
-            @reading-position-changed="updateDocumentReadingPosition(activeDocument.checkoutId, $event)"
-            @open-markdown-link="openFileDocument({ checkoutId: activeDocument.checkoutId, path: $event })"
-            @open-in-zed="runPaletteCommand('open-zed')"
-          />
+          >
+            <DocumentPane
+              :checkout="activeCheckout"
+              :document="activeDocument"
+              :git-snapshot="gitSnapshot"
+              :active="activeMainView === 'document'"
+              :refresh-revision="documentRefreshRevisions[activeDocument.checkoutId] ?? 0"
+              :zed-available="editorAvailability.zed"
+              :reading-position="{
+                top: checkoutUiStates[activeDocument.checkoutId]?.documentScrollTop ?? 0,
+                left: checkoutUiStates[activeDocument.checkoutId]?.documentScrollLeft ?? 0,
+              }"
+              :diff-scroll-top="checkoutUiStates[activeDocument.checkoutId]?.diffScrollTop ?? 0"
+              @update-mode="setDocumentMode"
+              @reading-position-changed="updateDocumentReadingPosition(activeDocument.checkoutId, $event)"
+              @diff-position-changed="updateDiffReadingPosition(activeDocument.checkoutId, $event)"
+              @open-markdown-link="openFileDocument({ checkoutId: activeDocument.checkoutId, path: $event })"
+              @open-in-zed="runPaletteCommand('open-zed')"
+            />
+          </section>
         </div>
       </SplitterPanel>
       <SplitterResizeHandle
@@ -790,7 +943,9 @@ async function closeCheckout(checkoutId: string) {
         aria-label="Resize files and changes inspector"
         class="splitter-handle"
         @dragging="onSplitterDragging"
-        @dblclick.stop="inspectorPanel?.resize(320)"
+        @keydown.capture="onSplitterKeydown"
+        @keyup.capture="onSplitterKeyup"
+        @dblclick.stop="resetPanelWidth('inspector')"
       />
       <SplitterPanel
         id="inspector-panel"
@@ -802,6 +957,8 @@ async function closeCheckout(checkoutId: string) {
         collapsible
         size-unit="px"
         class="inspector-splitter-panel relative min-h-0 shrink-0 overflow-visible"
+        @collapse="onPanelCollapse('inspector')"
+        @expand="onPanelExpand('inspector')"
       >
         <InspectorPane
           v-show="appLayout.inspectorVisible"

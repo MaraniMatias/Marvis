@@ -8,6 +8,7 @@ defineEmits<{
   toggleStatusBar: [];
   toggleFocus: [];
   toggleTransparency: [];
+  resetLayout: [];
   openCommands: [];
 }>();
 </script>
@@ -73,23 +74,14 @@ defineEmits<{
     </button>
     <details class="toolbar-settings">
       <summary class="toolbar-button" aria-label="Toolbar settings" title="Toolbar settings">···</summary>
-      <div class="toolbar-menu" role="menu" aria-label="Toolbar settings">
-        <button
-          type="button"
-          role="menuitemcheckbox"
-          :aria-checked="layout.reduceTransparency"
-          @click="$emit('toggleTransparency')"
-        >
+      <div class="toolbar-menu">
+        <button type="button" :aria-pressed="layout.reduceTransparency" @click="$emit('toggleTransparency')">
           {{ layout.reduceTransparency ? "✓" : "" }} Reduce transparency
         </button>
-        <button
-          type="button"
-          role="menuitemcheckbox"
-          :aria-checked="layout.statusBarVisible"
-          @click="$emit('toggleStatusBar')"
-        >
+        <button type="button" :aria-pressed="layout.statusBarVisible" @click="$emit('toggleStatusBar')">
           {{ layout.statusBarVisible ? "✓" : "" }} Show status bar
         </button>
+        <button type="button" @click="$emit('resetLayout')">Reset layout</button>
       </div>
     </details>
   </header>

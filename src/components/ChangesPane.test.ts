@@ -47,7 +47,7 @@ function snapshot(): ActiveGitSnapshot {
 describe("ChangesPane", () => {
   it("shows branch comparison context, filters renamed files, and opens the current path", async () => {
     const wrapper = mount(ChangesPane, {
-      props: { checkout, gitSnapshot: snapshot(), selectedPath: null },
+      props: { checkout, gitSnapshot: snapshot(), selectedPath: null, scrollTop: 0 },
     });
 
     expect(wrapper.text()).toContain("vs trunk · 2 changed");
@@ -68,13 +68,26 @@ describe("ChangesPane", () => {
     const gitSnapshot = snapshot();
     gitSnapshot.statusState = "loading";
     const wrapper = mount(ChangesPane, {
-      props: { checkout, gitSnapshot, selectedPath: null },
+      props: { checkout, gitSnapshot, selectedPath: null, scrollTop: 0 },
     });
     expect(wrapper.text()).toContain("Loading Git status");
     gitSnapshot.statusState = "error";
     gitSnapshot.changesStatusError = "Could not compare branches";
     await flushPromises();
     expect(wrapper.text()).toContain("Could not compare branches");
+    wrapper.unmount();
+  });
+
+  it("restores and reports the changed-file list position", async () => {
+    const wrapper = mount(ChangesPane, {
+      props: { checkout, gitSnapshot: snapshot(), selectedPath: null, scrollTop: 84 },
+    });
+    await flushPromises();
+    const viewport = wrapper.get('[aria-label="Changed files"]');
+    expect((viewport.element as HTMLElement).scrollTop).toBe(84);
+    (viewport.element as HTMLElement).scrollTop = 112;
+    await viewport.trigger("scroll");
+    expect(wrapper.emitted("scrollPositionChanged")).toEqual([[112]]);
     wrapper.unmount();
   });
 });

@@ -72,7 +72,9 @@ describe("persisted UI state", () => {
       selectedChangePath: "src/main.rs",
       expandedDirectories: ["docs", "src"],
       filesScrollTop: 640,
+      changesScrollTop: 480,
       documentScrollTop: 320,
+      diffScrollTop: 900,
     };
     expect(normalizeCheckoutUiState(JSON.parse(JSON.stringify(saved)))).toEqual(saved);
     expect(
