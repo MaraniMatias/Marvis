@@ -855,7 +855,7 @@ pub(crate) fn resolve_default_ref(
     primary_root: Option<&Path>,
 ) -> Result<DefaultRef, IpcError> {
     if let Some(branch) = persisted.map(|branch| branch.strip_prefix("origin/").unwrap_or(branch)) {
-        if let Some(default) = branch_ref(root, branch) {
+        if let Some(default) = resolve_branch_ref(root, branch) {
             return Ok(default);
         }
     }
@@ -871,7 +871,7 @@ pub(crate) fn resolve_default_ref(
         if output.status.success() {
             let reference = output_text(&output);
             if let Some(branch) = reference.strip_prefix("refs/remotes/origin/") {
-                if let Some(default) = branch_ref(root, branch) {
+                if let Some(default) = resolve_branch_ref(root, branch) {
                     return Ok(default);
                 }
             }
@@ -885,7 +885,7 @@ pub(crate) fn resolve_default_ref(
         if let Some(branch) =
             optional_git_text(primary_root, ["symbolic-ref", "--quiet", "--short", "HEAD"])
         {
-            if let Some(default) = branch_ref(root, &branch) {
+            if let Some(default) = resolve_branch_ref(root, &branch) {
                 return Ok(default);
             }
         }
@@ -912,7 +912,7 @@ fn share_git_common_dir(first: &Path, second: &Path) -> bool {
         .is_some_and(|(first, second)| first == second)
 }
 
-fn branch_ref(root: &Path, branch: &str) -> Option<DefaultRef> {
+pub(crate) fn resolve_branch_ref(root: &Path, branch: &str) -> Option<DefaultRef> {
     if branch.is_empty()
         || !run_git(
             root,

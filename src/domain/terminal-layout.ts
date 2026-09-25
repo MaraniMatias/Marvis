@@ -100,6 +100,24 @@ export function restoreTerminalLayout(value: unknown, sessions: Session[]): Chec
   return { activeTabId, tabs, sessionOrder: [...new Set(sessionOrder)] };
 }
 
+/** Collapse legacy tabs and splits to one historical session; restoring a layout never starts a PTY. */
+export function normalizeTerminalLayout(
+  value: unknown,
+  sessions: Session[],
+  preferredSessionId?: string | null,
+): CheckoutTerminalLayout {
+  const restored = restoreTerminalLayout(value, sessions);
+  const activeTab = restored.tabs.find((tab) => tab.id === restored.activeTabId);
+  const selectedId =
+    preferredSessionId && sessions.some((session) => session.id === preferredSessionId)
+      ? preferredSessionId
+      : activeTab
+        ? firstSessionId(activeTab.root)
+        : sessions.at(-1)?.id;
+  const selected = sessions.find((session) => session.id === selectedId);
+  return createTerminalLayout(selected ? [selected] : []);
+}
+
 export function addSessionToLayout(
   layout: CheckoutTerminalLayout,
   session: Session,

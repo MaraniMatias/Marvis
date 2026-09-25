@@ -5,6 +5,7 @@ import {
   createTerminalLayout,
   findSessionTab,
   firstSessionId,
+  normalizeTerminalLayout,
   removeSessionFromLayout,
   reorderSession,
   resizeSplit,
@@ -108,5 +109,22 @@ describe("terminal layout", () => {
     expect(outer).toMatchObject({ kind: "split", id: "outer", ratio: 0.5 });
     if (outer.kind !== "split" || outer.second.kind !== "split") throw new Error("nested layout expected");
     expect(outer.second.ratio).toBe(0.85);
+  });
+
+  it("normalizes persisted tabs and splits to one selected session", () => {
+    let layout = createTerminalLayout([session("one"), session("two")]);
+    layout = addSessionToLayout(layout, session("three"), {
+      targetSessionId: "two",
+      direction: "vertical",
+      splitId: "split:legacy",
+    });
+
+    const normalized = normalizeTerminalLayout(layout, [session("one"), session("two"), session("three")], "one");
+
+    expect(normalized).toEqual({
+      activeTabId: "layout:one",
+      tabs: [{ id: "layout:one", root: { kind: "session", sessionId: "one" } }],
+      sessionOrder: ["one"],
+    });
   });
 });

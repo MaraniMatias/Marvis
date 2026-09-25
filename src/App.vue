@@ -32,7 +32,6 @@ const {
   error,
   chooseFolder,
   selectCheckout,
-  selectSession,
   updateWorkspace,
   promptForDefaultBranchIfNeeded,
 } = useWorkspaceState();
@@ -156,14 +155,16 @@ async function requestShell(checkoutId: string) {
 }
 
 async function requestNvim(checkoutId: string, filePath?: string, position?: EditorPosition) {
+  const request = {
+    checkoutId,
+    ...(filePath && position && { filePath, line: position.line, column: position.column }),
+    token: ++nvimRequestToken,
+  };
+  nvimRequest.value = request;
   try {
     workspace.value = await persistCheckoutSelection(checkoutId);
-    nvimRequest.value = {
-      checkoutId,
-      ...(filePath && position && { filePath, line: position.line, column: position.column }),
-      token: ++nvimRequestToken,
-    };
   } catch (cause) {
+    if (nvimRequest.value?.token === request.token) nvimRequest.value = null;
     error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
   }
 }
@@ -193,8 +194,9 @@ async function runPaletteCommand(command: PaletteCommandId) {
       await chooseFolder();
       break;
     case "new-worktree":
-      if (checkout && activeRepo.value?.kind === "git" && !checkout.isMissing) {
-        openWorktreeDialog("create", checkout.id);
+      if (activeRepo.value?.kind === "git") {
+        const primary = activeRepo.value.checkouts.find((item) => item.isPrimary && !item.isMissing);
+        if (primary) openWorktreeDialog("create", primary.id);
       }
       break;
     case "new-terminal":
@@ -287,12 +289,11 @@ async function closeCheckout(checkoutId: string) {
         :repos="workspace.repos"
         :active-checkout-id="workspace.activeCheckoutId"
         :active-session-id="workspace.activeSessionId"
-        :session-runtime-statuses="sessionRuntimeStatuses"
         :activity-by-checkout="activityByCheckout"
+        :session-runtime-statuses="sessionRuntimeStatuses"
         :is-opening="isOpening"
         @open-folder="chooseFolder"
         @select-checkout="selectCheckout"
-        @select-session="selectSession"
         @locate-missing="locateCheckout"
         @close-missing="closeCheckout"
         @create-worktree="openWorktreeDialog('create', $event)"
@@ -300,14 +301,12 @@ async function closeCheckout(checkoutId: string) {
       />
       <SessionPane
         :checkout="activeCheckout"
-        :all-checkouts="allCheckouts"
         :active-session-id="workspace.activeSessionId"
         :is-opening="isOpening"
         :shell-request="shellRequest"
         :nvim-request="nvimRequest"
         :registered-session-ids="registeredSessionIds"
         @open-folder="chooseFolder"
-        @select-session="selectSession"
         @workspace-updated="updateWorkspace"
         @session-status-changed="updateSessionStatus"
       />

@@ -4,13 +4,7 @@ import { computed, ref, watch } from "vue";
 import type { Checkout, Repo, WorkspaceState } from "../domain/workspace";
 import type { WorktreeRemovalInfo } from "../domain/worktree";
 import { isIpcError } from "../domain/ipc";
-import {
-  createWorktree,
-  getWorktreeDefaults,
-  getWorktreeRemovalInfo,
-  removeWorktree,
-  setDefaultBranch,
-} from "../lib/ipc";
+import { createWorktree, getWorktreeDefaults, getWorktreeRemovalInfo, removeWorktree } from "../lib/ipc";
 
 const props = defineProps<{
   open: boolean;
@@ -76,22 +70,9 @@ watch(
 
 async function loadDefaults() {
   if (!props.checkout || !props.repo) return;
-  try {
-    const defaults = await getWorktreeDefaults(props.checkout.id);
-    location.value = defaults.location;
-    defaultBranch.value = defaults.defaultBranch;
-  } catch (cause) {
-    if (!isIpcError(cause) || cause.code !== "default_branch_unknown") throw cause;
-    const chosen = window.prompt(
-      `Git could not determine the default branch for “${props.repo.name}”. Enter an existing branch to use:`,
-      "",
-    );
-    if (!chosen?.trim()) throw new Error("Choose a valid default branch before creating a worktree.");
-    emit("workspaceUpdated", await setDefaultBranch(props.repo.id, chosen));
-    const defaults = await getWorktreeDefaults(props.checkout.id);
-    location.value = defaults.location;
-    defaultBranch.value = defaults.defaultBranch;
-  }
+  const defaults = await getWorktreeDefaults(props.checkout.id);
+  location.value = defaults.location;
+  defaultBranch.value = defaults.defaultBranch;
 }
 
 function updateTaskName(value: string) {
@@ -114,7 +95,6 @@ async function submitCreate() {
     const result = await createWorktree(props.checkout.id, taskName.value, branch.value, location.value);
     emit("workspaceUpdated", result.workspace);
     emit("close");
-    emit("requestShell", result.checkoutId);
   } catch (cause) {
     error.value = messageOf(cause);
   } finally {
@@ -180,7 +160,7 @@ function messageOf(cause: unknown): string {
             :id="mode === 'create' ? 'worktree-create-title' : 'worktree-remove-title'"
             class="text-base font-semibold text-zinc-100"
           >
-            {{ mode === "create" ? "Create worktree" : "Remove worktree" }}
+            {{ mode === "create" ? "Create worktree from main" : "Remove worktree" }}
           </h2>
           <p class="mt-1 truncate text-xs text-zinc-500">{{ checkout?.branch || checkout?.path }} · {{ repo?.name }}</p>
         </div>
@@ -215,19 +195,9 @@ function messageOf(cause: unknown): string {
             @input="branchEdited = true"
           />
         </label>
-        <label class="block text-xs text-zinc-400">
-          External worktree location
-          <input
-            v-model="location"
-            required
-            class="mt-1.5 w-full rounded-md border border-white/10 bg-[#101217] px-3 py-2 font-mono text-xs text-zinc-100 outline-none focus:border-indigo-300/50"
-          />
-          <span class="mt-1 block text-[11px] text-zinc-600"
-            >The selected location is remembered. Worktrees are never added to .git/info/exclude.</span
-          >
-        </label>
         <p v-if="defaultBranch" class="text-xs text-zinc-500">
-          Starting point: <code>{{ defaultBranch }}</code>
+          Starting point: <code>{{ defaultBranch }}</code> · Worktrees are created under <code>{{ location }}</code
+          >.
         </p>
         <p v-if="error" role="alert" class="text-sm text-red-200">{{ error }}</p>
         <footer class="flex justify-end gap-2 pt-1">

@@ -27,7 +27,12 @@ describe("Sidebar actions and checkout states", () => {
       lastOpenedAt: "now",
     };
     const wrapper = mount(Sidebar, {
-      props: { repos: [repo], activeCheckoutId: null, activeSessionId: null, isOpening: false },
+      props: {
+        repos: [repo],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
     });
 
     expect(wrapper.get('button[aria-label="Open directory"]')).toBeDefined();
@@ -43,7 +48,7 @@ describe("Sidebar actions and checkout states", () => {
     expect(wrapper.emitted("openFolder")).toHaveLength(1);
   });
 
-  it("offers create from each available Git checkout and removal only for worktrees", async () => {
+  it("offers create at the repository row and removal only for non-primary worktrees", async () => {
     const repo: Repo = {
       id: "repo:test",
       kind: "git",
@@ -56,7 +61,7 @@ describe("Sidebar actions and checkout states", () => {
           path: "/test",
           canonicalPath: "/test",
           isPrimary: true,
-          branch: "trunk",
+          branch: "main",
           changedFiles: 0,
           isMissing: false,
           sessions: [],
@@ -77,18 +82,27 @@ describe("Sidebar actions and checkout states", () => {
       lastOpenedAt: "now",
     };
     const wrapper = mount(Sidebar, {
-      props: { repos: [repo], activeCheckoutId: null, activeSessionId: null, isOpening: false },
+      props: {
+        repos: [repo],
+        activeCheckoutId: "checkout:feature",
+        activeSessionId: null,
+        isOpening: false,
+      },
     });
 
-    await wrapper.get('button[aria-label="Create worktree from trunk"]').trigger("click");
-    await wrapper.get('button[aria-label="Create worktree from feature"]').trigger("click");
+    expect(wrapper.find('button[aria-label="Create worktree for test"]').exists()).toBe(true);
+    expect(wrapper.find('button[aria-label="Create worktree from trunk"]').exists()).toBe(false);
+    expect(wrapper.find('button[aria-label="Create worktree from feature"]').exists()).toBe(false);
+    expect(wrapper.find('button[aria-label="Remove worktree main"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Marvis");
+    await wrapper.get('button[aria-label="Create worktree for test"]').trigger("click");
     await wrapper.get('button[aria-label="Remove worktree feature"]').trigger("click");
 
-    expect(wrapper.emitted("createWorktree")).toEqual([["checkout:primary"], ["checkout:feature"]]);
+    expect(wrapper.emitted("createWorktree")).toEqual([["checkout:primary"]]);
     expect(wrapper.emitted("removeWorktree")).toEqual([["checkout:feature"]]);
   });
 
-  it("shows only runtime-verified running and exited dots", () => {
+  it("shows one selected terminal child with runtime status under its checkout", async () => {
     const repo: Repo = {
       id: "repo:activity",
       kind: "plain",
@@ -138,21 +152,25 @@ describe("Sidebar actions and checkout states", () => {
       props: {
         repos: [repo],
         activeCheckoutId: "checkout:activity",
-        activeSessionId: null,
+        activeSessionId: "session:exited",
         isOpening: false,
-        sessionRuntimeStatuses: {
-          "session:running": { state: "running", foregroundProcess: true },
-          "session:exited": { state: "exited", exitCode: 1, foregroundProcess: false },
-        },
         activityByCheckout: { "checkout:activity": ["Terminal · Running", "Recent file writes"] },
+        sessionRuntimeStatuses: { "session:exited": { state: "exited", exitCode: 1 } },
       },
     });
 
-    expect(wrapper.find('[aria-label="Session running"]').exists()).toBe(true);
-    expect(wrapper.find('[aria-label="Session exited"]').exists()).toBe(true);
-    expect(wrapper.findAll('[aria-label^="Session "]')).toHaveLength(2);
+    const sessions = wrapper.findAll('button[aria-label^="Terminal session:"]');
+    expect(sessions).toHaveLength(1);
+    expect(sessions[0].attributes("aria-label")).toBe("Terminal session: Exited");
+    expect(sessions[0].classes()).toContain("text-zinc-200");
+    expect(sessions[0].attributes("aria-current")).toBe("page");
+    expect(sessions[0].get('[role="img"]').attributes("aria-label")).toBe("Session exited");
+    await wrapper.setProps({ activeCheckoutId: null, activeSessionId: null });
+    await wrapper.get('button[aria-label="Terminal session: Unknown"]').trigger("click");
+    expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:activity"]]);
     expect(wrapper.get('[aria-label="Concurrent activity: Terminal · Running, Recent file writes"]').text()).toBe(
       "Concurrent",
     );
+    expect(wrapper.text()).not.toContain("Running");
   });
 });

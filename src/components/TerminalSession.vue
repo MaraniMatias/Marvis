@@ -105,26 +105,30 @@ function queueInput(value: string) {
 }
 
 async function requestClose() {
-  if (!sessionId || closing.value) return;
+  if (!sessionId || closing.value) return false;
   closing.value = true;
   try {
     const actualStatus = await getTerminalStatus(props.checkoutId, sessionId);
     updateStatus(actualStatus);
     if (
       actualStatus.state === "running" &&
-      !window.confirm("This shell is still running. Close the session and stop its process?")
+      !window.confirm("This terminal session is still running. Close the session and stop its process?")
     ) {
       closing.value = false;
-      return;
+      return false;
     }
     await inputQueue;
     await resizeQueue;
     emit("closed", await closeTerminal(props.checkoutId, sessionId));
+    return true;
   } catch (cause) {
     showError(cause);
     closing.value = false;
+    return false;
   }
 }
+
+defineExpose({ requestClose });
 
 async function startSession() {
   if (started || disposed || !props.active || !terminalElement.value) return;

@@ -115,7 +115,9 @@ describe("TerminalSession UI", () => {
 
     await wrapper.get("button").trigger("click");
     await flushPromises();
-    expect(confirm).toHaveBeenCalledWith("This shell is still running. Close the session and stop its process?");
+    expect(confirm).toHaveBeenCalledWith(
+      "This terminal session is still running. Close the session and stop its process?",
+    );
     expect(closeTerminal).not.toHaveBeenCalled();
 
     confirm.mockReturnValue(true);
@@ -149,7 +151,7 @@ describe("TerminalSession UI", () => {
     wrapper.unmount();
   });
 
-  it("keeps resize requests scoped to each split terminal session", async () => {
+  it("keeps resize requests scoped to each terminal session", async () => {
     const first = { ...created, session: { ...created.session, id: "session:first" } };
     const second = { ...created, session: { ...created.session, id: "session:second" } };
     vi.mocked(createTerminal).mockResolvedValueOnce(first).mockResolvedValueOnce(second);

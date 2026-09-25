@@ -44,29 +44,46 @@ describe("WorktreeDialog", () => {
     vi.clearAllMocks();
   });
 
-  it("submits the editable name, branch, and external location, then opens a shell", async () => {
-    ipc.getWorktreeDefaults.mockResolvedValue({ location: "/Users/test/.marvis/worktrees", defaultBranch: "trunk" });
+  it("creates from main under the fixed repo-local worktree directory", async () => {
+    ipc.getWorktreeDefaults.mockResolvedValue({ location: "/test/.worktrees", defaultBranch: "main" });
     ipc.createWorktree.mockResolvedValue({ workspace, checkoutId: "checkout:new" });
     const wrapper = mount(WorktreeDialog, {
       props: { open: true, mode: "create", repo, checkout },
     });
     await flushPromises();
 
+    expect(wrapper.findAll("input")).toHaveLength(2);
+    expect((wrapper.findAll("input")[1].element as HTMLInputElement).value).toBe("feature/new-task");
+    expect(wrapper.text()).toContain("Starting point: main");
+    expect(wrapper.text()).toContain("Worktrees are created under /test/.worktrees");
+
     const maliciousName = "../../$(touch should-not-run); *";
     await wrapper.get("input[autofocus]").setValue(maliciousName);
     await wrapper.findAll("input")[1].setValue("feature/safe");
-    await wrapper.findAll("input")[2].setValue("/Users/test/worktrees");
     await wrapper.get("form").trigger("submit");
     await flushPromises();
 
-    expect(ipc.createWorktree).toHaveBeenCalledWith(
-      checkout.id,
-      maliciousName,
-      "feature/safe",
-      "/Users/test/worktrees",
-    );
+    expect(ipc.createWorktree).toHaveBeenCalledWith(checkout.id, maliciousName, "feature/safe", "/test/.worktrees");
     expect(wrapper.emitted("workspaceUpdated")).toEqual([[workspace]]);
-    expect(wrapper.emitted("requestShell")).toEqual([["checkout:new"]]);
+    expect(wrapper.emitted("requestShell")).toBeUndefined();
+    expect(wrapper.text()).toContain("Starting point: main");
+  });
+
+  it("shows an actionable error and blocks creation when main is missing", async () => {
+    const prompt = vi.spyOn(window, "prompt");
+    ipc.getWorktreeDefaults.mockRejectedValue({
+      code: "default_branch_unknown",
+      message: "Git branch 'main' does not exist; create or fetch it before creating a worktree",
+    });
+    const wrapper = mount(WorktreeDialog, {
+      props: { open: true, mode: "create", repo, checkout },
+    });
+    await flushPromises();
+
+    expect(wrapper.get('[role="alert"]').text()).toContain("Git branch 'main' does not exist");
+    expect(wrapper.get('button[type="submit"]').attributes("disabled")).toBeDefined();
+    expect(prompt).not.toHaveBeenCalled();
+    prompt.mockRestore();
   });
 
   it("shows dirty files and active sessions, defaults to keeping the branch, and requires confirmation", async () => {

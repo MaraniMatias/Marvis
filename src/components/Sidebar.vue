@@ -1,23 +1,22 @@
 <script setup lang="ts">
 import { reactive } from "vue";
-import type { Repo, TerminalSessionStatus } from "../domain/workspace";
+import type { Checkout, Repo, TerminalSessionStatus } from "../domain/workspace";
 import Button from "./ui/button/Button.vue";
 
 defineOptions({ name: "FolderSidebar" });
 
-defineProps<{
+const props = defineProps<{
   repos: Repo[];
   activeCheckoutId: string | null;
   activeSessionId: string | null;
   isOpening: boolean;
-  sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
   activityByCheckout?: Record<string, string[]>;
+  sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
 }>();
 
 defineEmits<{
   openFolder: [];
   selectCheckout: [checkoutId: string];
-  selectSession: [sessionId: string];
   locateMissing: [checkoutId: string];
   closeMissing: [checkoutId: string];
   createWorktree: [checkoutId: string];
@@ -30,14 +29,14 @@ function toggleRepo(repoId: string) {
   if (collapsedRepos.has(repoId)) collapsedRepos.delete(repoId);
   else collapsedRepos.add(repoId);
 }
+
+function sessionForCheckout(checkout: Checkout) {
+  return checkout.sessions.find((session) => session.id === props.activeSessionId) ?? checkout.sessions.at(-1);
+}
 </script>
 
 <template>
   <aside class="flex h-full flex-col border-r border-white/8 bg-[#15171c]">
-    <div class="flex h-14 items-center gap-3 border-b border-white/8 px-5">
-      <div class="grid size-7 place-items-center rounded-lg bg-indigo-400 text-xs font-bold text-[#111318]">M</div>
-      <span class="text-sm font-semibold tracking-wide text-zinc-100">Marvis</span>
-    </div>
     <div class="flex items-center justify-between px-4 pb-2 pt-5">
       <h2 class="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Repositories</h2>
       <button
@@ -51,15 +50,26 @@ function toggleRepo(repoId: string) {
     </div>
     <div v-if="repos.length" class="min-h-0 flex-1 overflow-y-auto px-2">
       <div v-for="repo in repos" :key="repo.id" class="mb-3">
-        <button
-          class="flex w-full items-center gap-1 rounded-md px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-white/6"
-          :aria-expanded="!collapsedRepos.has(repo.id)"
-          @click="toggleRepo(repo.id)"
-        >
-          <span class="w-3 text-[10px] text-zinc-600">{{ collapsedRepos.has(repo.id) ? "▸" : "▾" }}</span>
-          <span class="min-w-0 flex-1 truncate font-medium">{{ repo.name }}</span>
-          <span class="text-[10px] text-zinc-600">{{ repo.kind === "git" ? "Git" : "Plain" }}</span>
-        </button>
+        <div class="flex items-center gap-0.5">
+          <button
+            class="flex min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-white/6"
+            :aria-expanded="!collapsedRepos.has(repo.id)"
+            @click="toggleRepo(repo.id)"
+          >
+            <span class="w-3 text-[10px] text-zinc-600">{{ collapsedRepos.has(repo.id) ? "▸" : "▾" }}</span>
+            <span class="min-w-0 flex-1 truncate font-medium">{{ repo.name }}</span>
+            <span class="text-[10px] text-zinc-600">{{ repo.kind === "git" ? "Git" : "Plain" }}</span>
+          </button>
+          <button
+            v-if="repo.kind === 'git' && repo.checkouts.some((checkout) => checkout.isPrimary && !checkout.isMissing)"
+            :aria-label="`Create worktree for ${repo.name}`"
+            title="Create worktree from main"
+            class="grid size-6 shrink-0 place-items-center rounded text-sm text-zinc-500 hover:bg-white/8 hover:text-zinc-100"
+            @click.stop="$emit('createWorktree', repo.checkouts.find((checkout) => checkout.isPrimary)!.id)"
+          >
+            +
+          </button>
+        </div>
         <div v-if="!collapsedRepos.has(repo.id)" class="ml-2 border-l border-white/6 pl-2">
           <div v-for="checkout in repo.checkouts" :key="checkout.id" class="mb-0.5">
             <div class="group flex items-center gap-0.5">
@@ -91,15 +101,6 @@ function toggleRepo(repoId: string) {
                 </span>
               </button>
               <button
-                v-if="repo.kind === 'git' && !checkout.isMissing"
-                :aria-label="`Create worktree from ${checkout.branch || checkout.path}`"
-                title="Create worktree from this checkout"
-                class="grid size-6 shrink-0 place-items-center rounded text-sm text-zinc-500 hover:bg-white/8 hover:text-zinc-100"
-                @click.stop="$emit('createWorktree', checkout.id)"
-              >
-                +
-              </button>
-              <button
                 v-if="checkout.isMissing"
                 :aria-label="`Locate ${checkout.path}`"
                 title="Locate this missing directory"
@@ -129,25 +130,35 @@ function toggleRepo(repoId: string) {
                 ×
               </button>
             </div>
-            <div v-if="checkout.sessions.length" class="ml-3 border-l border-white/6 pl-2">
+            <div v-if="sessionForCheckout(checkout)" class="ml-3 border-l border-white/6 pl-2">
               <button
-                v-for="session in checkout.sessions"
-                :key="session.id"
                 class="flex w-full items-center gap-2 rounded px-2 py-1 text-left text-[11px] hover:bg-white/6"
-                :class="session.id === activeSessionId ? 'text-zinc-200' : 'text-zinc-500'"
-                @click="$emit('selectSession', session.id)"
+                :class="
+                  sessionForCheckout(checkout)?.id === activeSessionId || checkout.id === activeCheckoutId
+                    ? 'text-zinc-200'
+                    : 'text-zinc-500'
+                "
+                :aria-label="`Terminal session: ${sessionForCheckout(checkout)?.name}`"
+                :aria-current="checkout.id === activeCheckoutId ? 'page' : undefined"
+                @click="checkout.id !== activeCheckoutId && $emit('selectCheckout', checkout.id)"
               >
                 <span
-                  v-if="sessionRuntimeStatuses?.[session.id]"
+                  v-if="sessionRuntimeStatuses?.[sessionForCheckout(checkout)!.id]"
                   class="size-1.5 shrink-0 rounded-full"
-                  :class="sessionRuntimeStatuses[session.id].state === 'running' ? 'bg-green-400' : 'bg-red-400'"
+                  :class="
+                    sessionRuntimeStatuses[sessionForCheckout(checkout)!.id].state === 'running'
+                      ? 'bg-green-400'
+                      : 'bg-red-400'
+                  "
                   role="img"
                   :aria-label="
-                    sessionRuntimeStatuses[session.id].state === 'running' ? 'Session running' : 'Session exited'
+                    sessionRuntimeStatuses[sessionForCheckout(checkout)!.id].state === 'running'
+                      ? 'Session running'
+                      : 'Session exited'
                   "
                 />
-                <span class="truncate">{{ session.name }}</span>
-                <span class="shrink-0 text-[10px] text-zinc-600">{{ session.type }}</span>
+                <span class="truncate">{{ sessionForCheckout(checkout)?.name }}</span>
+                <span class="shrink-0 text-[10px] text-zinc-600">{{ sessionForCheckout(checkout)?.type }}</span>
               </button>
             </div>
           </div>

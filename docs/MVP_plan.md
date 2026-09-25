@@ -64,11 +64,11 @@ Medir latencia de entrada, caudal de salida, pérdida de bytes, tiempo de resize
 
 ### 0.3 Decisiones antes de programar funciones dependientes
 
-| Tema                           | Propuesta para avanzar                                                                                                               | Cierre necesario                                                                                                                                                                                        |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Q1: ubicación de worktrees     | Preferir un directorio externo al repo, configurable, para no modificar `.git/info/exclude` ni mostrar `.worktrees/` como untracked. | **Aprobar antes del spike Git definitivo y de crear worktrees.** El plan v0.4 propone `<repo>/.worktrees/<name>` como valor inicial, pero deja Q1 abierta: esta propuesta no lo reemplaza sin decisión. |
-| Q11: rama por defecto incierta | Solicitar selección una vez y persistirla por repo.                                                                                  | Confirmar el comportamiento en el spike Git.                                                                                                                                                            |
-| Q7/Q8: submódulos y bare       | Documentar resultado del spike y dar un comportamiento claro, sin fingir que son un checkout ordinario si no lo son.                 | Antes de cerrar resolución de rutas.                                                                                                                                                                    |
+| Tema                           | Propuesta para avanzar                                                                                                                                                       | Cierre necesario                                                                                                                    |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Q1: ubicación de worktrees     | Fijar el destino en `<repo>/.worktrees/<name>` y añadir `/.worktrees/` a `.git/info/exclude` sin reemplazar entradas existentes; la creación parte exclusivamente de `main`. | **Resuelta para esta implementación.** Rechazar otros destinos y, si `main` no existe, mostrar un error claro sin elegir otra rama. |
+| Q11: rama por defecto incierta | Solicitar selección una vez y persistirla por repo.                                                                                                                          | Confirmar el comportamiento en el spike Git.                                                                                        |
+| Q7/Q8: submódulos y bare       | Documentar resultado del spike y dar un comportamiento claro, sin fingir que son un checkout ordinario si no lo son.                                                         | Antes de cerrar resolución de rutas.                                                                                                |
 
 ## 4. Fase 1 — Base técnica
 
@@ -173,5 +173,5 @@ Este trabajo **no desaparece** por no estar dentro del primer MVP. Priorizarlo p
 - [ ] Rust valida rutas, IDs y pertenencia; procesos externos usan argumentos separados.
 - [ ] Nunca se pierde la distinción entre checkout primario y worktree ni entre repo Git y carpeta plain.
 - [ ] Los procesos no se restauran ficticiamente; Git y los worktrees se reconcilian al abrir.
-- [ ] Las decisiones pendientes se registran antes de implementar las funciones que dependen de ellas; en particular, Q1 antes de crear worktrees.
+- [ ] Las decisiones pendientes se registran antes de implementar las funciones que dependen de ellas; Q1 queda resuelta en esta implementación con `.worktrees` y base `main` estricta.
 - [ ] Las funcionalidades diferidas siguen enumeradas y se cierran en la entrega indicada por v0.4.

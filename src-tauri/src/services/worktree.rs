@@ -1,6 +1,7 @@
 use std::{
     ffi::OsString,
     fs,
+    io::Write,
     path::{Component, Path, PathBuf},
     process::{Command, Output},
 };
@@ -82,17 +83,13 @@ struct Context {
 pub fn defaults(database: &Database, checkout_id: &str) -> Result<WorktreeDefaults, IpcError> {
     let context = context(database, checkout_id)?;
     ensure_available_source(&context)?;
-    let default = git::resolve_default_ref(
-        &context.root,
-        context.repo.default_branch.as_deref(),
-        Some(Path::new(&context.repo.root)),
-    )?;
+    require_main_branch(&context.root)?;
     Ok(WorktreeDefaults {
-        location: database
-            .worktree_location()
-            .map_err(operation_error)?
-            .unwrap_or_else(default_worktree_location),
-        default_branch: default.branch,
+        location: Path::new(&context.repo.root)
+            .join(".worktrees")
+            .display()
+            .to_string(),
+        default_branch: "main".into(),
     })
 }
 
@@ -114,14 +111,7 @@ pub fn create(
         ));
     }
 
-    let default = git::resolve_default_ref(
-        &context.root,
-        context.repo.default_branch.as_deref(),
-        Some(Path::new(&context.repo.root)),
-    )?;
-    database
-        .set_default_branch(&context.repo.id, &default.branch)
-        .map_err(operation_error)?;
+    let default = require_main_branch(&context.root)?;
 
     let entries = worktrees(&context.root)?;
     if let Some(holder) = entries
@@ -131,23 +121,21 @@ pub fn create(
         return Err(branch_in_use(branch, holder, &context.repo));
     }
 
-    let location = prepare_location(location, Path::new(&context.repo.root))?;
-    database
-        .set_worktree_location(&location.display().to_string())
-        .map_err(operation_error)?;
-    let repo_component =
-        sanitize_component(&context.repo.name).unwrap_or_else(|_| "repository".into());
-    let destination_parent = location.join(repo_component);
-    if fs::symlink_metadata(&destination_parent)
-        .is_ok_and(|metadata| metadata.file_type().is_symlink())
-        && !destination_parent.exists()
-    {
+    let destination_parent = prepare_location(location, Path::new(&context.repo.root))?;
+    let repo_worktrees = Path::new(&context.repo.root).join(".worktrees");
+    if location == repo_worktrees && destination_parent != repo_worktrees {
         return Err(IpcError::new(
             IpcErrorCode::InvalidPath,
-            "worktree location contains a broken symbolic link",
+            "the repository's .worktrees location cannot be a symbolic link",
         ));
     }
-    let destination_parent = prepare_location(&destination_parent, Path::new(&context.repo.root))?;
+    if destination_parent != repo_worktrees {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidPath,
+            "worktrees must be created in the repository's .worktrees directory",
+        ));
+    }
+    ensure_worktrees_ignored(Path::new(&context.repo.root))?;
     fs::create_dir_all(&destination_parent).map_err(|error| {
         IpcError::new(
             IpcErrorCode::PermissionDenied,
@@ -160,10 +148,10 @@ pub fn create(
             format!("could not resolve the worktree location: {error}"),
         )
     })?;
-    if destination_parent.starts_with(Path::new(&context.repo.root)) {
+    if destination_parent != repo_worktrees {
         return Err(IpcError::new(
-            IpcErrorCode::PathOutsideCheckout,
-            "worktrees must be created outside the repository",
+            IpcErrorCode::InvalidPath,
+            "worktrees must be created in the repository's .worktrees directory",
         ));
     }
     let destination = destination_parent.join(task_name);
@@ -600,6 +588,21 @@ fn valid_branch(root: &Path, branch: &str) -> bool {
         .is_ok_and(|output| output.status.success())
 }
 
+fn require_main_branch(root: &Path) -> Result<git::DefaultRef, IpcError> {
+    if local_branch_exists(root, "main") {
+        return Ok(git::DefaultRef {
+            reference: "refs/heads/main".into(),
+            branch: "main".into(),
+        });
+    }
+    git::resolve_branch_ref(root, "main").ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::DefaultBranchUnknown,
+            "Git branch 'main' does not exist; create or fetch it before creating a worktree",
+        )
+    })
+}
+
 fn local_branch_exists(root: &Path, branch: &str) -> bool {
     if !valid_branch(root, branch) {
         return false;
@@ -688,23 +691,136 @@ fn prepare_location(location: &Path, repo_root: &Path) -> Result<PathBuf, IpcErr
     for component in missing.iter().rev() {
         resolved.push(component);
     }
-    if resolved.starts_with(repo_root) {
+    if resolved.starts_with(repo_root) && resolved != repo_root.join(".worktrees") {
         return Err(IpcError::new(
             IpcErrorCode::PathOutsideCheckout,
-            "worktree location must be outside the repository",
+            "worktrees inside the repository must use its .worktrees directory",
         ));
     }
     Ok(resolved)
 }
 
-fn default_worktree_location() -> String {
-    std::env::var_os("HOME")
-        .map(PathBuf::from)
-        .unwrap_or_else(std::env::temp_dir)
-        .join(".marvis")
-        .join("worktrees")
-        .display()
-        .to_string()
+fn ensure_worktrees_ignored(root: &Path) -> Result<(), IpcError> {
+    let output = checked_git(
+        root,
+        ["rev-parse", "--git-path", "info/exclude"],
+        "could not locate Git exclude file",
+    )?;
+    let raw_path = PathBuf::from(output_text(&output));
+    let path = if raw_path.is_absolute() {
+        raw_path
+    } else {
+        root.join(raw_path)
+    };
+    let git_dir = checked_git(
+        root,
+        ["rev-parse", "--absolute-git-dir"],
+        "could not locate Git metadata",
+    )?;
+    let git_dir = PathBuf::from(output_text(&git_dir))
+        .canonicalize()
+        .map_err(|error| {
+            IpcError::new(
+                IpcErrorCode::InvalidPath,
+                format!("could not resolve Git metadata directory: {error}"),
+            )
+        })?;
+    let git_common_dir = checked_git(
+        root,
+        ["rev-parse", "--git-common-dir"],
+        "could not locate shared Git metadata",
+    )?;
+    let git_common_dir = PathBuf::from(output_text(&git_common_dir));
+    let git_common_dir = if git_common_dir.is_absolute() {
+        git_common_dir
+    } else {
+        root.join(git_common_dir)
+    }
+    .canonicalize()
+    .map_err(|error| {
+        IpcError::new(
+            IpcErrorCode::InvalidPath,
+            format!("could not resolve shared Git metadata directory: {error}"),
+        )
+    })?;
+    let exclude_parent = path.parent().ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::InvalidPath,
+            "Git exclude file has no parent directory",
+        )
+    })?;
+    let exclude_parent = exclude_parent.canonicalize().map_err(|error| {
+        IpcError::new(
+            IpcErrorCode::InvalidPath,
+            format!("could not resolve Git info directory: {error}"),
+        )
+    })?;
+    if !exclude_parent.starts_with(&git_dir) && !exclude_parent.starts_with(&git_common_dir) {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidPath,
+            "Git's local exclude file is outside the repository metadata directory",
+        ));
+    }
+    let contents = match fs::read(&path) {
+        Ok(contents) => contents,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Vec::new(),
+        Err(error) => {
+            return Err(IpcError::new(
+                IpcErrorCode::PermissionDenied,
+                format!("could not read Git's local exclude file: {error}"),
+            ));
+        }
+    };
+    let already_ignored = contents
+        .split(|byte| *byte == b'\n')
+        .map(|line| line.strip_suffix(b"\r").unwrap_or(line))
+        .any(|line| {
+            matches!(
+                line,
+                b"/.worktrees/" | b"/.worktrees" | b".worktrees/" | b".worktrees"
+            )
+        });
+    if already_ignored {
+        return Ok(());
+    }
+    if fs::symlink_metadata(&path).is_ok_and(|metadata| metadata.file_type().is_symlink()) {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidPath,
+            "Git's local exclude file is a symbolic link; refusing to modify a file outside the repository metadata",
+        ));
+    }
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent).map_err(|error| {
+            IpcError::new(
+                IpcErrorCode::PermissionDenied,
+                format!("could not create Git's local info directory: {error}"),
+            )
+        })?;
+    }
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+        .map_err(|error| {
+            IpcError::new(
+                IpcErrorCode::PermissionDenied,
+                format!("could not update Git's local exclude file: {error}"),
+            )
+        })?;
+    if !contents.is_empty() && !contents.ends_with(b"\n") {
+        file.write_all(b"\n").map_err(|error| {
+            IpcError::new(
+                IpcErrorCode::PermissionDenied,
+                format!("could not update Git's local exclude file: {error}"),
+            )
+        })?;
+    }
+    file.write_all(b"/.worktrees/\n").map_err(|error| {
+        IpcError::new(
+            IpcErrorCode::PermissionDenied,
+            format!("could not update Git's local exclude file: {error}"),
+        )
+    })
 }
 
 fn git_output(root: &Path, args: Vec<OsString>) -> Result<Output, IpcError> {
@@ -787,7 +903,7 @@ mod tests {
     fn fixture(base: &Path) -> (Database, PathBuf, String) {
         let root = base.join("repo with spaces");
         fs::create_dir_all(&root).unwrap();
-        git(&root, &["init", "-b", "trunk"]);
+        git(&root, &["init", "-b", "main"]);
         git(&root, &["config", "user.name", "Marvis test"]);
         git(&root, &["config", "user.email", "marvis@example.invalid"]);
         fs::write(root.join("base.txt"), "base\n").unwrap();
@@ -854,12 +970,17 @@ mod tests {
         let (database, root, primary_id) = fixture(temp.path());
         let source_id = add_worktree(&database, &root, temp.path(), "current-feature");
         assert_ne!(source_id, primary_id);
-        let location = temp.path().join("external worktrees");
+        fs::write(root.join("main-only.txt"), "main head\n").unwrap();
+        git(&root, &["add", "main-only.txt"]);
+        git(&root, &["commit", "-m", "main-only"]);
+        let location = root.canonicalize().unwrap().join(".worktrees");
         let excludes_path = root.join(".git/info/exclude");
-        let excludes_before = fs::read(&excludes_path).unwrap_or_default();
+        fs::write(&excludes_path, b"# existing user rule\n*.local\n").unwrap();
+        let excludes_before = fs::read(&excludes_path).unwrap();
 
         let settings = defaults(&database, &source_id).unwrap();
-        assert_eq!(settings.default_branch, "trunk");
+        assert_eq!(settings.default_branch, "main");
+        assert_eq!(settings.location, location.display().to_string());
         let created = create(
             &database,
             &source_id,
@@ -875,27 +996,93 @@ mod tests {
             .find(|checkout| checkout.id == created.checkout_id)
             .unwrap();
         assert_eq!(checkout.branch.as_deref(), Some("feature/safe-name"));
-        assert!(checkout
-            .canonical_path
-            .starts_with(location.canonicalize().unwrap().to_str().unwrap()));
-        assert!(checkout.canonical_path.contains("repo with spaces"));
+        assert_eq!(
+            Path::new(&checkout.canonical_path).parent(),
+            Some(location.canonicalize().unwrap().as_path())
+        );
         assert_eq!(
             git(
                 Path::new(&checkout.canonical_path),
                 &["log", "-1", "--format=%s"]
             ),
-            "base"
+            "main-only"
         );
         assert_eq!(
             created.workspace.active_checkout_id.as_deref(),
             Some(created.checkout_id.as_str())
         );
         assert!(!temp.path().join("pwned").exists());
-        assert_eq!(fs::read(excludes_path).unwrap_or_default(), excludes_before);
+        let excludes_after = fs::read(excludes_path).unwrap();
+        assert!(excludes_after.starts_with(&excludes_before));
+        assert!(String::from_utf8_lossy(&excludes_after).contains("/.worktrees/"));
+        assert_eq!(
+            git(&root, &["status", "--porcelain", "--untracked-files=all"]),
+            ""
+        );
         assert_eq!(
             defaults(&database, &primary_id).unwrap().location,
-            location.canonicalize().unwrap().display().to_string()
+            location.display().to_string()
         );
+    }
+
+    #[test]
+    fn worktree_creation_requires_main_without_falling_back_to_the_current_branch() {
+        let temp = tempdir().unwrap();
+        let (database, root, checkout_id) = fixture(temp.path());
+        git(&root, &["branch", "-m", "trunk"]);
+
+        let error = defaults(&database, &checkout_id).unwrap_err();
+
+        assert!(error.message.contains("Git branch 'main' does not exist"));
+        assert!(create(
+            &database,
+            &checkout_id,
+            "work",
+            "feature/work",
+            &root.join(".worktrees"),
+        )
+        .unwrap_err()
+        .message
+        .contains("Git branch 'main' does not exist"));
+    }
+
+    #[test]
+    fn worktree_creation_is_fixed_to_the_repository_worktrees_directory() {
+        let temp = tempdir().unwrap();
+        let (database, root, checkout_id) = fixture(temp.path());
+        let external = temp.path().join("external-worktrees");
+
+        let error = create(&database, &checkout_id, "work", "feature/work", &external).unwrap_err();
+
+        assert!(error.message.contains("repository's .worktrees directory"));
+        assert!(!external.exists());
+        assert!(!root.join(".worktrees").exists());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn refuses_to_append_to_an_exclude_symlink_outside_git_metadata() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let (database, root, checkout_id) = fixture(temp.path());
+        let exclude = root.join(".git/info/exclude");
+        let outside = temp.path().join("user-exclude");
+        fs::write(&outside, b"user data\n").unwrap();
+        fs::remove_file(&exclude).unwrap();
+        symlink(&outside, &exclude).unwrap();
+
+        let error = create(
+            &database,
+            &checkout_id,
+            "work",
+            "feature/work",
+            &root.join(".worktrees"),
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("symbolic link"));
+        assert_eq!(fs::read(outside).unwrap(), b"user data\n");
     }
 
     #[test]
@@ -933,7 +1120,7 @@ mod tests {
 
         let error = create(&database, &checkout_id, "work", "feature/symlink", &alias).unwrap_err();
 
-        assert!(error.message.contains("outside the repository"));
+        assert!(error.message.contains("inside the repository"));
         assert!(!root.join("repo with spaces/work").exists());
     }
 
