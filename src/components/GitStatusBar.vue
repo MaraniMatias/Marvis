@@ -21,9 +21,7 @@ const branchLabel = () => status.value?.branch ?? (status.value?.head ? `HEAD ${
 </script>
 
 <template>
-  <footer
-    class="flex h-8 shrink-0 items-center gap-3 border-t border-white/8 bg-[#15171c] px-4 text-[11px] text-zinc-400"
-  >
+  <footer class="flex h-8 shrink-0 items-center gap-3 border-t border-white/8 px-4 text-xs text-zinc-400">
     <span v-if="!checkout" role="status">No checkout selected</span>
     <span v-else-if="checkout.isMissing" role="status">Directory missing</span>
     <span v-else-if="repo?.kind !== 'git'" role="status">Plain directory · Git status unavailable</span>

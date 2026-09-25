@@ -12,12 +12,94 @@ use crate::domain::workspace::{
     Checkout, Repo, RepoKind, Session, SessionStatus, SessionType, WorkspaceState,
 };
 
-const SCHEMA_VERSION: i64 = 5;
+const SCHEMA_VERSION: i64 = 6;
 const ACTIVE_CHECKOUT: &str = "active_checkout_id";
 const ACTIVE_SESSION: &str = "active_session_id";
 const WORKTREE_LOCATION: &str = "worktree_location";
 const WINDOW_GEOMETRY: &str = "window_geometry";
 const WINDOW_MAXIMIZED: &str = "window_maximized";
+const UI_LAYOUT: &str = "ui_layout_v1";
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct LayoutSnapshot {
+    pub sidebar_width: u32,
+    pub inspector_width: u32,
+    pub sidebar_visible: bool,
+    pub inspector_visible: bool,
+    pub status_bar_visible: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct AppLayoutState {
+    pub version: u8,
+    pub sidebar_width: u32,
+    pub inspector_width: u32,
+    pub sidebar_visible: bool,
+    pub inspector_visible: bool,
+    pub status_bar_visible: bool,
+    pub focus_snapshot: Option<LayoutSnapshot>,
+    pub collapsed_repo_ids: Vec<String>,
+    pub reduce_transparency: bool,
+}
+
+impl Default for AppLayoutState {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            sidebar_width: 260,
+            inspector_width: 320,
+            sidebar_visible: true,
+            inspector_visible: true,
+            status_bar_visible: true,
+            focus_snapshot: None,
+            collapsed_repo_ids: Vec::new(),
+            reduce_transparency: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct PersistedDocument {
+    pub checkout_id: String,
+    pub path: String,
+    pub source: String,
+    pub mode: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutUiState {
+    pub version: u8,
+    pub document: Option<PersistedDocument>,
+    pub main_view: String,
+    pub inspector_tab: String,
+    pub selected_file_path: Option<String>,
+    pub selected_change_path: Option<String>,
+    pub expanded_directories: Vec<String>,
+    pub files_scroll_top: u32,
+    pub document_scroll_top: u32,
+    pub document_scroll_left: u32,
+}
+
+impl Default for CheckoutUiState {
+    fn default() -> Self {
+        Self {
+            version: 1,
+            document: None,
+            main_view: "terminal".into(),
+            inspector_tab: "files".into(),
+            selected_file_path: None,
+            selected_change_path: None,
+            expanded_directories: Vec::new(),
+            files_scroll_top: 0,
+            document_scroll_top: 0,
+            document_scroll_left: 0,
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -577,6 +659,104 @@ impl Database {
         Ok(())
     }
 
+    pub fn load_app_layout(&self) -> Result<AppLayoutState, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let Some(serialized) = get_preference(&connection, UI_LAYOUT)? else {
+            return Ok(AppLayoutState::default());
+        };
+        let layout = serde_json::from_str::<AppLayoutState>(&serialized)
+            .ok()
+            .filter(validate_app_layout)
+            .unwrap_or_default();
+        if serde_json::to_string(&layout).map_err(|error| error.to_string())? != serialized {
+            connection
+                .execute("DELETE FROM preferences WHERE key = ?1", [UI_LAYOUT])
+                .map_err(db_error)?;
+        }
+        Ok(layout)
+    }
+
+    pub fn save_app_layout(&self, layout: &AppLayoutState) -> Result<(), String> {
+        if !validate_app_layout(layout) {
+            return Err("saved UI layout is outside the supported range".into());
+        }
+        let serialized = serde_json::to_string(layout).map_err(|error| error.to_string())?;
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "INSERT INTO preferences (key, value) VALUES (?1, ?2)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                params![UI_LAYOUT, serialized],
+            )
+            .map_err(db_error)?;
+        Ok(())
+    }
+
+    pub fn load_checkout_ui_state(&self, checkout_id: &str) -> Result<CheckoutUiState, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM checkouts WHERE id = ?1)",
+                [checkout_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !exists {
+            return Err("checkout does not exist".into());
+        }
+        let serialized = connection
+            .query_row(
+                "SELECT state_json FROM checkout_ui_states WHERE checkout_id = ?1",
+                [checkout_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(db_error)?;
+        let Some(serialized) = serialized else {
+            return Ok(CheckoutUiState::default());
+        };
+        let state = serde_json::from_str::<CheckoutUiState>(&serialized)
+            .ok()
+            .filter(|state| validate_checkout_ui_state(checkout_id, state))
+            .unwrap_or_default();
+        if serde_json::to_string(&state).map_err(|error| error.to_string())? != serialized {
+            connection
+                .execute(
+                    "DELETE FROM checkout_ui_states WHERE checkout_id = ?1",
+                    [checkout_id],
+                )
+                .map_err(db_error)?;
+        }
+        Ok(state)
+    }
+
+    pub fn save_checkout_ui_state(
+        &self,
+        checkout_id: &str,
+        state: &CheckoutUiState,
+    ) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let checkout_exists: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM checkouts WHERE id = ?1)",
+                [checkout_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !checkout_exists || !validate_checkout_ui_state(checkout_id, state) {
+            return Err("saved checkout UI state failed validation".into());
+        }
+        let serialized = serde_json::to_string(state).map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "INSERT INTO checkout_ui_states (checkout_id, state_json) VALUES (?1, ?2)
+                 ON CONFLICT(checkout_id) DO UPDATE SET state_json = excluded.state_json",
+                params![checkout_id, serialized],
+            )
+            .map_err(db_error)?;
+        Ok(())
+    }
+
     pub fn close_missing_checkout(&self, checkout_id: &str) -> Result<WorkspaceState, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.unchecked_transaction().map_err(db_error)?;
@@ -993,6 +1173,39 @@ fn transfer_checkout_metadata(
             params![next_checkout_id, previous_checkout_id],
         )
         .map_err(db_error)?;
+    let checkout_ui_state = transaction
+        .query_row(
+            "SELECT state_json FROM checkout_ui_states WHERE checkout_id = ?1",
+            [previous_checkout_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(db_error)?;
+    if let Some(serialized) = checkout_ui_state {
+        let mut state = serde_json::from_str::<CheckoutUiState>(&serialized).ok();
+        if let Some(state) = state
+            .as_mut()
+            .filter(|state| validate_checkout_ui_state(previous_checkout_id, state))
+        {
+            if let Some(document) = state.document.as_mut() {
+                document.checkout_id = next_checkout_id.to_string();
+            }
+            let serialized = serde_json::to_string(state).map_err(|error| error.to_string())?;
+            transaction
+                .execute(
+                    "UPDATE checkout_ui_states SET checkout_id = ?1, state_json = ?2 WHERE checkout_id = ?3",
+                    params![next_checkout_id, serialized, previous_checkout_id],
+                )
+                .map_err(db_error)?;
+        } else {
+            transaction
+                .execute(
+                    "DELETE FROM checkout_ui_states WHERE checkout_id = ?1",
+                    [previous_checkout_id],
+                )
+                .map_err(db_error)?;
+        }
+    }
     if get_preference(transaction, ACTIVE_CHECKOUT)?.as_deref() == Some(previous_checkout_id) {
         set_preference(transaction, ACTIVE_CHECKOUT, Some(next_checkout_id))?;
     }
@@ -1007,6 +1220,66 @@ fn validate_terminal_layout(
     let session_ids = terminal_layout_session_ids(connection, checkout_id)?;
     let session_ids = session_ids.into_iter().collect();
     layout.validate(&session_ids)
+}
+
+fn validate_app_layout(layout: &AppLayoutState) -> bool {
+    fn valid_snapshot(snapshot: &LayoutSnapshot) -> bool {
+        (220..=380).contains(&snapshot.sidebar_width)
+            && (260..=560).contains(&snapshot.inspector_width)
+    }
+    layout.version == 1
+        && valid_snapshot(&LayoutSnapshot {
+            sidebar_width: layout.sidebar_width,
+            inspector_width: layout.inspector_width,
+            sidebar_visible: layout.sidebar_visible,
+            inspector_visible: layout.inspector_visible,
+            status_bar_visible: layout.status_bar_visible,
+        })
+        && layout.focus_snapshot.as_ref().is_none_or(valid_snapshot)
+        && layout.collapsed_repo_ids.len() <= 1000
+        && layout
+            .collapsed_repo_ids
+            .iter()
+            .all(|id| !id.is_empty() && id.len() <= 4096)
+}
+
+fn safe_checkout_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 4096
+        && !path.contains('\\')
+        && Path::new(path)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
+fn validate_checkout_ui_state(checkout_id: &str, state: &CheckoutUiState) -> bool {
+    state.version == 1
+        && matches!(state.main_view.as_str(), "terminal" | "document")
+        && matches!(state.inspector_tab.as_str(), "files" | "changes")
+        && state.document.as_ref().is_none_or(|document| {
+            document.checkout_id == checkout_id
+                && safe_checkout_relative_path(&document.path)
+                && matches!(document.source.as_str(), "file" | "change")
+                && matches!(document.mode.as_str(), "diff" | "view" | "code")
+                && (document.source != "file" || document.mode != "diff")
+        })
+        && (state.main_view != "document" || state.document.is_some())
+        && state
+            .selected_file_path
+            .as_ref()
+            .is_none_or(|path| safe_checkout_relative_path(path))
+        && state
+            .selected_change_path
+            .as_ref()
+            .is_none_or(|path| safe_checkout_relative_path(path))
+        && state.expanded_directories.len() <= 2000
+        && state
+            .expanded_directories
+            .iter()
+            .all(|path| safe_checkout_relative_path(path))
+        && state.files_scroll_top <= 10_000_000
+        && state.document_scroll_top <= 10_000_000
+        && state.document_scroll_left <= 10_000_000
 }
 
 fn migrate(connection: &Connection) -> Result<(), String> {
@@ -1117,6 +1390,19 @@ fn migrate(connection: &Connection) -> Result<(), String> {
                     PRIMARY KEY (checkout_id, path)
                 );
                 PRAGMA user_version = 5;",
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+    }
+    if version < 6 {
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE checkout_ui_states (
+                    checkout_id TEXT PRIMARY KEY NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                    state_json TEXT NOT NULL
+                );
+                PRAGMA user_version = 6;",
             )
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
@@ -1346,7 +1632,10 @@ mod tests {
         workspace::{Repo, Session, SessionStatus, SessionType},
     };
 
-    use super::{Database, SCHEMA_VERSION};
+    use super::{
+        AppLayoutState, CheckoutUiState, Database, LayoutSnapshot, PersistedDocument,
+        SCHEMA_VERSION,
+    };
 
     fn plain_repo(path: &Path, now: &str) -> Repo {
         Repo::plain(path, now).expect("plain repo")
@@ -1387,6 +1676,189 @@ mod tests {
             )
             .unwrap();
         assert!(has_checkout_layouts);
+
+        let has_checkout_ui_states: bool = database
+            .connection
+            .lock()
+            .unwrap()
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'checkout_ui_states')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(has_checkout_ui_states);
+    }
+
+    #[test]
+    fn ui_state_round_trips_migrates_and_discards_invalid_saved_data() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("ui-state.sqlite3");
+        let folder = temp.path().join("checkout");
+        fs::create_dir(&folder).unwrap();
+        let repo = plain_repo(&folder, "now");
+        let checkout_id = repo.checkouts[0].id.clone();
+        let database = Database::open(&db_path).unwrap();
+        database.register_plain_repo(repo).unwrap();
+
+        let layout = AppLayoutState {
+            sidebar_width: 340,
+            inspector_width: 420,
+            sidebar_visible: false,
+            focus_snapshot: Some(LayoutSnapshot {
+                sidebar_width: 280,
+                inspector_width: 360,
+                sidebar_visible: true,
+                inspector_visible: true,
+                status_bar_visible: false,
+            }),
+            collapsed_repo_ids: vec!["repo:collapsed".into()],
+            ..AppLayoutState::default()
+        };
+        database.save_app_layout(&layout).unwrap();
+        let state = CheckoutUiState {
+            document: Some(PersistedDocument {
+                checkout_id: checkout_id.clone(),
+                path: "docs/guide.md".into(),
+                source: "file".into(),
+                mode: "view".into(),
+            }),
+            main_view: "document".into(),
+            inspector_tab: "changes".into(),
+            selected_file_path: Some("docs/guide.md".into()),
+            selected_change_path: Some("src/main.rs".into()),
+            expanded_directories: vec!["docs".into(), "src".into()],
+            files_scroll_top: 640,
+            document_scroll_top: 320,
+            document_scroll_left: 4,
+            ..CheckoutUiState::default()
+        };
+        database
+            .save_checkout_ui_state(&checkout_id, &state)
+            .unwrap();
+        assert_eq!(database.load_app_layout().unwrap(), layout);
+        assert_eq!(
+            database.load_checkout_ui_state(&checkout_id).unwrap(),
+            state
+        );
+
+        {
+            let connection = database.connection.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE checkout_ui_states SET state_json = ?1 WHERE checkout_id = ?2",
+                    params![r#"{"version":1,"document":{"checkoutId":"checkout:wrong","path":"../secret","source":"file","mode":"view"},"mainView":"document","inspectorTab":"files","selectedFilePath":null,"selectedChangePath":null,"expandedDirectories":[],"filesScrollTop":0,"documentScrollTop":0,"documentScrollLeft":0}"#, checkout_id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE preferences SET value = ?1 WHERE key = 'ui_layout_v1'",
+                    [r#"{"version":99}"#],
+                )
+                .unwrap();
+        }
+        assert_eq!(
+            database.load_checkout_ui_state(&checkout_id).unwrap(),
+            CheckoutUiState::default()
+        );
+        assert_eq!(
+            database.load_app_layout().unwrap(),
+            AppLayoutState::default()
+        );
+        let connection = database.connection.lock().unwrap();
+        let invalid_checkout_state_remains: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM checkout_ui_states WHERE checkout_id = ?1)",
+                [&checkout_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!invalid_checkout_state_remains);
+        let invalid_global_state_remains: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM preferences WHERE key = 'ui_layout_v1')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!invalid_global_state_remains);
+        drop(connection);
+
+        let old_version = Database::open_in_memory().unwrap();
+        {
+            let connection = old_version.connection.lock().unwrap();
+            connection
+                .execute_batch("DROP TABLE checkout_ui_states; PRAGMA user_version = 5;")
+                .unwrap();
+            super::migrate(&connection).unwrap();
+            assert_eq!(
+                connection
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                6
+            );
+        }
+    }
+
+    #[test]
+    fn checkout_ui_state_moves_with_relocated_plain_checkout_and_cascades_on_delete() {
+        let temp = tempdir().unwrap();
+        let old_path = temp.path().join("old");
+        let new_path = temp.path().join("new");
+        fs::create_dir(&old_path).unwrap();
+        fs::create_dir(&new_path).unwrap();
+        let old_repo = plain_repo(&old_path, "1");
+        let new_repo = plain_repo(&new_path, "2");
+        let old_checkout_id = old_repo.checkouts[0].id.clone();
+        let new_checkout_id = new_repo.checkouts[0].id.clone();
+        let database = Database::open_in_memory().unwrap();
+        database.register_plain_repo(old_repo.clone()).unwrap();
+        let ui_state = CheckoutUiState {
+            document: Some(PersistedDocument {
+                checkout_id: old_checkout_id.clone(),
+                path: "README.md".into(),
+                source: "file".into(),
+                mode: "view".into(),
+            }),
+            main_view: "document".into(),
+            ..CheckoutUiState::default()
+        };
+        database
+            .save_checkout_ui_state(&old_checkout_id, &ui_state)
+            .unwrap();
+        fs::remove_dir(&old_path).unwrap();
+
+        database
+            .relocate_plain_checkout(&old_repo.id, &old_checkout_id, &new_repo)
+            .unwrap();
+        let mut moved_state = ui_state;
+        moved_state.document.as_mut().unwrap().checkout_id = new_checkout_id.clone();
+        assert_eq!(
+            database.load_checkout_ui_state(&new_checkout_id).unwrap(),
+            moved_state
+        );
+        assert_eq!(
+            database
+                .load_checkout_ui_state(&old_checkout_id)
+                .unwrap_err(),
+            "checkout does not exist"
+        );
+
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM repos WHERE id = ?1", [&new_repo.id])
+            .unwrap();
+        let connection = database.connection.lock().unwrap();
+        let state_remains: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM checkout_ui_states WHERE checkout_id = ?1)",
+                [&new_checkout_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!state_remains);
     }
 
     #[test]

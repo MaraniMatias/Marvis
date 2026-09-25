@@ -105,7 +105,11 @@ fn main() {
             commands::terminal::terminal_status,
             commands::terminal::terminal_close,
             commands::terminal::terminal_layout_load,
-            commands::terminal::terminal_layout_save
+            commands::terminal::terminal_layout_save,
+            commands::ui_state::ui_layout_load,
+            commands::ui_state::ui_layout_save,
+            commands::ui_state::checkout_ui_state_load,
+            commands::ui_state::checkout_ui_state_save
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Marvis");

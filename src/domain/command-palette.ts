@@ -1,5 +1,10 @@
 export type PaletteCommandId =
   | "open-directory"
+  | "toggle-focus"
+  | "toggle-sidebar"
+  | "toggle-inspector"
+  | "toggle-status-bar"
+  | "toggle-transparency"
   | "new-worktree"
   | "new-terminal"
   | "open-file"
@@ -25,7 +30,14 @@ export interface PaletteCapabilities {
 }
 
 export function getPaletteCommands(capabilities: PaletteCapabilities): PaletteCommand[] {
-  const commands: PaletteCommand[] = [{ id: "open-directory", label: "Open Directory", enabled: true }];
+  const commands: PaletteCommand[] = [
+    { id: "open-directory", label: "Open Directory", enabled: true },
+    { id: "toggle-focus", label: "Toggle Focus Mode", enabled: true },
+    { id: "toggle-sidebar", label: "Toggle Navigation Sidebar", enabled: true },
+    { id: "toggle-inspector", label: "Toggle Files and Changes Inspector", enabled: true },
+    { id: "toggle-status-bar", label: "Toggle Status Bar", enabled: true },
+    { id: "toggle-transparency", label: "Toggle Reduce Transparency", enabled: true },
+  ];
   if (!capabilities.hasCheckout || capabilities.isMissing) return commands;
 
   if (capabilities.isGit) {

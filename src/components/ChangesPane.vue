@@ -80,7 +80,7 @@ function openChange(path: string) {
         type="search"
         aria-label="Filter changed files"
         placeholder="Filter changed files…"
-        class="h-8 w-full rounded border border-white/8 bg-[#111318] px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-white/20"
+        class="h-8 w-full rounded border border-white/8 bg-black/10 px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-400/50"
       />
     </div>
     <div class="min-h-0 flex-1 overflow-auto p-2" aria-label="Changed files" @scroll="onScroll">
@@ -105,7 +105,7 @@ function openChange(path: string) {
           v-for="file in visibleFileWindow.files"
           :key="file.path"
           type="button"
-          class="flex h-7 w-full items-center gap-2 rounded px-2 text-left text-xs hover:bg-white/6"
+          class="flex h-7 w-full items-center gap-2 rounded px-2 text-left text-[12px] hover:bg-white/6"
           :class="selectedPath === file.path ? 'bg-white/8 text-zinc-100' : 'text-zinc-400'"
           @click="openChange(file.path)"
         >

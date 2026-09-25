@@ -4,6 +4,7 @@ import { computed, nextTick, ref, watch } from "vue";
 import { isIpcError } from "../domain/ipc";
 import type { FileEntry, FileSearchResult } from "../domain/files";
 import type { Checkout, Repo } from "../domain/workspace";
+import type { CheckoutUiState } from "../domain/ui-state";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { listCheckoutFiles, searchCheckoutFiles } from "../lib/ipc";
 import ChangesPane from "./ChangesPane.vue";
@@ -13,10 +14,17 @@ const props = defineProps<{
   repo?: Repo | null;
   gitSnapshot: ActiveGitSnapshot;
   commandRequest?: { action: "open-file" | "open-changes"; token: number } | null;
+  savedState?: CheckoutUiState | null;
 }>();
 const emit = defineEmits<{
   openFile: [value: { checkoutId: string; path: string }];
   openChange: [value: { checkoutId: string; path: string }];
+  updateUiState: [
+    value: Pick<
+      CheckoutUiState,
+      "inspectorTab" | "selectedFilePath" | "selectedChangePath" | "expandedDirectories" | "filesScrollTop"
+    >,
+  ];
 }>();
 
 type DirectoryState = "loading" | "error" | "empty" | "truncated";
@@ -45,6 +53,7 @@ const searchTruncated = ref(false);
 const searchState = ref<"idle" | "loading" | "ready" | "error">("idle");
 const searchError = ref("");
 const treeScrollTop = ref(0);
+const treeViewport = ref<HTMLElement | null>(null);
 let searchIndexCheckoutId: string | null = null;
 let searchIndexPromise: { checkoutId: string; promise: Promise<FileSearchResult> } | null = null;
 let generation = 0;
@@ -115,8 +124,14 @@ watch(
     searchIndexPromise = null;
     searchState.value = "idle";
     searchGeneration += 1;
-    treeScrollTop.value = 0;
-    activeTab.value = "files";
+    const saved = props.savedState;
+    treeScrollTop.value = saved?.filesScrollTop ?? 0;
+    expanded.value = saved?.expandedDirectories ?? [];
+    activeTab.value = saved?.inspectorTab === "changes" && props.repo?.kind === "git" ? "changes" : "files";
+    if (checkoutId && saved?.selectedFilePath)
+      selectedPaths.value = { ...selectedPaths.value, [checkoutId]: saved.selectedFilePath };
+    if (checkoutId && saved?.selectedChangePath)
+      selectedChangedPaths.value = { ...selectedChangedPaths.value, [checkoutId]: saved.selectedChangePath };
     rootError.value = "";
     if (!checkoutId) {
       rootState.value = "idle";
@@ -129,9 +144,29 @@ watch(
     }
     rootState.value = "loading";
     await loadDirectory(checkoutId, ".", requestGeneration);
+    const restoredDirectories = [...expanded.value];
+    for (let index = 0; index < restoredDirectories.length; index += 16) {
+      if (requestGeneration !== generation) return;
+      await Promise.all(
+        restoredDirectories.slice(index, index + 16).map((path) => loadDirectory(checkoutId, path, requestGeneration)),
+      );
+    }
+    await nextTick();
+    if (requestGeneration === generation && treeViewport.value) treeViewport.value.scrollTop = treeScrollTop.value;
   },
   { immediate: true },
 );
+
+watch([activeTab, selectedPath, selectedChangedPath, expanded, treeScrollTop], () => {
+  if (!props.checkout) return;
+  emit("updateUiState", {
+    inspectorTab: activeTab.value,
+    selectedFilePath: selectedPath.value,
+    selectedChangePath: selectedChangedPath.value,
+    expandedDirectories: expanded.value,
+    filesScrollTop: Math.round(treeScrollTop.value),
+  });
+});
 
 watch(
   () => props.commandRequest?.token,
@@ -363,7 +398,7 @@ function onTreeScroll(event: Event) {
 </script>
 
 <template>
-  <aside class="flex h-full w-80 shrink-0 flex-col border-l border-white/8 bg-[#15171c]">
+  <aside class="app-inspector flex h-full w-full min-w-0 flex-col border-l border-white/8">
     <div
       role="tablist"
       aria-label="Inspector sections"
@@ -399,11 +434,16 @@ function onTreeScroll(event: Event) {
           type="search"
           aria-label="Search files"
           placeholder="Search files…"
-          class="h-8 w-full rounded border border-white/8 bg-[#111318] px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-white/20"
+          class="h-8 w-full rounded border border-white/8 bg-black/10 px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-400/50"
         />
         <p v-else class="px-1 py-1 text-xs text-zinc-500">Checkout files</p>
       </div>
-      <section class="min-h-0 flex-1 overflow-auto p-2" aria-label="Checkout files" @scroll="onTreeScroll">
+      <section
+        ref="treeViewport"
+        class="min-h-0 flex-1 overflow-auto p-2"
+        aria-label="Checkout files"
+        @scroll="onTreeScroll"
+      >
         <p v-if="rootState === 'idle'" class="px-3 py-4 text-sm text-zinc-500">Open a checkout to browse files.</p>
         <p v-else-if="rootState === 'loading'" role="status" class="px-3 py-4 text-sm text-zinc-400">Loading files…</p>
         <p v-else-if="rootState === 'missing'" role="status" class="px-3 py-4 text-sm text-amber-300">

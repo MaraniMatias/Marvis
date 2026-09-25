@@ -3,7 +3,9 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type { PaletteCommand, PaletteCommandId } from "../domain/command-palette";
 
-const props = defineProps<{ commands: PaletteCommand[] }>();
+const props = withDefaults(defineProps<{ commands: PaletteCommand[]; openRequestToken?: number }>(), {
+  openRequestToken: 0,
+});
 const emit = defineEmits<{ select: [command: PaletteCommandId] }>();
 
 const open = ref(false);
@@ -25,6 +27,13 @@ watch(open, async (isOpen) => {
   await nextTick();
   searchInput.value?.focus();
 });
+
+watch(
+  () => props.openRequestToken,
+  (token, previous) => {
+    if (token !== previous) open.value = true;
+  },
+);
 
 function close() {
   open.value = false;
@@ -73,7 +82,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeydown));
       role="dialog"
       aria-modal="true"
       aria-label="Command palette"
-      class="w-full max-w-lg overflow-hidden rounded-xl border border-white/10 bg-[#191b21] shadow-2xl"
+      class="surface-popover w-full max-w-lg overflow-hidden rounded-xl border border-white/10 shadow-2xl"
     >
       <input
         ref="searchInput"

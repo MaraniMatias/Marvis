@@ -41,6 +41,7 @@ interface TerminalView {
 }
 interface TerminalSessionHandle {
   requestClose(): Promise<boolean>;
+  focus(): void;
 }
 
 const layouts = ref<Record<string, CheckoutTerminalLayout>>({});
@@ -122,6 +123,13 @@ function setTerminalRef(key: string, instance: unknown) {
   if (instance) terminalRefs.set(key, instance as TerminalSessionHandle);
   else terminalRefs.delete(key);
 }
+
+function focusActiveTerminal() {
+  const view = activeView.value;
+  if (view) terminalRefs.get(view.key)?.focus();
+}
+
+defineExpose({ focusActiveTerminal });
 
 async function launchNeovim(target?: TerminalLaunchTarget) {
   const selectedCheckout = props.checkout;
@@ -253,7 +261,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
 </script>
 
 <template>
-  <main class="flex min-w-0 flex-1 flex-col bg-[#111318]">
+  <main class="session-pane flex min-w-0 flex-1 flex-col">
     <section class="relative min-h-0 flex-1 p-3" aria-label="Terminal session view">
       <div v-for="view in views" v-show="view.checkoutId === checkout?.id" :key="view.key" class="absolute inset-3">
         <TerminalSession
@@ -274,7 +282,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
 
       <div
         v-if="!activeView"
-        class="grid h-full place-items-center rounded-lg border border-white/8 bg-[#15171c] p-8 text-center"
+        class="grid h-full place-items-center rounded-lg border border-white/8 bg-[var(--surface-panel)] p-8 text-center"
       >
         <div class="max-w-sm">
           <h1 class="text-base font-medium text-zinc-100">

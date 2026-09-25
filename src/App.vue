@@ -1,12 +1,15 @@
 <script setup lang="ts">
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
-import { computed, onMounted, onUnmounted, ref } from "vue";
+import { getCurrentWindow } from "@tauri-apps/api/window";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { SplitterGroup, SplitterPanel, SplitterResizeHandle } from "reka-ui";
 import type { Checkout } from "./domain/workspace";
 import type { PaletteCommandId } from "./domain/command-palette";
 import { getPaletteCommands } from "./domain/command-palette";
 import { parseEditorPosition } from "./domain/editor";
 import type { EditorPosition } from "./domain/editor";
+import { resolveMainView } from "./domain/main-document";
 import type { MainDocument, MainDocumentMode } from "./domain/main-document";
 import InspectorPane from "./components/InspectorPane.vue";
 import CommandPalette from "./components/CommandPalette.vue";
@@ -28,6 +31,19 @@ import type { EditorAvailability } from "./lib/ipc";
 import { useWorkspaceState } from "./presentation/workspace";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
 import { isMarkdownPath } from "./presentation/markdown-preview";
+import AppToolbar from "./components/AppToolbar.vue";
+import {
+  DEFAULT_APP_LAYOUT,
+  DEFAULT_CHECKOUT_UI_STATE,
+  needsInspectorDrawer,
+  normalizeAppLayout,
+  normalizeCheckoutUiState,
+  resizeLayoutPanel,
+  toggleFocusLayout,
+  toggleLayoutVisibility as toggleLayoutVisibilityState,
+} from "./domain/ui-state";
+import type { AppLayoutState, CheckoutUiState } from "./domain/ui-state";
+import { loadAppLayout, loadCheckoutUiState, saveAppLayout, saveCheckoutUiState } from "./lib/ipc";
 
 const {
   workspace,
@@ -40,6 +56,16 @@ const {
   updateWorkspace,
   promptForDefaultBranchIfNeeded,
 } = useWorkspaceState();
+const appLayout = ref<AppLayoutState>({ ...DEFAULT_APP_LAYOUT });
+const appLayoutReady = ref(false);
+const checkoutUiStates = ref<Record<string, CheckoutUiState>>({});
+const checkoutUiReady = ref(false);
+const sessionPane = ref<InstanceType<typeof SessionPane> | null>(null);
+const sidebarPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
+const inspectorPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
+const paletteRequestToken = ref(0);
+const viewportWidth = ref(window.innerWidth);
+const isNarrow = computed(() => needsInspectorDrawer(appLayout.value, viewportWidth.value));
 const activeRepo = computed(
   () =>
     workspace.value.repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === activeCheckout.value?.id)) ??
@@ -89,6 +115,13 @@ let nvimRequestToken = 0;
 let inspectorCommandToken = 0;
 let unlistenFileActivity: (() => void) | undefined;
 let activityListenerDisposed = false;
+let unlistenCloseRequested: (() => void) | undefined;
+let allowWindowClose = false;
+let uiLayoutSaveTimer: number | undefined;
+const checkoutUiSaveTimers = new Map<string, number>();
+let uiStateWriteQueue: Promise<void> = Promise.resolve();
+const loadedCheckoutUiIds = new Set<string>();
+let checkoutUiLoadGeneration = 0;
 const activityExpiryTimers = new Map<string, number>();
 const lifecycleCheckout = computed<Checkout | null>(
   () =>
@@ -121,11 +154,11 @@ const activeDocument = computed(() => {
   return document;
 });
 const activeMainView = computed(() => {
-  const checkoutId = activeCheckout.value?.id;
-  return checkoutId && activeDocument.value && mainViews.value[checkoutId] === "document" ? "document" : "terminal";
+  return resolveMainView(mainViews.value, activeCheckout.value?.id ?? null, activeDocument.value);
 });
 
 function openFileDocument(selection: { checkoutId: string; path: string }) {
+  const previousDocument = documents.value[selection.checkoutId];
   documents.value = {
     ...documents.value,
     [selection.checkoutId]: {
@@ -135,11 +168,22 @@ function openFileDocument(selection: { checkoutId: string; path: string }) {
     },
   };
   mainViews.value = { ...mainViews.value, [selection.checkoutId]: "document" };
+  updateCheckoutUiState(selection.checkoutId, {
+    document: documents.value[selection.checkoutId],
+    mainView: "document",
+    ...(previousDocument?.path !== selection.path && { documentScrollTop: 0, documentScrollLeft: 0 }),
+  });
 }
 
 function openChangedDocument(selection: { checkoutId: string; path: string }) {
+  const previousDocument = documents.value[selection.checkoutId];
   documents.value = { ...documents.value, [selection.checkoutId]: { ...selection, source: "change", mode: "diff" } };
   mainViews.value = { ...mainViews.value, [selection.checkoutId]: "document" };
+  updateCheckoutUiState(selection.checkoutId, {
+    document: documents.value[selection.checkoutId],
+    mainView: "document",
+    ...(previousDocument?.path !== selection.path && { documentScrollTop: 0, documentScrollLeft: 0 }),
+  });
 }
 
 function setDocumentMode(mode: MainDocumentMode) {
@@ -147,6 +191,7 @@ function setDocumentMode(mode: MainDocumentMode) {
   const document = activeDocument.value;
   if (!checkoutId || !document) return;
   documents.value = { ...documents.value, [checkoutId]: { ...document, mode } };
+  updateCheckoutUiState(checkoutId, { document: documents.value[checkoutId] });
 }
 
 function closeDocument() {
@@ -156,21 +201,236 @@ function closeDocument() {
   delete next[checkoutId];
   documents.value = next;
   mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
+  updateCheckoutUiState(checkoutId, { document: null, mainView: "terminal" });
 }
 
 function activateCheckoutTerminal(checkoutId: string) {
-  mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
+  // Selecting a checkout restores its saved main view. Only explicit terminal actions switch views.
   void selectCheckout(checkoutId);
 }
 
-function activateTerminalSession(sessionId: string) {
+async function activateTerminalSession(sessionId: string) {
   const checkout = allCheckouts.value.find((item) => item.sessions.some((session) => session.id === sessionId));
   if (!checkout) return;
   mainViews.value = { ...mainViews.value, [checkout.id]: "terminal" };
-  void selectWorkspaceSession(sessionId);
+  updateCheckoutUiState(checkout.id, { mainView: "terminal" });
+  await selectWorkspaceSession(sessionId);
+  await nextTick();
+  sessionPane.value?.focusActiveTerminal();
 }
 
+function updateCheckoutUiState(checkoutId: string, patch: Partial<CheckoutUiState>) {
+  const previous = checkoutUiStates.value[checkoutId] ?? { ...DEFAULT_CHECKOUT_UI_STATE };
+  const state = normalizeCheckoutUiState({ ...previous, ...patch, version: 1 });
+  checkoutUiStates.value = { ...checkoutUiStates.value, [checkoutId]: state };
+  if (checkoutUiReady.value && loadedCheckoutUiIds.has(checkoutId)) scheduleCheckoutUiSave(checkoutId);
+}
+
+function updateDocumentReadingPosition(checkoutId: string, position: { top: number; left: number }) {
+  updateCheckoutUiState(checkoutId, {
+    documentScrollTop: Math.round(position.top),
+    documentScrollLeft: Math.round(position.left),
+  });
+}
+
+function updateInspectorUiState(
+  checkoutId: string,
+  patch: Pick<
+    CheckoutUiState,
+    "inspectorTab" | "selectedFilePath" | "selectedChangePath" | "expandedDirectories" | "filesScrollTop"
+  >,
+) {
+  updateCheckoutUiState(checkoutId, patch);
+}
+
+function scheduleUiWrite(write: () => Promise<void>) {
+  const pending = uiStateWriteQueue
+    .catch(() => {})
+    .then(write)
+    .catch((cause: unknown) => {
+      error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+    });
+  uiStateWriteQueue = pending;
+}
+
+function scheduleAppLayoutSave() {
+  if (!appLayoutReady.value) return;
+  if (uiLayoutSaveTimer !== undefined) window.clearTimeout(uiLayoutSaveTimer);
+  uiLayoutSaveTimer = window.setTimeout(() => {
+    uiLayoutSaveTimer = undefined;
+    const state = normalizeAppLayout(JSON.parse(JSON.stringify(appLayout.value)));
+    scheduleUiWrite(() => saveAppLayout(state));
+  }, 250);
+}
+
+function scheduleCheckoutUiSave(checkoutId: string) {
+  const previousTimer = checkoutUiSaveTimers.get(checkoutId);
+  if (previousTimer !== undefined) window.clearTimeout(previousTimer);
+  checkoutUiSaveTimers.set(
+    checkoutId,
+    window.setTimeout(() => {
+      checkoutUiSaveTimers.delete(checkoutId);
+      const state = normalizeCheckoutUiState(JSON.parse(JSON.stringify(checkoutUiStates.value[checkoutId])));
+      scheduleUiWrite(() => saveCheckoutUiState(checkoutId, state));
+    }, 250),
+  );
+}
+
+async function flushUiStateWrites() {
+  if (uiLayoutSaveTimer !== undefined) {
+    window.clearTimeout(uiLayoutSaveTimer);
+    uiLayoutSaveTimer = undefined;
+    const state = normalizeAppLayout(JSON.parse(JSON.stringify(appLayout.value)));
+    scheduleUiWrite(() => saveAppLayout(state));
+  }
+  for (const [checkoutId, timer] of checkoutUiSaveTimers) {
+    window.clearTimeout(timer);
+    const state = normalizeCheckoutUiState(JSON.parse(JSON.stringify(checkoutUiStates.value[checkoutId])));
+    scheduleUiWrite(() => saveCheckoutUiState(checkoutId, state));
+  }
+  checkoutUiSaveTimers.clear();
+  await uiStateWriteQueue;
+}
+
+function toggleFocusMode() {
+  appLayout.value = toggleFocusLayout(appLayout.value);
+  flushAfterLayoutInteraction();
+}
+
+function toggleLayoutVisibility(key: "sidebarVisible" | "inspectorVisible" | "statusBarVisible") {
+  appLayout.value = toggleLayoutVisibilityState(appLayout.value, key);
+  flushAfterLayoutInteraction();
+}
+
+function toggleTransparency() {
+  appLayout.value = { ...appLayout.value, reduceTransparency: !appLayout.value.reduceTransparency };
+  flushAfterLayoutInteraction();
+}
+
+function flushAfterLayoutInteraction() {
+  void nextTick(() => flushUiStateWrites());
+}
+
+function updateCollapsedRepos(repoIds: string[]) {
+  appLayout.value = { ...appLayout.value, collapsedRepoIds: repoIds };
+  flushAfterLayoutInteraction();
+}
+
+function onSplitterDragging(dragging: boolean) {
+  if (!dragging) void flushUiStateWrites();
+}
+
+function ensureInspectorVisible() {
+  if (appLayout.value.focusSnapshot) {
+    appLayout.value = {
+      ...appLayout.value,
+      ...appLayout.value.focusSnapshot,
+      focusSnapshot: null,
+      inspectorVisible: true,
+    };
+  } else if (!appLayout.value.inspectorVisible) {
+    appLayout.value = { ...appLayout.value, inspectorVisible: true };
+  }
+}
+
+function onSplitterLayout(sizes: number[]) {
+  if (!appLayoutReady.value || sizes.length < 3) return;
+  let next = appLayout.value;
+  if (sizes[0] > 0) next = resizeLayoutPanel(next, "sidebar", sizes[0]);
+  if (!isNarrow.value && sizes[2] > 0) next = resizeLayoutPanel(next, "inspector", sizes[2]);
+  if (next.sidebarWidth !== appLayout.value.sidebarWidth || next.inspectorWidth !== appLayout.value.inspectorWidth) {
+    appLayout.value = next;
+  }
+}
+
+function setMainView(view: "terminal" | "document") {
+  const checkoutId = activeCheckout.value?.id;
+  if (!checkoutId) return;
+  mainViews.value = { ...mainViews.value, [checkoutId]: view };
+  updateCheckoutUiState(checkoutId, { mainView: view });
+  if (view === "terminal") void nextTick(() => sessionPane.value?.focusActiveTerminal());
+}
+
+watch(appLayout, () => scheduleAppLayoutSave(), { deep: true });
+
+watch(
+  [() => appLayout.value.sidebarVisible, () => appLayout.value.inspectorVisible, isNarrow, appLayoutReady],
+  async () => {
+    if (!appLayoutReady.value) return;
+    await nextTick();
+    if (appLayout.value.sidebarVisible) {
+      sidebarPanel.value?.expand();
+      sidebarPanel.value?.resize(appLayout.value.sidebarWidth);
+    } else sidebarPanel.value?.collapse();
+    if (appLayout.value.inspectorVisible && !isNarrow.value) {
+      inspectorPanel.value?.expand();
+      inspectorPanel.value?.resize(appLayout.value.inspectorWidth);
+    } else inspectorPanel.value?.collapse();
+  },
+  { immediate: true, flush: "post" },
+);
+
+watch(
+  () => activeCheckout.value?.id,
+  async (checkoutId) => {
+    const request = ++checkoutUiLoadGeneration;
+    checkoutUiReady.value = false;
+    if (!checkoutId) {
+      checkoutUiReady.value = true;
+      return;
+    }
+    if (loadedCheckoutUiIds.has(checkoutId)) {
+      checkoutUiReady.value = true;
+      return;
+    }
+    try {
+      const state = normalizeCheckoutUiState(await loadCheckoutUiState(checkoutId));
+      if (request !== checkoutUiLoadGeneration || activeCheckout.value?.id !== checkoutId) return;
+      checkoutUiStates.value = { ...checkoutUiStates.value, [checkoutId]: state };
+      if (state.document?.checkoutId === checkoutId)
+        documents.value = { ...documents.value, [checkoutId]: state.document };
+      mainViews.value = {
+        ...mainViews.value,
+        [checkoutId]:
+          state.mainView === "document" && state.document?.checkoutId === checkoutId ? "document" : "terminal",
+      };
+    } catch (cause) {
+      if (request === checkoutUiLoadGeneration) {
+        error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+        checkoutUiStates.value = { ...checkoutUiStates.value, [checkoutId]: { ...DEFAULT_CHECKOUT_UI_STATE } };
+      }
+    } finally {
+      if (request === checkoutUiLoadGeneration) {
+        loadedCheckoutUiIds.add(checkoutId);
+        checkoutUiReady.value = true;
+      }
+    }
+  },
+  { immediate: true, flush: "sync" },
+);
+
 onMounted(async () => {
+  window.addEventListener("resize", onViewportResize);
+  const currentWindow = getCurrentWindow();
+  try {
+    unlistenCloseRequested = await currentWindow.onCloseRequested(async (event) => {
+      if (allowWindowClose) return;
+      event.preventDefault();
+      await flushUiStateWrites();
+      allowWindowClose = true;
+      await currentWindow.close();
+    });
+  } catch {
+    // The close flush is available only in the native Tauri window.
+  }
+  try {
+    appLayout.value = normalizeAppLayout(await loadAppLayout());
+  } catch (cause) {
+    error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+    appLayout.value = { ...DEFAULT_APP_LAYOUT };
+  } finally {
+    appLayoutReady.value = true;
+  }
   try {
     const dispose = await listen<string>("checkout-file-activity", (event) => {
       recentFileWrites.value = { ...recentFileWrites.value, [event.payload]: true };
@@ -204,10 +464,19 @@ onMounted(async () => {
 
 onUnmounted(() => {
   activityListenerDisposed = true;
+  unlistenCloseRequested?.();
+  window.removeEventListener("resize", onViewportResize);
   unlistenFileActivity?.();
   for (const timer of activityExpiryTimers.values()) window.clearTimeout(timer);
   activityExpiryTimers.clear();
+  if (uiLayoutSaveTimer !== undefined) window.clearTimeout(uiLayoutSaveTimer);
+  for (const timer of checkoutUiSaveTimers.values()) window.clearTimeout(timer);
+  checkoutUiSaveTimers.clear();
 });
+
+function onViewportResize() {
+  viewportWidth.value = window.innerWidth;
+}
 
 function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
   lifecycle.value = { mode, checkoutId };
@@ -215,6 +484,7 @@ function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
 
 async function requestShell(checkoutId: string) {
   mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
+  updateCheckoutUiState(checkoutId, { mainView: "terminal" });
   try {
     workspace.value = await persistCheckoutSelection(checkoutId);
     shellRequest.value = { checkoutId, token: ++shellRequestToken };
@@ -225,6 +495,7 @@ async function requestShell(checkoutId: string) {
 
 async function requestNvim(checkoutId: string, filePath?: string, position?: EditorPosition) {
   mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
+  updateCheckoutUiState(checkoutId, { mainView: "terminal" });
   const request = {
     checkoutId,
     ...(filePath && position && { filePath, line: position.line, column: position.column }),
@@ -263,6 +534,21 @@ async function runPaletteCommand(command: PaletteCommandId) {
     case "open-directory":
       await chooseFolder();
       break;
+    case "toggle-focus":
+      toggleFocusMode();
+      break;
+    case "toggle-sidebar":
+      toggleLayoutVisibility("sidebarVisible");
+      break;
+    case "toggle-inspector":
+      toggleLayoutVisibility("inspectorVisible");
+      break;
+    case "toggle-status-bar":
+      toggleLayoutVisibility("statusBarVisible");
+      break;
+    case "toggle-transparency":
+      toggleTransparency();
+      break;
     case "new-worktree":
       if (activeRepo.value?.kind === "git") {
         const primary = activeRepo.value.checkouts.find((item) => item.isPrimary && !item.isMissing);
@@ -273,16 +559,22 @@ async function runPaletteCommand(command: PaletteCommandId) {
       if (checkout && !checkout.isMissing) await requestShell(checkout.id);
       break;
     case "open-file":
-      if (checkout && !checkout.isMissing) requestInspector("open-file");
+      if (checkout && !checkout.isMissing) {
+        ensureInspectorVisible();
+        requestInspector("open-file");
+      }
       break;
     case "open-changes":
-      if (checkout && activeRepo.value?.kind === "git" && !checkout.isMissing) requestInspector("open-changes");
+      if (checkout && activeRepo.value?.kind === "git" && !checkout.isMissing) {
+        ensureInspectorVisible();
+        requestInspector("open-changes");
+      }
       break;
     case "open-preview":
       if (activeDocument.value) {
         const mode = isMarkdownPath(activeDocument.value.path) ? "view" : "code";
         setDocumentMode(mode);
-        mainViews.value = { ...mainViews.value, [activeDocument.value.checkoutId]: "document" };
+        setMainView("document");
       }
       break;
     case "open-zed":
@@ -353,36 +645,73 @@ async function closeCheckout(checkoutId: string) {
 </script>
 
 <template>
-  <div class="relative flex h-full min-w-[900px] flex-col bg-[#111318] text-zinc-100">
-    <div class="flex min-h-0 flex-1">
-      <Sidebar
-        :repos="workspace.repos"
-        :active-checkout-id="workspace.activeCheckoutId"
-        :active-session-id="workspace.activeSessionId"
-        :activity-by-checkout="activityByCheckout"
-        :session-runtime-statuses="sessionRuntimeStatuses"
-        :is-opening="isOpening"
-        @open-folder="chooseFolder"
-        @select-checkout="activateCheckoutTerminal"
-        @select-session="activateTerminalSession"
-        @locate-missing="locateCheckout"
-        @close-missing="closeCheckout"
-        @create-worktree="openWorktreeDialog('create', $event)"
-        @remove-worktree="openWorktreeDialog('remove', $event)"
+  <div
+    v-if="appLayoutReady"
+    class="app-shell relative flex h-full min-w-[900px] flex-col text-zinc-100"
+    :class="{ 'reduce-transparency': appLayout.reduceTransparency }"
+    :style="{ '--inspector-width': `${appLayout.inspectorWidth}px` }"
+  >
+    <AppToolbar
+      :layout="appLayout"
+      :narrow="isNarrow"
+      @toggle-sidebar="toggleLayoutVisibility('sidebarVisible')"
+      @toggle-inspector="toggleLayoutVisibility('inspectorVisible')"
+      @toggle-status-bar="toggleLayoutVisibility('statusBarVisible')"
+      @toggle-focus="toggleFocusMode"
+      @toggle-transparency="toggleTransparency"
+      @open-commands="paletteRequestToken += 1"
+    />
+    <SplitterGroup direction="horizontal" class="app-splitter flex min-h-0 flex-1" @layout="onSplitterLayout">
+      <SplitterPanel
+        id="navigation-panel"
+        ref="sidebarPanel"
+        :default-size="appLayout.sidebarVisible ? appLayout.sidebarWidth : 0"
+        :min-size="220"
+        :max-size="380"
+        :collapsed-size="0"
+        collapsible
+        size-unit="px"
+        class="min-h-0 shrink-0"
+      >
+        <Sidebar
+          v-show="appLayout.sidebarVisible"
+          :repos="workspace.repos"
+          :active-checkout-id="workspace.activeCheckoutId"
+          :active-session-id="workspace.activeSessionId"
+          :collapsed-repo-ids="appLayout.collapsedRepoIds"
+          :activity-by-checkout="activityByCheckout"
+          :session-runtime-statuses="sessionRuntimeStatuses"
+          :is-opening="isOpening"
+          @open-folder="chooseFolder"
+          @select-checkout="activateCheckoutTerminal"
+          @select-session="activateTerminalSession"
+          @locate-missing="locateCheckout"
+          @close-missing="closeCheckout"
+          @create-worktree="openWorktreeDialog('create', $event)"
+          @remove-worktree="openWorktreeDialog('remove', $event)"
+          @update-collapsed-repos="updateCollapsedRepos"
+        />
+      </SplitterPanel>
+      <SplitterResizeHandle
+        id="navigation-resize-handle"
+        aria-label="Resize navigation sidebar"
+        class="splitter-handle"
+        @dragging="onSplitterDragging"
+        @dblclick.stop="sidebarPanel?.resize(260)"
       />
-      <div class="flex min-w-0 flex-1 flex-col">
+      <SplitterPanel id="main-panel" :min-size="420" size-unit="px" class="main-column min-h-0 min-w-0 flex-1">
         <nav
           role="tablist"
           aria-label="Main view"
-          class="flex h-11 shrink-0 items-center gap-1 border-b border-white/8 px-3"
+          class="main-tabs flex h-10 shrink-0 items-center gap-1 border-b border-white/8 px-3"
         >
           <button
             role="tab"
             type="button"
             :aria-selected="activeMainView === 'terminal'"
-            class="rounded px-3 py-1.5 text-xs"
+            class="rounded px-3 py-1.5 text-[13px]"
             :class="activeMainView === 'terminal' ? 'bg-white/8 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
-            @click="activeCheckout && (mainViews = { ...mainViews, [activeCheckout.id]: 'terminal' })"
+            @click="setMainView('terminal')"
           >
             Terminal
           </button>
@@ -395,30 +724,39 @@ async function closeCheckout(checkoutId: string) {
               role="tab"
               type="button"
               :aria-selected="activeMainView === 'document'"
-              class="max-w-64 truncate px-1 py-1.5 text-xs"
+              class="max-w-64 truncate px-1 py-1.5 text-[13px]"
               :class="activeMainView === 'document' ? 'text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
-              @click="mainViews = { ...mainViews, [activeDocument.checkoutId]: 'document' }"
+              @click="setMainView('document')"
             >
               {{ activeDocument.path.split(/[\\/]/).at(-1) }}
             </button>
             <button
               type="button"
               aria-label="Close document"
+              title="Close document"
               class="rounded px-1 text-zinc-500 hover:bg-white/8 hover:text-zinc-200"
               @click="closeDocument"
             >
               ×
             </button>
           </div>
+          <span
+            v-if="activeCheckout"
+            class="ml-auto max-w-[45%] truncate pr-2 text-xs text-zinc-500"
+            :title="activeCheckout.path"
+          >
+            {{ activeCheckout.branch || activeCheckout.path.split(/[\\/]/).at(-1) }}
+          </span>
         </nav>
-        <div class="relative min-h-0 flex-1">
+        <div class="relative min-h-0 flex-1" :aria-busy="!checkoutUiReady">
           <SessionPane
             v-show="activeMainView === 'terminal'"
+            ref="sessionPane"
             class="absolute inset-0"
-            :checkout="activeCheckout"
+            :checkout="checkoutUiReady ? activeCheckout : null"
             :active-session-id="workspace.activeSessionId"
-            :is-opening="isOpening"
-            :visible="activeMainView === 'terminal'"
+            :is-opening="isOpening || !checkoutUiReady"
+            :visible="checkoutUiReady && activeMainView === 'terminal'"
             :shell-request="shellRequest"
             :nvim-request="nvimRequest"
             :registered-session-ids="registeredSessionIds"
@@ -427,7 +765,7 @@ async function closeCheckout(checkoutId: string) {
             @session-status-changed="updateSessionStatus"
           />
           <DocumentPane
-            v-if="activeDocument"
+            v-if="activeDocument && checkoutUiReady"
             v-show="activeMainView === 'document'"
             class="absolute inset-0"
             :checkout="activeCheckout"
@@ -435,19 +773,50 @@ async function closeCheckout(checkoutId: string) {
             :git-snapshot="gitSnapshot"
             :active="activeMainView === 'document'"
             :refresh-revision="documentRefreshRevisions[activeDocument.checkoutId] ?? 0"
+            :zed-available="editorAvailability.zed"
+            :reading-position="{
+              top: checkoutUiStates[activeDocument.checkoutId]?.documentScrollTop ?? 0,
+              left: checkoutUiStates[activeDocument.checkoutId]?.documentScrollLeft ?? 0,
+            }"
             @update-mode="setDocumentMode"
+            @reading-position-changed="updateDocumentReadingPosition(activeDocument.checkoutId, $event)"
+            @open-markdown-link="openFileDocument({ checkoutId: activeDocument.checkoutId, path: $event })"
+            @open-in-zed="runPaletteCommand('open-zed')"
           />
         </div>
-      </div>
-      <InspectorPane
-        :checkout="activeCheckout"
-        :repo="activeRepo"
-        :git-snapshot="gitSnapshot"
-        :command-request="inspectorCommand"
-        @open-file="openFileDocument"
-        @open-change="openChangedDocument"
+      </SplitterPanel>
+      <SplitterResizeHandle
+        id="inspector-resize-handle"
+        aria-label="Resize files and changes inspector"
+        class="splitter-handle"
+        @dragging="onSplitterDragging"
+        @dblclick.stop="inspectorPanel?.resize(320)"
       />
-    </div>
+      <SplitterPanel
+        id="inspector-panel"
+        ref="inspectorPanel"
+        :default-size="appLayout.inspectorVisible && !isNarrow ? appLayout.inspectorWidth : 0"
+        :min-size="260"
+        :max-size="560"
+        :collapsed-size="0"
+        collapsible
+        size-unit="px"
+        class="inspector-splitter-panel relative min-h-0 shrink-0 overflow-visible"
+      >
+        <InspectorPane
+          v-show="appLayout.inspectorVisible"
+          :class="{ 'right-inspector-drawer': isNarrow }"
+          :checkout="checkoutUiReady ? activeCheckout : null"
+          :repo="checkoutUiReady ? activeRepo : null"
+          :git-snapshot="gitSnapshot"
+          :command-request="inspectorCommand"
+          :saved-state="activeCheckout ? checkoutUiStates[activeCheckout.id] : null"
+          @open-file="openFileDocument"
+          @open-change="openChangedDocument"
+          @update-ui-state="activeCheckout && updateInspectorUiState(activeCheckout.id, $event)"
+        />
+      </SplitterPanel>
+    </SplitterGroup>
     <WorktreeDialog
       :open="!!lifecycle"
       :mode="lifecycle?.mode ?? 'create'"
@@ -459,18 +828,21 @@ async function closeCheckout(checkoutId: string) {
       @warning="reportWarning"
     />
     <GitStatusBar
+      v-if="appLayout.statusBarVisible"
+      class="app-statusbar"
       :checkout="activeCheckout"
       :repo="activeRepo"
       :git-snapshot="gitSnapshot"
       :concurrent-actors="activeCheckout ? activityByCheckout[activeCheckout.id] : []"
     />
-    <CommandPalette :commands="paletteCommands" @select="runPaletteCommand" />
+    <CommandPalette :commands="paletteCommands" :open-request-token="paletteRequestToken" @select="runPaletteCommand" />
     <div
       v-if="error"
       role="alert"
-      class="absolute bottom-12 left-1/2 max-w-[min(36rem,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-red-400/20 bg-[#242126] px-4 py-3 text-sm text-red-200 shadow-xl"
+      class="absolute bottom-12 left-1/2 z-50 max-w-[min(36rem,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-red-400/20 bg-[#242126] px-4 py-3 text-sm text-red-200 shadow-xl"
     >
       {{ error }}
     </div>
   </div>
+  <div v-else class="h-full bg-transparent p-5 text-sm text-zinc-400" role="status">Restoring workspace layout…</div>
 </template>

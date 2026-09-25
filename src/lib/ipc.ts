@@ -6,6 +6,7 @@ import type { GitDiffPage, GitFileDiff, GitStatus } from "../domain/git";
 import type { Session, TerminalLaunchType, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalInfo } from "../domain/worktree";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
+import type { AppLayoutState, CheckoutUiState } from "../domain/ui-state";
 
 export interface CreatedTerminal {
   session: Session;
@@ -160,6 +161,22 @@ export function loadTerminalLayout(checkoutId: string): Promise<CheckoutTerminal
 
 export function saveTerminalLayout(checkoutId: string, layout: CheckoutTerminalLayout): Promise<void> {
   return invoke<void>("terminal_layout_save", { checkoutId, layout });
+}
+
+export function loadAppLayout(): Promise<AppLayoutState> {
+  return invoke<AppLayoutState>("ui_layout_load");
+}
+
+export function saveAppLayout(layout: AppLayoutState): Promise<void> {
+  return invoke<void>("ui_layout_save", { layout });
+}
+
+export function loadCheckoutUiState(checkoutId: string): Promise<CheckoutUiState> {
+  return invoke<CheckoutUiState>("checkout_ui_state_load", { checkoutId });
+}
+
+export function saveCheckoutUiState(checkoutId: string, state: CheckoutUiState): Promise<void> {
+  return invoke<void>("checkout_ui_state_save", { checkoutId, state });
 }
 
 export function getWorktreeDefaults(checkoutId: string): Promise<WorktreeDefaults> {

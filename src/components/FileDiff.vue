@@ -211,7 +211,7 @@ onUnmounted(() => {
       <p v-if="diffPageError" role="alert" class="mb-2 shrink-0 text-xs text-red-300">{{ diffPageError }}</p>
       <div
         ref="diffViewport"
-        class="min-h-0 flex-1 overflow-auto rounded border border-white/8 bg-[#101217] font-mono text-[11px]"
+        class="diff-viewport min-h-0 flex-1 overflow-auto rounded border border-white/8 font-mono text-[12px]"
         aria-label="Diff contents"
         @scroll="onDiffScroll"
       >
@@ -226,7 +226,7 @@ onUnmounted(() => {
               v-for="row in visibleLargeDiffWindow.rows"
               :key="row.visualIndex"
               data-testid="large-diff-row"
-              class="flex h-[22px] min-w-max items-center overflow-hidden whitespace-pre"
+              class="flex h-6 min-w-max items-center overflow-hidden whitespace-pre text-[12px]"
             >
               <button
                 v-if="row.line?.kind === 'hunk'"
@@ -287,7 +287,7 @@ onUnmounted(() => {
               :diff-view-mode="DiffModeEnum.Unified"
               diff-view-theme="dark"
               :diff-view-highlight="true"
-              :diff-view-font-size="11"
+              :diff-view-font-size="13"
               class="min-w-0"
             />
           </section>

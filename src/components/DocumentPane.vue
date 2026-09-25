@@ -19,27 +19,29 @@ const props = withDefaults(
     gitSnapshot: ActiveGitSnapshot;
     active?: boolean;
     refreshRevision?: number;
+    readingPosition?: { top: number; left: number };
+    zedAvailable?: boolean;
   }>(),
-  { active: true, refreshRevision: 0 },
+  { active: true, refreshRevision: 0, readingPosition: () => ({ top: 0, left: 0 }), zedAvailable: false },
 );
-const emit = defineEmits<{ updateMode: [mode: MainDocumentMode] }>();
+const emit = defineEmits<{
+  updateMode: [mode: MainDocumentMode];
+  readingPositionChanged: [position: { top: number; left: number }];
+  openMarkdownLink: [path: string];
+  openInZed: [];
+}>();
 
 const content = ref("");
 const contentState = ref<"idle" | "loading" | "ready" | "error">("idle");
 const contentError = ref("");
 const fileViewport = ref<HTMLElement | null>(null);
-const readingPosition = ref({ top: 0, left: 0 });
-const available = computed(() => {
-  if (props.document.source === "file") return true;
-  if (props.gitSnapshot.statusState === "loading" && !props.gitSnapshot.status) return null;
-  return (
-    props.gitSnapshot.status?.files.some((file) => file.path === props.document.path && file.status !== "D") ?? false
-  );
-});
+const wrapCode = ref(false);
 const deleted = computed(
   () =>
     props.gitSnapshot.status?.files.some((file) => file.path === props.document.path && file.status === "D") ?? false,
 );
+const available = computed(() => !deleted.value);
+const readingPosition = ref(props.readingPosition);
 const { markdownHtml, markdownPreviewState, markdownImageWarning, isMarkdownPath, load, clear } = useMarkdownPreview(
   () => props.checkout?.id ?? null,
 );
@@ -84,12 +86,6 @@ async function loadFile(preservePosition = false) {
   const path = props.document.path;
   const fileIdentity = identity.value;
   if (!checkoutId || props.document.checkoutId !== checkoutId || props.document.mode === "diff") return;
-  if (available.value === null) {
-    requestGeneration += 1;
-    contentState.value = "loading";
-    contentError.value = "Waiting for Git status…";
-    return;
-  }
   if (!available.value) {
     requestGeneration += 1;
     content.value = "";
@@ -100,7 +96,7 @@ async function loadFile(preservePosition = false) {
     return;
   }
   const request = ++requestGeneration;
-  const previousPosition = preservePosition ? readingPosition.value : { top: 0, left: 0 };
+  const previousPosition = preservePosition ? readingPosition.value : props.readingPosition;
   content.value = "";
   contentState.value = "loading";
   contentError.value = "";
@@ -117,7 +113,18 @@ async function loadFile(preservePosition = false) {
       fileViewport.value.scrollLeft = previousPosition.left;
     }
     readingPosition.value = previousPosition;
-    if (props.document.mode === "view" && isMarkdown.value) await load(checkoutId, path, result.content);
+    if (props.document.mode === "view" && isMarkdown.value) {
+      await load(checkoutId, path, result.content);
+      await nextTick();
+      const images = fileViewport.value?.querySelectorAll("img") ?? [];
+      await Promise.all(Array.from(images, (image) => image.decode?.().catch(() => undefined) ?? Promise.resolve()));
+      await nextTick();
+      if (request === requestGeneration && fileViewport.value) {
+        fileViewport.value.scrollTop = previousPosition.top;
+        fileViewport.value.scrollLeft = previousPosition.left;
+        readingPosition.value = previousPosition;
+      }
+    }
   } catch (error) {
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
     contentError.value = errorText(error);
@@ -137,7 +144,7 @@ watch(
       contentState.value = "idle";
       contentError.value = "";
       clear();
-      readingPosition.value = { top: 0, left: 0 };
+      readingPosition.value = props.readingPosition;
       if (fileViewport.value) {
         fileViewport.value.scrollTop = 0;
         fileViewport.value.scrollLeft = 0;
@@ -145,14 +152,6 @@ watch(
     }
     if (mode === "diff") {
       requestGeneration += 1;
-      clear();
-      return;
-    }
-    if (isAvailable === null) {
-      requestGeneration += 1;
-      content.value = "";
-      contentState.value = "loading";
-      contentError.value = "Waiting for Git status…";
       clear();
       return;
     }
@@ -207,16 +206,62 @@ function setFileMode() {
 function onFileScroll(event: Event) {
   const viewport = event.currentTarget as HTMLElement;
   readingPosition.value = { top: viewport.scrollTop, left: viewport.scrollLeft };
+  emit("readingPositionChanged", readingPosition.value);
+}
+
+function onMarkdownLink(event: MouseEvent) {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const link = target.closest("a[href]");
+  const href = link?.getAttribute("href");
+  if (!href || href.startsWith("#") || /^[a-z][a-z\d+.-]*:/i.test(href) || href.startsWith("/") || href.includes("\\"))
+    return;
+  try {
+    const base = props.document.path.split("/").slice(0, -1);
+    for (const part of decodeURIComponent(href.split(/[?#]/, 1)[0] ?? "").split("/")) {
+      if (!part || part === ".") continue;
+      if (part === "..") {
+        if (!base.length) return;
+        base.pop();
+      } else base.push(part);
+    }
+    const path = base.join("/");
+    if (!path || path.includes("\0") || !isMarkdownPath(path)) return;
+    event.preventDefault();
+    emit("openMarkdownLink", path);
+  } catch {
+    // Ignore malformed encoded relative paths.
+  }
 }
 </script>
 
 <template>
-  <main class="flex min-h-0 flex-1 flex-col bg-[#111318]">
+  <main class="document-pane flex min-h-0 flex-1 flex-col">
     <header class="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-white/8 px-4">
       <span class="min-w-0 truncate font-mono text-[11px] text-zinc-400" :title="document.path">{{
         document.path
       }}</span>
       <div role="group" aria-label="Document mode" class="flex shrink-0 items-center gap-1">
+        <button
+          type="button"
+          :disabled="!zedAvailable"
+          title="Open in Zed"
+          aria-label="Open file in Zed"
+          class="rounded px-2 py-1 text-[11px] text-zinc-500 hover:bg-white/8 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+          @click="$emit('openInZed')"
+        >
+          ↗ Zed
+        </button>
+        <button
+          v-if="document.mode !== 'diff'"
+          type="button"
+          :aria-pressed="wrapCode"
+          title="Toggle source line wrapping"
+          class="rounded px-2 py-1 text-[11px] text-zinc-500 hover:bg-white/8 hover:text-zinc-200"
+          @click="wrapCode = !wrapCode"
+        >
+          Wrap
+        </button>
         <template v-if="document.source === 'change'">
           <button
             type="button"
@@ -290,8 +335,7 @@ function onFileScroll(event: Event) {
       aria-label="File contents"
       @scroll="onFileScroll"
     >
-      <p v-if="available === null" role="status" class="p-5 text-sm text-zinc-500">Waiting for Git status…</p>
-      <p v-else-if="available === false" role="status" class="p-5 text-sm text-amber-300">
+      <p v-if="available === false" role="status" class="p-5 text-sm text-amber-300">
         {{
           deleted
             ? "This file was deleted; its previous contents are available in the diff."
@@ -312,17 +356,38 @@ function onFileScroll(event: Event) {
             Some Markdown images were missing, unsupported, or over the preview limits.
           </p>
           <!-- eslint-disable vue/no-v-html -- Content is generated and DOMPurify-sanitized in markdown-preview.ts. -->
-          <article v-if="markdownPreviewState === 'ready'" class="markdown-preview p-5 text-sm" v-html="markdownHtml" />
+          <article
+            v-if="markdownPreviewState === 'ready'"
+            class="markdown-preview p-5 text-sm"
+            @click="onMarkdownLink"
+            v-html="markdownHtml"
+          />
           <!-- eslint-enable vue/no-v-html -->
         </template>
-        <div v-else class="min-w-max py-3 font-mono text-xs leading-5 text-zinc-300" aria-label="Source code">
-          <div v-for="(line, index) in highlightedLines" :key="index" class="flex min-h-5 whitespace-pre">
-            <span class="sticky left-0 w-12 shrink-0 select-none bg-[#111318] pr-3 text-right text-zinc-600">{{
-              index + 1
-            }}</span>
-            <!-- eslint-disable-next-line vue/no-v-html -- Code is generated by highlight.js and DOMPurify-sanitized. -->
-            <code v-if="line !== null" class="hljs min-w-max px-3" v-html="line" />
-            <code v-else class="min-w-max px-3">{{ sourceLines[index] }}</code>
+        <div
+          v-else
+          class="py-3 font-mono text-[13px] leading-5 text-zinc-300"
+          :class="wrapCode ? 'w-full min-w-0' : 'min-w-max'"
+          aria-label="Source code"
+        >
+          <div
+            v-for="(line, index) in highlightedLines"
+            :key="index"
+            class="flex min-h-5"
+            :class="wrapCode ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'"
+          >
+            <span class="source-line-number">{{ index + 1 }}</span>
+            <!-- eslint-disable vue/no-v-html -- Code is generated by highlight.js and DOMPurify-sanitized. -->
+            <code
+              v-if="line !== null"
+              class="hljs px-3"
+              :class="wrapCode ? 'min-w-0 whitespace-pre-wrap break-all' : 'min-w-max'"
+              v-html="line"
+            />
+            <!-- eslint-enable vue/no-v-html -->
+            <code v-else class="px-3" :class="wrapCode ? 'min-w-0 whitespace-pre-wrap break-all' : 'min-w-max'">{{
+              sourceLines[index]
+            }}</code>
           </div>
         </div>
       </template>
@@ -403,5 +468,17 @@ function onFileScroll(event: Event) {
 .markdown-preview :deep(img) {
   max-width: 100%;
   height: auto;
+}
+
+.source-line-number {
+  position: sticky;
+  left: 0;
+  width: 3rem;
+  flex-shrink: 0;
+  user-select: none;
+  background: var(--surface-document);
+  padding-right: 0.75rem;
+  color: #52525b;
+  text-align: right;
 }
 </style>

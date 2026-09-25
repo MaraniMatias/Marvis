@@ -152,7 +152,7 @@ function messageOf(cause: unknown): string {
       role="dialog"
       aria-modal="true"
       :aria-labelledby="mode === 'create' ? 'worktree-create-title' : 'worktree-remove-title'"
-      class="w-full max-w-xl rounded-xl border border-white/10 bg-[#191b21] p-5 shadow-2xl"
+      class="surface-popover w-full max-w-xl rounded-xl border border-white/10 p-5 shadow-2xl"
     >
       <header class="mb-4 flex items-start justify-between gap-4">
         <div>

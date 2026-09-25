@@ -1,20 +1,28 @@
 <script setup lang="ts">
-import { reactive } from "vue";
+/* eslint-disable vue/html-self-closing */
+import { computed, ref } from "vue";
 import type { Checkout, Repo, TerminalSessionStatus } from "../domain/workspace";
-import Button from "./ui/button/Button.vue";
 
 defineOptions({ name: "FolderSidebar" });
 
-const props = defineProps<{
-  repos: Repo[];
-  activeCheckoutId: string | null;
-  activeSessionId: string | null;
-  isOpening: boolean;
-  activityByCheckout?: Record<string, string[]>;
-  sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
-}>();
+const props = withDefaults(
+  defineProps<{
+    repos: Repo[];
+    activeCheckoutId: string | null;
+    activeSessionId: string | null;
+    isOpening: boolean;
+    activityByCheckout?: Record<string, string[]>;
+    sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
+    collapsedRepoIds?: string[];
+  }>(),
+  {
+    collapsedRepoIds: () => [],
+    activityByCheckout: () => ({}),
+    sessionRuntimeStatuses: () => ({}),
+  },
+);
 
-defineEmits<{
+const emit = defineEmits<{
   openFolder: [];
   selectCheckout: [checkoutId: string];
   selectSession: [sessionId: string];
@@ -22,13 +30,19 @@ defineEmits<{
   closeMissing: [checkoutId: string];
   createWorktree: [checkoutId: string];
   removeWorktree: [checkoutId: string];
+  updateCollapsedRepos: [repoIds: string[]];
 }>();
-
-const collapsedRepos = reactive(new Set<string>());
+const repoQuery = ref("");
+const filteredRepos = computed(() => {
+  const query = repoQuery.value.trim().toLocaleLowerCase();
+  return query ? props.repos.filter((repo) => repo.name.toLocaleLowerCase().includes(query)) : props.repos;
+});
 
 function toggleRepo(repoId: string) {
-  if (collapsedRepos.has(repoId)) collapsedRepos.delete(repoId);
-  else collapsedRepos.add(repoId);
+  const next = new Set(props.collapsedRepoIds);
+  if (next.has(repoId)) next.delete(repoId);
+  else next.add(repoId);
+  emit("updateCollapsedRepos", [...next]);
 }
 
 function sessionForCheckout(checkout: Checkout) {
@@ -37,11 +51,12 @@ function sessionForCheckout(checkout: Checkout) {
 </script>
 
 <template>
-  <aside class="flex h-full flex-col border-r border-white/8 bg-[#15171c]">
-    <div class="flex items-center justify-between px-4 pb-2 pt-5">
-      <h2 class="text-[11px] font-semibold uppercase tracking-[0.14em] text-zinc-500">Repositories</h2>
+  <aside class="app-sidebar flex h-full min-h-0 flex-col border-r border-white/8">
+    <div class="flex h-12 shrink-0 items-center justify-between px-3">
+      <h2 class="text-xs font-semibold text-zinc-300">Repositories</h2>
       <button
         aria-label="Open directory"
+        title="Open directory"
         class="grid size-7 place-items-center rounded text-lg leading-none text-zinc-400 hover:bg-white/8 hover:text-white"
         :disabled="isOpening"
         @click="$emit('openFolder')"
@@ -49,15 +64,24 @@ function sessionForCheckout(checkout: Checkout) {
         +
       </button>
     </div>
-    <div v-if="repos.length" class="min-h-0 flex-1 overflow-y-auto px-2">
-      <div v-for="repo in repos" :key="repo.id" class="mb-3">
+    <div class="shrink-0 border-b border-white/8 px-2 pb-2">
+      <input
+        v-model="repoQuery"
+        type="search"
+        aria-label="Search repositories"
+        placeholder="Filter repositories…"
+        class="h-8 w-full rounded border border-white/8 bg-black/10 px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-400/50"
+      />
+    </div>
+    <div v-if="filteredRepos.length" class="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+      <div v-for="repo in filteredRepos" :key="repo.id" class="mb-3">
         <div class="flex items-center gap-0.5">
           <button
-            class="flex min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1.5 text-left text-xs text-zinc-300 hover:bg-white/6"
-            :aria-expanded="!collapsedRepos.has(repo.id)"
+            class="flex min-w-0 flex-1 items-center gap-1 rounded-md px-2 py-1.5 text-left text-[13px] text-zinc-300 hover:bg-white/6"
+            :aria-expanded="!collapsedRepoIds.includes(repo.id)"
             @click="toggleRepo(repo.id)"
           >
-            <span class="w-3 text-[10px] text-zinc-600">{{ collapsedRepos.has(repo.id) ? "▸" : "▾" }}</span>
+            <span class="w-3 text-[10px] text-zinc-600">{{ collapsedRepoIds.includes(repo.id) ? "▸" : "▾" }}</span>
             <span class="min-w-0 flex-1 truncate font-medium">{{ repo.name }}</span>
             <span class="text-[10px] text-zinc-600">{{ repo.kind === "git" ? "Git" : "Plain" }}</span>
           </button>
@@ -71,11 +95,11 @@ function sessionForCheckout(checkout: Checkout) {
             +
           </button>
         </div>
-        <div v-if="!collapsedRepos.has(repo.id)" class="ml-2 border-l border-white/6 pl-2">
+        <div v-if="!collapsedRepoIds.includes(repo.id)" class="ml-2 border-l border-white/6 pl-2">
           <div v-for="checkout in repo.checkouts" :key="checkout.id" class="mb-0.5">
             <div class="group flex items-center gap-0.5">
               <button
-                class="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-white/6"
+                class="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-[13px] hover:bg-white/6"
                 :class="checkout.id === activeCheckoutId ? 'bg-white/8 text-zinc-100' : 'text-zinc-400'"
                 @click="$emit('selectCheckout', checkout.id)"
               >
@@ -166,19 +190,11 @@ function sessionForCheckout(checkout: Checkout) {
         </div>
       </div>
     </div>
-    <div v-else class="px-4 py-2 text-xs leading-5 text-zinc-500">Your opened folders will appear here.</div>
-    <div class="mt-auto border-t border-white/8 p-3">
-      <Button variant="quiet" class="w-full justify-start" :disabled="isOpening" @click="$emit('openFolder')">
-        <svg viewBox="0 0 20 20" fill="none" aria-hidden="true" class="size-4">
-          <path
-            d="M2.75 5.75a1.5 1.5 0 0 1 1.5-1.5h4l1.5 1.75h6a1.5 1.5 0 0 1 1.5 1.5v6.75a1.5 1.5 0 0 1-1.5 1.5h-11a2 2 0 0 1-2-2v-8Z"
-            stroke="currentColor"
-            stroke-width="1.4"
-            stroke-linejoin="round"
-          />
-        </svg>
-        {{ isOpening ? "Opening…" : "Open directory" }}
-      </Button>
+    <div v-else-if="repoQuery" role="status" class="px-4 py-3 text-xs leading-5 text-zinc-500">
+      No matching repositories.
+    </div>
+    <div v-else class="px-4 py-3 text-xs leading-5 text-zinc-500">
+      Your opened folders will appear here. Use + to add one.
     </div>
   </aside>
 </template>

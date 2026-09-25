@@ -36,7 +36,7 @@ describe("Sidebar actions and checkout states", () => {
     });
 
     expect(wrapper.get('button[aria-label="Open directory"]')).toBeDefined();
-    expect(wrapper.text()).toContain("Open directory");
+    expect(wrapper.get('button[aria-label="Open directory"]').attributes("title")).toBe("Open directory");
     expect(wrapper.text()).toContain("Missing");
     expect(wrapper.find('button[aria-label="Locate /test/gone"]').exists()).toBe(true);
     expect(wrapper.find('button[aria-label="Close /test/gone"]').exists()).toBe(true);

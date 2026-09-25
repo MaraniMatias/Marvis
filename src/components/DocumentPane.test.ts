@@ -171,6 +171,17 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("navigates safe relative Markdown document links within the active checkout", async () => {
+    const checkoutId = "checkout:markdown-links";
+    const document: MainDocument = { checkoutId, path: "docs/start.md", source: "file", mode: "view" };
+    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: "[Next guide](../guide.md)" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps(document, checkout(checkoutId)) });
+    await vi.waitFor(() => expect(wrapper.find('[aria-label="File contents"] article').exists()).toBe(true));
+    await wrapper.get('[aria-label="File contents"] a[href="../guide.md"]').trigger("click");
+    expect(wrapper.emitted("openMarkdownLink")).toEqual([["guide.md"]]);
+    wrapper.unmount();
+  });
+
   it("offers Diff/View/Code for a Markdown change and only reads it after leaving Diff", async () => {
     const checkoutId = "checkout:markdown-change";
     const document: MainDocument = {
@@ -189,10 +200,14 @@ describe("DocumentPane", () => {
         .get('[aria-label="Document mode"]')
         .findAll("button")
         .map((button) => button.text()),
-    ).toEqual(["Diff", "View", "Code"]);
+    ).toEqual(["↗ Zed", "Diff", "View", "Code"]);
     expect(mocks.readCheckoutFile).not.toHaveBeenCalled();
 
-    await wrapper.get('[aria-label="Document mode"]').findAll("button")[1].trigger("click");
+    await wrapper
+      .get('[aria-label="Document mode"]')
+      .findAll("button")
+      .find((button) => button.text() === "View")!
+      .trigger("click");
     expect(wrapper.emitted("updateMode")?.at(-1)).toEqual(["view"]);
     await wrapper.setProps({ document: { ...document, mode: "view" } });
     await flushPromises();
@@ -256,6 +271,23 @@ describe("DocumentPane", () => {
     await flushPromises();
     expect(mocks.readCheckoutFile).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("This file was deleted");
+    wrapper.unmount();
+  });
+
+  it("keeps the current file readable after its change is removed from Git status", async () => {
+    const checkoutId = "checkout:cleaned";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]);
+    const document: MainDocument = { checkoutId, path: "src/app.ts", source: "change", mode: "code" };
+    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: "const stillHere = true;" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps(document, checkout(checkoutId), gitSnapshot) });
+    await flushPromises();
+    expect(wrapper.text()).toContain("const stillHere = true;");
+
+    gitSnapshot.status!.files = [];
+    gitSnapshot.statusRevision += 1;
+    await flushPromises();
+    expect(wrapper.text()).toContain("const stillHere = true;");
+    expect(wrapper.text()).not.toContain("current file is unavailable");
     wrapper.unmount();
   });
 

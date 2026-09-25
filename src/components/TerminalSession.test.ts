@@ -196,6 +196,27 @@ describe("TerminalSession UI", () => {
     wrapper.unmount();
   });
 
+  it("coalesces resize requests while a terminal resize is pending", async () => {
+    let finishFirstResize!: () => void;
+    vi.mocked(resizeTerminal).mockImplementationOnce(
+      () => new Promise<void>((resolve) => (finishFirstResize = resolve)),
+    );
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    terminalMock.resizes[0]?.({ cols: 97, rows: 31 });
+    await flushPromises();
+    terminalMock.resizes[0]?.({ cols: 100, rows: 32 });
+    terminalMock.resizes[0]?.({ cols: 104, rows: 34 });
+    finishFirstResize();
+    await flushPromises();
+
+    expect(resizeTerminal).toHaveBeenCalledTimes(2);
+    expect(resizeTerminal).toHaveBeenNthCalledWith(1, "checkout:repo", "session:new", 97, 31);
+    expect(resizeTerminal).toHaveBeenNthCalledWith(2, "checkout:repo", "session:new", 104, 34);
+    wrapper.unmount();
+  });
+
   it("keeps a completed process visible with its exit code", async () => {
     vi.mocked(getTerminalStatus).mockResolvedValue({ state: "exited", exitCode: 17 });
     const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });

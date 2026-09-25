@@ -58,6 +58,7 @@ let resizeObserver: ResizeObserver | undefined;
 let statusTimer: number | undefined;
 let inputQueue: Promise<void> = Promise.resolve();
 let resizeQueue: Promise<void> = Promise.resolve();
+let resizeScheduled = false;
 let disposed = false;
 let started = false;
 let latestSize = { cols: 0, rows: 0 };
@@ -92,10 +93,22 @@ function fitActiveView() {
 
 function queueResize(cols: number, rows: number) {
   latestSize = { cols, rows };
-  if (!sessionId || state.value.state !== "running") return;
-  const id = sessionId;
-  const resize = resizeQueue.then(() => resizeTerminal(props.checkoutId, id, cols, rows));
-  resizeQueue = resize.catch(showError);
+  if (!sessionId || state.value.state !== "running" || resizeScheduled) return;
+  resizeScheduled = true;
+  resizeQueue = resizeQueue
+    .catch(() => {})
+    .then(async () => {
+      while (sessionId && state.value.state === "running") {
+        const size = latestSize;
+        const id = sessionId;
+        await resizeTerminal(props.checkoutId, id, size.cols, size.rows);
+        if (size.cols === latestSize.cols && size.rows === latestSize.rows) break;
+      }
+    })
+    .catch(showError)
+    .finally(() => {
+      resizeScheduled = false;
+    });
 }
 
 function queueInput(value: string) {
@@ -130,7 +143,7 @@ async function requestClose() {
   }
 }
 
-defineExpose({ requestClose });
+defineExpose({ requestClose, focus: () => terminal.focus() });
 
 async function startSession() {
   if (started || disposed || !props.active || !terminalElement.value) return;
