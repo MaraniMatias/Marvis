@@ -112,25 +112,11 @@ pub fn resolve_target(
     let workspace = database
         .load_workspace()
         .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?;
-    let repo = workspace
-        .repos
-        .iter()
-        .find(|repo| {
-            repo.checkouts
-                .iter()
-                .any(|checkout| checkout.id == checkout_id)
-        })
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::InvalidCheckout,
-                "checkout ID is not registered",
-            )
-        })?;
-    let checkout = repo
-        .checkouts
-        .iter()
-        .find(|checkout| checkout.id == checkout_id)
-        .expect("checkout was found in repo");
+    let (repo, checkout) = crate::services::checkout::registered_checkout(
+        &workspace.repos,
+        checkout_id,
+        "checkout ID is not registered",
+    )?;
     if checkout.is_missing {
         return Err(IpcError::new(
             IpcErrorCode::FolderMissing,

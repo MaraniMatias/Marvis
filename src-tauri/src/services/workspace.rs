@@ -36,25 +36,11 @@ pub fn locate_missing_checkout(
     selected_path: &Path,
 ) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
     let state = database.load_workspace().map_err(operation_error)?;
-    let repo = state
-        .repos
-        .iter()
-        .find(|repo| {
-            repo.checkouts
-                .iter()
-                .any(|checkout| checkout.id == checkout_id)
-        })
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::InvalidCheckout,
-                "checkout ID is not registered",
-            )
-        })?;
-    let checkout = repo
-        .checkouts
-        .iter()
-        .find(|checkout| checkout.id == checkout_id)
-        .expect("checkout was found in repository");
+    let (repo, checkout) = crate::services::checkout::registered_checkout(
+        &state.repos,
+        checkout_id,
+        "checkout ID is not registered",
+    )?;
     let selected_path = fs::canonicalize(selected_path).map_err(|error| {
         IpcError::new(
             IpcErrorCode::FolderMissing,
@@ -217,25 +203,11 @@ pub fn close_missing_checkout(
     checkout_id: &str,
 ) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
     let state = database.load_workspace().map_err(operation_error)?;
-    let repo = state
-        .repos
-        .iter()
-        .find(|repo| {
-            repo.checkouts
-                .iter()
-                .any(|checkout| checkout.id == checkout_id)
-        })
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::InvalidCheckout,
-                "checkout ID is not registered",
-            )
-        })?;
-    let checkout = repo
-        .checkouts
-        .iter()
-        .find(|checkout| checkout.id == checkout_id)
-        .expect("checkout was found in repository");
+    let (repo, checkout) = crate::services::checkout::registered_checkout(
+        &state.repos,
+        checkout_id,
+        "checkout ID is not registered",
+    )?;
     if !checkout.is_missing {
         return Err(IpcError::new(
             IpcErrorCode::InvalidCheckout,

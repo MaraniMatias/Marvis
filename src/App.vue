@@ -24,6 +24,7 @@ import {
 } from "./lib/ipc";
 import type { EditorAvailability } from "./lib/ipc";
 import { useWorkspaceState } from "./presentation/workspace";
+import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
 
 const {
   workspace,
@@ -40,6 +41,7 @@ const activeRepo = computed(
     workspace.value.repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === activeCheckout.value?.id)) ??
     null,
 );
+const gitSnapshot = useActiveGitSnapshot(activeCheckout, activeRepo, () => void promptForDefaultBranchIfNeeded(true));
 const allCheckouts = computed(() => workspace.value.repos.flatMap((repo) => repo.checkouts));
 const registeredSessionIds = computed(() =>
   workspace.value.repos.flatMap((repo) =>
@@ -242,10 +244,6 @@ function reportWarning(message: string) {
   error.value = message;
 }
 
-function handleDefaultBranchUnknown() {
-  void promptForDefaultBranchIfNeeded(true);
-}
-
 async function locateCheckout(checkoutId: string) {
   const checkout = allCheckouts.value.find((item) => item.id === checkoutId);
   if (!checkout) return;
@@ -313,8 +311,8 @@ async function closeCheckout(checkoutId: string) {
       <InspectorPane
         :checkout="activeCheckout"
         :repo="activeRepo"
+        :git-snapshot="gitSnapshot"
         :command-request="inspectorCommand"
-        @default-branch-unknown="handleDefaultBranchUnknown"
         @selected-file="selectedFile = $event"
       />
     </div>
@@ -331,8 +329,8 @@ async function closeCheckout(checkoutId: string) {
     <GitStatusBar
       :checkout="activeCheckout"
       :repo="activeRepo"
+      :git-snapshot="gitSnapshot"
       :concurrent-actors="activeCheckout ? activityByCheckout[activeCheckout.id] : []"
-      @default-branch-unknown="handleDefaultBranchUnknown"
     />
     <CommandPalette :commands="paletteCommands" @select="runPaletteCommand" />
     <div

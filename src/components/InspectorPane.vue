@@ -1,28 +1,22 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-self-closing */
-import { listen } from "@tauri-apps/api/event";
-import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
 import { isIpcError } from "../domain/ipc";
 import type { FileEntry, FileSearchResult } from "../domain/files";
-import type { GitStatus } from "../domain/git";
 import type { Checkout, Repo } from "../domain/workspace";
-import {
-  getGitStatus,
-  listCheckoutFiles,
-  readCheckoutFile,
-  readCheckoutMarkdownImage,
-  searchCheckoutFiles,
-} from "../lib/ipc";
+import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
+import { useMarkdownPreview } from "../presentation/markdown-preview";
+import { listCheckoutFiles, readCheckoutFile, searchCheckoutFiles } from "../lib/ipc";
 
 const ChangesPane = defineAsyncComponent(() => import("./ChangesPane.vue"));
 
 const props = defineProps<{
   checkout: Checkout | null;
   repo?: Repo | null;
+  gitSnapshot: ActiveGitSnapshot;
   commandRequest?: { action: "open-file" | "open-changes" | "open-preview"; token: number } | null;
 }>();
 const emit = defineEmits<{
-  defaultBranchUnknown: [];
   selectedFile: [value: { checkoutId: string; path: string } | null];
 }>();
 
@@ -43,10 +37,15 @@ const content = ref("");
 const contentState = ref<"idle" | "loading" | "ready" | "error">("idle");
 const contentError = ref("");
 const activeTab = ref<"files" | "changes" | "preview">("files");
-const markdownHtml = ref("");
-const markdownPreviewState = ref<"idle" | "loading" | "ready">("idle");
-const markdownImageWarning = ref(false);
-const gitStatus = ref<GitStatus | null>(null);
+const {
+  markdownHtml,
+  markdownPreviewState,
+  markdownImageWarning,
+  isMarkdownPath,
+  load: loadMarkdownPreview,
+  clear: clearMarkdownPreview,
+  invalidate: invalidateMarkdownPreview,
+} = useMarkdownPreview(() => props.checkout?.id ?? null);
 const searchQuery = ref("");
 const searchInput = ref<HTMLInputElement | null>(null);
 const searchEntries = ref<FileEntry[]>([]);
@@ -57,23 +56,11 @@ const treeScrollTop = ref(0);
 let searchIndexCheckoutId: string | null = null;
 let searchIndexPromise: { checkoutId: string; promise: Promise<FileSearchResult> } | null = null;
 let generation = 0;
-let gitGeneration = 0;
 let searchGeneration = 0;
-let previewGeneration = 0;
-let unlistenGit: (() => void) | undefined;
-let mounted = true;
 
 const TREE_ROW_HEIGHT = 32;
 const TREE_WINDOW_SIZE = 80;
 const TREE_OVERSCAN = 12;
-const MAX_MARKDOWN_IMAGES = 12;
-const MAX_MARKDOWN_IMAGE_BYTES = 8 * 1024 * 1024;
-const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdown", "mkd"]);
-
-function isMarkdownPath(path: string): boolean {
-  const extension = path.split(".").pop()?.toLowerCase();
-  return extension !== undefined && MARKDOWN_EXTENSIONS.has(extension);
-}
 
 function errorText(error: unknown): string {
   if (isIpcError(error)) {
@@ -143,10 +130,7 @@ watch(
     contentState.value = "idle";
     contentError.value = "";
     activeTab.value = "files";
-    previewGeneration += 1;
-    markdownHtml.value = "";
-    markdownPreviewState.value = "idle";
-    markdownImageWarning.value = false;
+    clearMarkdownPreview();
     rootError.value = "";
     if (!checkoutId) {
       rootState.value = "idle";
@@ -178,48 +162,22 @@ watch(
   },
 );
 
-async function loadGitStatus() {
-  const checkoutId = props.checkout?.id;
-  const requestGeneration = ++gitGeneration;
-  if (!checkoutId || props.checkout?.isMissing || props.repo?.kind !== "git") {
-    gitStatus.value = null;
-    return;
-  }
-  gitStatus.value = null;
-  try {
-    const result = await getGitStatus(checkoutId);
-    if (
-      mounted &&
-      requestGeneration === gitGeneration &&
-      props.checkout?.id === checkoutId &&
-      props.repo?.kind === "git"
-    ) {
-      gitStatus.value = result;
-    }
-  } catch {
-    if (requestGeneration === gitGeneration) gitStatus.value = null;
-  }
-}
-
 watch(
-  () => [props.checkout?.id, props.checkout?.isMissing, props.repo?.kind, props.repo?.defaultBranch] as const,
-  () => void loadGitStatus(),
-  { immediate: true },
+  () => [props.gitSnapshot.statusEventRevision, props.gitSnapshot.statusEventCheckoutId] as const,
+  ([, eventCheckoutId]) => {
+    const checkoutId = props.checkout?.id;
+    if (
+      checkoutId &&
+      eventCheckoutId === checkoutId &&
+      checkoutId === props.gitSnapshot.checkoutId &&
+      !props.checkout?.isMissing &&
+      props.repo?.kind === "git" &&
+      activeTab.value !== "changes"
+    ) {
+      void refreshAfterGitChange(checkoutId);
+    }
+  },
 );
-
-onMounted(async () => {
-  try {
-    const dispose = await listen<string>("git-status-changed", (event) => {
-      if (event.payload === props.checkout?.id && activeTab.value !== "changes") {
-        void refreshAfterGitChange(event.payload);
-      }
-    });
-    if (!mounted) dispose();
-    else unlistenGit = dispose;
-  } catch {
-    // The initial status remains available even when event listening is unavailable.
-  }
-});
 
 watch(activeTab, (tab) => {
   const checkoutId = props.checkout?.id;
@@ -229,7 +187,6 @@ watch(activeTab, (tab) => {
 });
 
 async function refreshAfterGitChange(checkoutId: string) {
-  void loadGitStatus();
   const requestGeneration = generation;
   for (const path of Object.keys(directories.value)) {
     if (requestGeneration !== generation || props.checkout?.id !== checkoutId) return;
@@ -237,6 +194,7 @@ async function refreshAfterGitChange(checkoutId: string) {
   }
   const selected = selectedPath.value;
   if (selected && requestGeneration === generation && props.checkout?.id === checkoutId) {
+    invalidateMarkdownPreview();
     try {
       const result = await readCheckoutFile(checkoutId, selected);
       if (requestGeneration === generation && selectedPath.value === selected) {
@@ -272,11 +230,6 @@ async function refreshAfterGitChange(checkoutId: string) {
   }
 }
 
-onUnmounted(() => {
-  mounted = false;
-  unlistenGit?.();
-});
-
 watch(
   () => props.repo?.kind,
   (kind) => {
@@ -300,6 +253,7 @@ async function selectFile(entry: FileEntry) {
   const checkoutId = props.checkout?.id;
   if (!checkoutId) return;
   const requestGeneration = generation;
+  clearMarkdownPreview();
   selectedPath.value = entry.path;
   emit("selectedFile", { checkoutId, path: entry.path });
   content.value = "";
@@ -317,51 +271,6 @@ async function selectFile(entry: FileEntry) {
     contentState.value = "error";
     clearMarkdownPreview();
   }
-}
-
-function clearMarkdownPreview() {
-  previewGeneration += 1;
-  markdownHtml.value = "";
-  markdownPreviewState.value = "idle";
-  markdownImageWarning.value = false;
-}
-
-async function loadMarkdownPreview(checkoutId: string, path: string, source: string) {
-  const requestGeneration = ++previewGeneration;
-  markdownHtml.value = "";
-  markdownImageWarning.value = false;
-  if (!isMarkdownPath(path)) {
-    markdownPreviewState.value = "idle";
-    return;
-  }
-
-  markdownPreviewState.value = "loading";
-  const { attachMarkdownImages, renderMarkdownPreview } = await import("../lib/markdown-preview");
-  if (requestGeneration !== previewGeneration || props.checkout?.id !== checkoutId) return;
-  const preview = renderMarkdownPreview(source, path);
-  const paths = preview.images.map((image) => image.path);
-  const loadedImages = new Map<string, { mimeType: string; dataBase64: string }>();
-  markdownImageWarning.value = preview.images.length > MAX_MARKDOWN_IMAGES;
-
-  let totalImageBytes = 0;
-  for (const image of preview.images.slice(0, MAX_MARKDOWN_IMAGES)) {
-    if (requestGeneration !== previewGeneration || props.checkout?.id !== checkoutId) return;
-    try {
-      const resource = await readCheckoutMarkdownImage(checkoutId, path, image.source);
-      if (resource.sizeBytes > MAX_MARKDOWN_IMAGE_BYTES - totalImageBytes) {
-        markdownImageWarning.value = true;
-        continue;
-      }
-      totalImageBytes += resource.sizeBytes;
-      loadedImages.set(image.path, resource);
-    } catch {
-      markdownImageWarning.value = true;
-    }
-  }
-
-  if (requestGeneration !== previewGeneration || props.checkout?.id !== checkoutId) return;
-  markdownHtml.value = attachMarkdownImages(preview.html, paths, loadedImages);
-  markdownPreviewState.value = "ready";
 }
 
 const visibleEntries = computed<VisibleEntry[]>(() => {
@@ -476,7 +385,7 @@ const visibleTreeWindow = computed(() => {
 
 const gitDecorations = computed(() => {
   const decorations = new Map<string, string>();
-  for (const file of gitStatus.value?.files ?? []) {
+  for (const file of props.gitSnapshot.status?.files ?? []) {
     decorations.set(file.path, file.status);
     const parents = file.path.split("/");
     parents.pop();
@@ -685,8 +594,7 @@ function onTreeScroll(event: Event) {
       v-else-if="checkout && !checkout.isMissing && repo?.kind === 'git'"
       :key="checkout.id"
       :checkout="checkout"
-      :default-branch="repo.defaultBranch"
-      @default-branch-unknown="$emit('defaultBranchUnknown')"
+      :git-snapshot="gitSnapshot"
     />
   </aside>
 </template>

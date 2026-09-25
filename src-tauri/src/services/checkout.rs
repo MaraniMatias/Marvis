@@ -5,6 +5,22 @@ use crate::domain::{
     workspace::{checkout_id_for_path, repo_id_for_path, Checkout, Repo},
 };
 
+pub(super) fn registered_checkout<'a>(
+    repos: &'a [Repo],
+    checkout_id: &str,
+    not_found_message: &'static str,
+) -> Result<(&'a Repo, &'a Checkout), IpcError> {
+    repos
+        .iter()
+        .find_map(|repo| {
+            repo.checkouts
+                .iter()
+                .find(|checkout| checkout.id == checkout_id)
+                .map(|checkout| (repo, checkout))
+        })
+        .ok_or_else(|| IpcError::new(IpcErrorCode::InvalidCheckout, not_found_message))
+}
+
 /// Resolves an existing relative path only after confirming the checkout ID belongs to the repo.
 /// This is a Rust service primitive; it is not exposed as a general filesystem command to Tauri.
 pub fn resolve_checkout_path(

@@ -712,44 +712,27 @@ fn registered_git_context(database: &Database, checkout_id: &str) -> Result<GitC
     let workspace = database
         .load_workspace()
         .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?;
-    let repo = workspace
-        .repos
-        .into_iter()
-        .find(|repo| {
-            repo.checkouts
-                .iter()
-                .any(|checkout| checkout.id == checkout_id)
-        })
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::InvalidCheckout,
-                "checkout ID is not registered",
-            )
-        })?;
+    let (repo, checkout) = crate::services::checkout::registered_checkout(
+        &workspace.repos,
+        checkout_id,
+        "checkout ID is not registered",
+    )?;
     if repo.kind != RepoKind::Git {
         return Err(IpcError::new(
             IpcErrorCode::InvalidCheckout,
             "Git changes are only available for Git checkouts",
         ));
     }
-    let checkout = repo
-        .checkouts
-        .iter()
-        .find(|checkout| checkout.id == checkout_id)
-        .cloned()
-        .ok_or_else(|| {
-            IpcError::new(IpcErrorCode::InvalidCheckout, "checkout is not registered")
-        })?;
     if checkout.is_missing {
         return Err(IpcError::new(
             IpcErrorCode::FolderMissing,
             "checkout is no longer available",
         ));
     }
-    let root = resolve_checkout_path(&repo, checkout_id, Path::new("."))?;
+    let root = resolve_checkout_path(repo, checkout_id, Path::new("."))?;
     Ok(GitContext {
-        repo,
-        checkout,
+        repo: repo.clone(),
+        checkout: checkout.clone(),
         root,
     })
 }

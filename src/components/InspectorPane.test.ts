@@ -1,16 +1,16 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Checkout } from "../domain/workspace";
+import { reactive } from "vue";
+import type { GitStatus } from "../domain/git";
+import type { Checkout, Repo } from "../domain/workspace";
+import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 
 const mocks = vi.hoisted(() => ({
   listCheckoutFiles: vi.fn(),
   readCheckoutFile: vi.fn(),
   readCheckoutMarkdownImage: vi.fn(),
   searchCheckoutFiles: vi.fn(),
-  getGitStatus: vi.fn(),
-  listen: vi.fn(),
-  onGitStatusChanged: null as ((event: { payload: string }) => void) | null,
 }));
 
 vi.mock("../lib/ipc", () => ({
@@ -18,9 +18,7 @@ vi.mock("../lib/ipc", () => ({
   readCheckoutFile: mocks.readCheckoutFile,
   readCheckoutMarkdownImage: mocks.readCheckoutMarkdownImage,
   searchCheckoutFiles: mocks.searchCheckoutFiles,
-  getGitStatus: mocks.getGitStatus,
 }));
-vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
 import InspectorPane from "./InspectorPane.vue";
 
@@ -37,15 +35,39 @@ function checkout(id: string, isMissing = false): Checkout {
   };
 }
 
+function gitSnapshot(checkoutId: string, status: GitStatus | null = null): ActiveGitSnapshot {
+  return reactive({
+    checkoutId,
+    status,
+    viewedPaths: [],
+    loading: false,
+    statusState: status ? ("ready" as const) : ("error" as const),
+    statusError: "",
+    changesStatusError: "",
+    viewedError: "",
+    watchError: "",
+    changesWatchError: "",
+    statusRevision: 0,
+    statusEventRevision: 0,
+    statusEventCheckoutId: null,
+    markViewed: async () => undefined,
+  });
+}
+
+function mountInspector(props: {
+  checkout: Checkout;
+  repo?: Repo;
+  gitSnapshot?: ActiveGitSnapshot;
+  commandRequest?: { action: "open-file" | "open-changes" | "open-preview"; token: number } | null;
+}) {
+  return mount(InspectorPane, {
+    props: { ...props, gitSnapshot: props.gitSnapshot ?? gitSnapshot(props.checkout.id) },
+  });
+}
+
 describe("InspectorPane", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    mocks.onGitStatusChanged = null;
-    mocks.listen.mockImplementation(async (_event: string, handler: (event: { payload: string }) => void) => {
-      mocks.onGitStatusChanged = handler;
-      return vi.fn();
-    });
-    mocks.getGitStatus.mockResolvedValue({ branch: "main", defaultBranch: "main", aheadCount: 0, files: [] });
     mocks.searchCheckoutFiles.mockResolvedValue({ entries: [], truncated: false });
     mocks.readCheckoutMarkdownImage.mockResolvedValue({
       mimeType: "image/png",
@@ -63,7 +85,7 @@ describe("InspectorPane", () => {
       path,
       content: `contents:${path}`,
     }));
-    const wrapper = mount(InspectorPane, { props: { checkout: checkout("checkout:first") } });
+    const wrapper = mountInspector({ checkout: checkout("checkout:first") });
     await flushPromises();
 
     await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
@@ -83,7 +105,7 @@ describe("InspectorPane", () => {
 
   it("shows empty, loading, permission, and missing states", async () => {
     mocks.listCheckoutFiles.mockResolvedValueOnce({ entries: [], truncated: false });
-    const wrapper = mount(InspectorPane, { props: { checkout: checkout("empty") } });
+    const wrapper = mountInspector({ checkout: checkout("empty") });
     expect(wrapper.get('[role="status"]').text()).toContain("Loading files");
     await flushPromises();
     expect(wrapper.text()).toContain("This checkout is empty.");
@@ -111,7 +133,7 @@ describe("InspectorPane", () => {
       ],
       truncated: false,
     });
-    const wrapper = mount(InspectorPane, { props: { checkout: checkout("large") } });
+    const wrapper = mountInspector({ checkout: checkout("large") });
     await flushPromises();
 
     const fileTree = wrapper.get('[aria-label="Checkout files"]');
@@ -139,12 +161,12 @@ describe("InspectorPane", () => {
           : [{ name: "main.ts", path: "src/main.ts", kind: "file" }],
       truncated: false,
     }));
-    mocks.getGitStatus.mockResolvedValue({
+    const status: GitStatus = {
       branch: "feature",
       defaultBranch: "main",
       aheadCount: 1,
       files: [{ path: "src/main.ts", status: "M" }],
-    });
+    };
     const repo = {
       id: "repo:git",
       kind: "git" as const,
@@ -155,7 +177,7 @@ describe("InspectorPane", () => {
       createdAt: "now",
       lastOpenedAt: "now",
     };
-    const wrapper = mount(InspectorPane, { props: { checkout: checkout("git"), repo } });
+    const wrapper = mountInspector({ checkout: checkout("git"), repo, gitSnapshot: gitSnapshot("git", status) });
     await flushPromises();
     expect(wrapper.findAll("button").map((button) => button.text())).toContain("Changes");
 
@@ -165,7 +187,7 @@ describe("InspectorPane", () => {
     wrapper.unmount();
   });
 
-  it("refreshes the file tree and selected checkout state after Git watcher events", async () => {
+  it("refreshes the file tree when the shared owner reports a Git status event", async () => {
     mocks.listCheckoutFiles
       .mockResolvedValueOnce({
         entries: [{ name: "before.txt", path: "before.txt", kind: "file" }],
@@ -188,14 +210,15 @@ describe("InspectorPane", () => {
       createdAt: "now",
       lastOpenedAt: "now",
     };
-    const wrapper = mount(InspectorPane, { props: { checkout: checkout("git"), repo } });
+    const snapshot = gitSnapshot("git");
+    const wrapper = mountInspector({ checkout: checkout("git"), repo, gitSnapshot: snapshot });
     await flushPromises();
     expect(wrapper.text()).not.toContain("after.txt");
 
-    mocks.onGitStatusChanged?.({ payload: "git" });
+    snapshot.statusEventCheckoutId = "git";
+    snapshot.statusEventRevision += 1;
     await flushPromises();
     expect(wrapper.text()).toContain("after.txt");
-    expect(mocks.getGitStatus).toHaveBeenCalledTimes(2);
     wrapper.unmount();
   });
 
@@ -208,7 +231,7 @@ describe("InspectorPane", () => {
       path: "docs/readme.md",
       content: "# Hello\n\n[unsafe](javascript:alert(1))\n\n![local](../images/photo.png)",
     });
-    const wrapper = mount(InspectorPane, { props: { checkout: checkout("markdown") } });
+    const wrapper = mountInspector({ checkout: checkout("markdown") });
     await flushPromises();
 
     expect(wrapper.findAll("button").map((button) => button.text())).not.toContain("Preview");
@@ -233,6 +256,54 @@ describe("InspectorPane", () => {
     wrapper.unmount();
   });
 
+  it("ignores a Markdown preview result that completes after another file is selected", async () => {
+    mocks.listCheckoutFiles.mockResolvedValue({
+      entries: [
+        { name: "old.md", path: "old.md", kind: "file" },
+        { name: "new.md", path: "new.md", kind: "file" },
+      ],
+      truncated: false,
+    });
+    mocks.readCheckoutFile.mockImplementation(async (_checkoutId: string, path: string) => ({
+      path,
+      content: path === "old.md" ? "# Old\n\n![old](old.png)" : "# New",
+    }));
+    let resolveImage!: (image: { mimeType: string; dataBase64: string; sizeBytes: number }) => void;
+    mocks.readCheckoutMarkdownImage.mockReturnValue(
+      new Promise((resolve) => {
+        resolveImage = resolve;
+      }),
+    );
+    const wrapper = mountInspector({ checkout: checkout("stale-preview") });
+    await flushPromises();
+
+    const files = wrapper.get('[aria-label="Checkout files"]');
+    await files
+      .findAll("button")
+      .find((button) => button.text().includes("old.md"))!
+      .trigger("click");
+    await vi.waitFor(() => expect(mocks.readCheckoutMarkdownImage).toHaveBeenCalled());
+
+    await files
+      .findAll("button")
+      .find((button) => button.text().includes("new.md"))!
+      .trigger("click");
+    await flushPromises();
+    await wrapper
+      .get('[aria-label="Inspector sections"]')
+      .findAll("button")
+      .find((button) => button.text() === "Preview")!
+      .trigger("click");
+    resolveImage({ mimeType: "image/png", dataBase64: "iVBORw0KGgo=", sizeBytes: 8 });
+    await flushPromises();
+
+    const preview = wrapper.get('[aria-label="File preview"] article');
+    expect(preview.text()).toContain("New");
+    expect(preview.text()).not.toContain("Old");
+    expect(preview.element.querySelector("img")).toBeNull();
+    wrapper.unmount();
+  });
+
   it("previews non-Markdown source as plain text instead of rendering it as HTML", async () => {
     mocks.listCheckoutFiles.mockResolvedValue({
       entries: [{ name: "example.ts", path: "src/example.ts", kind: "file" }],
@@ -242,7 +313,7 @@ describe("InspectorPane", () => {
       path: "src/example.ts",
       content: "const source = '<script>alert(1)</script>';",
     });
-    const wrapper = mount(InspectorPane, { props: { checkout: checkout("source") } });
+    const wrapper = mountInspector({ checkout: checkout("source") });
     await flushPromises();
     await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
     await flushPromises();
@@ -271,7 +342,7 @@ describe("InspectorPane", () => {
       if (path === "binary.bin") throw { code: "binary_file", message: "binary" };
       throw { code: "file_too_large", message: "large" };
     });
-    const wrapper = mount(InspectorPane, { props: { checkout: checkout("file-states") } });
+    const wrapper = mountInspector({ checkout: checkout("file-states") });
     await flushPromises();
 
     for (const [filename, message] of [

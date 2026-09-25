@@ -1,28 +1,22 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { reactive } from "vue";
+import type { GitDiffPage } from "../domain/git";
 import type { Checkout } from "../domain/workspace";
+import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 
 const mocks = vi.hoisted(() => ({
   getGitDiff: vi.fn(),
   getGitDiffPage: vi.fn(),
-  getGitStatus: vi.fn(),
-  getGitViewedFiles: vi.fn(),
   markGitFileViewed: vi.fn(),
-  listen: vi.fn(),
-  onStatusChanged: null as ((event: { payload: string }) => void) | null,
-  onViewedChanged: null as ((event: { payload: string }) => void) | null,
 }));
 
 vi.mock("../lib/ipc", () => ({
   getGitDiff: mocks.getGitDiff,
   getGitDiffPage: mocks.getGitDiffPage,
-  getGitStatus: mocks.getGitStatus,
-  getGitViewedFiles: mocks.getGitViewedFiles,
   markGitFileViewed: mocks.markGitFileViewed,
 }));
-
-vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
 vi.mock("@git-diff-view/vue", () => ({
   DiffFile: class {
@@ -49,26 +43,80 @@ function checkout(): Checkout {
   };
 }
 
+function gitSnapshot(
+  status: ActiveGitSnapshot["status"] = {
+    branch: "feature",
+    defaultBranch: "trunk",
+    aheadCount: 1,
+    files: [
+      { path: "text.txt", status: "M" },
+      { path: "image.bin", status: "A" },
+    ],
+  },
+  overrides: Partial<ActiveGitSnapshot> = {},
+): ActiveGitSnapshot {
+  const snapshot = reactive<ActiveGitSnapshot>({
+    checkoutId: "checkout:repo",
+    status,
+    viewedPaths: [],
+    loading: false,
+    statusState: status ? "ready" : "error",
+    statusError: "",
+    changesStatusError: "",
+    viewedError: "",
+    watchError: "",
+    changesWatchError: "",
+    statusRevision: 0,
+    statusEventRevision: 0,
+    statusEventCheckoutId: null,
+    markViewed: async (checkoutId, path) => {
+      try {
+        await mocks.markGitFileViewed(checkoutId, path);
+        if (snapshot.checkoutId === checkoutId && !snapshot.viewedPaths.includes(path)) {
+          snapshot.viewedPaths = [...snapshot.viewedPaths, path];
+        }
+      } catch (error) {
+        snapshot.viewedError = error instanceof Error ? error.message : String(error);
+      }
+    },
+    ...overrides,
+  });
+  return snapshot;
+}
+
+function largeDiff(totalLines: number) {
+  return {
+    path: "text.txt",
+    patch: "",
+    isBinary: false,
+    large: true,
+    tooLarge: false,
+    totalLines,
+    hunks: [{ startLine: 0, endLine: totalLines, title: "@@ -1 +1 @@" }],
+  };
+}
+
+function diffPage(totalLines: number, offset: number, limit: number): GitDiffPage {
+  return {
+    path: "text.txt",
+    startLine: offset,
+    totalLines,
+    lines: Array.from({ length: Math.min(limit, totalLines - offset) }, (_, pageIndex) => {
+      const index = offset + pageIndex;
+      return {
+        index,
+        kind: index === 0 ? "hunk" : "context",
+        text: index === 0 ? "@@ -1 +1 @@" : ` line-${index}`,
+        oldLineNumber: index || null,
+        newLineNumber: index || null,
+      };
+    }),
+  };
+}
+
 describe("ChangesPane", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    mocks.onStatusChanged = null;
-    mocks.onViewedChanged = null;
-    mocks.listen.mockImplementation(async (name: string, handler: (event: { payload: string }) => void) => {
-      if (name === "git-viewed-changed") mocks.onViewedChanged = handler;
-      else mocks.onStatusChanged = handler;
-      return vi.fn();
-    });
-    mocks.getGitStatus.mockResolvedValue({
-      branch: "feature",
-      defaultBranch: "trunk",
-      aheadCount: 1,
-      files: [
-        { path: "text.txt", status: "M" },
-        { path: "image.bin", status: "A" },
-      ],
-    });
-    mocks.getGitViewedFiles.mockResolvedValue([]);
     mocks.markGitFileViewed.mockResolvedValue(undefined);
     mocks.getGitDiffPage.mockResolvedValue({ path: "", startLine: 0, totalLines: 0, lines: [] });
     mocks.getGitDiff.mockImplementation(async (_checkoutId: string, path: string) => ({
@@ -85,9 +133,10 @@ describe("ChangesPane", () => {
     }));
   });
 
-  it("loads file diffs on demand and refreshes status and the selected diff from watcher events", async () => {
+  it("uses the shared status and refreshes a selected diff when its revision changes", async () => {
+    const snapshot = gitSnapshot();
     const wrapper = mount(ChangesPane, {
-      props: { checkout: checkout(), defaultBranch: "trunk" },
+      props: { checkout: checkout(), gitSnapshot: snapshot },
     });
     await flushPromises();
 
@@ -103,9 +152,8 @@ describe("ChangesPane", () => {
     await hunk.trigger("click");
     expect(hunk.attributes("aria-expanded")).toBe("false");
 
-    mocks.onStatusChanged?.({ payload: "checkout:repo" });
+    snapshot.statusRevision += 1;
     await flushPromises();
-    expect(mocks.getGitStatus).toHaveBeenCalledTimes(2);
     expect(mocks.getGitDiff).toHaveBeenCalledTimes(2);
 
     await wrapper.get("button:nth-of-type(2)").trigger("click");
@@ -115,18 +163,19 @@ describe("ChangesPane", () => {
     wrapper.unmount();
   });
 
-  it("delegates an unknown default branch to the existing choice flow", async () => {
-    mocks.getGitStatus.mockRejectedValueOnce({
-      code: "default_branch_unknown",
-      message: "Choose a default branch",
-    });
+  it("shows status errors owned by the active checkout snapshot", async () => {
     const wrapper = mount(ChangesPane, {
-      props: { checkout: checkout() },
+      props: {
+        checkout: checkout(),
+        gitSnapshot: gitSnapshot(null, {
+          statusState: "error",
+          changesStatusError: "Choose a default branch",
+        }),
+      },
     });
 
     await flushPromises();
 
-    expect(wrapper.emitted("defaultBranchUnknown")).toHaveLength(1);
     expect(wrapper.text()).toContain("Choose a default branch");
     wrapper.unmount();
   });
@@ -142,7 +191,7 @@ describe("ChangesPane", () => {
       hunks: [],
     });
     const wrapper = mount(ChangesPane, {
-      props: { checkout: checkout(), defaultBranch: "trunk" },
+      props: { checkout: checkout(), gitSnapshot: gitSnapshot() },
     });
     await flushPromises();
     await wrapper.get("button").trigger("click");
@@ -181,7 +230,7 @@ describe("ChangesPane", () => {
     );
 
     const wrapper = mount(ChangesPane, {
-      props: { checkout: checkout(), defaultBranch: "trunk" },
+      props: { checkout: checkout(), gitSnapshot: gitSnapshot() },
     });
     await flushPromises();
     await wrapper.get("button").trigger("click");
@@ -195,6 +244,141 @@ describe("ChangesPane", () => {
     expect(wrapper.text()).toContain("+new-4999");
     expect(wrapper.findAll('[data-testid="large-diff-row"]').length).toBeLessThanOrEqual(80);
     expect(mocks.getGitDiffPage).toHaveBeenCalledWith("checkout:repo", "text.txt", 9984, 32);
+    wrapper.unmount();
+  });
+
+  it("keeps paged diff requests to three while the window spans four pages", async () => {
+    const totalLines = 500;
+    mocks.getGitDiff.mockResolvedValueOnce(largeDiff(totalLines));
+    let active = 0;
+    let maximumActive = 0;
+    const resolvePage = new Map<number, () => void>();
+    mocks.getGitDiffPage.mockImplementation(
+      (_checkoutId: string, _path: string, offset: number, limit: number) =>
+        new Promise<GitDiffPage>((resolve) => {
+          active += 1;
+          maximumActive = Math.max(maximumActive, active);
+          resolvePage.set(offset, () => {
+            resolvePage.delete(offset);
+            active -= 1;
+            resolve(diffPage(totalLines, offset, limit));
+          });
+        }),
+    );
+
+    const wrapper = mount(ChangesPane, {
+      props: { checkout: checkout(), gitSnapshot: gitSnapshot() },
+    });
+    await flushPromises();
+    await wrapper.get("button").trigger("click");
+    await flushPromises();
+    const viewport = wrapper.get('[aria-label="Large diff"]');
+    (viewport.element as HTMLElement).scrollTop = 27 * 22;
+    await viewport.trigger("scroll");
+    await flushPromises();
+
+    expect(mocks.getGitDiffPage).toHaveBeenCalledTimes(3);
+    expect(maximumActive).toBe(3);
+    resolvePage.get(0)?.();
+    await flushPromises();
+    expect(mocks.getGitDiffPage).toHaveBeenCalledWith("checkout:repo", "text.txt", 96, 32);
+    expect(maximumActive).toBe(3);
+
+    for (const resolve of [...resolvePage.values()]) resolve();
+    await flushPromises();
+    wrapper.unmount();
+  });
+
+  it("evicts old diff pages after eight cached pages", async () => {
+    const totalLines = 1024;
+    mocks.getGitDiff.mockResolvedValueOnce(largeDiff(totalLines));
+    mocks.getGitDiffPage.mockImplementation(async (_checkoutId: string, _path: string, offset: number, limit: number) =>
+      diffPage(totalLines, offset, limit),
+    );
+
+    const wrapper = mount(ChangesPane, {
+      props: { checkout: checkout(), gitSnapshot: gitSnapshot() },
+    });
+    await flushPromises();
+    await wrapper.get("button").trigger("click");
+    await flushPromises();
+    const viewport = wrapper.get('[aria-label="Large diff"]');
+    const scrollToWindow = async (start: number) => {
+      (viewport.element as HTMLElement).scrollTop = (start + 10) * 22;
+      await viewport.trigger("scroll");
+      await flushPromises();
+    };
+    await scrollToWindow(96);
+    await scrollToWindow(192);
+    await scrollToWindow(0);
+
+    const requestedOffsets = mocks.getGitDiffPage.mock.calls.map(([, , offset]) => offset);
+    expect(new Set(requestedOffsets.slice(0, 9)).size).toBe(9);
+    expect(requestedOffsets.filter((offset) => offset === 0)).toHaveLength(2);
+    wrapper.unmount();
+  });
+
+  it("ignores page responses that finish after selecting another file", async () => {
+    const totalLines = 100;
+    mocks.getGitDiff.mockImplementation(async (_checkoutId: string, path: string) =>
+      path === "text.txt" ? largeDiff(totalLines) : { ...largeDiff(0), isBinary: true, large: false },
+    );
+    const resolvePages: Array<() => void> = [];
+    mocks.getGitDiffPage.mockImplementation(
+      (_checkoutId: string, _path: string, offset: number, limit: number) =>
+        new Promise<GitDiffPage>((resolve) => {
+          resolvePages.push(() => resolve(diffPage(totalLines, offset, limit)));
+        }),
+    );
+
+    const wrapper = mount(ChangesPane, {
+      props: { checkout: checkout(), gitSnapshot: gitSnapshot() },
+    });
+    await flushPromises();
+    await wrapper.get("button").trigger("click");
+    await flushPromises();
+    expect(resolvePages.length).toBeGreaterThan(0);
+
+    await wrapper.get("button:nth-of-type(2)").trigger("click");
+    await flushPromises();
+    for (const resolve of resolvePages) resolve();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Binary file; text diff is unavailable.");
+    expect(wrapper.find('[data-testid="large-diff-row"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("invalidates pending page responses when the checkout changes", async () => {
+    const totalLines = 100;
+    mocks.getGitDiff.mockResolvedValueOnce(largeDiff(totalLines));
+    const resolvePages: Array<() => void> = [];
+    mocks.getGitDiffPage.mockImplementation(
+      (_checkoutId: string, _path: string, offset: number, limit: number) =>
+        new Promise<GitDiffPage>((resolve) => {
+          resolvePages.push(() => resolve(diffPage(totalLines, offset, limit)));
+        }),
+    );
+
+    const wrapper = mount(ChangesPane, {
+      props: { checkout: checkout(), gitSnapshot: gitSnapshot() },
+    });
+    await flushPromises();
+    await wrapper.get("button").trigger("click");
+    await flushPromises();
+    expect(resolvePages.length).toBeGreaterThan(0);
+
+    const nextSnapshot = gitSnapshot();
+    nextSnapshot.checkoutId = "checkout:other";
+    await wrapper.setProps({
+      checkout: { ...checkout(), id: "checkout:other" },
+      gitSnapshot: nextSnapshot,
+    });
+    for (const resolve of resolvePages) resolve();
+    await flushPromises();
+
+    expect(wrapper.text()).toContain("Select a changed file to load its diff.");
+    expect(wrapper.find('[data-testid="large-diff-row"]').exists()).toBe(false);
     wrapper.unmount();
   });
 });

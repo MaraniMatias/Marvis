@@ -448,34 +448,17 @@ impl From<&Session> for ActiveWorktreeSession {
 
 fn context(database: &Database, checkout_id: &str) -> Result<Context, IpcError> {
     let workspace = database.load_workspace().map_err(operation_error)?;
-    let repo = workspace
-        .repos
-        .into_iter()
-        .find(|repo| {
-            repo.checkouts
-                .iter()
-                .any(|checkout| checkout.id == checkout_id)
-        })
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::InvalidCheckout,
-                "checkout ID is not registered",
-            )
-        })?;
+    let (repo, checkout) = crate::services::checkout::registered_checkout(
+        &workspace.repos,
+        checkout_id,
+        "checkout ID is not registered",
+    )?;
     if repo.kind != crate::domain::workspace::RepoKind::Git {
         return Err(IpcError::new(
             IpcErrorCode::InvalidCheckout,
             "worktrees are only available for Git repositories",
         ));
     }
-    let checkout = repo
-        .checkouts
-        .iter()
-        .find(|checkout| checkout.id == checkout_id)
-        .cloned()
-        .ok_or_else(|| {
-            IpcError::new(IpcErrorCode::InvalidCheckout, "checkout is not registered")
-        })?;
     let root = if checkout.is_missing {
         let path = database
             .existing_git_checkout(&repo.id)
@@ -493,11 +476,11 @@ fn context(database: &Database, checkout_id: &str) -> Result<Context, IpcError> 
             )
         })?
     } else {
-        resolve_checkout_path(&repo, checkout_id, Path::new("."))?
+        resolve_checkout_path(repo, checkout_id, Path::new("."))?
     };
     Ok(Context {
-        repo,
-        checkout,
+        repo: repo.clone(),
+        checkout: checkout.clone(),
         root,
     })
 }

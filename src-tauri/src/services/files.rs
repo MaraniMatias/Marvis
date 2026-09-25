@@ -12,7 +12,7 @@ use crate::{
     domain::{
         files::{CheckoutImage, FileContent, FileEntry, FileEntryKind, FileSearchResult, FileTree},
         ipc::{IpcError, IpcErrorCode},
-        workspace::{Repo, RepoKind},
+        workspace::{Checkout, Repo, RepoKind},
     },
     persistence::Database,
 };
@@ -27,12 +27,7 @@ pub fn list(
     checkout_id: &str,
     relative_path: &str,
 ) -> Result<FileTree, IpcError> {
-    let repo = registered_repo(database, checkout_id)?;
-    let checkout = repo
-        .checkouts
-        .iter()
-        .find(|checkout| checkout.id == checkout_id)
-        .unwrap();
+    let (repo, checkout) = registered_checkout(database, checkout_id)?;
     ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
     let root = Path::new(&checkout.canonical_path);
     let requested = parse_relative_path(relative_path)?;
@@ -111,12 +106,7 @@ pub fn list(
 }
 
 pub fn search(database: &Database, checkout_id: &str) -> Result<FileSearchResult, IpcError> {
-    let repo = registered_repo(database, checkout_id)?;
-    let checkout = repo
-        .checkouts
-        .iter()
-        .find(|checkout| checkout.id == checkout_id)
-        .unwrap();
+    let (repo, checkout) = registered_checkout(database, checkout_id)?;
     ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
     let root = Path::new(&checkout.canonical_path);
     let (mut entries, truncated) = if repo.kind == RepoKind::Git {
@@ -285,12 +275,7 @@ pub fn read(
     checkout_id: &str,
     relative_path: &Path,
 ) -> Result<FileContent, IpcError> {
-    let repo = registered_repo(database, checkout_id)?;
-    let checkout = repo
-        .checkouts
-        .iter()
-        .find(|checkout| checkout.id == checkout_id)
-        .unwrap();
+    let (repo, checkout) = registered_checkout(database, checkout_id)?;
     ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
     let relative_path = relative_path
         .to_str()
@@ -333,12 +318,7 @@ pub fn read_markdown_image(
     markdown_path: &str,
     image_path: &str,
 ) -> Result<CheckoutImage, IpcError> {
-    let repo = registered_repo(database, checkout_id)?;
-    let checkout = repo
-        .checkouts
-        .iter()
-        .find(|checkout| checkout.id == checkout_id)
-        .unwrap();
+    let (repo, checkout) = registered_checkout(database, checkout_id)?;
     ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
     let markdown_path = parse_relative_path(markdown_path)?;
     let markdown_file =
@@ -516,23 +496,19 @@ fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
-fn registered_repo(database: &Database, checkout_id: &str) -> Result<Repo, IpcError> {
-    database
+fn registered_checkout(
+    database: &Database,
+    checkout_id: &str,
+) -> Result<(Repo, Checkout), IpcError> {
+    let workspace = database
         .load_workspace()
-        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?
-        .repos
-        .into_iter()
-        .find(|repo| {
-            repo.checkouts
-                .iter()
-                .any(|checkout| checkout.id == checkout_id)
-        })
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::InvalidCheckout,
-                "checkout ID is not registered",
-            )
-        })
+        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?;
+    let (repo, checkout) = crate::services::checkout::registered_checkout(
+        &workspace.repos,
+        checkout_id,
+        "checkout ID is not registered",
+    )?;
+    Ok((repo.clone(), checkout.clone()))
 }
 
 fn parse_relative_path(path: &str) -> Result<PathBuf, IpcError> {

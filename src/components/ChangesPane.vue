@@ -1,20 +1,22 @@
 <script setup lang="ts">
-import { listen } from "@tauri-apps/api/event";
 import { DiffFile, DiffModeEnum, DiffView } from "@git-diff-view/vue";
 import "@git-diff-view/vue/styles/diff-view-pure.css";
-import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, watch } from "vue";
-import type { GitDiffPage, GitDiffPageLine, GitFileDiff, GitStatus } from "../domain/git";
+import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
+import type { GitFileDiff } from "../domain/git";
 import { isIpcError } from "../domain/ipc";
 import type { Checkout } from "../domain/workspace";
-import { getGitDiff, getGitDiffPage, getGitStatus, getGitViewedFiles, markGitFileViewed } from "../lib/ipc";
+import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
+import { getGitDiff } from "../lib/ipc";
+import { DIFF_ROW_HEIGHT, useLargeDiff } from "./use-large-diff";
 
-const props = defineProps<{ checkout: Checkout; defaultBranch?: string }>();
-const emit = defineEmits<{ defaultBranchUnknown: [] }>();
+const props = defineProps<{ checkout: Checkout; gitSnapshot: ActiveGitSnapshot }>();
 
-const status = ref<GitStatus | null>(null);
-const statusState = ref<"loading" | "ready" | "error">("loading");
-const statusError = ref("");
-const watchError = ref("");
+const status = computed(() => props.gitSnapshot.status);
+const statusState = computed(() => props.gitSnapshot.statusState);
+const statusError = computed(() => props.gitSnapshot.changesStatusError);
+const watchError = computed(() => props.gitSnapshot.changesWatchError);
+const viewedPaths = computed(() => props.gitSnapshot.viewedPaths);
+const viewedError = computed(() => props.gitSnapshot.viewedError);
 const selectedPath = ref<string | null>(null);
 const diff = ref<GitFileDiff | null>(null);
 const diffHunks = shallowRef<Array<{ title: string; file: DiffFile }>>([]);
@@ -30,15 +32,11 @@ const showNoTextHunks = computed(
     !diff.value?.tooLarge &&
     !hasTextHunks.value,
 );
-const viewedPaths = ref<string[]>([]);
-const viewedError = ref("");
 const fileScrollTop = ref(0);
 const diffViewport = ref<HTMLElement | null>(null);
 const diffScrollTop = ref(0);
-const diffPages = shallowRef<Record<number, GitDiffPage>>({});
-const diffPageErrors = ref<Record<number, string>>({});
-const diffPageError = ref("");
-const diffPagePending = new Set<string>();
+const largeDiff = useLargeDiff(() => props.checkout.id, selectedPath, diff, collapsedHunks, diffScrollTop);
+const { diffPageError, largeDiffLineCount, visibleLargeDiffWindow } = largeDiff;
 const visibleFileWindow = computed(() => {
   const files = status.value?.files ?? [];
   const rowHeight = 28;
@@ -58,93 +56,8 @@ const viewedCount = computed(() => {
   const viewed = new Set(viewedPaths.value);
   return status.value?.files.filter((file) => viewed.has(file.path)).length ?? 0;
 });
-interface VirtualHunk {
-  rawStart: number;
-  visualStart: number;
-  visualEnd: number;
-  index: number;
-  collapsed: boolean;
-}
-
-const virtualHunks = computed<VirtualHunk[]>(() => {
-  let visualLine = 0;
-  return (diff.value?.hunks ?? []).map((hunk, index) => {
-    const collapsed = collapsedHunks.value.includes(index);
-    const rawLength = Math.max(1, hunk.endLine - hunk.startLine);
-    const visualLength = collapsed ? 1 : rawLength;
-    const segment = {
-      rawStart: hunk.startLine,
-      visualStart: visualLine,
-      visualEnd: visualLine + visualLength,
-      index,
-      collapsed,
-    };
-    visualLine += visualLength;
-    return segment;
-  });
-});
-const largeDiffLineCount = computed(() => virtualHunks.value.at(-1)?.visualEnd ?? 0);
-const DIFF_PAGE_SIZE = 32;
-const DIFF_ROW_HEIGHT = 22;
-const DIFF_WINDOW_SIZE = 80;
-const MAX_CACHED_DIFF_PAGES = 8;
-const MAX_CONCURRENT_DIFF_PAGE_REQUESTS = 3;
-let pageUseOrder: number[] = [];
-let statusGeneration = 0;
 let diffGeneration = 0;
-let viewedGeneration = 0;
-let unlisten: (() => void) | undefined;
-let unlistenViewed: (() => void) | undefined;
 let mounted = true;
-let requestedDefaultBranchPrompt = false;
-
-function segmentAt(line: number, segments: VirtualHunk[]): VirtualHunk | undefined {
-  let low = 0;
-  let high = segments.length - 1;
-  while (low <= high) {
-    const middle = (low + high) >>> 1;
-    const segment = segments[middle];
-    if (line < segment.visualStart) high = middle - 1;
-    else if (line >= segment.visualEnd) low = middle + 1;
-    else return segment;
-  }
-  return undefined;
-}
-
-const visibleLargeDiffWindow = computed(() => {
-  const total = largeDiffLineCount.value;
-  const maximumStart = Math.max(0, total - DIFF_WINDOW_SIZE);
-  const start = Math.min(maximumStart, Math.max(0, Math.floor(diffScrollTop.value / DIFF_ROW_HEIGHT) - 10));
-  const end = Math.min(total, start + DIFF_WINDOW_SIZE);
-  const rows: Array<{
-    visualIndex: number;
-    rawIndex: number;
-    hunkIndex: number;
-    collapsed: boolean;
-    line?: GitDiffPageLine;
-    error?: string;
-  }> = [];
-  for (let visualIndex = start; visualIndex < end; visualIndex += 1) {
-    const segment = segmentAt(visualIndex, virtualHunks.value);
-    if (!segment) continue;
-    const rawIndex = segment.rawStart + (segment.collapsed ? 0 : visualIndex - segment.visualStart);
-    const pageOffset = Math.floor(rawIndex / DIFF_PAGE_SIZE) * DIFF_PAGE_SIZE;
-    const page = diffPages.value[pageOffset];
-    rows.push({
-      visualIndex,
-      rawIndex,
-      hunkIndex: segment.index,
-      collapsed: segment.collapsed,
-      line: page?.lines[rawIndex - page.startLine],
-      error: diffPageErrors.value[pageOffset],
-    });
-  }
-  return {
-    rows,
-    paddingTop: start * DIFF_ROW_HEIGHT,
-    paddingBottom: (total - end) * DIFF_ROW_HEIGHT,
-  };
-});
 
 function errorText(error: unknown): string {
   return isIpcError(error) ? error.message : error instanceof Error ? error.message : String(error);
@@ -173,45 +86,18 @@ function createHunks(path: string, patch: string) {
   });
 }
 
-async function loadViewedFiles(checkoutId: string) {
-  const request = ++viewedGeneration;
-  viewedError.value = "";
-  try {
-    const paths = await getGitViewedFiles(checkoutId);
-    if (mounted && request === viewedGeneration && props.checkout.id === checkoutId) viewedPaths.value = paths;
-  } catch (error) {
-    if (request === viewedGeneration) {
-      viewedPaths.value = [];
-      viewedError.value = errorText(error);
-    }
-  }
-}
-
 async function markViewed(path: string) {
-  const checkoutId = props.checkout.id;
-  if (viewedPaths.value.includes(path)) return;
-  try {
-    await markGitFileViewed(checkoutId, path);
-    if (mounted && props.checkout.id === checkoutId && !viewedPaths.value.includes(path)) {
-      viewedPaths.value = [...viewedPaths.value, path];
-      viewedError.value = "";
-    }
-  } catch (error) {
-    if (props.checkout.id === checkoutId) viewedError.value = errorText(error);
-  }
+  await props.gitSnapshot.markViewed(props.checkout.id, path);
 }
 
 async function loadDiff(path: string, preservePosition = false) {
   const request = ++diffGeneration;
   const oldScrollTop = preservePosition ? diffScrollTop.value : 0;
+  if (selectedPath.value === path) largeDiff.reset();
   selectedPath.value = path;
   diff.value = null;
   diffHunks.value = [];
   collapsedHunks.value = [];
-  diffPages.value = {};
-  diffPageErrors.value = {};
-  diffPageError.value = "";
-  pageUseOrder = [];
   diffScrollTop.value = oldScrollTop;
   diffError.value = "";
   diffState.value = "loading";
@@ -225,7 +111,7 @@ async function loadDiff(path: string, preservePosition = false) {
     diffState.value = "ready";
     await nextTick();
     if (diffViewport.value) diffViewport.value.scrollTop = oldScrollTop;
-    if (result.large && !result.tooLarge && !result.isBinary) void loadVisibleLargePages();
+    if (result.large && !result.tooLarge && !result.isBinary) void largeDiff.loadVisiblePages();
     if (!result.tooLarge && !result.isBinary && (result.large ? result.totalLines > 0 : result.patch.includes("@@"))) {
       void markViewed(path);
     }
@@ -236,66 +122,18 @@ async function loadDiff(path: string, preservePosition = false) {
   }
 }
 
-async function loadLargeDiffPage(path: string, offset: number, request: number) {
-  const cacheKey = `${request}:${offset}`;
-  if (diffPages.value[offset] || diffPageErrors.value[offset] || diffPagePending.has(cacheKey)) return;
-  if (diffPagePending.size >= MAX_CONCURRENT_DIFF_PAGE_REQUESTS) return;
-  diffPagePending.add(cacheKey);
-  diffPageErrors.value = { ...diffPageErrors.value, [offset]: "" };
-  try {
-    const result = await getGitDiffPage(props.checkout.id, path, offset, DIFF_PAGE_SIZE);
-    if (!mounted || request !== diffGeneration || selectedPath.value !== path) return;
-    if (result.totalLines !== diff.value?.totalLines || result.lines.length === 0) {
-      diffPageErrors.value = {
-        ...diffPageErrors.value,
-        [offset]: "Diff changed while loading. Refresh Changes and try again.",
-      };
-      return;
-    }
-    const pages = { ...diffPages.value, [offset]: result };
-    diffPageError.value = "";
-    pageUseOrder = [...pageUseOrder.filter((pageOffset) => pageOffset !== offset), offset];
-    while (pageUseOrder.length > MAX_CACHED_DIFF_PAGES) {
-      const expired = pageUseOrder.shift();
-      if (expired !== undefined) delete pages[expired];
-    }
-    diffPages.value = pages;
-  } catch (error) {
-    if (request === diffGeneration) {
-      const message = errorText(error);
-      diffPageErrors.value = { ...diffPageErrors.value, [offset]: message };
-      diffPageError.value = message;
-    }
-  } finally {
-    diffPagePending.delete(cacheKey);
-    if (mounted) loadVisibleLargePages();
-  }
-}
-
-function loadVisibleLargePages() {
-  const path = selectedPath.value;
-  const request = diffGeneration;
-  if (!path || !diff.value?.large || diff.value.tooLarge) return;
-  const offsets = new Set(
-    visibleLargeDiffWindow.value.rows.map((row) => Math.floor(row.rawIndex / DIFF_PAGE_SIZE) * DIFF_PAGE_SIZE),
-  );
-  for (const offset of offsets) void loadLargeDiffPage(path, offset, request);
-}
-
 function onLargeDiffScroll(event: Event) {
   diffScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
-  loadVisibleLargePages();
+  largeDiff.loadVisiblePages();
 }
 
-async function loadStatus(isRefresh = false) {
-  const request = ++statusGeneration;
-  if (!isRefresh || !status.value) statusState.value = "loading";
-  statusError.value = "";
-  try {
-    const result = await getGitStatus(props.checkout.id);
-    if (!mounted || request !== statusGeneration) return;
-    status.value = result;
-    statusState.value = "ready";
+watch(
+  () => props.gitSnapshot.statusRevision,
+  async (revision, previous) => {
+    if (revision === previous || props.gitSnapshot.checkoutId !== props.checkout.id || !props.gitSnapshot.status) {
+      return;
+    }
+    const result = props.gitSnapshot.status;
     if (selectedPath.value) {
       if (result.files.some((file) => file.path === selectedPath.value)) {
         await loadDiff(selectedPath.value, true);
@@ -303,32 +141,26 @@ async function loadStatus(isRefresh = false) {
         selectedPath.value = null;
         diff.value = null;
         diffHunks.value = [];
-        diffPages.value = {};
-        diffPageErrors.value = {};
         diffScrollTop.value = 0;
         diffState.value = "idle";
       }
     }
-  } catch (error) {
-    if (!mounted || request !== statusGeneration) return;
-    status.value = null;
-    statusError.value = errorText(error);
-    statusState.value = "error";
-    if (isIpcError(error) && error.code === "default_branch_unknown" && !requestedDefaultBranchPrompt) {
-      requestedDefaultBranchPrompt = true;
-      emit("defaultBranchUnknown");
-    }
-  }
-}
+  },
+);
 
 watch(
   () => props.checkout.id,
-  (checkoutId) => {
-    fileScrollTop.value = 0;
-    viewedPaths.value = [];
-    void loadViewedFiles(checkoutId);
+  () => {
+    diffGeneration += 1;
+    selectedPath.value = null;
+    diff.value = null;
+    diffHunks.value = [];
+    collapsedHunks.value = [];
+    diffError.value = "";
+    diffScrollTop.value = 0;
+    diffState.value = "idle";
   },
-  { immediate: true },
+  { flush: "sync" },
 );
 
 function onFileListScroll(event: Event) {
@@ -346,51 +178,15 @@ function toggleHunk(index: number) {
       const maximum = Math.max(0, largeDiffLineCount.value * DIFF_ROW_HEIGHT - viewport.clientHeight);
       if (viewport.scrollTop > maximum) viewport.scrollTop = maximum;
       diffScrollTop.value = viewport.scrollTop;
-      loadVisibleLargePages();
+      largeDiff.loadVisiblePages();
     });
   }
 }
 
-onMounted(async () => {
-  try {
-    const dispose = await listen<string>("git-status-changed", (event) => {
-      if (event.payload === props.checkout.id) void loadStatus(true);
-    });
-    if (!mounted) dispose();
-    else unlisten = dispose;
-  } catch (error) {
-    watchError.value = errorText(error);
-  }
-
-  try {
-    const dispose = await listen<string>("git-viewed-changed", (event) => {
-      if (event.payload === props.checkout.id) void loadViewedFiles(props.checkout.id);
-    });
-    if (!mounted) dispose();
-    else unlistenViewed = dispose;
-  } catch (error) {
-    viewedError.value = errorText(error);
-  }
-
-  if (!mounted) return;
-  await loadStatus();
-});
-
 onUnmounted(() => {
   mounted = false;
-  unlisten?.();
-  unlistenViewed?.();
+  diffGeneration += 1;
 });
-
-watch(
-  () => props.defaultBranch,
-  (branch, previous) => {
-    if (branch && branch !== previous) {
-      requestedDefaultBranchPrompt = false;
-      void loadStatus(true);
-    }
-  },
-);
 </script>
 
 <template>
