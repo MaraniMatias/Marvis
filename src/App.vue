@@ -126,6 +126,7 @@ const pendingCheckoutUiPatches = new Map<string, Partial<CheckoutUiState>>();
 let checkoutUiLoadGeneration = 0;
 let userSplitterIntent = false;
 let userSplitterKeyDown = false;
+let synchronizingSplitters = false;
 const activityExpiryTimers = new Map<string, number>();
 const lifecycleCheckout = computed<Checkout | null>(
   () =>
@@ -351,14 +352,14 @@ function onSplitterKeyup(event: KeyboardEvent) {
 }
 
 function onPanelCollapse(panel: "sidebar" | "inspector") {
-  if (!userSplitterIntent) return;
+  if (synchronizingSplitters || !userSplitterIntent) return;
   const key = panel === "sidebar" ? "sidebarVisible" : "inspectorVisible";
   if (!appLayout.value[key]) return;
   appLayout.value = { ...appLayout.value, [key]: false };
 }
 
 function onPanelExpand(panel: "sidebar" | "inspector") {
-  if (!userSplitterIntent) return;
+  if (synchronizingSplitters || !userSplitterIntent) return;
   const key = panel === "sidebar" ? "sidebarVisible" : "inspectorVisible";
   if (appLayout.value[key]) return;
   appLayout.value = { ...appLayout.value, [key]: true };
@@ -378,7 +379,7 @@ function ensureInspectorVisible() {
 }
 
 function onSplitterLayout(sizes: number[]) {
-  if (!appLayoutReady.value || !userSplitterIntent || sizes.length < 3) return;
+  if (synchronizingSplitters || !appLayoutReady.value || !userSplitterIntent || sizes.length < 3) return;
   let next = appLayout.value;
   if (sizes[0] > 0) next = resizeLayoutPanel(next, "sidebar", sizes[0]);
   if (!isNarrow.value && sizes[2] > 0) next = resizeLayoutPanel(next, "inspector", sizes[2]);
@@ -399,7 +400,7 @@ function onSplitterLayout(sizes: number[]) {
 
 function resetPanelWidth(panel: "sidebar" | "inspector") {
   const width = panel === "sidebar" ? DEFAULT_APP_LAYOUT.sidebarWidth : DEFAULT_APP_LAYOUT.inspectorWidth;
-  (panel === "sidebar" ? sidebarPanel.value : inspectorPanel.value)?.resize(width);
+  withSplitterSynchronization(() => (panel === "sidebar" ? sidebarPanel.value : inspectorPanel.value)?.resize(width));
   appLayout.value = resizeLayoutPanel(appLayout.value, panel, width);
   if (appLayout.value.focusSnapshot) {
     appLayout.value = {
@@ -412,7 +413,31 @@ function resetPanelWidth(panel: "sidebar" | "inspector") {
 
 function resetLayout() {
   appLayout.value = { ...DEFAULT_APP_LAYOUT };
+  synchronizeSplitterPanels();
   flushAfterLayoutInteraction();
+}
+
+function withSplitterSynchronization(action: () => void) {
+  const wasSynchronizing = synchronizingSplitters;
+  synchronizingSplitters = true;
+  try {
+    action();
+  } finally {
+    synchronizingSplitters = wasSynchronizing;
+  }
+}
+
+function synchronizeSplitterPanels() {
+  withSplitterSynchronization(() => {
+    if (appLayout.value.sidebarVisible) {
+      sidebarPanel.value?.expand();
+      sidebarPanel.value?.resize(appLayout.value.sidebarWidth);
+    } else sidebarPanel.value?.collapse();
+    if (appLayout.value.inspectorVisible && !isNarrow.value) {
+      inspectorPanel.value?.expand();
+      inspectorPanel.value?.resize(appLayout.value.inspectorWidth);
+    } else inspectorPanel.value?.collapse();
+  });
 }
 
 function setMainView(view: "terminal" | "document") {
@@ -452,14 +477,7 @@ watch(
   async () => {
     if (!appLayoutReady.value) return;
     await nextTick();
-    if (appLayout.value.sidebarVisible) {
-      sidebarPanel.value?.expand();
-      sidebarPanel.value?.resize(appLayout.value.sidebarWidth);
-    } else sidebarPanel.value?.collapse();
-    if (appLayout.value.inspectorVisible && !isNarrow.value) {
-      inspectorPanel.value?.expand();
-      inspectorPanel.value?.resize(appLayout.value.inspectorWidth);
-    } else inspectorPanel.value?.collapse();
+    synchronizeSplitterPanels();
   },
   { immediate: true, flush: "post" },
 );

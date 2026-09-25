@@ -21,6 +21,7 @@ const mocks = vi.hoisted(() => ({
     onCloseRequested: (handler: (event: { preventDefault(): void }) => Promise<void>) => Promise<() => void>;
     close: () => Promise<void>;
   } | null,
+  onProgrammaticPanelResize: null as ((panelId: string, size: number) => void) | null,
 }));
 
 vi.mock("reka-ui", async () => {
@@ -40,7 +41,7 @@ vi.mock("reka-ui", async () => {
       expose({
         collapse: () => emit("collapse"),
         expand: () => emit("expand"),
-        resize: vi.fn(),
+        resize: vi.fn((size: number) => mocks.onProgrammaticPanelResize?.(props.id ?? "", size)),
       });
       return () => h("div", { id: props.id }, slots.default?.());
     },
@@ -257,6 +258,7 @@ describe("App UI integration", () => {
     mocks.workspaceRef = null;
     mocks.sessionPaneMounts = 0;
     mocks.onCloseRequested = null;
+    mocks.onProgrammaticPanelResize = null;
     mocks.loadAppLayout.mockResolvedValue({ ...DEFAULT_APP_LAYOUT });
     mocks.loadCheckoutUiState.mockResolvedValue({ ...DEFAULT_CHECKOUT_UI_STATE });
     mocks.saveAppLayout.mockResolvedValue(undefined);
@@ -369,6 +371,29 @@ describe("App UI integration", () => {
     wrapper.unmount();
   });
 
+  it("ignores layout events caused by panel synchronization during an active drag", async () => {
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
+      ...DEFAULT_APP_LAYOUT,
+      sidebarWidth: 345,
+      inspectorWidth: 420,
+    });
+    const group = wrapper.getComponent(SplitterGroup);
+    const handles = wrapper.findAllComponents(SplitterResizeHandle);
+    const panels = wrapper.findAllComponents(SplitterPanel);
+    mocks.onProgrammaticPanelResize = () => group.vm.$emit("layout", [210, 830, 360]);
+
+    handles[0]!.vm.$emit("dragging", true);
+    panels[0]!.vm.$emit("collapse");
+    await flushPromises();
+    handles[0]!.vm.$emit("dragging", false);
+    await flushPromises();
+
+    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
+      expect.objectContaining({ sidebarVisible: false, sidebarWidth: 345, inspectorWidth: 420 }),
+    );
+    wrapper.unmount();
+  });
+
   it("lets double-click reset widths persist even though its resize callback is programmatic", async () => {
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
       ...DEFAULT_APP_LAYOUT,
@@ -392,11 +417,14 @@ describe("App UI integration", () => {
       ...DEFAULT_APP_LAYOUT,
       sidebarWidth: 345,
       inspectorWidth: 450,
-      sidebarVisible: false,
     });
+    const resizeCalls = vi.fn();
+    mocks.onProgrammaticPanelResize = (panelId, size) => resizeCalls(panelId, size);
     await wrapper.get(".toolbar-settings summary").trigger("click");
     await wrapper.get(".toolbar-menu button:last-child").trigger("click");
     await flushPromises();
+    expect(resizeCalls).toHaveBeenCalledWith("navigation-panel", DEFAULT_APP_LAYOUT.sidebarWidth);
+    expect(resizeCalls).toHaveBeenCalledWith("inspector-panel", DEFAULT_APP_LAYOUT.inspectorWidth);
     expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
       expect.objectContaining({
         sidebarWidth: DEFAULT_APP_LAYOUT.sidebarWidth,
