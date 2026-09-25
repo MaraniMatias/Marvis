@@ -23,6 +23,7 @@ struct Session {
     master: Box<dyn MasterPty + Send>,
     writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
+    process_id: Option<u32>,
     exit_code: Option<u32>,
 }
 
@@ -76,6 +77,7 @@ impl TerminalBackend {
             .slave
             .spawn_command(command)
             .map_err(|error| error.to_string())?;
+        let process_id = child.process_id();
         drop(pair.slave);
 
         if let Err(error) = thread::Builder::new()
@@ -109,6 +111,7 @@ impl TerminalBackend {
                 master: pair.master,
                 writer,
                 child,
+                process_id,
                 exit_code: None,
             },
         );
@@ -166,10 +169,12 @@ impl TerminalBackend {
             Some(exit_code) => TerminalSessionStatus {
                 state: TerminalProcessState::Exited,
                 exit_code: Some(exit_code),
+                foreground_process: false,
             },
             None => TerminalSessionStatus {
                 state: TerminalProcessState::Running,
                 exit_code: None,
+                foreground_process: session.foreground_process(),
             },
         })
     }
@@ -206,6 +211,22 @@ impl TerminalBackend {
         }
         sessions.remove(id);
         Ok(true)
+    }
+}
+
+impl Session {
+    fn foreground_process(&self) -> bool {
+        #[cfg(unix)]
+        {
+            self.master
+                .process_group_leader()
+                .zip(self.process_id)
+                .is_some_and(|(foreground, shell)| foreground as u32 != shell)
+        }
+        #[cfg(not(unix))]
+        {
+            false
+        }
     }
 }
 
@@ -386,6 +407,36 @@ mod tests {
         assert!(backend.close("first").unwrap());
         assert!(backend.close("second").unwrap());
         assert!(!backend.close("second").unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn foreground_activity_excludes_an_idle_shell_and_tracks_a_foreground_command() {
+        let backend = TerminalBackend::default();
+        let (output, _receiver) = sink();
+        spawn(&backend, "foreground", "/bin/sh", &["-i"], output);
+        assert!(!backend.status("foreground").unwrap().foreground_process);
+
+        backend.write("foreground", b"sleep 10\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while !backend.status("foreground").unwrap().foreground_process {
+            assert!(
+                Instant::now() < deadline,
+                "foreground process was not observed"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+
+        backend.write("foreground", b"\x03").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while backend.status("foreground").unwrap().foreground_process {
+            assert!(
+                Instant::now() < deadline,
+                "foreground process did not return to the shell"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        backend.close("foreground").unwrap();
     }
 
     use crate::domain::workspace::TerminalProcessState;

@@ -2,12 +2,14 @@ import type { OpenedFolder } from "./folder";
 
 export type RepoKind = "git" | "plain";
 export type SessionType = "shell" | "nvim" | "server" | "custom" | "agent";
-export type SessionStatus = "inactive";
+export type TerminalLaunchType = "shell" | "nvim";
+export type SessionStatus = "active" | "inactive";
 export type TerminalProcessState = "running" | "exited";
 
 export interface TerminalSessionStatus {
   state: TerminalProcessState;
   exitCode?: number;
+  foregroundProcess?: boolean;
 }
 
 export interface Repo {

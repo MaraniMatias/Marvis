@@ -7,8 +7,9 @@ import TerminalSession from "./TerminalSession.vue";
 const terminalMock = vi.hoisted(() => ({
   channel: null as { onmessage: (buffer: ArrayBuffer) => void } | null,
   input: null as ((value: string) => void) | null,
-  resize: null as ((size: { cols: number; rows: number }) => void) | null,
+  resizes: [] as Array<(size: { cols: number; rows: number }) => void>,
   output: [] as number[][],
+  options: null as Record<string, unknown> | null,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -26,13 +27,16 @@ vi.mock("@xterm/xterm", () => ({
     cols = 80;
     rows = 24;
     options = {};
+    constructor(options: Record<string, unknown>) {
+      terminalMock.options = options;
+    }
     loadAddon() {}
     open() {}
     onData(callback: (value: string) => void) {
       terminalMock.input = callback;
     }
     onResize(callback: (size: { cols: number; rows: number }) => void) {
-      terminalMock.resize = callback;
+      terminalMock.resizes.push(callback);
     }
     write(data: Uint8Array) {
       terminalMock.output.push(Array.from(data));
@@ -74,8 +78,9 @@ describe("TerminalSession UI", () => {
     vi.clearAllMocks();
     terminalMock.channel = null;
     terminalMock.input = null;
-    terminalMock.resize = null;
+    terminalMock.resizes = [];
     terminalMock.output = [];
+    terminalMock.options = null;
     vi.mocked(createTerminal).mockResolvedValue(created);
     vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running" });
     vi.mocked(closeTerminal).mockResolvedValue(workspace);
@@ -88,12 +93,18 @@ describe("TerminalSession UI", () => {
     const output = Uint8Array.of(0, 0xc3, 0xa9, 0x1b, 0x5b, 0x33, 0x31, 0x6d);
     terminalMock.channel?.onmessage(output.buffer as ArrayBuffer);
     terminalMock.input?.("λ pasted");
-    terminalMock.resize?.({ cols: 97, rows: 31 });
+    terminalMock.resizes[0]?.({ cols: 97, rows: 31 });
     await flushPromises();
 
     expect(terminalMock.output).toEqual([Array.from(output)]);
-    expect(writeTerminal).toHaveBeenCalledWith("session:new", new TextEncoder().encode("λ pasted"));
-    expect(resizeTerminal).toHaveBeenCalledWith("session:new", 97, 31);
+    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "shell", expect.anything(), undefined);
+    expect(terminalMock.options).toMatchObject({
+      fontFamily: '"FiraCode Nerd Font Mono", monospace',
+      fontSize: 16,
+      lineHeight: 1.2,
+    });
+    expect(writeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", new TextEncoder().encode("λ pasted"));
+    expect(resizeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", 97, 31);
     wrapper.unmount();
   });
 
@@ -110,10 +121,52 @@ describe("TerminalSession UI", () => {
     confirm.mockReturnValue(true);
     await wrapper.get("button").trigger("click");
     await flushPromises();
-    expect(closeTerminal).toHaveBeenCalledWith("session:new");
+    expect(closeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new");
     expect(wrapper.emitted("closed")).toHaveLength(1);
     wrapper.unmount();
     confirm.mockRestore();
+  });
+
+  it("launches Neovim through its typed session request", async () => {
+    const wrapper = mount(TerminalSession, {
+      props: { checkoutId: "checkout:repo", active: true, sessionType: "nvim" },
+    });
+    await flushPromises();
+
+    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "nvim", expect.anything(), undefined);
+    expect(wrapper.text()).toContain("Neovim running");
+    wrapper.unmount();
+  });
+
+  it("passes the selected file and exact line to the in-app Neovim session", async () => {
+    const launchTarget = { filePath: "src/main file.rs", line: 42, column: 7 };
+    const wrapper = mount(TerminalSession, {
+      props: { checkoutId: "checkout:repo", active: true, sessionType: "nvim", launchTarget },
+    });
+    await flushPromises();
+
+    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "nvim", expect.anything(), launchTarget);
+    wrapper.unmount();
+  });
+
+  it("keeps resize requests scoped to each split terminal session", async () => {
+    const first = { ...created, session: { ...created.session, id: "session:first" } };
+    const second = { ...created, session: { ...created.session, id: "session:second" } };
+    vi.mocked(createTerminal).mockResolvedValueOnce(first).mockResolvedValueOnce(second);
+    const wrapper = mount({
+      components: { TerminalSession },
+      template:
+        '<div><TerminalSession checkout-id="checkout:repo" :active="true" /><TerminalSession checkout-id="checkout:repo" :active="true" /></div>',
+    });
+    await flushPromises();
+
+    terminalMock.resizes[0]({ cols: 91, rows: 30 });
+    terminalMock.resizes[1]({ cols: 103, rows: 37 });
+    await flushPromises();
+
+    expect(resizeTerminal).toHaveBeenCalledWith("checkout:repo", "session:first", 91, 30);
+    expect(resizeTerminal).toHaveBeenCalledWith("checkout:repo", "session:second", 103, 37);
+    wrapper.unmount();
   });
 
   it("keeps a completed process visible with its exit code", async () => {

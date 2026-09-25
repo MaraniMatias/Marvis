@@ -22,4 +22,5 @@ jobs:
       - run: pnpm lint:rust
       - run: pnpm typecheck
       - run: pnpm test
+      - run: pnpm test:security
       - run: pnpm build:app

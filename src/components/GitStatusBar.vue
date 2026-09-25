@@ -1,15 +1,24 @@
 <script setup lang="ts">
 import { listen } from "@tauri-apps/api/event";
-import { watch, ref } from "vue";
+import { computed, watch, ref } from "vue";
 import { isIpcError } from "../domain/ipc";
 import type { GitStatus } from "../domain/git";
 import type { Checkout, Repo } from "../domain/workspace";
-import { getGitStatus, unwatchGitCheckout, watchGitCheckout } from "../lib/ipc";
+import { getGitStatus, getGitViewedFiles, unwatchGitCheckout, watchGitCheckout } from "../lib/ipc";
 
-const props = defineProps<{ checkout: Checkout | null; repo: Repo | null }>();
+const props = defineProps<{
+  checkout: Checkout | null;
+  repo: Repo | null;
+  concurrentActors?: string[];
+}>();
 const emit = defineEmits<{ defaultBranchUnknown: [] }>();
 
 const status = ref<GitStatus | null>(null);
+const viewedPaths = ref<string[]>([]);
+const viewedCount = computed(() => {
+  const viewed = new Set(viewedPaths.value);
+  return status.value?.files.filter((file) => viewed.has(file.path)).length ?? 0;
+});
 const loading = ref(false);
 const error = ref("");
 const watchError = ref("");
@@ -26,15 +35,19 @@ watch(
     let current = true;
     let watching = false;
     let unlisten: (() => void) | undefined;
+    let unlistenViewed: (() => void) | undefined;
     let requestedDefaultBranch = false;
     let statusRequest = 0;
+    let viewedRequest = 0;
     onCleanup(() => {
       current = false;
       unlisten?.();
+      unlistenViewed?.();
       if (watching && checkoutId) void unwatchGitCheckout(checkoutId).catch(() => undefined);
     });
 
     status.value = null;
+    viewedPaths.value = [];
     error.value = "";
     watchError.value = "";
     loading.value = false;
@@ -53,6 +66,20 @@ watch(
         if (!current || requestGeneration !== generation || refreshRequest !== statusRequest) return;
         status.value = result;
         error.value = "";
+        const viewedGeneration = ++viewedRequest;
+        try {
+          const viewed = await getGitViewedFiles(checkoutId);
+          if (
+            current &&
+            requestGeneration === generation &&
+            refreshRequest === statusRequest &&
+            viewedGeneration === viewedRequest
+          ) {
+            viewedPaths.value = viewed;
+          }
+        } catch {
+          if (current && viewedGeneration === viewedRequest) viewedPaths.value = [];
+        }
       } catch (cause) {
         if (!current || requestGeneration !== generation || refreshRequest !== statusRequest) return;
         status.value = null;
@@ -75,6 +102,19 @@ watch(
         return;
       }
       unlisten = dispose;
+    } catch (cause) {
+      if (current) watchError.value = errorText(cause);
+    }
+
+    try {
+      const dispose = await listen<string>("git-viewed-changed", (event) => {
+        if (event.payload === checkoutId) void refresh();
+      });
+      if (!current) {
+        dispose();
+        return;
+      }
+      unlistenViewed = dispose;
     } catch (cause) {
       if (current) watchError.value = errorText(cause);
     }
@@ -107,12 +147,25 @@ const branchLabel = () => status.value?.branch ?? (status.value?.head ? `HEAD ${
     <template v-else-if="status">
       <span role="status" aria-label="Git branch">{{ branchLabel() }}</span>
       <span role="status" aria-label="Changed files">{{ status.files.length }} changed</span>
+      <span role="status" aria-label="Commits ahead">
+        {{ status.aheadCount }} {{ status.aheadCount === 1 ? "commit" : "commits" }} ahead
+      </span>
+      <span role="status" aria-label="Viewed files">{{ viewedCount }}/{{ status.files.length }} viewed</span>
     </template>
     <span v-else-if="loading" role="status">Loading Git status…</span>
     <span v-else-if="error" role="status" :title="error">Git status unavailable</span>
     <span v-else role="status">Git status unavailable</span>
     <span v-if="watchError && checkout && !checkout.isMissing && repo?.kind === 'git'" class="ml-auto text-amber-300">
       Live updates unavailable
+    </span>
+    <span
+      v-if="concurrentActors && concurrentActors.length > 1"
+      role="status"
+      class="ml-auto truncate text-sky-200"
+      :title="`Observed concurrent activity: ${concurrentActors.join(' + ')}. External editors and agents are not tracked.`"
+      aria-label="Concurrent activity"
+    >
+      Concurrent · {{ concurrentActors.join(" + ") }}
     </span>
   </footer>
 </template>

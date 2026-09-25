@@ -1,14 +1,30 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, ref, watch } from "vue";
+/* eslint-disable vue/html-self-closing */
+import { listen } from "@tauri-apps/api/event";
+import { computed, defineAsyncComponent, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { isIpcError } from "../domain/ipc";
-import type { FileEntry } from "../domain/files";
+import type { FileEntry, FileSearchResult } from "../domain/files";
+import type { GitStatus } from "../domain/git";
 import type { Checkout, Repo } from "../domain/workspace";
-import { listCheckoutFiles, readCheckoutFile } from "../lib/ipc";
+import {
+  getGitStatus,
+  listCheckoutFiles,
+  readCheckoutFile,
+  readCheckoutMarkdownImage,
+  searchCheckoutFiles,
+} from "../lib/ipc";
 
 const ChangesPane = defineAsyncComponent(() => import("./ChangesPane.vue"));
 
-const props = defineProps<{ checkout: Checkout | null; repo?: Repo | null }>();
-defineEmits<{ defaultBranchUnknown: [] }>();
+const props = defineProps<{
+  checkout: Checkout | null;
+  repo?: Repo | null;
+  commandRequest?: { action: "open-file" | "open-changes" | "open-preview"; token: number } | null;
+}>();
+const emit = defineEmits<{
+  defaultBranchUnknown: [];
+  selectedFile: [value: { checkoutId: string; path: string } | null];
+}>();
 
 type DirectoryState = "loading" | "error" | "empty" | "truncated";
 interface VisibleEntry {
@@ -26,8 +42,38 @@ const selectedPath = ref<string | null>(null);
 const content = ref("");
 const contentState = ref<"idle" | "loading" | "ready" | "error">("idle");
 const contentError = ref("");
-const activeTab = ref<"files" | "changes">("files");
+const activeTab = ref<"files" | "changes" | "preview">("files");
+const markdownHtml = ref("");
+const markdownPreviewState = ref<"idle" | "loading" | "ready">("idle");
+const markdownImageWarning = ref(false);
+const gitStatus = ref<GitStatus | null>(null);
+const searchQuery = ref("");
+const searchInput = ref<HTMLInputElement | null>(null);
+const searchEntries = ref<FileEntry[]>([]);
+const searchTruncated = ref(false);
+const searchState = ref<"idle" | "loading" | "ready" | "error">("idle");
+const searchError = ref("");
+const treeScrollTop = ref(0);
+let searchIndexCheckoutId: string | null = null;
+let searchIndexPromise: { checkoutId: string; promise: Promise<FileSearchResult> } | null = null;
 let generation = 0;
+let gitGeneration = 0;
+let searchGeneration = 0;
+let previewGeneration = 0;
+let unlistenGit: (() => void) | undefined;
+let mounted = true;
+
+const TREE_ROW_HEIGHT = 32;
+const TREE_WINDOW_SIZE = 80;
+const TREE_OVERSCAN = 12;
+const MAX_MARKDOWN_IMAGES = 12;
+const MAX_MARKDOWN_IMAGE_BYTES = 8 * 1024 * 1024;
+const MARKDOWN_EXTENSIONS = new Set(["md", "markdown", "mdown", "mkd"]);
+
+function isMarkdownPath(path: string): boolean {
+  const extension = path.split(".").pop()?.toLowerCase();
+  return extension !== undefined && MARKDOWN_EXTENSIONS.has(extension);
+}
 
 function errorText(error: unknown): string {
   if (isIpcError(error)) {
@@ -37,7 +83,7 @@ function errorText(error: unknown): string {
       case "permission_denied":
         return "Permission denied while reading this folder or file.";
       case "file_too_large":
-        return "This file is larger than the 1 MiB text limit.";
+        return "This file is larger than the preview size limit.";
       case "binary_file":
         return "This file is binary or is not valid UTF-8.";
       case "path_outside_checkout":
@@ -83,10 +129,24 @@ watch(
     directories.value = {};
     directoryStates.value = {};
     expanded.value = [];
+    searchQuery.value = "";
+    searchEntries.value = [];
+    searchTruncated.value = false;
+    searchIndexCheckoutId = null;
+    searchIndexPromise = null;
+    searchState.value = "idle";
+    searchGeneration += 1;
+    treeScrollTop.value = 0;
     selectedPath.value = null;
+    emit("selectedFile", null);
     content.value = "";
     contentState.value = "idle";
     contentError.value = "";
+    activeTab.value = "files";
+    previewGeneration += 1;
+    markdownHtml.value = "";
+    markdownPreviewState.value = "idle";
+    markdownImageWarning.value = false;
     rootError.value = "";
     if (!checkoutId) {
       rootState.value = "idle";
@@ -102,6 +162,120 @@ watch(
   },
   { immediate: true },
 );
+
+watch(
+  () => props.commandRequest?.token,
+  async () => {
+    const request = props.commandRequest;
+    if (!request) return;
+    if (request.action === "open-changes" && props.repo?.kind === "git") activeTab.value = "changes";
+    else if (request.action === "open-preview" && selectedPath.value) activeTab.value = "preview";
+    else if (request.action === "open-file") {
+      activeTab.value = "files";
+      await nextTick();
+      searchInput.value?.focus();
+    }
+  },
+);
+
+async function loadGitStatus() {
+  const checkoutId = props.checkout?.id;
+  const requestGeneration = ++gitGeneration;
+  if (!checkoutId || props.checkout?.isMissing || props.repo?.kind !== "git") {
+    gitStatus.value = null;
+    return;
+  }
+  gitStatus.value = null;
+  try {
+    const result = await getGitStatus(checkoutId);
+    if (
+      mounted &&
+      requestGeneration === gitGeneration &&
+      props.checkout?.id === checkoutId &&
+      props.repo?.kind === "git"
+    ) {
+      gitStatus.value = result;
+    }
+  } catch {
+    if (requestGeneration === gitGeneration) gitStatus.value = null;
+  }
+}
+
+watch(
+  () => [props.checkout?.id, props.checkout?.isMissing, props.repo?.kind, props.repo?.defaultBranch] as const,
+  () => void loadGitStatus(),
+  { immediate: true },
+);
+
+onMounted(async () => {
+  try {
+    const dispose = await listen<string>("git-status-changed", (event) => {
+      if (event.payload === props.checkout?.id && activeTab.value !== "changes") {
+        void refreshAfterGitChange(event.payload);
+      }
+    });
+    if (!mounted) dispose();
+    else unlistenGit = dispose;
+  } catch {
+    // The initial status remains available even when event listening is unavailable.
+  }
+});
+
+watch(activeTab, (tab) => {
+  const checkoutId = props.checkout?.id;
+  if (tab === "files" && checkoutId && props.repo?.kind === "git") {
+    void refreshAfterGitChange(checkoutId);
+  }
+});
+
+async function refreshAfterGitChange(checkoutId: string) {
+  void loadGitStatus();
+  const requestGeneration = generation;
+  for (const path of Object.keys(directories.value)) {
+    if (requestGeneration !== generation || props.checkout?.id !== checkoutId) return;
+    await loadDirectory(checkoutId, path, requestGeneration);
+  }
+  const selected = selectedPath.value;
+  if (selected && requestGeneration === generation && props.checkout?.id === checkoutId) {
+    try {
+      const result = await readCheckoutFile(checkoutId, selected);
+      if (requestGeneration === generation && selectedPath.value === selected) {
+        content.value = result.content;
+        contentState.value = "ready";
+        contentError.value = "";
+        await loadMarkdownPreview(checkoutId, selected, result.content);
+      }
+    } catch (error) {
+      if (requestGeneration === generation && selectedPath.value === selected) {
+        contentError.value = errorText(error);
+        contentState.value = "error";
+        clearMarkdownPreview();
+      }
+    }
+  }
+  if (searchQuery.value.trim() && props.checkout?.id === checkoutId) {
+    searchIndexCheckoutId = null;
+    searchIndexPromise = null;
+    searchEntries.value = [];
+    searchTruncated.value = false;
+    const searchRequest = ++searchGeneration;
+    searchState.value = "loading";
+    try {
+      await loadSearchIndex(checkoutId);
+      if (searchRequest === searchGeneration) searchState.value = "ready";
+    } catch (error) {
+      if (searchRequest === searchGeneration) {
+        searchError.value = errorText(error);
+        searchState.value = "error";
+      }
+    }
+  }
+}
+
+onUnmounted(() => {
+  mounted = false;
+  unlistenGit?.();
+});
 
 watch(
   () => props.repo?.kind,
@@ -127,6 +301,7 @@ async function selectFile(entry: FileEntry) {
   if (!checkoutId) return;
   const requestGeneration = generation;
   selectedPath.value = entry.path;
+  emit("selectedFile", { checkoutId, path: entry.path });
   content.value = "";
   contentError.value = "";
   contentState.value = "loading";
@@ -135,11 +310,58 @@ async function selectFile(entry: FileEntry) {
     if (requestGeneration !== generation || selectedPath.value !== entry.path) return;
     content.value = result.content;
     contentState.value = "ready";
+    await loadMarkdownPreview(checkoutId, entry.path, result.content);
   } catch (error) {
     if (requestGeneration !== generation || selectedPath.value !== entry.path) return;
     contentError.value = errorText(error);
     contentState.value = "error";
+    clearMarkdownPreview();
   }
+}
+
+function clearMarkdownPreview() {
+  previewGeneration += 1;
+  markdownHtml.value = "";
+  markdownPreviewState.value = "idle";
+  markdownImageWarning.value = false;
+}
+
+async function loadMarkdownPreview(checkoutId: string, path: string, source: string) {
+  const requestGeneration = ++previewGeneration;
+  markdownHtml.value = "";
+  markdownImageWarning.value = false;
+  if (!isMarkdownPath(path)) {
+    markdownPreviewState.value = "idle";
+    return;
+  }
+
+  markdownPreviewState.value = "loading";
+  const { attachMarkdownImages, renderMarkdownPreview } = await import("../lib/markdown-preview");
+  if (requestGeneration !== previewGeneration || props.checkout?.id !== checkoutId) return;
+  const preview = renderMarkdownPreview(source, path);
+  const paths = preview.images.map((image) => image.path);
+  const loadedImages = new Map<string, { mimeType: string; dataBase64: string }>();
+  markdownImageWarning.value = preview.images.length > MAX_MARKDOWN_IMAGES;
+
+  let totalImageBytes = 0;
+  for (const image of preview.images.slice(0, MAX_MARKDOWN_IMAGES)) {
+    if (requestGeneration !== previewGeneration || props.checkout?.id !== checkoutId) return;
+    try {
+      const resource = await readCheckoutMarkdownImage(checkoutId, path, image.source);
+      if (resource.sizeBytes > MAX_MARKDOWN_IMAGE_BYTES - totalImageBytes) {
+        markdownImageWarning.value = true;
+        continue;
+      }
+      totalImageBytes += resource.sizeBytes;
+      loadedImages.set(image.path, resource);
+    } catch {
+      markdownImageWarning.value = true;
+    }
+  }
+
+  if (requestGeneration !== previewGeneration || props.checkout?.id !== checkoutId) return;
+  markdownHtml.value = attachMarkdownImages(preview.html, paths, loadedImages);
+  markdownPreviewState.value = "ready";
 }
 
 const visibleEntries = computed<VisibleEntry[]>(() => {
@@ -163,12 +385,123 @@ const visibleEntries = computed<VisibleEntry[]>(() => {
   append(".", 0);
   return result;
 });
+
+function fuzzyScore(path: string, query: string): number {
+  const candidate = path.toLocaleLowerCase();
+  const normalized = query.toLocaleLowerCase().trim();
+  let cursor = 0;
+  let score = 0;
+  let previous = -2;
+  for (const character of normalized) {
+    const index = candidate.indexOf(character, cursor);
+    if (index < 0) return -1;
+    score += index - cursor + (index === previous + 1 ? -2 : index);
+    previous = index;
+    cursor = index + 1;
+  }
+  const basename = candidate.slice(candidate.lastIndexOf("/") + 1);
+  if (basename.startsWith(normalized)) score -= 100;
+  return score;
+}
+
+async function loadSearchIndex(checkoutId: string): Promise<FileSearchResult> {
+  if (searchIndexCheckoutId === checkoutId) {
+    return { entries: searchEntries.value, truncated: searchTruncated.value };
+  }
+  if (searchIndexPromise?.checkoutId === checkoutId) return searchIndexPromise.promise;
+
+  const promise = searchCheckoutFiles(checkoutId);
+  searchIndexPromise = { checkoutId, promise };
+  try {
+    const result = await promise;
+    if (props.checkout?.id === checkoutId && searchIndexPromise?.promise === promise) {
+      searchIndexCheckoutId = checkoutId;
+      searchEntries.value = result.entries;
+      searchTruncated.value = result.truncated;
+    }
+    return result;
+  } finally {
+    if (searchIndexPromise?.promise === promise) searchIndexPromise = null;
+  }
+}
+
+watch(
+  () => [props.checkout?.id, props.checkout?.isMissing, searchQuery.value] as const,
+  async ([checkoutId, isMissing, query]) => {
+    const requestGeneration = ++searchGeneration;
+    treeScrollTop.value = 0;
+    searchError.value = "";
+    if (!query.trim() || !checkoutId || isMissing) {
+      searchState.value = "idle";
+      return;
+    }
+    searchState.value = "loading";
+    try {
+      await loadSearchIndex(checkoutId);
+      if (requestGeneration === searchGeneration) searchState.value = "ready";
+    } catch (error) {
+      if (requestGeneration === searchGeneration) {
+        searchError.value = errorText(error);
+        searchState.value = "error";
+      }
+    }
+  },
+);
+
+const matchedSearchEntries = computed<VisibleEntry[]>(() => {
+  const query = searchQuery.value.trim();
+  if (!query) return [];
+  return searchEntries.value
+    .map((entry) => ({ entry, score: fuzzyScore(entry.path, query) }))
+    .filter((match) => match.score >= 0)
+    .sort((left, right) => left.score - right.score || left.entry.path.localeCompare(right.entry.path))
+    .slice(0, 200)
+    .map(({ entry }) => ({ entry, depth: 0 }));
+});
+
+const fileRows = computed<VisibleEntry[]>(() =>
+  searchQuery.value.trim() ? matchedSearchEntries.value : visibleEntries.value,
+);
+
+const visibleTreeWindow = computed(() => {
+  const maximumStart = Math.max(0, fileRows.value.length - TREE_WINDOW_SIZE);
+  const start = Math.min(maximumStart, Math.max(0, Math.floor(treeScrollTop.value / TREE_ROW_HEIGHT) - TREE_OVERSCAN));
+  const end = Math.min(fileRows.value.length, start + TREE_WINDOW_SIZE);
+  return {
+    rows: fileRows.value.slice(start, end),
+    paddingTop: start * TREE_ROW_HEIGHT,
+    paddingBottom: (fileRows.value.length - end) * TREE_ROW_HEIGHT,
+  };
+});
+
+const gitDecorations = computed(() => {
+  const decorations = new Map<string, string>();
+  for (const file of gitStatus.value?.files ?? []) {
+    decorations.set(file.path, file.status);
+    const parents = file.path.split("/");
+    parents.pop();
+    for (let index = 1; index <= parents.length; index += 1) {
+      const directory = parents.slice(0, index).join("/");
+      if (!decorations.has(directory)) decorations.set(directory, "•");
+    }
+  }
+  return decorations;
+});
+
+function decorationFor(path: string): string | undefined {
+  return gitDecorations.value.get(path);
+}
+
+function onTreeScroll(event: Event) {
+  treeScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
+}
 </script>
 
 <template>
   <aside class="flex h-full w-80 shrink-0 flex-col border-l border-white/8 bg-[#15171c]">
     <div role="group" aria-label="Inspector sections" class="flex h-14 items-center gap-1 border-b border-white/8 px-3">
       <button
+        v-if="checkout"
         :aria-pressed="activeTab === 'files'"
         class="rounded px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em]"
         :class="activeTab === 'files' ? 'bg-white/8 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'"
@@ -177,7 +510,7 @@ const visibleEntries = computed<VisibleEntry[]>(() => {
         Files
       </button>
       <button
-        v-if="repo?.kind === 'git'"
+        v-if="repo?.kind === 'git' && checkout && !checkout.isMissing"
         :aria-pressed="activeTab === 'changes'"
         class="rounded px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em]"
         :class="activeTab === 'changes' ? 'bg-white/8 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'"
@@ -185,9 +518,22 @@ const visibleEntries = computed<VisibleEntry[]>(() => {
       >
         Changes
       </button>
+      <button
+        v-if="selectedPath && !checkout?.isMissing"
+        :aria-pressed="activeTab === 'preview'"
+        class="rounded px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em]"
+        :class="activeTab === 'preview' ? 'bg-white/8 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'"
+        @click="activeTab = 'preview'"
+      >
+        Preview
+      </button>
     </div>
     <div v-if="activeTab === 'files'" class="flex min-h-0 flex-1 flex-col">
-      <section class="min-h-0 flex-1 overflow-auto border-b border-white/8 p-2" aria-label="Checkout files">
+      <section
+        class="min-h-0 flex-1 overflow-auto border-b border-white/8 p-2"
+        aria-label="Checkout files"
+        @scroll="onTreeScroll"
+      >
         <p v-if="rootState === 'idle'" class="px-3 py-4 text-sm text-zinc-500">Open a checkout to browse files.</p>
         <p v-else-if="rootState === 'loading'" role="status" class="px-3 py-4 text-sm text-zinc-400">Loading files…</p>
         <p v-else-if="rootState === 'missing'" role="status" class="px-3 py-4 text-sm text-amber-300">
@@ -202,40 +548,94 @@ const visibleEntries = computed<VisibleEntry[]>(() => {
           This checkout is empty.
         </p>
         <template v-else>
+          <input
+            ref="searchInput"
+            v-model="searchQuery"
+            type="search"
+            aria-label="Search files"
+            placeholder="Search files…"
+            class="mb-2 h-8 w-full rounded border border-white/8 bg-[#111318] px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-white/20"
+          />
+          <p
+            v-if="searchQuery.trim() && searchState === 'loading'"
+            role="status"
+            class="px-2 py-2 text-xs text-zinc-500"
+          >
+            Searching checkout files…
+          </p>
+          <p
+            v-else-if="searchQuery.trim() && searchState === 'error'"
+            role="alert"
+            class="px-2 py-2 text-xs text-red-300"
+          >
+            {{ searchError }}
+          </p>
+          <template v-else-if="searchQuery.trim() && searchState === 'ready'">
+            <p v-if="matchedSearchEntries.length === 0" role="status" class="px-2 py-2 text-xs text-zinc-500">
+              No files match this search.
+            </p>
+            <p v-else-if="matchedSearchEntries.length === 200" class="px-2 pb-1 text-[10px] text-zinc-600">
+              Showing the best 200 matches; refine the search for more.
+            </p>
+          </template>
+          <p v-if="searchQuery.trim() && searchTruncated" class="px-2 pb-1 text-[10px] text-amber-300">
+            Search is limited to the first 50,000 files in this checkout.
+          </p>
           <p v-if="directoryStates['.'] === 'truncated'" class="px-2 py-1 text-xs text-zinc-500">
             Some entries omitted (folder is large).
           </p>
+          <p v-if="searchQuery.trim() && searchState !== 'ready'" class="px-2 py-1 text-xs text-zinc-500">
+            Search filters files across the checkout.
+          </p>
           <div
-            v-for="(item, index) in visibleEntries"
-            :key="item.entry?.path ?? `${item.depth}-${index}-${item.message}`"
-            :style="{ paddingLeft: `${8 + item.depth * 14}px` }"
-            class="flex min-h-8 items-center"
+            v-else
+            :style="{
+              paddingTop: `${visibleTreeWindow.paddingTop}px`,
+              paddingBottom: `${visibleTreeWindow.paddingBottom}px`,
+            }"
           >
-            <span v-if="!item.entry" class="py-1 text-xs text-zinc-500">{{ item.message }}</span>
-            <button
-              v-else-if="item.entry.kind === 'directory'"
-              type="button"
-              class="w-full truncate rounded px-2 py-1 text-left text-xs text-zinc-300 hover:bg-white/6"
-              :aria-expanded="expanded.includes(item.entry.path)"
-              @click="toggleDirectory(item.entry)"
+            <div
+              v-for="(item, index) in visibleTreeWindow.rows"
+              :key="item.entry?.path ?? `${item.depth}-${index}-${item.message}`"
+              :style="{ paddingLeft: `${8 + item.depth * 14}px` }"
+              class="flex h-8 items-center overflow-hidden"
             >
-              <span class="mr-2 text-zinc-500">
-                {{ expanded.includes(item.entry.path) ? "▾" : "▸" }}
-              </span>
-              <span>{{ item.entry.name }}</span>
-            </button>
-            <button
-              v-else
-              type="button"
-              class="w-full truncate rounded px-2 py-1 text-left text-xs hover:bg-white/6"
-              :class="selectedPath === item.entry.path ? 'bg-white/8 text-zinc-100' : 'text-zinc-400'"
-              @click="selectFile(item.entry)"
-            >
-              <span class="mr-2 text-zinc-600">
-                {{ item.entry.kind === "symlink" ? "↗" : "·" }}
-              </span>
-              <span>{{ item.entry.name }}</span>
-            </button>
+              <span v-if="!item.entry" class="truncate py-1 text-xs text-zinc-500">{{ item.message }}</span>
+              <button
+                v-else-if="item.entry.kind === 'directory'"
+                type="button"
+                class="flex h-8 w-full min-w-0 items-center truncate rounded px-2 text-left text-xs text-zinc-300 hover:bg-white/6"
+                :aria-expanded="expanded.includes(item.entry.path)"
+                @click="toggleDirectory(item.entry)"
+              >
+                <span class="mr-2 shrink-0 text-zinc-500">
+                  {{ expanded.includes(item.entry.path) ? "▾" : "▸" }}
+                </span>
+                <span class="truncate">{{ item.entry.name }}</span>
+                <span v-if="decorationFor(item.entry.path)" class="ml-auto pl-2 text-[10px] text-amber-300">
+                  {{ decorationFor(item.entry.path) }}
+                </span>
+              </button>
+              <button
+                v-else
+                type="button"
+                class="flex h-8 w-full min-w-0 items-center truncate rounded px-2 text-left text-xs hover:bg-white/6"
+                :class="selectedPath === item.entry.path ? 'bg-white/8 text-zinc-100' : 'text-zinc-400'"
+                @click="selectFile(item.entry)"
+              >
+                <span class="mr-2 shrink-0 text-zinc-600">
+                  {{ item.entry.kind === "symlink" ? "↗" : "·" }}
+                </span>
+                <span class="truncate">{{ item.entry.name }}</span>
+                <span
+                  v-if="decorationFor(item.entry.path)"
+                  class="ml-auto pl-2 text-[10px] font-semibold"
+                  :class="decorationFor(item.entry.path) === '??' ? 'text-green-400' : 'text-amber-300'"
+                >
+                  {{ decorationFor(item.entry.path) }}
+                </span>
+              </button>
+            </div>
           </div>
         </template>
       </section>
@@ -257,8 +657,32 @@ const visibleEntries = computed<VisibleEntry[]>(() => {
         </template>
       </section>
     </div>
+    <section v-else-if="activeTab === 'preview'" class="min-h-0 flex-1 overflow-auto p-4" aria-label="File preview">
+      <p v-if="!selectedPath" class="text-sm text-zinc-500">Select a file to preview it.</p>
+      <template v-else>
+        <p class="mb-4 break-all font-mono text-[11px] text-zinc-400">{{ selectedPath }}</p>
+        <p v-if="contentState === 'loading'" role="status" class="text-sm text-zinc-400">Loading file preview…</p>
+        <p v-else-if="contentState === 'error'" role="alert" class="text-sm text-amber-300">{{ contentError }}</p>
+        <p v-else-if="contentState === 'ready' && content.length === 0" role="status" class="text-sm text-zinc-500">
+          This file is empty.
+        </p>
+        <template v-else-if="contentState === 'ready'">
+          <p v-if="markdownPreviewState === 'loading'" role="status" class="mb-3 text-xs text-zinc-500">
+            Loading relative images…
+          </p>
+          <p v-if="markdownImageWarning" role="status" class="mb-3 text-xs text-amber-300">
+            Some Markdown images were missing, unsupported, or over the preview limits.
+          </p>
+          <!-- eslint-disable-next-line vue/no-v-html -- Content is generated and DOMPurify-sanitized in markdown-preview.ts. -->
+          <article v-if="isMarkdownPath(selectedPath)" class="markdown-preview text-sm" v-html="markdownHtml"></article>
+          <pre v-else class="whitespace-pre-wrap break-words font-mono text-xs leading-5 text-zinc-300">{{
+            content
+          }}</pre>
+        </template>
+      </template>
+    </section>
     <ChangesPane
-      v-else-if="checkout && repo?.kind === 'git'"
+      v-else-if="checkout && !checkout.isMissing && repo?.kind === 'git'"
       :key="checkout.id"
       :checkout="checkout"
       :default-branch="repo.defaultBranch"
@@ -266,3 +690,79 @@ const visibleEntries = computed<VisibleEntry[]>(() => {
     />
   </aside>
 </template>
+
+<style scoped>
+.markdown-preview :deep(h1),
+.markdown-preview :deep(h2),
+.markdown-preview :deep(h3) {
+  margin: 1.25rem 0 0.6rem;
+  color: #e4e4e7;
+  font-weight: 650;
+}
+
+.markdown-preview :deep(h1) {
+  font-size: 1.35rem;
+}
+
+.markdown-preview :deep(h2) {
+  font-size: 1.15rem;
+}
+
+.markdown-preview :deep(p),
+.markdown-preview :deep(ul),
+.markdown-preview :deep(ol),
+.markdown-preview :deep(blockquote) {
+  margin: 0.65rem 0;
+  color: #d4d4d8;
+}
+
+.markdown-preview :deep(ul),
+.markdown-preview :deep(ol) {
+  padding-left: 1.4rem;
+  list-style: revert;
+}
+
+.markdown-preview :deep(a) {
+  color: #93c5fd;
+  text-decoration: underline;
+}
+
+.markdown-preview :deep(blockquote) {
+  border-left: 2px solid #52525b;
+  padding-left: 0.75rem;
+}
+
+.markdown-preview :deep(table) {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 0.9rem 0;
+}
+
+.markdown-preview :deep(th),
+.markdown-preview :deep(td) {
+  border: 1px solid #3f3f46;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+}
+
+.markdown-preview :deep(pre) {
+  overflow: auto;
+  margin: 0.75rem 0;
+  border-radius: 0.375rem;
+  padding: 0.75rem;
+  font-size: 0.75rem;
+}
+
+.markdown-preview :deep(code:not(pre code)) {
+  border-radius: 0.2rem;
+  background: #27272a;
+  padding: 0.1rem 0.25rem;
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 0.85em;
+}
+
+.markdown-preview :deep(img) {
+  max-width: 100%;
+  height: auto;
+}
+</style>

@@ -7,7 +7,7 @@
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "vue-tsc --noEmit && vite build",
-    "build:app": "tauri build --no-bundle",
+    "build:app": "tauri build",
     "preview": "vite preview",
     "tauri": "tauri",
     "fmt": "prettier --write \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml",
@@ -16,6 +16,7 @@
     "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "typecheck": "vue-tsc --noEmit",
     "test:frontend": "vitest run",
+    "test:security": "vitest run -t SEC- && cargo test --manifest-path src-tauri/Cargo.toml sec_",
     "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
     "test": "pnpm test:frontend && pnpm test:rust"
   },
@@ -25,6 +26,10 @@
     "@tauri-apps/plugin-dialog": "^2.4.0",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/xterm": "^6.0.0",
+    "dompurify": "^3.4.16",
+    "highlight.js": "^11.12.0",
+    "markdown-it": "^15.0.2",
+    "markdown-it-task-lists": "^2.1.1",
     "reka-ui": "^2.5.0",
     "vue": "^3.5.21"
   },
@@ -32,6 +37,7 @@
     "@eslint/js": "^9.36.0",
     "@tailwindcss/vite": "^4.1.13",
     "@tauri-apps/cli": "^2.11.1",
+    "@types/markdown-it": "^14.2.0",
     "@vitejs/plugin-vue": "^6.0.1",
     "@vue/test-utils": "^2.5.1",
     "@xterm/headless": "^6.0.0",

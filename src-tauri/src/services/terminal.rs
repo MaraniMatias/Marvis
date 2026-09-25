@@ -7,6 +7,7 @@ use std::{
 use crate::{
     domain::workspace::{Session, SessionStatus, SessionType, WorkspaceState},
     persistence::{timestamp, Database},
+    services::editor::{self, EditorTarget},
     terminal::{OutputSink, SpawnOptions, TerminalBackend},
 };
 
@@ -17,16 +18,75 @@ pub struct CreatedTerminal {
     pub workspace: WorkspaceState,
 }
 
+#[derive(Debug, Clone, Copy, serde::Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalLaunchType {
+    Shell,
+    Nvim,
+}
+
+pub struct TerminalOptions {
+    pub cols: u16,
+    pub rows: u16,
+    pub session_type: TerminalLaunchType,
+    pub target: Option<EditorTarget>,
+}
+
 pub fn create(
     database: &Database,
     backend: &TerminalBackend,
     checkout_id: &str,
     cols: u16,
     rows: u16,
+    session_type: TerminalLaunchType,
     output: OutputSink,
 ) -> Result<CreatedTerminal, String> {
+    create_with_options(
+        database,
+        backend,
+        checkout_id,
+        TerminalOptions {
+            cols,
+            rows,
+            session_type,
+            target: None,
+        },
+        output,
+    )
+}
+
+pub fn create_with_options(
+    database: &Database,
+    backend: &TerminalBackend,
+    checkout_id: &str,
+    options: TerminalOptions,
+    output: OutputSink,
+) -> Result<CreatedTerminal, String> {
+    let TerminalOptions {
+        cols,
+        rows,
+        session_type,
+        target,
+    } = options;
     let cwd = database.terminal_checkout_path(checkout_id)?;
-    let program = inherited_shell();
+    let (program, args, name, stored_type) = match session_type {
+        TerminalLaunchType::Shell => {
+            if target.is_some() {
+                return Err("a file location can only be opened by a Neovim session".into());
+            }
+            let program = inherited_shell();
+            let name = program
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned())
+                .unwrap_or_else(|| "shell".into());
+            (program, vec!["-l".into()], name, SessionType::Shell)
+        }
+        TerminalLaunchType::Nvim => {
+            let (program, args) =
+                editor::nvim_launch_spec(target.as_ref()).map_err(|error| error.message)?;
+            (program, args, "nvim".into(), SessionType::Nvim)
+        }
+    };
     let session = Session {
         id: format!(
             "session:terminal:{}-{}-{}",
@@ -34,21 +94,18 @@ pub fn create(
             std::process::id(),
             NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
         ),
-        session_type: SessionType::Shell,
+        session_type: stored_type,
         checkout_id: checkout_id.to_string(),
-        name: program
-            .file_name()
-            .map(|name| name.to_string_lossy().into_owned())
-            .unwrap_or_else(|| "shell".into()),
+        name,
         created_at: timestamp(),
-        status: SessionStatus::Inactive,
+        status: SessionStatus::Active,
     };
 
     backend.spawn(
         session.id.clone(),
         SpawnOptions {
             program,
-            args: vec!["-l".into()],
+            args,
             cwd,
             cols,
             rows,
@@ -99,7 +156,7 @@ mod tests {
         terminal::{OutputSink, TerminalBackend},
     };
 
-    use super::create;
+    use super::{create, TerminalLaunchType};
 
     fn plain_repo(path: &Path) -> Repo {
         Repo::plain(path, "now").unwrap()
@@ -128,20 +185,35 @@ mod tests {
             "checkout:unknown",
             80,
             24,
+            TerminalLaunchType::Shell,
             Box::new(|_| Ok(()))
         )
         .is_err());
-        let first = create(&database, &backend, &repo.checkouts[0].id, 80, 24, output).unwrap();
+        let first = create(
+            &database,
+            &backend,
+            &repo.checkouts[0].id,
+            80,
+            24,
+            TerminalLaunchType::Shell,
+            output,
+        )
+        .unwrap();
         let second = create(
             &database,
             &backend,
             &repo.checkouts[0].id,
             80,
             24,
+            TerminalLaunchType::Shell,
             Box::new(|_| Ok(())),
         )
         .unwrap();
         assert_ne!(first.session.id, second.session.id);
+        assert_eq!(
+            first.session.status,
+            crate::domain::workspace::SessionStatus::Active
+        );
         assert_eq!(second.workspace.repos[0].checkouts[0].sessions.len(), 2);
         assert_eq!(
             second.workspace.active_session_id.as_deref(),
@@ -153,6 +225,7 @@ mod tests {
             &other_repo.checkouts[0].id,
             80,
             24,
+            TerminalLaunchType::Shell,
             Box::new(|_| Ok(())),
         )
         .unwrap();
@@ -197,5 +270,19 @@ mod tests {
             restored_other.sessions[0].status,
             crate::domain::workspace::SessionStatus::Inactive
         );
+    }
+
+    #[test]
+    fn launch_type_only_accepts_backend_owned_shell_and_nvim_presets() {
+        assert_eq!(
+            serde_json::from_str::<TerminalLaunchType>("\"shell\"").unwrap(),
+            TerminalLaunchType::Shell
+        );
+        assert_eq!(
+            serde_json::from_str::<TerminalLaunchType>("\"nvim\"").unwrap(),
+            TerminalLaunchType::Nvim
+        );
+        assert!(serde_json::from_str::<TerminalLaunchType>("\"server\"").is_err());
+        assert!(serde_json::from_str::<TerminalLaunchType>("\"custom\"").is_err());
     }
 }

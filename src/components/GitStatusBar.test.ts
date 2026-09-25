@@ -5,14 +5,17 @@ import type { Checkout, Repo } from "../domain/workspace";
 
 const mocks = vi.hoisted(() => ({
   getGitStatus: vi.fn(),
+  getGitViewedFiles: vi.fn(),
   watchGitCheckout: vi.fn(),
   unwatchGitCheckout: vi.fn(),
   listen: vi.fn(),
   onStatusChanged: null as ((event: { payload: string }) => void) | null,
+  onViewedChanged: null as ((event: { payload: string }) => void) | null,
 }));
 
 vi.mock("../lib/ipc", () => ({
   getGitStatus: mocks.getGitStatus,
+  getGitViewedFiles: mocks.getGitViewedFiles,
   watchGitCheckout: mocks.watchGitCheckout,
   unwatchGitCheckout: mocks.unwatchGitCheckout,
 }));
@@ -48,8 +51,10 @@ describe("GitStatusBar", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.onStatusChanged = null;
-    mocks.listen.mockImplementation(async (_event: string, handler: (event: { payload: string }) => void) => {
-      mocks.onStatusChanged = handler;
+    mocks.onViewedChanged = null;
+    mocks.listen.mockImplementation(async (event: string, handler: (event: { payload: string }) => void) => {
+      if (event === "git-viewed-changed") mocks.onViewedChanged = handler;
+      else mocks.onStatusChanged = handler;
       return vi.fn();
     });
     mocks.watchGitCheckout.mockResolvedValue(undefined);
@@ -57,12 +62,15 @@ describe("GitStatusBar", () => {
     mocks.getGitStatus.mockImplementation(async (checkoutId: string) => ({
       branch: checkoutId.endsWith("second") ? "feature" : "trunk",
       defaultBranch: "trunk",
-      aheadCount: 0,
+      aheadCount: checkoutId.endsWith("second") ? 2 : 1,
       files: Array.from({ length: checkoutId.endsWith("second") ? 3 : 1 }, (_, index) => ({
         path: `file-${index}.txt`,
         status: "M",
       })),
     }));
+    mocks.getGitViewedFiles.mockImplementation(async (checkoutId: string) =>
+      checkoutId.endsWith("second") ? ["file-0.txt", "file-1.txt"] : ["file-0.txt"],
+    );
   });
 
   it("loads on selection and refreshes the selected checkout from watcher events", async () => {
@@ -70,6 +78,8 @@ describe("GitStatusBar", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("trunk");
     expect(wrapper.text()).toContain("1 changed");
+    expect(wrapper.text()).toContain("1 commit ahead");
+    expect(wrapper.text()).toContain("1/1 viewed");
     expect(mocks.watchGitCheckout).toHaveBeenCalledWith("checkout:first");
 
     mocks.onStatusChanged?.({ payload: "checkout:first" });
@@ -82,6 +92,12 @@ describe("GitStatusBar", () => {
     expect(mocks.watchGitCheckout).toHaveBeenLastCalledWith("checkout:second");
     expect(wrapper.text()).toContain("feature");
     expect(wrapper.text()).toContain("3 changed");
+    expect(wrapper.text()).toContain("2 commits ahead");
+    expect(wrapper.text()).toContain("2/3 viewed");
+
+    mocks.onViewedChanged?.({ payload: "checkout:second" });
+    await flushPromises();
+    expect(mocks.getGitViewedFiles).toHaveBeenCalledTimes(4);
     wrapper.unmount();
   });
 
@@ -98,6 +114,23 @@ describe("GitStatusBar", () => {
     expect(wrapper.text()).toContain("Directory missing");
     expect(mocks.getGitStatus).not.toHaveBeenCalled();
     expect(mocks.watchGitCheckout).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("shows an informational concurrent activity signal without blocking", () => {
+    const wrapper = mount(GitStatusBar, {
+      props: {
+        checkout: checkout("checkout:activity"),
+        repo: gitRepo,
+        concurrentActors: ["Neovim · nvim", "Recent file writes"],
+      },
+    });
+
+    expect(wrapper.get('[aria-label="Concurrent activity"]').text()).toContain("Neovim · nvim");
+    expect(wrapper.get('[aria-label="Concurrent activity"]').attributes("title")).toContain(
+      "External editors and agents are not tracked",
+    );
+    expect(wrapper.find("button").exists()).toBe(false);
     wrapper.unmount();
   });
 });

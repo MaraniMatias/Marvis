@@ -1,4 +1,4 @@
-use std::{ffi::OsString, path::Path, process::Command};
+use std::{ffi::OsString, fs, path::Path, process::Command};
 
 use crate::{
     domain::{
@@ -7,7 +7,7 @@ use crate::{
     },
     git,
     persistence::{timestamp, Database},
-    services::folder,
+    services::{folder, worktree},
 };
 
 pub fn register_folder(
@@ -28,6 +28,250 @@ pub fn register_folder(
             .register_plain_repo(repo)
             .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
     }
+}
+
+pub fn locate_missing_checkout(
+    database: &Database,
+    checkout_id: &str,
+    selected_path: &Path,
+) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
+    let state = database.load_workspace().map_err(operation_error)?;
+    let repo = state
+        .repos
+        .iter()
+        .find(|repo| {
+            repo.checkouts
+                .iter()
+                .any(|checkout| checkout.id == checkout_id)
+        })
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "checkout ID is not registered",
+            )
+        })?;
+    let checkout = repo
+        .checkouts
+        .iter()
+        .find(|checkout| checkout.id == checkout_id)
+        .expect("checkout was found in repository");
+    let selected_path = fs::canonicalize(selected_path).map_err(|error| {
+        IpcError::new(
+            IpcErrorCode::FolderMissing,
+            format!("located directory is unavailable: {error}"),
+        )
+    })?;
+    if !selected_path.is_dir() {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidPath,
+            "located path is not a directory",
+        ));
+    }
+    if !checkout.is_missing {
+        if selected_path != Path::new(&checkout.canonical_path) {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "only a missing checkout can be located",
+            ));
+        }
+        return register_folder(database, &selected_path);
+    }
+    if checkout
+        .sessions
+        .iter()
+        .any(|session| session.status == crate::domain::workspace::SessionStatus::Active)
+    {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "close active terminal sessions before relocating this checkout",
+        ));
+    }
+
+    if repo.kind == RepoKind::Plain {
+        if git::resolve_repository(&selected_path, &timestamp())?.is_some() {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "located directory is a Git checkout, not the missing plain directory",
+            ));
+        }
+        let relocated = Repo::plain(&selected_path, timestamp())
+            .map_err(|error| IpcError::new(IpcErrorCode::InvalidPath, error))?;
+        return database
+            .relocate_plain_checkout(&repo.id, checkout_id, &relocated)
+            .map_err(operation_error);
+    }
+
+    if selected_path == Path::new(&checkout.canonical_path) {
+        let (resolved, focus_id) = git::resolve_repository(&selected_path, &timestamp())?
+            .ok_or_else(|| {
+                IpcError::new(
+                    IpcErrorCode::NotRepository,
+                    "located directory is not a Git checkout",
+                )
+            })?;
+        if resolved.id != repo.id || focus_id != checkout_id {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "located directory does not match the missing checkout",
+            ));
+        }
+        return database
+            .register_git_repo(resolved, &focus_id)
+            .map_err(operation_error);
+    }
+
+    if checkout.is_primary {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "plain directories and primary checkouts can only be located at their original path; open a moved directory as a new location",
+        ));
+    }
+    let management_root = database
+        .existing_git_checkout(&repo.id)
+        .map_err(operation_error)?
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::FolderMissing,
+                "no available checkout exists to verify this worktree",
+            )
+        })?;
+    if git_common_dir(&management_root)? != git_common_dir(&selected_path)? {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "located directory belongs to a different Git repository",
+        ));
+    }
+    let repair = Command::new("git")
+        .args(["worktree", "repair"])
+        .arg(&selected_path)
+        .current_dir(&management_root)
+        .output()
+        .map_err(|error| {
+            IpcError::new(
+                IpcErrorCode::GitFailed,
+                format!("could not repair the located worktree: {error}"),
+            )
+        })?;
+    if !repair.status.success() {
+        return Err(IpcError::new(
+            IpcErrorCode::GitFailed,
+            format!(
+                "Git could not repair the located worktree: {}",
+                String::from_utf8_lossy(&repair.stderr).trim()
+            ),
+        ));
+    }
+    let (resolved, focus_id) =
+        git::resolve_repository(&selected_path, &timestamp())?.ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::NotRepository,
+                "located directory is not a Git checkout",
+            )
+        })?;
+    if resolved.id != repo.id || !resolved.checkouts.iter().any(|item| item.id == focus_id) {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "located directory does not resolve to the repository containing this missing worktree",
+        ));
+    }
+    database
+        .locate_git_checkout(&resolved, checkout_id, &focus_id)
+        .map_err(operation_error)
+}
+
+fn git_common_dir(path: &Path) -> Result<std::path::PathBuf, IpcError> {
+    let output = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(path)
+        .output()
+        .map_err(|error| {
+            IpcError::new(
+                IpcErrorCode::GitFailed,
+                format!("could not verify Git worktree ownership: {error}"),
+            )
+        })?;
+    if !output.status.success() {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "located directory does not contain Git worktree metadata",
+        ));
+    }
+    let common_dir_text = String::from_utf8_lossy(&output.stdout);
+    let common_dir = Path::new(common_dir_text.trim());
+    let common_dir = if common_dir.is_absolute() {
+        common_dir.to_path_buf()
+    } else {
+        path.join(common_dir)
+    };
+    common_dir.canonicalize().map_err(|error| {
+        IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            format!("could not resolve Git worktree ownership: {error}"),
+        )
+    })
+}
+
+pub fn close_missing_checkout(
+    database: &Database,
+    backend: &crate::terminal::TerminalBackend,
+    checkout_id: &str,
+) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
+    let state = database.load_workspace().map_err(operation_error)?;
+    let repo = state
+        .repos
+        .iter()
+        .find(|repo| {
+            repo.checkouts
+                .iter()
+                .any(|checkout| checkout.id == checkout_id)
+        })
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "checkout ID is not registered",
+            )
+        })?;
+    let checkout = repo
+        .checkouts
+        .iter()
+        .find(|checkout| checkout.id == checkout_id)
+        .expect("checkout was found in repository");
+    if !checkout.is_missing {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "only a missing checkout can be closed",
+        ));
+    }
+    if repo.kind == RepoKind::Git && !checkout.is_primary {
+        if checkout
+            .sessions
+            .iter()
+            .any(|session| session.status == crate::domain::workspace::SessionStatus::Active)
+        {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "close active terminal sessions before closing this missing worktree",
+            ));
+        }
+        let info = worktree::removal_info(database, checkout_id)?;
+        let confirmation = worktree::WorktreeRemovalConfirmation {
+            confirm_dirty: false,
+            confirmed_dirty_files: info.dirty_files,
+            confirmed_session_ids: Vec::new(),
+            expected_branch: info.branch,
+            expected_unmerged_commits: info.unmerged_commits,
+            delete_branch: false,
+        };
+        return worktree::remove(database, backend, checkout_id, &confirmation)
+            .map(|removed| removed.workspace);
+    }
+    database
+        .close_missing_checkout(checkout_id)
+        .map_err(operation_error)
+}
+
+fn operation_error(error: String) -> IpcError {
+    IpcError::new(IpcErrorCode::OperationFailed, error)
 }
 
 pub fn restore(database: &Database) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
@@ -117,11 +361,17 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        domain::workspace::{RepoKind, Session, SessionStatus, SessionType},
+        domain::{
+            terminal_layout::{CheckoutTerminalLayout, TerminalLayoutNode, TerminalLayoutTab},
+            workspace::{RepoKind, Session, SessionStatus, SessionType},
+        },
         persistence::Database,
     };
 
-    use super::{register_folder, restore, set_default_branch};
+    use super::{
+        close_missing_checkout, locate_missing_checkout, register_folder, restore,
+        set_default_branch,
+    };
 
     fn git(cwd: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -450,5 +700,209 @@ mod tests {
         assert!(error
             .message
             .contains("Bare repositories are not supported"));
+    }
+
+    #[test]
+    fn locating_a_moved_worktree_repairs_git_and_migrates_its_checkout_metadata() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let moved_from = temp.path().join("worktree-old");
+        let moved_to = temp.path().join("worktree-new");
+        init_repo(&primary);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature",
+                moved_from.to_str().unwrap(),
+            ],
+        );
+        let database = database(temp.path());
+        let registered = register_folder(&database, &primary).unwrap();
+        let old_id = register_folder(&database, &moved_from)
+            .unwrap()
+            .active_checkout_id
+            .unwrap();
+        let session = Session {
+            id: "session:feature-shell".into(),
+            session_type: SessionType::Shell,
+            checkout_id: old_id.clone(),
+            name: "zsh".into(),
+            created_at: "now".into(),
+            status: SessionStatus::Active,
+        };
+        database.add_terminal_session(&session).unwrap();
+        let layout = CheckoutTerminalLayout {
+            active_tab_id: Some("tab:feature".into()),
+            tabs: vec![TerminalLayoutTab {
+                id: "tab:feature".into(),
+                root: TerminalLayoutNode::Session {
+                    session_id: session.id.clone(),
+                },
+            }],
+            session_order: vec![session.id.clone()],
+        };
+        database.save_terminal_layout(&old_id, &layout).unwrap();
+        database.mark_file_viewed(&old_id, "README.md").unwrap();
+        drop(database);
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        fs::rename(&moved_from, &moved_to).unwrap();
+
+        let located = locate_missing_checkout(&database, &old_id, &moved_to).unwrap();
+        let repo = &located.repos[0];
+        let new_id = crate::domain::workspace::checkout_id_for_path(
+            &moved_to.canonicalize().unwrap().display().to_string(),
+        );
+        assert_eq!(repo.checkouts.len(), 2);
+        assert!(repo.checkouts.iter().all(|checkout| checkout.id != old_id));
+        let checkout = repo
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.id == new_id)
+            .unwrap();
+        assert_eq!(checkout.branch.as_deref(), Some("feature"));
+        assert!(!checkout.is_missing);
+        assert_eq!(
+            checkout.sessions,
+            [Session {
+                checkout_id: new_id.clone(),
+                status: SessionStatus::Inactive,
+                ..session
+            }]
+        );
+        assert_eq!(located.active_checkout_id.as_deref(), Some(new_id.as_str()));
+        assert_eq!(
+            located.active_session_id.as_deref(),
+            Some("session:feature-shell")
+        );
+        assert_eq!(
+            database.load_terminal_layout(&new_id).unwrap(),
+            Some(layout)
+        );
+        assert_eq!(database.viewed_files(&new_id).unwrap(), ["README.md"]);
+        assert_eq!(repo.id, registered.repos[0].id);
+    }
+
+    #[test]
+    fn missing_plain_checkout_can_only_be_located_at_its_saved_path() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("plain");
+        fs::create_dir(&path).unwrap();
+        let database = database(temp.path());
+        let state = register_folder(&database, &path).unwrap();
+        let checkout_id = state.repos[0].checkouts[0].id.clone();
+        fs::remove_dir(&path).unwrap();
+        fs::create_dir(&path).unwrap();
+        let other = temp.path().join("other");
+        fs::create_dir(&other).unwrap();
+
+        assert!(locate_missing_checkout(&database, &checkout_id, &other).is_err());
+        let restored = locate_missing_checkout(&database, &checkout_id, &path).unwrap();
+        assert!(!restored.repos[0].checkouts[0].is_missing);
+    }
+
+    #[test]
+    fn locating_a_moved_plain_directory_rekeys_the_workspace_and_preserves_history() {
+        let temp = tempdir().unwrap();
+        let old_path = temp.path().join("plain-old");
+        let new_path = temp.path().join("plain-new");
+        fs::create_dir(&old_path).unwrap();
+        let database = database(temp.path());
+        let state = register_folder(&database, &old_path).unwrap();
+        let old_id = state.repos[0].checkouts[0].id.clone();
+        let session = Session {
+            id: "session:plain-shell".into(),
+            session_type: SessionType::Shell,
+            checkout_id: old_id.clone(),
+            name: "zsh".into(),
+            created_at: "now".into(),
+            status: SessionStatus::Active,
+        };
+        database.add_terminal_session(&session).unwrap();
+        database.mark_file_viewed(&old_id, "notes.md").unwrap();
+        drop(database);
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        fs::rename(&old_path, &new_path).unwrap();
+
+        let relocated = locate_missing_checkout(&database, &old_id, &new_path).unwrap();
+        let repo = &relocated.repos[0];
+        let new_id = crate::domain::workspace::checkout_id_for_path(
+            &new_path.canonicalize().unwrap().display().to_string(),
+        );
+        assert_eq!(
+            repo.id,
+            crate::domain::workspace::repo_id_for_path(&repo.root)
+        );
+        assert_eq!(
+            repo.root,
+            new_path.canonicalize().unwrap().display().to_string()
+        );
+        assert!(repo.checkouts.iter().all(|checkout| checkout.id != old_id));
+        assert_eq!(repo.checkouts[0].id, new_id);
+        assert_eq!(repo.checkouts[0].sessions[0].checkout_id, new_id);
+        assert_eq!(
+            repo.checkouts[0].sessions[0].status,
+            SessionStatus::Inactive
+        );
+        assert_eq!(database.viewed_files(&new_id).unwrap(), ["notes.md"]);
+        assert_eq!(
+            relocated.active_checkout_id.as_deref(),
+            Some(new_id.as_str())
+        );
+        assert_eq!(
+            relocated.active_session_id.as_deref(),
+            Some("session:plain-shell")
+        );
+    }
+
+    #[test]
+    fn closing_a_missing_location_removes_only_its_workspace_registration() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("plain");
+        fs::create_dir(&path).unwrap();
+        let database = database(temp.path());
+        let state = register_folder(&database, &path).unwrap();
+        let checkout_id = state.repos[0].checkouts[0].id.clone();
+        fs::remove_dir(&path).unwrap();
+
+        let closed = close_missing_checkout(
+            &database,
+            &crate::terminal::TerminalBackend::default(),
+            &checkout_id,
+        )
+        .unwrap();
+        assert!(closed.repos.is_empty());
+    }
+
+    #[test]
+    fn closing_a_missing_checkout_is_refused_while_its_session_is_active() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("plain");
+        fs::create_dir(&path).unwrap();
+        let database = database(temp.path());
+        let state = register_folder(&database, &path).unwrap();
+        let checkout_id = state.repos[0].checkouts[0].id.clone();
+        database
+            .add_terminal_session(&Session {
+                id: "session:missing".into(),
+                session_type: SessionType::Shell,
+                checkout_id: checkout_id.clone(),
+                name: "shell".into(),
+                created_at: "now".into(),
+                status: SessionStatus::Active,
+            })
+            .unwrap();
+        fs::remove_dir(&path).unwrap();
+
+        let error = close_missing_checkout(
+            &database,
+            &crate::terminal::TerminalBackend::default(),
+            &checkout_id,
+        )
+        .unwrap_err();
+        assert!(error.message.contains("active terminal sessions"));
+        assert_eq!(database.load_workspace().unwrap().repos.len(), 1);
     }
 }

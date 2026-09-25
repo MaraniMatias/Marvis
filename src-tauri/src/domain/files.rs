@@ -9,6 +9,13 @@ pub struct FileTree {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub struct FileSearchResult {
+    pub entries: Vec<FileEntry>,
+    pub truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
 pub struct FileEntry {
     pub name: String,
     pub path: String,
@@ -28,4 +35,12 @@ pub enum FileEntryKind {
 pub struct FileContent {
     pub path: String,
     pub content: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct CheckoutImage {
+    pub mime_type: String,
+    pub data_base64: String,
+    pub size_bytes: usize,
 }

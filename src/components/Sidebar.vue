@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { reactive } from "vue";
-import type { Repo } from "../domain/workspace";
+import type { Repo, TerminalSessionStatus } from "../domain/workspace";
 import Button from "./ui/button/Button.vue";
 
 defineOptions({ name: "FolderSidebar" });
@@ -10,12 +10,18 @@ defineProps<{
   activeCheckoutId: string | null;
   activeSessionId: string | null;
   isOpening: boolean;
+  sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
+  activityByCheckout?: Record<string, string[]>;
 }>();
 
 defineEmits<{
   openFolder: [];
   selectCheckout: [checkoutId: string];
   selectSession: [sessionId: string];
+  locateMissing: [checkoutId: string];
+  closeMissing: [checkoutId: string];
+  createWorktree: [checkoutId: string];
+  removeWorktree: [checkoutId: string];
 }>();
 
 const collapsedRepos = reactive(new Set<string>());
@@ -56,25 +62,73 @@ function toggleRepo(repoId: string) {
         </button>
         <div v-if="!collapsedRepos.has(repo.id)" class="ml-2 border-l border-white/6 pl-2">
           <div v-for="checkout in repo.checkouts" :key="checkout.id" class="mb-0.5">
-            <button
-              class="flex w-full items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-white/6"
-              :class="checkout.id === activeCheckoutId ? 'bg-white/8 text-zinc-100' : 'text-zinc-400'"
-              @click="$emit('selectCheckout', checkout.id)"
-            >
-              <span class="truncate">
-                {{
-                  checkout.isPrimary
-                    ? `Primary${checkout.branch ? ` · ${checkout.branch}` : ""}`
-                    : checkout.branch || checkout.path
-                }}
-              </span>
-              <span
-                v-if="checkout.isMissing"
-                class="shrink-0 rounded bg-amber-400/10 px-1.5 py-0.5 text-[10px] text-amber-200"
+            <div class="group flex items-center gap-0.5">
+              <button
+                class="flex min-w-0 flex-1 items-center justify-between gap-2 rounded-md px-2 py-1.5 text-left text-xs hover:bg-white/6"
+                :class="checkout.id === activeCheckoutId ? 'bg-white/8 text-zinc-100' : 'text-zinc-400'"
+                @click="$emit('selectCheckout', checkout.id)"
               >
-                Missing
-              </span>
-            </button>
+                <span class="truncate">
+                  {{
+                    checkout.isPrimary
+                      ? `Primary${checkout.branch ? ` · ${checkout.branch}` : ""}`
+                      : checkout.branch || checkout.path
+                  }}
+                </span>
+                <span
+                  v-if="checkout.isMissing"
+                  class="shrink-0 rounded bg-amber-400/10 px-1.5 py-0.5 text-[10px] text-amber-200"
+                >
+                  Missing
+                </span>
+                <span
+                  v-else-if="(activityByCheckout?.[checkout.id]?.length ?? 0) > 1"
+                  class="shrink-0 rounded bg-sky-400/10 px-1.5 py-0.5 text-[10px] text-sky-200"
+                  :title="`Concurrent activity: ${activityByCheckout?.[checkout.id]?.join(' + ')}`"
+                  :aria-label="`Concurrent activity: ${activityByCheckout?.[checkout.id]?.join(', ')}`"
+                >
+                  Concurrent
+                </span>
+              </button>
+              <button
+                v-if="repo.kind === 'git' && !checkout.isMissing"
+                :aria-label="`Create worktree from ${checkout.branch || checkout.path}`"
+                title="Create worktree from this checkout"
+                class="grid size-6 shrink-0 place-items-center rounded text-sm text-zinc-500 hover:bg-white/8 hover:text-zinc-100"
+                @click.stop="$emit('createWorktree', checkout.id)"
+              >
+                +
+              </button>
+              <button
+                v-if="checkout.isMissing"
+                :aria-label="`Locate ${checkout.path}`"
+                title="Locate this missing directory"
+                class="grid size-6 shrink-0 place-items-center rounded text-[10px] text-amber-200 hover:bg-amber-400/10"
+                :disabled="isOpening"
+                @click.stop="$emit('locateMissing', checkout.id)"
+              >
+                Locate
+              </button>
+              <button
+                v-if="checkout.isMissing"
+                :aria-label="`Close ${checkout.path}`"
+                title="Close this missing location in Marvis"
+                class="grid size-6 shrink-0 place-items-center rounded text-sm text-zinc-500 hover:bg-white/8 hover:text-zinc-100"
+                :disabled="isOpening"
+                @click.stop="$emit('closeMissing', checkout.id)"
+              >
+                ×
+              </button>
+              <button
+                v-if="repo.kind === 'git' && !checkout.isPrimary && !checkout.isMissing"
+                :aria-label="`Remove worktree ${checkout.branch || checkout.path}`"
+                title="Remove worktree"
+                class="grid size-6 shrink-0 place-items-center rounded text-sm text-zinc-500 hover:bg-red-400/10 hover:text-red-200"
+                @click.stop="$emit('removeWorktree', checkout.id)"
+              >
+                ×
+              </button>
+            </div>
             <div v-if="checkout.sessions.length" class="ml-3 border-l border-white/6 pl-2">
               <button
                 v-for="session in checkout.sessions"
@@ -83,6 +137,15 @@ function toggleRepo(repoId: string) {
                 :class="session.id === activeSessionId ? 'text-zinc-200' : 'text-zinc-500'"
                 @click="$emit('selectSession', session.id)"
               >
+                <span
+                  v-if="sessionRuntimeStatuses?.[session.id]"
+                  class="size-1.5 shrink-0 rounded-full"
+                  :class="sessionRuntimeStatuses[session.id].state === 'running' ? 'bg-green-400' : 'bg-red-400'"
+                  role="img"
+                  :aria-label="
+                    sessionRuntimeStatuses[session.id].state === 'running' ? 'Session running' : 'Session exited'
+                  "
+                />
                 <span class="truncate">{{ session.name }}</span>
                 <span class="shrink-0 text-[10px] text-zinc-600">{{ session.type }}</span>
               </button>

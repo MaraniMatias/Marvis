@@ -1,8 +1,10 @@
 # Marvis — Plan de base y primer MVP
 
-> Plan de ejecución para el primer hito usable de la Entrega 1 (*The Workstation*). Se lee junto con `MARVIS_DELIVERY_PLAN_v0.4.md` y los requisitos v0.2, actualmente conservados en `MARVIS_REQUIREMENTS.md.old`. Si hay diferencias de modelo o alcance, prevalece v0.4.
+> **OBSOLETO — sustituido por [PLAN_PENDIENTE.md](PLAN_PENDIENTE.md).** Se conserva como registro del plan original; para trabajo nuevo y criterios de cierre usar el plan de pendientes junto con [MVP_VALIDATION.md](MVP_VALIDATION.md). El alcance normativo sigue siendo `MARVIS_DELIVERY_PLAN_v0.4.md` y los requisitos v0.2.
 
-**Estado:** propuesta de implementación. **Plataforma inicial:** macOS.
+> Plan de ejecución para el primer hito usable de la Entrega 1 (_The Workstation_). Se lee junto con `MARVIS_DELIVERY_PLAN_v0.4.md` y los requisitos v0.2, actualmente conservados en `MARVIS_REQUIREMENTS.md.old`. Si hay diferencias de modelo o alcance, prevalece v0.4.
+
+**Estado:** obsoleto; no usar para planificar trabajo nuevo. **Plataforma inicial:** macOS.
 
 ## 1. Propósito y límites
 
@@ -29,13 +31,13 @@ No se requiere OpenCode para ese recorrido. La integración de agentes y review 
 
 ## 2. Orden y puertas de avance
 
-| Fase | Resultado verificable | Depende de |
-| --- | --- | --- |
-| 0. Riesgos | Spikes de Git y terminal medidos; decisiones bloqueantes registradas | Scaffold instrumental mínimo |
-| 1. Base | App abre, identifica y restaura repos/checkouts; IPC y persistencia funcionan | Resultados de fase 0 aplicables |
-| 2. MVP | Recorrido completo con terminal, archivos y cambios | Base estable |
-| 3. Entrega 1 | Cumple D1-01 a D1-20 y SEC-01 a SEC-07 | MVP usable |
-| Después | Entrega 2 (agentes y review), luego Entrega 3 | Entrega anterior cerrada |
+| Fase         | Resultado verificable                                                         | Depende de                      |
+| ------------ | ----------------------------------------------------------------------------- | ------------------------------- |
+| 0. Riesgos   | Spikes de Git y terminal medidos; decisiones bloqueantes registradas          | Scaffold instrumental mínimo    |
+| 1. Base      | App abre, identifica y restaura repos/checkouts; IPC y persistencia funcionan | Resultados de fase 0 aplicables |
+| 2. MVP       | Recorrido completo con terminal, archivos y cambios                           | Base estable                    |
+| 3. Entrega 1 | Cumple D1-01 a D1-20 y SEC-01 a SEC-07                                        | MVP usable                      |
+| Después      | Entrega 2 (agentes y review), luego Entrega 3                                 | Entrega anterior cerrada        |
 
 El scaffold instrumental para medir los spikes puede construirse al principio, pero **no** se da por definitiva la arquitectura de terminal o Git antes de superar sus pruebas. No hace falta terminar toda la fase 0 antes de preparar tipos, pruebas e infraestructura independientes de esos resultados.
 
@@ -62,11 +64,11 @@ Medir latencia de entrada, caudal de salida, pérdida de bytes, tiempo de resize
 
 ### 0.3 Decisiones antes de programar funciones dependientes
 
-| Tema | Propuesta para avanzar | Cierre necesario |
-| --- | --- | --- |
-| Q1: ubicación de worktrees | Preferir un directorio externo al repo, configurable, para no modificar `.git/info/exclude` ni mostrar `.worktrees/` como untracked. | **Aprobar antes del spike Git definitivo y de crear worktrees.** El plan v0.4 propone `<repo>/.worktrees/<name>` como valor inicial, pero deja Q1 abierta: esta propuesta no lo reemplaza sin decisión. |
-| Q11: rama por defecto incierta | Solicitar selección una vez y persistirla por repo. | Confirmar el comportamiento en el spike Git. |
-| Q7/Q8: submódulos y bare | Documentar resultado del spike y dar un comportamiento claro, sin fingir que son un checkout ordinario si no lo son. | Antes de cerrar resolución de rutas. |
+| Tema                           | Propuesta para avanzar                                                                                                               | Cierre necesario                                                                                                                                                                                        |
+| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Q1: ubicación de worktrees     | Preferir un directorio externo al repo, configurable, para no modificar `.git/info/exclude` ni mostrar `.worktrees/` como untracked. | **Aprobar antes del spike Git definitivo y de crear worktrees.** El plan v0.4 propone `<repo>/.worktrees/<name>` como valor inicial, pero deja Q1 abierta: esta propuesta no lo reemplaza sin decisión. |
+| Q11: rama por defecto incierta | Solicitar selección una vez y persistirla por repo.                                                                                  | Confirmar el comportamiento en el spike Git.                                                                                                                                                            |
+| Q7/Q8: submódulos y bare       | Documentar resultado del spike y dar un comportamiento claro, sin fingir que son un checkout ordinario si no lo son.                 | Antes de cerrar resolución de rutas.                                                                                                                                                                    |
 
 ## 4. Fase 1 — Base técnica
 

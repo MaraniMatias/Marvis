@@ -3,13 +3,23 @@ import { Channel } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import type { TerminalSessionStatus } from "../domain/workspace";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import type { TerminalLaunchType, TerminalSessionStatus } from "../domain/workspace";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
+import type { TerminalLaunchTarget } from "../lib/ipc";
 import { renderPtyOutput } from "../lib/terminal-renderer";
 import Button from "./ui/button/Button.vue";
 
-const props = defineProps<{ checkoutId: string; active: boolean }>();
+const props = withDefaults(
+  defineProps<{
+    checkoutId: string;
+    active: boolean;
+    focused?: boolean;
+    sessionType?: TerminalLaunchType;
+    launchTarget?: TerminalLaunchTarget;
+  }>(),
+  { focused: false, sessionType: "shell", launchTarget: undefined },
+);
 const emit = defineEmits<{
   created: [result: Awaited<ReturnType<typeof createTerminal>>];
   closed: [workspace: Awaited<ReturnType<typeof closeTerminal>>];
@@ -18,14 +28,18 @@ const emit = defineEmits<{
 }>();
 
 const terminalElement = ref<HTMLElement | null>(null);
-const state = ref<TerminalSessionStatus>({ state: "running" });
+const state = ref<TerminalSessionStatus>({ state: "running", foregroundProcess: false });
+const sessionLabel = computed(() =>
+  props.sessionType === "nvim" ? "Neovim" : props.sessionType.charAt(0).toUpperCase() + props.sessionType.slice(1),
+);
 const error = ref<string | null>(null);
 const closing = ref(false);
 const terminal = new Terminal({
   allowProposedApi: false,
   cursorBlink: true,
-  fontFamily: "SFMono-Regular, Menlo, Monaco, monospace",
-  fontSize: 13,
+  fontFamily: '"FiraCode Nerd Font Mono", monospace',
+  fontSize: 16,
+  lineHeight: 1.2,
   scrollback: 10000,
   theme: {
     background: "#10151d",
@@ -63,7 +77,7 @@ function updateStatus(status: TerminalSessionStatus) {
 async function pollStatus() {
   if (!sessionId) return;
   try {
-    updateStatus(await getTerminalStatus(sessionId));
+    updateStatus(await getTerminalStatus(props.checkoutId, sessionId));
   } catch (cause) {
     showError(cause);
   }
@@ -78,7 +92,7 @@ function queueResize(cols: number, rows: number) {
   latestSize = { cols, rows };
   if (!sessionId || state.value.state !== "running") return;
   const id = sessionId;
-  const resize = resizeQueue.then(() => resizeTerminal(id, cols, rows));
+  const resize = resizeQueue.then(() => resizeTerminal(props.checkoutId, id, cols, rows));
   resizeQueue = resize.catch(showError);
 }
 
@@ -86,7 +100,7 @@ function queueInput(value: string) {
   if (!sessionId || closing.value || state.value.state !== "running") return;
   const id = sessionId;
   const bytes = new TextEncoder().encode(value);
-  const write = inputQueue.then(() => writeTerminal(id, bytes));
+  const write = inputQueue.then(() => writeTerminal(props.checkoutId, id, bytes));
   inputQueue = write.catch(showError);
 }
 
@@ -94,7 +108,7 @@ async function requestClose() {
   if (!sessionId || closing.value) return;
   closing.value = true;
   try {
-    const actualStatus = await getTerminalStatus(sessionId);
+    const actualStatus = await getTerminalStatus(props.checkoutId, sessionId);
     updateStatus(actualStatus);
     if (
       actualStatus.state === "running" &&
@@ -105,7 +119,7 @@ async function requestClose() {
     }
     await inputQueue;
     await resizeQueue;
-    emit("closed", await closeTerminal(sessionId));
+    emit("closed", await closeTerminal(props.checkoutId, sessionId));
   } catch (cause) {
     showError(cause);
     closing.value = false;
@@ -120,9 +134,16 @@ async function startSession() {
   channel.onmessage = (buffer) => renderPtyOutput(terminal, buffer);
   const initialSize = { cols: terminal.cols || 80, rows: terminal.rows || 24 };
   try {
-    const created = await createTerminal(props.checkoutId, initialSize.cols, initialSize.rows, channel);
+    const created = await createTerminal(
+      props.checkoutId,
+      initialSize.cols,
+      initialSize.rows,
+      props.sessionType,
+      channel,
+      props.launchTarget,
+    );
     if (disposed) {
-      await closeTerminal(created.session.id);
+      await closeTerminal(props.checkoutId, created.session.id);
       return;
     }
     sessionId = created.session.id;
@@ -149,11 +170,12 @@ terminal.onData(queueInput);
 terminal.onResize(({ cols, rows }) => queueResize(cols, rows));
 
 watch(
-  () => props.active,
-  async (active) => {
+  () => [props.active, props.focused] as const,
+  async ([active, focused]) => {
     if (!active) return;
     await nextTick();
     fitActiveView();
+    if (focused) terminal.focus();
     void startSession();
   },
 );
@@ -180,7 +202,7 @@ onUnmounted(() => {
   <section class="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-white/8 bg-[#10151d]">
     <header class="flex h-9 shrink-0 items-center justify-between border-b border-white/8 px-3">
       <span class="truncate font-mono text-xs text-zinc-400">{{
-        state.state === "running" ? "Shell running" : `Exited · code ${state.exitCode ?? "unknown"}`
+        state.state === "running" ? `${sessionLabel} running` : `Exited · code ${state.exitCode ?? "unknown"}`
       }}</span>
       <Button variant="quiet" :disabled="closing" @click="requestClose">
         {{ closing ? "Closing…" : "Close session" }}

@@ -67,6 +67,7 @@ pub struct Session {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "lowercase")]
 pub enum SessionStatus {
+    Active,
     Inactive,
 }
 
@@ -76,6 +77,7 @@ pub struct TerminalSessionStatus {
     pub state: TerminalProcessState,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<u32>,
+    pub foreground_process: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
