@@ -1,0 +1,19 @@
+[package]
+name = "marvis"
+version = "0.1.0"
+description = "A focused workspace for repositories and checkouts"
+edition = "2021"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+tauri = { version = "2", features = [] }
+tauri-plugin-dialog = "2"
+rusqlite = { version = "0.37", features = ["bundled"] }
+portable-pty = "0.9"
+notify = "8"
+
+[dev-dependencies]
+tempfile = "3"

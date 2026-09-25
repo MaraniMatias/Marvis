@@ -5,7 +5,7 @@
 **Status:** Draft v0.2
 **Application:** Marvis
 **Initial platform:** macOS
-**Frontend:** Vue 3 + TypeScript + Vite + reka-ui (ver si tiene sentido @git-diff-view/vue)
+**Frontend:** Vue 3 + TypeScript + Vite + shadcn-vue + (Reka ui) + Tailwind CSS + (y @git-diff-view/vue)
 **Desktop runtime:** Tauri 2
 **Native core:** Rust
 **Primary agent:** OpenCode

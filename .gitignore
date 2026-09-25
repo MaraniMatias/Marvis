@@ -1,0 +1,15 @@
+node_modules/
+dist/
+target/
+coverage/
+.vite/
+.turbo/
+.cache/
+.eslintcache
+.prettier-cache
+*.tsbuildinfo
+src-tauri/gen/
+.DS_Store
+.ruff_cache/
+.pytest_cache/
+__pycache__/

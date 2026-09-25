@@ -1,0 +1,25 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  checks:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm fmt:check
+      - run: pnpm lint
+      - run: pnpm lint:rust
+      - run: pnpm typecheck
+      - run: pnpm test
+      - run: pnpm build:app

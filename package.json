@@ -1,0 +1,51 @@
+{
+  "name": "marvis",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "packageManager": "pnpm@12.5.1",
+  "scripts": {
+    "dev": "vite --host 127.0.0.1 --port 1420",
+    "build": "vue-tsc --noEmit && vite build",
+    "build:app": "tauri build --no-bundle",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "fmt": "prettier --write \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml",
+    "fmt:check": "prettier --check \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml --check",
+    "lint": "eslint src vite.config.ts",
+    "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "typecheck": "vue-tsc --noEmit",
+    "test:frontend": "vitest run",
+    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
+    "test": "pnpm test:frontend && pnpm test:rust"
+  },
+  "dependencies": {
+    "@git-diff-view/vue": "^0.1.7",
+    "@tauri-apps/api": "^2.11.1",
+    "@tauri-apps/plugin-dialog": "^2.4.0",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
+    "reka-ui": "^2.5.0",
+    "vue": "^3.5.21"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.36.0",
+    "@tailwindcss/vite": "^4.1.13",
+    "@tauri-apps/cli": "^2.11.1",
+    "@vitejs/plugin-vue": "^6.0.1",
+    "@vue/test-utils": "^2.5.1",
+    "@xterm/headless": "^6.0.0",
+    "eslint": "^9.36.0",
+    "eslint-plugin-vue": "^10.4.0",
+    "globals": "^16.4.0",
+    "happy-dom": "^20.14.5",
+    "prettier": "^3.6.2",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.44.1",
+    "vite": "^7.1.7",
+    "vitest": "^3.2.4",
+    "vue-eslint-parser": "^10.4.1",
+    "vue-tsc": "^3.0.8"
+  }
+}
