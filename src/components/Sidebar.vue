@@ -17,6 +17,7 @@ const props = defineProps<{
 defineEmits<{
   openFolder: [];
   selectCheckout: [checkoutId: string];
+  selectSession: [sessionId: string];
   locateMissing: [checkoutId: string];
   closeMissing: [checkoutId: string];
   createWorktree: [checkoutId: string];
@@ -140,7 +141,7 @@ function sessionForCheckout(checkout: Checkout) {
                 "
                 :aria-label="`Terminal session: ${sessionForCheckout(checkout)?.name}`"
                 :aria-current="checkout.id === activeCheckoutId ? 'page' : undefined"
-                @click="checkout.id !== activeCheckoutId && $emit('selectCheckout', checkout.id)"
+                @click="$emit('selectSession', sessionForCheckout(checkout)!.id)"
               >
                 <span
                   v-if="sessionRuntimeStatuses?.[sessionForCheckout(checkout)!.id]"

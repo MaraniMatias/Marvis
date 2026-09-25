@@ -167,7 +167,7 @@ describe("Sidebar actions and checkout states", () => {
     expect(sessions[0].get('[role="img"]').attributes("aria-label")).toBe("Session exited");
     await wrapper.setProps({ activeCheckoutId: null, activeSessionId: null });
     await wrapper.get('button[aria-label="Terminal session: Unknown"]').trigger("click");
-    expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:activity"]]);
+    expect(wrapper.emitted("selectSession")).toEqual([["session:unknown"]]);
     expect(wrapper.get('[aria-label="Concurrent activity: Terminal · Running, Recent file writes"]').text()).toBe(
       "Concurrent",
     );

@@ -10,6 +10,7 @@ const terminalMock = vi.hoisted(() => ({
   resizes: [] as Array<(size: { cols: number; rows: number }) => void>,
   output: [] as number[][],
   options: null as Record<string, unknown> | null,
+  focusCalls: 0,
 }));
 
 vi.mock("@tauri-apps/api/core", () => ({
@@ -41,7 +42,9 @@ vi.mock("@xterm/xterm", () => ({
     write(data: Uint8Array) {
       terminalMock.output.push(Array.from(data));
     }
-    focus() {}
+    focus() {
+      terminalMock.focusCalls += 1;
+    }
     dispose() {}
   },
 }));
@@ -81,6 +84,7 @@ describe("TerminalSession UI", () => {
     terminalMock.resizes = [];
     terminalMock.output = [];
     terminalMock.options = null;
+    terminalMock.focusCalls = 0;
     vi.mocked(createTerminal).mockResolvedValue(created);
     vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running" });
     vi.mocked(closeTerminal).mockResolvedValue(workspace);
@@ -148,6 +152,27 @@ describe("TerminalSession UI", () => {
     await flushPromises();
 
     expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "nvim", expect.anything(), launchTarget);
+    wrapper.unmount();
+  });
+
+  it("does not steal focus when a hidden terminal finishes starting", async () => {
+    let resolveCreate!: (value: typeof created) => void;
+    vi.mocked(createTerminal).mockReturnValue(
+      new Promise((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+    const wrapper = mount(TerminalSession, {
+      props: { checkoutId: "checkout:repo", active: true, visible: false, focused: true },
+    });
+    expect(createTerminal).toHaveBeenCalledTimes(1);
+    resolveCreate(created);
+    await flushPromises();
+    expect(terminalMock.focusCalls).toBe(0);
+
+    await wrapper.setProps({ visible: true, focused: true });
+    await flushPromises();
+    expect(terminalMock.focusCalls).toBe(1);
     wrapper.unmount();
   });
 

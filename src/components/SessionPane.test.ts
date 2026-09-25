@@ -21,6 +21,7 @@ vi.mock("./TerminalSession.vue", async () => {
       props: {
         checkoutId: { type: String, required: true },
         active: { type: Boolean, default: false },
+        visible: { type: Boolean, default: true },
         sessionType: { type: String, default: "shell" },
         launchTarget: { type: Object, default: undefined },
       },
@@ -154,6 +155,40 @@ describe("SessionPane terminal UI", () => {
     expect(terminalMock.mounts).toBe(1);
     expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(1);
     expect(saveTerminalLayout).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("keeps the terminal mounted while document tabs hide and show it", async () => {
+    const wrapper = mount(SessionPane, {
+      props: { checkout, activeSessionId: null, isOpening: true, visible: true },
+    });
+    await wrapper.setProps({ isOpening: false });
+    await flushPromises();
+    const terminal = wrapper.findComponent({ name: "TerminalSession" });
+    expect(terminal.exists()).toBe(true);
+    expect(terminal.props("visible")).toBe(true);
+
+    await wrapper.setProps({ visible: false });
+    expect(wrapper.findComponent({ name: "TerminalSession" }).exists()).toBe(true);
+    expect(wrapper.findComponent({ name: "TerminalSession" }).props("visible")).toBe(false);
+    await wrapper.setProps({ visible: true });
+    expect(wrapper.findComponent({ name: "TerminalSession" }).props("visible")).toBe(true);
+    expect(terminalMock.mounts).toBe(1);
+    wrapper.unmount();
+  });
+
+  it("does not create another shell when an existing session is selected", async () => {
+    const wrapper = mount(SessionPane, {
+      props: { checkout, activeSessionId: null, isOpening: true },
+    });
+    await wrapper.setProps({ isOpening: false });
+    await flushPromises();
+    expect(terminalMock.mounts).toBe(1);
+
+    await wrapper.setProps({ activeSessionId: "session:old" });
+    await flushPromises();
+    expect(terminalMock.mounts).toBe(1);
+    expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(1);
     wrapper.unmount();
   });
 

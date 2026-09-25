@@ -7,8 +7,10 @@ import type { PaletteCommandId } from "./domain/command-palette";
 import { getPaletteCommands } from "./domain/command-palette";
 import { parseEditorPosition } from "./domain/editor";
 import type { EditorPosition } from "./domain/editor";
+import type { MainDocument, MainDocumentMode } from "./domain/main-document";
 import InspectorPane from "./components/InspectorPane.vue";
 import CommandPalette from "./components/CommandPalette.vue";
+import DocumentPane from "./components/DocumentPane.vue";
 import GitStatusBar from "./components/GitStatusBar.vue";
 import SessionPane from "./components/SessionPane.vue";
 import Sidebar from "./components/Sidebar.vue";
@@ -25,6 +27,7 @@ import {
 import type { EditorAvailability } from "./lib/ipc";
 import { useWorkspaceState } from "./presentation/workspace";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
+import { isMarkdownPath } from "./presentation/markdown-preview";
 
 const {
   workspace,
@@ -33,6 +36,7 @@ const {
   error,
   chooseFolder,
   selectCheckout,
+  selectSession: selectWorkspaceSession,
   updateWorkspace,
   promptForDefaultBranchIfNeeded,
 } = useWorkspaceState();
@@ -57,14 +61,16 @@ const nvimRequest = ref<{
   column?: number;
   token: number;
 } | null>(null);
-const selectedFile = ref<{ checkoutId: string; path: string } | null>(null);
+const documents = ref<Record<string, MainDocument>>({});
+const mainViews = ref<Record<string, "terminal" | "document">>({});
 const inspectorCommand = ref<{
-  action: "open-file" | "open-changes" | "open-preview";
+  action: "open-file" | "open-changes";
   token: number;
 } | null>(null);
 const editorAvailability = ref<EditorAvailability>({ zed: false, neovim: false });
 const sessionRuntimeStatuses = ref<Record<string, TerminalSessionStatus>>({});
 const recentFileWrites = ref<Record<string, boolean>>({});
+const documentRefreshRevisions = ref<Record<string, number>>({});
 const activityByCheckout = computed(() => {
   const activity: Record<string, string[]> = {};
   for (const checkout of allCheckouts.value) {
@@ -98,20 +104,80 @@ const lifecycleRepo = computed(
 );
 const paletteCommands = computed(() => {
   const checkout = activeCheckout.value;
+  const document = checkout ? documents.value[checkout.id] : undefined;
   return getPaletteCommands({
     hasCheckout: Boolean(checkout),
     isMissing: checkout?.isMissing ?? false,
     isGit: activeRepo.value?.kind === "git",
-    hasSelectedFile: selectedFile.value?.checkoutId === checkout?.id,
+    hasSelectedFile: Boolean(document),
     zedAvailable: editorAvailability.value.zed,
     neovimAvailable: editorAvailability.value.neovim,
   });
 });
+const activeDocument = computed(() => {
+  const checkout = activeCheckout.value;
+  const document = checkout ? documents.value[checkout.id] : undefined;
+  if (!checkout || !document || document.checkoutId !== checkout.id) return null;
+  return document;
+});
+const activeMainView = computed(() => {
+  const checkoutId = activeCheckout.value?.id;
+  return checkoutId && activeDocument.value && mainViews.value[checkoutId] === "document" ? "document" : "terminal";
+});
+
+function openFileDocument(selection: { checkoutId: string; path: string }) {
+  documents.value = {
+    ...documents.value,
+    [selection.checkoutId]: {
+      ...selection,
+      source: "file",
+      mode: isMarkdownPath(selection.path) ? "view" : "code",
+    },
+  };
+  mainViews.value = { ...mainViews.value, [selection.checkoutId]: "document" };
+}
+
+function openChangedDocument(selection: { checkoutId: string; path: string }) {
+  documents.value = { ...documents.value, [selection.checkoutId]: { ...selection, source: "change", mode: "diff" } };
+  mainViews.value = { ...mainViews.value, [selection.checkoutId]: "document" };
+}
+
+function setDocumentMode(mode: MainDocumentMode) {
+  const checkoutId = activeCheckout.value?.id;
+  const document = activeDocument.value;
+  if (!checkoutId || !document) return;
+  documents.value = { ...documents.value, [checkoutId]: { ...document, mode } };
+}
+
+function closeDocument() {
+  const checkoutId = activeCheckout.value?.id;
+  if (!checkoutId) return;
+  const next = { ...documents.value };
+  delete next[checkoutId];
+  documents.value = next;
+  mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
+}
+
+function activateCheckoutTerminal(checkoutId: string) {
+  mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
+  void selectCheckout(checkoutId);
+}
+
+function activateTerminalSession(sessionId: string) {
+  const checkout = allCheckouts.value.find((item) => item.sessions.some((session) => session.id === sessionId));
+  if (!checkout) return;
+  mainViews.value = { ...mainViews.value, [checkout.id]: "terminal" };
+  void selectWorkspaceSession(sessionId);
+}
 
 onMounted(async () => {
   try {
     const dispose = await listen<string>("checkout-file-activity", (event) => {
       recentFileWrites.value = { ...recentFileWrites.value, [event.payload]: true };
+      documentRefreshRevisions.value = {
+        ...documentRefreshRevisions.value,
+        [event.payload]: (documentRefreshRevisions.value[event.payload] ?? 0) + 1,
+      };
       const previous = activityExpiryTimers.get(event.payload);
       if (previous !== undefined) window.clearTimeout(previous);
       activityExpiryTimers.set(
@@ -148,6 +214,7 @@ function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
 }
 
 async function requestShell(checkoutId: string) {
+  mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
   try {
     workspace.value = await persistCheckoutSelection(checkoutId);
     shellRequest.value = { checkoutId, token: ++shellRequestToken };
@@ -157,6 +224,7 @@ async function requestShell(checkoutId: string) {
 }
 
 async function requestNvim(checkoutId: string, filePath?: string, position?: EditorPosition) {
+  mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
   const request = {
     checkoutId,
     ...(filePath && position && { filePath, line: position.line, column: position.column }),
@@ -180,7 +248,7 @@ function promptEditorPosition(): EditorPosition | null {
   return position;
 }
 
-function requestInspector(action: "open-file" | "open-changes" | "open-preview") {
+function requestInspector(action: "open-file" | "open-changes") {
   inspectorCommand.value = { action, token: ++inspectorCommandToken };
 }
 
@@ -211,11 +279,15 @@ async function runPaletteCommand(command: PaletteCommandId) {
       if (checkout && activeRepo.value?.kind === "git" && !checkout.isMissing) requestInspector("open-changes");
       break;
     case "open-preview":
-      if (selectedFile.value?.checkoutId === checkout?.id) requestInspector("open-preview");
+      if (activeDocument.value) {
+        const mode = isMarkdownPath(activeDocument.value.path) ? "view" : "code";
+        setDocumentMode(mode);
+        mainViews.value = { ...mainViews.value, [activeDocument.value.checkoutId]: "document" };
+      }
       break;
     case "open-zed":
       if (checkout && !checkout.isMissing) {
-        const file = selectedFile.value?.checkoutId === checkout.id ? selectedFile.value.path : undefined;
+        const file = activeDocument.value?.checkoutId === checkout.id ? activeDocument.value.path : undefined;
         const position = file ? promptEditorPosition() : undefined;
         if (file && !position) break;
         try {
@@ -227,7 +299,7 @@ async function runPaletteCommand(command: PaletteCommandId) {
       break;
     case "open-neovim":
       if (checkout && !checkout.isMissing) {
-        const file = selectedFile.value?.checkoutId === checkout.id ? selectedFile.value.path : undefined;
+        const file = activeDocument.value?.checkoutId === checkout.id ? activeDocument.value.path : undefined;
         const position = file ? promptEditorPosition() : undefined;
         if (file && !position) break;
         await requestNvim(checkout.id, file, position ?? undefined);
@@ -291,29 +363,89 @@ async function closeCheckout(checkoutId: string) {
         :session-runtime-statuses="sessionRuntimeStatuses"
         :is-opening="isOpening"
         @open-folder="chooseFolder"
-        @select-checkout="selectCheckout"
+        @select-checkout="activateCheckoutTerminal"
+        @select-session="activateTerminalSession"
         @locate-missing="locateCheckout"
         @close-missing="closeCheckout"
         @create-worktree="openWorktreeDialog('create', $event)"
         @remove-worktree="openWorktreeDialog('remove', $event)"
       />
-      <SessionPane
-        :checkout="activeCheckout"
-        :active-session-id="workspace.activeSessionId"
-        :is-opening="isOpening"
-        :shell-request="shellRequest"
-        :nvim-request="nvimRequest"
-        :registered-session-ids="registeredSessionIds"
-        @open-folder="chooseFolder"
-        @workspace-updated="updateWorkspace"
-        @session-status-changed="updateSessionStatus"
-      />
+      <div class="flex min-w-0 flex-1 flex-col">
+        <nav
+          role="tablist"
+          aria-label="Main view"
+          class="flex h-11 shrink-0 items-center gap-1 border-b border-white/8 px-3"
+        >
+          <button
+            role="tab"
+            type="button"
+            :aria-selected="activeMainView === 'terminal'"
+            class="rounded px-3 py-1.5 text-xs"
+            :class="activeMainView === 'terminal' ? 'bg-white/8 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
+            @click="activeCheckout && (mainViews = { ...mainViews, [activeCheckout.id]: 'terminal' })"
+          >
+            Terminal
+          </button>
+          <div
+            v-if="activeDocument"
+            class="flex h-full items-center gap-1 border-b px-2"
+            :class="activeMainView === 'document' ? 'border-sky-400/60' : 'border-transparent'"
+          >
+            <button
+              role="tab"
+              type="button"
+              :aria-selected="activeMainView === 'document'"
+              class="max-w-64 truncate px-1 py-1.5 text-xs"
+              :class="activeMainView === 'document' ? 'text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
+              @click="mainViews = { ...mainViews, [activeDocument.checkoutId]: 'document' }"
+            >
+              {{ activeDocument.path.split(/[\\/]/).at(-1) }}
+            </button>
+            <button
+              type="button"
+              aria-label="Close document"
+              class="rounded px-1 text-zinc-500 hover:bg-white/8 hover:text-zinc-200"
+              @click="closeDocument"
+            >
+              ×
+            </button>
+          </div>
+        </nav>
+        <div class="relative min-h-0 flex-1">
+          <SessionPane
+            v-show="activeMainView === 'terminal'"
+            class="absolute inset-0"
+            :checkout="activeCheckout"
+            :active-session-id="workspace.activeSessionId"
+            :is-opening="isOpening"
+            :visible="activeMainView === 'terminal'"
+            :shell-request="shellRequest"
+            :nvim-request="nvimRequest"
+            :registered-session-ids="registeredSessionIds"
+            @open-folder="chooseFolder"
+            @workspace-updated="updateWorkspace"
+            @session-status-changed="updateSessionStatus"
+          />
+          <DocumentPane
+            v-if="activeDocument"
+            v-show="activeMainView === 'document'"
+            class="absolute inset-0"
+            :checkout="activeCheckout"
+            :document="activeDocument"
+            :git-snapshot="gitSnapshot"
+            :active="activeMainView === 'document'"
+            :refresh-revision="documentRefreshRevisions[activeDocument.checkoutId] ?? 0"
+            @update-mode="setDocumentMode"
+          />
+        </div>
+      </div>
       <InspectorPane
         :checkout="activeCheckout"
         :repo="activeRepo"
         :git-snapshot="gitSnapshot"
         :command-request="inspectorCommand"
-        @selected-file="selectedFile = $event"
+        @open-file="openFileDocument"
+        @open-change="openChangedDocument"
       />
     </div>
     <WorktreeDialog

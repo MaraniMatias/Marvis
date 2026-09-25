@@ -12,6 +12,7 @@ const props = defineProps<{
   checkout: Checkout | null;
   activeSessionId: string | null;
   isOpening: boolean;
+  visible?: boolean;
   shellRequest?: { checkoutId: string; token: number } | null;
   nvimRequest?: {
     checkoutId: string;
@@ -22,6 +23,7 @@ const props = defineProps<{
   } | null;
   registeredSessionIds?: string[];
 }>();
+const isVisible = computed(() => props.visible ?? true);
 
 const emit = defineEmits<{
   openFolder: [];
@@ -252,15 +254,6 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
 
 <template>
   <main class="flex min-w-0 flex-1 flex-col bg-[#111318]">
-    <header class="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-white/8 px-6">
-      <div v-if="checkout" class="flex min-w-0 items-center gap-2 text-sm">
-        <span class="truncate text-zinc-200">{{ checkout.path.split(/[\\/]/).filter(Boolean).at(-1) }}</span>
-        <span class="text-zinc-600">/</span>
-        <span class="text-zinc-500">Terminal</span>
-      </div>
-      <span v-else class="text-sm text-zinc-500">Terminal</span>
-    </header>
-
     <section class="relative min-h-0 flex-1 p-3" aria-label="Terminal session view">
       <div v-for="view in views" v-show="view.checkoutId === checkout?.id" :key="view.key" class="absolute inset-3">
         <TerminalSession
@@ -270,7 +263,8 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
           :session-type="view.sessionType"
           :launch-target="view.launchTarget"
           :active="view.checkoutId === checkout?.id"
-          :focused="view.session?.id === activeSessionId"
+          :visible="isVisible"
+          :focused="isVisible && view.session?.id === activeSessionId"
           @created="onCreated(view.key, $event)"
           @closed="onClosed(view.key, $event)"
           @status-changed="onStatusChanged(view.session?.id ?? view.key, $event)"

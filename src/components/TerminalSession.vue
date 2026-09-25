@@ -14,11 +14,12 @@ const props = withDefaults(
   defineProps<{
     checkoutId: string;
     active: boolean;
+    visible?: boolean;
     focused?: boolean;
     sessionType?: TerminalLaunchType;
     launchTarget?: TerminalLaunchTarget;
   }>(),
-  { focused: false, sessionType: "shell", launchTarget: undefined },
+  { visible: true, focused: false, sessionType: "shell", launchTarget: undefined },
 );
 const emit = defineEmits<{
   created: [result: Awaited<ReturnType<typeof createTerminal>>];
@@ -84,7 +85,8 @@ async function pollStatus() {
 }
 
 function fitActiveView() {
-  if (!props.active || !terminalElement.value) return;
+  if (!props.active || !props.visible || !terminalElement.value) return;
+  if (terminalElement.value.clientWidth === 0 || terminalElement.value.clientHeight === 0) return;
   fit.fit();
 }
 
@@ -159,7 +161,7 @@ async function startSession() {
     ) {
       queueResize(terminal.cols, terminal.rows);
     }
-    terminal.focus();
+    if (props.visible && props.active && props.focused) terminal.focus();
     await pollStatus();
     if (state.value.state === "running") {
       statusTimer = window.setInterval(() => void pollStatus(), 750);
@@ -174,12 +176,12 @@ terminal.onData(queueInput);
 terminal.onResize(({ cols, rows }) => queueResize(cols, rows));
 
 watch(
-  () => [props.active, props.focused] as const,
-  async ([active, focused]) => {
+  () => [props.active, props.visible, props.focused] as const,
+  async ([active, visible, focused]) => {
     if (!active) return;
     await nextTick();
     fitActiveView();
-    if (focused) terminal.focus();
+    if (visible && focused) terminal.focus();
     void startSession();
   },
 );

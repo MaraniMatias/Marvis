@@ -95,6 +95,7 @@ export function useWorkspaceState() {
     selectSession: async (sessionId: string | null) => {
       try {
         workspace.value = await persistSessionSelection(sessionId);
+        await promptForDefaultBranchIfNeeded();
       } catch (cause) {
         error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
       }
