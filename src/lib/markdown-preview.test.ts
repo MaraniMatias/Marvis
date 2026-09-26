@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { attachMarkdownImages, renderMarkdownPreview } from "./markdown-preview";
 
 describe("Markdown preview", () => {
-  it("renders GFM tables, task lists, and highlighted fenced code", () => {
+  it("renders GFM tables, task lists, and fenced code", () => {
     const preview = renderMarkdownPreview(
       "| name | value |\n| --- | --- |\n| one | two |\n\n- [x] done\n- [ ] later\n\n```js\nconst answer = 42;\n```",
       "docs/readme.md",
@@ -12,7 +12,7 @@ describe("Markdown preview", () => {
     expect(preview.html).toContain("<table>");
     expect(preview.html).toContain('type="checkbox"');
     expect(preview.html).toContain("checked");
-    expect(preview.html).toContain('class="hljs-keyword"');
+    expect(preview.html).toContain('<pre><code class="language-js">const answer = 42;');
   });
 
   it("SEC-04 sanitizes scripts, event handlers, and javascript URLs", () => {

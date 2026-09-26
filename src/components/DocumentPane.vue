@@ -1,7 +1,4 @@
 <script setup lang="ts">
-import DOMPurify from "dompurify";
-import hljs from "highlight.js/lib/common";
-import "highlight.js/styles/github-dark.css";
 import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
 import type { MainDocument, MainDocumentMode } from "../domain/main-document";
 import type { Checkout } from "../domain/workspace";
@@ -64,48 +61,93 @@ const staleContent = computed(() => contentIdentity.value !== null && contentIde
 const staleDiff = computed(
   () => props.document.mode === "diff" && staleContent.value && diffReadyIdentity.value !== identity.value,
 );
-const highlightedSource = computed(() => {
-  const extension = props.document.path.split(".").pop()?.toLowerCase();
-  const language = extension && hljs.getLanguage(extension) ? extension : undefined;
-  if (!language) return null;
-  const html = hljs.highlight(content.value, { language, ignoreIllegals: true }).value;
-  const sanitized = DOMPurify.sanitize(html, {
-    ALLOWED_TAGS: ["span"],
-    ALLOWED_ATTR: ["class"],
-  });
-  return sanitized;
-});
-const highlightedLines = computed(() =>
-  highlightedSource.value === null ? null : splitHighlightedLines(highlightedSource.value),
-);
+const highlightedLines = ref<readonly string[] | null>(null);
+const highlightedSource = ref<string | null>(null);
+const highlighting = ref(false);
 let requestGeneration = 0;
+let highlightGeneration = 0;
 let loadedIdentity: string | null = null;
 
-function splitHighlightedLines(html: string): string[] {
-  const lines: string[] = [];
-  const openSpans: string[] = [];
-  const tagsAndBreaks = /<span class="[^"]*">|<\/span>|\r?\n/g;
-  let line = "";
-  let cursor = 0;
-  for (const match of html.matchAll(tagsAndBreaks)) {
-    const token = match[0];
-    const index = match.index;
-    line += html.slice(cursor, index);
-    if (token === "\n" || token === "\r\n") {
-      lines.push(`${line}${"</span>".repeat(openSpans.length)}`);
-      line = openSpans.join("");
-    } else if (token.startsWith("</")) {
-      line += token;
-      openSpans.pop();
-    } else {
-      line += token;
-      openSpans.push(token);
-    }
-    cursor = index + token.length;
+const highlightableSourceExtensions = new Set([
+  "c",
+  "cs",
+  "css",
+  "go",
+  "gql",
+  "graphql",
+  "h",
+  "htm",
+  "html",
+  "java",
+  "js",
+  "jsx",
+  "json",
+  "jsonc",
+  "kt",
+  "kts",
+  "less",
+  "md",
+  "mdown",
+  "markdown",
+  "php",
+  "py",
+  "pyw",
+  "rs",
+  "scss",
+  "sh",
+  "sql",
+  "swift",
+  "toml",
+  "ts",
+  "tsx",
+  "vue",
+  "xml",
+  "yaml",
+  "yml",
+  "zsh",
+]);
+
+function canHighlightSource(path: string): boolean {
+  const extension = path.split(".").pop()?.toLowerCase();
+  return extension !== undefined && highlightableSourceExtensions.has(extension);
+}
+
+function invalidateHighlight(clear = true) {
+  highlightGeneration += 1;
+  highlighting.value = false;
+  if (clear) {
+    highlightedLines.value = null;
+    highlightedSource.value = null;
   }
-  line += html.slice(cursor);
-  lines.push(line);
-  return lines;
+}
+
+function startHighlight(fileIdentity: string, source: string) {
+  const path = props.document.path;
+  const request = ++highlightGeneration;
+  highlightedLines.value = null;
+  highlightedSource.value = null;
+  highlighting.value = canHighlightSource(path);
+  if (!highlighting.value) return;
+
+  void import("../lib/source-highlighter")
+    .then(({ highlightSource }) => highlightSource(path, source))
+    .then((lines) => {
+      if (
+        request !== highlightGeneration ||
+        identity.value !== fileIdentity ||
+        content.value !== source ||
+        (props.document.mode === "view" && isMarkdown.value)
+      )
+        return;
+      highlightedLines.value = lines;
+      highlightedSource.value = lines === null ? null : source;
+      highlighting.value = false;
+    })
+    .catch(() => {
+      if (request === highlightGeneration && identity.value === fileIdentity && content.value === source) {
+        highlighting.value = false;
+      }
+    });
 }
 
 function errorText(error: unknown): string {
@@ -137,6 +179,7 @@ async function loadFile(preservePosition = false) {
   if (!checkoutId || props.document.checkoutId !== checkoutId || props.document.mode === "diff") return;
   if (!available.value) {
     requestGeneration += 1;
+    invalidateHighlight();
     content.value = "";
     contentIdentity.value = fileIdentity;
     contentState.value = "error";
@@ -156,6 +199,11 @@ async function loadFile(preservePosition = false) {
     contentIdentity.value = fileIdentity;
     contentState.value = "ready";
     loadedIdentity = fileIdentity;
+    if (props.document.mode === "view" && isMarkdown.value) {
+      invalidateHighlight();
+    } else {
+      startHighlight(fileIdentity, result.content);
+    }
     await nextTick();
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
     if (fileViewport.value) {
@@ -174,6 +222,7 @@ async function loadFile(preservePosition = false) {
     contentError.value = errorText(error);
     contentState.value = "error";
     loadedIdentity = fileIdentity;
+    invalidateHighlight();
     clear();
   }
 }
@@ -206,6 +255,7 @@ watch(
   async ([fileIdentity, mode, isAvailable]) => {
     if (loadedIdentity !== fileIdentity) {
       requestGeneration += 1;
+      invalidateHighlight(false);
       loadedIdentity = null;
       contentState.value = contentIdentity.value === null ? "idle" : "loading";
       contentError.value = "";
@@ -219,11 +269,13 @@ watch(
     }
     if (mode === "diff") {
       requestGeneration += 1;
+      invalidateHighlight();
       clear();
       return;
     }
     if (isAvailable === false) {
       requestGeneration += 1;
+      invalidateHighlight();
       content.value = "";
       contentIdentity.value = fileIdentity;
       contentState.value = "error";
@@ -246,7 +298,10 @@ watch(
         await load(checkoutId, props.document.path, content.value);
         await restoreMarkdownReadingPosition(position, request, fileIdentity, checkoutId);
       }
-    } else clear();
+    } else {
+      if (contentState.value === "ready") startHighlight(fileIdentity, content.value);
+      clear();
+    }
   },
   { immediate: true, flush: "sync" },
 );
@@ -446,7 +501,14 @@ function onMarkdownLink(event: MouseEvent) {
         Loading file…
       </p>
       <template v-else-if="staleContent">
-        <pre v-if="content" class="whitespace-pre-wrap p-3 font-mono text-[13px] leading-5 text-zinc-300">{{
+        <pre
+          v-if="content && highlightedLines !== null && highlightedSource === content"
+          class="whitespace-pre-wrap p-3 font-mono text-[13px] leading-5 text-zinc-300"
+        >
+          <!-- eslint-disable-next-line vue/no-v-html -- Code is generated by Shiki and DOMPurify-sanitized. -->
+          <code class="shiki" v-html="highlightedLines.join('\n')" />
+        </pre>
+        <pre v-else-if="content" class="whitespace-pre-wrap p-3 font-mono text-[13px] leading-5 text-zinc-300">{{
           content
         }}</pre>
         <p v-else class="p-3 text-sm text-zinc-500">Updating document…</p>
@@ -455,6 +517,7 @@ function onMarkdownLink(event: MouseEvent) {
       <p v-else-if="contentState === 'ready' && content.length === 0" role="status" class="p-3 text-sm text-zinc-500">
         This file is empty.
       </p>
+      <p v-else-if="highlighting" role="status" class="p-3 text-sm text-zinc-500">Highlighting source…</p>
       <template v-else-if="contentState === 'ready' || (contentState === 'loading' && contentIdentity === identity)">
         <template v-if="document.mode === 'view' && isMarkdown">
           <p v-if="markdownPreviewState === 'loading'" role="status" class="px-3 pt-3 text-xs text-zinc-500">
@@ -479,8 +542,8 @@ function onMarkdownLink(event: MouseEvent) {
         >
           <pre class="source-line-number" aria-hidden="true">{{ sourceLineNumbers }}</pre>
           <pre class="source-code min-w-max whitespace-pre">
-            <!-- eslint-disable vue/no-v-html -- Code is generated by highlight.js and DOMPurify-sanitized. -->
-            <code v-if="highlightedSource !== null" class="hljs" v-html="highlightedSource" />
+            <!-- eslint-disable vue/no-v-html -- Code is generated by Shiki and DOMPurify-sanitized. -->
+            <code v-if="highlightedLines !== null" class="shiki" v-html="highlightedLines.join('\n')" />
             <!-- eslint-enable vue/no-v-html -->
             <code v-else>{{ content }}</code>
           </pre>
@@ -498,10 +561,10 @@ function onMarkdownLink(event: MouseEvent) {
             :class="wrapCode ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'"
           >
             <span class="source-line-number">{{ index + 1 }}</span>
-            <!-- eslint-disable vue/no-v-html -- Line fragments come from one sanitized highlight.js render. -->
+            <!-- eslint-disable vue/no-v-html -- Line fragments come from one sanitized Shiki render. -->
             <code
               v-if="highlightedLines !== null"
-              class="hljs px-3"
+              class="shiki px-3"
               :class="wrapCode ? 'min-w-0 whitespace-pre-wrap break-all' : 'min-w-max'"
               v-html="highlightedLines[index]"
             />

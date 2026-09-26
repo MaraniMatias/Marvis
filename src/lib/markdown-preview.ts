@@ -1,8 +1,6 @@
 import DOMPurify from "dompurify";
-import hljs from "highlight.js/lib/common";
 import MarkdownIt from "markdown-it";
 import taskLists from "markdown-it-task-lists";
-import "highlight.js/styles/github-dark.css";
 
 export interface MarkdownImageReference {
   /** The original Markdown URL, passed to the checkout-scoped image command. */
@@ -72,12 +70,6 @@ export function renderMarkdownPreview(source: string, markdownPath: string): Mar
   const markdown = new MarkdownIt({
     html: false,
     linkify: true,
-    highlight(code, language) {
-      if (language && hljs.getLanguage(language)) {
-        return hljs.highlight(code, { language }).value;
-      }
-      return MarkdownIt().utils.escapeHtml(code);
-    },
   }).use(taskLists, { enabled: false });
   markdown.validateLink = safeMarkdownLink;
   markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {

@@ -1,7 +1,6 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import DOMPurify from "dompurify";
 import { defineComponent, reactive, ref } from "vue";
 import type { GitStatus } from "../domain/git";
 import type { MainDocument } from "../domain/main-document";
@@ -157,7 +156,7 @@ describe("DocumentPane", () => {
       .findAll("button")
       .find((button) => button.text() === "Code")!
       .trigger("click");
-    await flushPromises();
+    await vi.waitFor(() => expect(wrapper.find('[aria-label="Source code"]').exists()).toBe(true));
     expect(wrapper.get('[aria-label="Source code"]').text()).toContain("# Marvis");
 
     await wrapper.get('[aria-label="Inspector sections"]').findAll("button")[1].trigger("click");
@@ -219,25 +218,27 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
-  it("highlights multiline source with one continuous syntax token and displays line numbers", async () => {
-    const sanitize = vi.spyOn(DOMPurify, "sanitize").mockImplementation((html) => html as string);
+  it("highlights multiline source with Shiki and displays line numbers", async () => {
     const document: MainDocument = {
       checkoutId: "checkout:multiline-source",
-      path: "src/example.js",
+      path: "src/example.ts",
       source: "file",
       mode: "code",
     };
-    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: "/* first line\nsecond line */" });
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: document.path,
+      content: "const answer: number = 42;\nreturn answer;",
+    });
     const wrapper = mount(DocumentPane, { props: documentPaneProps(document) });
-    try {
-      await flushPromises();
-      const source = wrapper.get('[aria-label="Source code"]');
-      expect(source.findAll(".hljs-comment").map((span) => span.text())).toEqual(["/* first line", "second line */"]);
-      expect(source.findAll(".source-line-number").map((number) => number.text())).toEqual(["1", "2"]);
-    } finally {
-      wrapper.unmount();
-      sanitize.mockRestore();
-    }
+    await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(2));
+    const source = wrapper.get('[aria-label="Source code"]');
+    expect(source.findAll(".shiki .line").map((line) => line.text())).toEqual([
+      "const answer: number = 42;",
+      "return answer;",
+    ]);
+    expect(source.findAll(".shiki .line > span").length).toBeGreaterThan(0);
+    expect(source.findAll(".source-line-number").map((number) => number.text())).toEqual(["1", "2"]);
+    wrapper.unmount();
   });
 
   it("uses compact source rendering above the line bound", async () => {
