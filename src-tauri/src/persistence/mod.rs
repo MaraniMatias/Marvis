@@ -1090,8 +1090,11 @@ impl Database {
     ) -> Result<(), String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.unchecked_transaction().map_err(db_error)?;
-        validate_terminal_layout(&transaction, checkout_id, layout)?;
-        let serialized = serde_json::to_string(layout).map_err(|error| error.to_string())?;
+        let session_ids = terminal_layout_session_ids(&transaction, checkout_id)?;
+        let mut normalized = layout.clone();
+        normalized.reconcile_sessions(&session_ids);
+        validate_terminal_layout(&transaction, checkout_id, &normalized)?;
+        let serialized = serde_json::to_string(&normalized).map_err(|error| error.to_string())?;
         transaction
             .execute(
                 "INSERT INTO checkout_terminal_layouts (checkout_id, layout_json)
@@ -2167,7 +2170,7 @@ mod tests {
     }
 
     #[test]
-    fn checkout_layouts_persist_and_reject_sessions_owned_by_another_checkout() {
+    fn checkout_layouts_persist_and_heal_sessions_owned_by_another_checkout() {
         let temp = tempdir().expect("temporary directory");
         let first_path = temp.path().join("first");
         let second_path = temp.path().join("second");
@@ -2247,9 +2250,20 @@ mod tests {
             }],
             session_order: vec![second_session.id],
         };
-        assert!(database
+        database
             .save_terminal_layout(&first_repo.checkouts[0].id, &foreign_layout)
-            .is_err());
+            .expect("save checkout layout heals stale session membership");
+        let healed = database
+            .load_terminal_layout(&first_repo.checkouts[0].id)
+            .expect("load healed layout")
+            .expect("healed layout");
+        assert_eq!(
+            healed.session_order,
+            vec![first_session.id.clone(), first_split_session.id.clone()]
+        );
+        database
+            .save_terminal_layout(&first_repo.checkouts[0].id, &layout)
+            .expect("restore layout for persistence checks");
         assert!(database.load_terminal_layout("checkout:unknown").is_err());
         assert_eq!(
             database

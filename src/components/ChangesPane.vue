@@ -73,7 +73,7 @@ function openChange(path: string) {
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col">
-    <div class="shrink-0 border-b border-white/8 px-3 py-3">
+    <div class="shrink-0 border-b border-white/8 px-2 py-2">
       <p class="truncate text-xs font-medium text-zinc-200">
         {{ status?.branch || (status?.head ? `HEAD ${status.head}` : "Git changes") }}
       </p>
@@ -92,7 +92,7 @@ function openChange(path: string) {
         Live updates unavailable: {{ watchError }}
       </p>
     </div>
-    <div class="shrink-0 border-b border-white/8 p-2">
+    <div class="shrink-0 border-b border-white/8 p-1">
       <input
         v-model="query"
         type="search"
@@ -101,7 +101,7 @@ function openChange(path: string) {
         class="h-8 w-full rounded border border-white/8 bg-black/10 px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-400/50"
       />
     </div>
-    <div ref="listViewport" class="min-h-0 flex-1 overflow-auto p-2" aria-label="Changed files" @scroll="onScroll">
+    <div ref="listViewport" class="min-h-0 flex-1 overflow-auto p-1" aria-label="Changed files" @scroll="onScroll">
       <p v-if="statusState === 'loading'" role="status" class="px-2 py-3 text-xs text-zinc-500">Loading Git status…</p>
       <p v-else-if="statusState === 'error'" role="alert" class="px-2 py-3 text-xs text-red-300">
         {{ statusError || gitSnapshot.statusError }}

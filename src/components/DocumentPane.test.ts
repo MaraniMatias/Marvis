@@ -278,6 +278,50 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("keeps the previous file visible while a fast file-to-change selection settles", async () => {
+    const checkoutId = "checkout:quick-selection";
+    const fileDocument: MainDocument = { checkoutId, path: "a.ts", source: "file", mode: "code" };
+    const changeDocument: MainDocument = { checkoutId, path: "b.ts", source: "change", mode: "diff" };
+    mocks.readCheckoutFile.mockResolvedValue({ path: "a.ts", content: "const fileA = true;" });
+    let resolveDiff!: (value: {
+      path: string;
+      patch: string;
+      isBinary: boolean;
+      large: boolean;
+      tooLarge: boolean;
+      totalLines: number;
+      hunks: { startLine: number; endLine: number; title: string }[];
+    }) => void;
+    mocks.getGitDiff.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          resolveDiff = resolve;
+        }),
+    );
+    const wrapper = mount(DocumentPane, { props: documentPaneProps(fileDocument, checkout(checkoutId)) });
+    await flushPromises();
+    expect(wrapper.text()).toContain("const fileA = true;");
+
+    await wrapper.setProps({ document: changeDocument });
+    await vi.waitFor(() => expect(resolveDiff).toBeTypeOf("function"));
+    expect(wrapper.get('[aria-label="File contents"]').text()).toContain("const fileA = true;");
+    expect(wrapper.text()).not.toContain("No text hunks are available for this change.");
+
+    resolveDiff({
+      path: "b.ts",
+      patch: "diff --git a/b.ts b/b.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
+    });
+    await flushPromises();
+    expect(wrapper.text()).toContain("Rendered diff");
+    expect(wrapper.text()).not.toContain("const fileA = true;");
+    wrapper.unmount();
+  });
+
   it("refreshes a changed file while keeping its reading position", async () => {
     mocks.readCheckoutFile
       .mockResolvedValueOnce({ path: "src/app.ts", content: "const first = true;" })

@@ -76,6 +76,11 @@ const isStarting = computed(
     Boolean(activeView.value && !activeView.value.session),
 );
 
+function reportTerminalError(cause: unknown) {
+  const message = cause instanceof Error ? cause.message : String(cause);
+  terminalError.value = /^(?:saved terminal layout is invalid|terminal layout\b)/.test(message) ? null : message;
+}
+
 function saveLayout(checkoutId: string, layout: CheckoutTerminalLayout) {
   layouts.value[checkoutId] = layout;
   const snapshot = JSON.parse(JSON.stringify(layout)) as CheckoutTerminalLayout;
@@ -83,9 +88,7 @@ function saveLayout(checkoutId: string, layout: CheckoutTerminalLayout) {
   const pending = previous
     .catch(() => {})
     .then(() => saveTerminalLayout(checkoutId, snapshot))
-    .catch((cause: unknown) => {
-      terminalError.value = cause instanceof Error ? cause.message : String(cause);
-    });
+    .catch(reportTerminalError);
   layoutSaveQueues.set(checkoutId, pending);
   return pending;
 }
@@ -103,7 +106,7 @@ function initializeLayout(target: Checkout) {
       }
     })
     .catch((cause: unknown) => {
-      terminalError.value = cause instanceof Error ? cause.message : String(cause);
+      reportTerminalError(cause);
       layouts.value[target.id] = createTerminalLayout([]);
     })
     .then(() => {
@@ -305,12 +308,12 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
 
 <template>
   <main class="session-pane flex min-w-0 flex-1 flex-col">
-    <section class="relative min-h-0 flex-1 p-3" aria-label="Terminal session view">
+    <section class="relative min-h-0 flex-1" aria-label="Terminal session view">
       <div
         v-for="view in views"
         v-show="view.checkoutId === checkout?.id && view.key === activeView?.key"
         :key="view.key"
-        class="absolute inset-3"
+        class="absolute inset-px"
       >
         <TerminalSession
           :ref="(instance) => setTerminalRef(view.key, instance)"
@@ -330,7 +333,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
 
       <div
         v-if="!activeView"
-        class="grid h-full place-items-center rounded-lg border border-white/8 bg-[var(--surface-panel)] p-8 text-center"
+        class="grid h-full place-items-center rounded-lg border border-white/8 bg-[var(--surface-panel)] p-6 text-center"
       >
         <div class="max-w-sm">
           <h1 class="text-base font-medium text-zinc-100">
@@ -363,7 +366,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
       </div>
     </section>
 
-    <p v-if="terminalError" role="alert" class="m-0 border-t border-red-400/20 px-5 py-3 text-sm text-red-200">
+    <p v-if="terminalError" role="alert" class="m-0 border-t border-red-400/20 px-2 py-2 text-sm text-red-200">
       {{ terminalError }}
     </p>
   </main>

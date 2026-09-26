@@ -215,7 +215,7 @@ onUnmounted(() => {
 
 <template>
   <section class="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-white/8 bg-[#10151d]">
-    <div ref="terminalElement" class="min-h-0 flex-1 p-2" aria-label="Shell terminal" />
+    <div ref="terminalElement" class="min-h-0 flex-1 p-px" aria-label="Shell terminal" />
     <p v-if="error" role="alert" class="m-0 border-t border-red-400/20 px-3 py-2 text-xs text-red-200">
       {{ error }}
     </p>

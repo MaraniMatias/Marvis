@@ -17,7 +17,10 @@ const props = defineProps<{
   active: boolean;
   scrollTop: number;
 }>();
-const emit = defineEmits<{ scrollPositionChanged: [top: number] }>();
+const emit = defineEmits<{
+  ready: [path: string];
+  scrollPositionChanged: [top: number];
+}>();
 
 const diff = shallowRef<GitFileDiff | null>(null);
 const diffHunks = shallowRef<Array<{ title: string; file: DiffFile }>>([]);
@@ -73,10 +76,13 @@ async function loadDiff(path: string, preservePosition = false) {
   const request = ++diffGeneration;
   const checkoutId = props.checkout.id;
   const oldScrollTop = preservePosition ? diffScrollTop.value : props.scrollTop;
+  const keepPreviousDiff = diff.value !== null;
   if (selectedPath.value === path) largeDiff.reset();
   selectedPath.value = path;
-  diff.value = null;
-  diffHunks.value = [];
+  if (!keepPreviousDiff) {
+    diff.value = null;
+    diffHunks.value = [];
+  }
   collapsedHunks.value = [];
   diffScrollTop.value = oldScrollTop;
   diffError.value = "";
@@ -96,6 +102,7 @@ async function loadDiff(path: string, preservePosition = false) {
       diffHunks.value = createHunks(path, result.patch);
     }
     diffState.value = "ready";
+    emit("ready", path);
     await nextTick();
     if (request !== diffGeneration || props.checkout.id !== checkoutId || props.path !== path) return;
     if (diffViewport.value) diffViewport.value.scrollTop = oldScrollTop;
@@ -196,8 +203,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="flex min-h-0 flex-1 flex-col overflow-hidden p-4" aria-label="File diff">
-    <p v-if="diffState === 'loading'" role="status" class="text-xs text-zinc-500">Loading diff…</p>
+  <section class="flex min-h-0 flex-1 flex-col overflow-hidden p-1" aria-label="File diff">
+    <p v-if="diffState === 'loading' && !diff" role="status" class="text-xs text-zinc-500">Loading diff…</p>
     <p v-else-if="diffState === 'error'" role="alert" class="text-xs text-red-300">{{ diffError }}</p>
     <p v-else-if="diff?.isBinary" role="status" class="text-xs text-amber-300">
       Binary file; text diff is unavailable.
@@ -212,7 +219,7 @@ onUnmounted(() => {
     <p v-else-if="showNoTextHunks" role="status" class="text-xs text-zinc-500">
       No text hunks are available for this change.
     </p>
-    <template v-else-if="diffState === 'ready' && diff">
+    <template v-else-if="(diffState === 'ready' || diffState === 'loading') && diff">
       <p v-if="diff.large" class="mb-2 shrink-0 text-[10px] text-zinc-500">
         {{ diff.totalLines.toLocaleString() }} diff rows · virtualized view · all rows available by scrolling
       </p>
@@ -279,7 +286,7 @@ onUnmounted(() => {
             </div>
           </div>
         </template>
-        <div v-else class="min-w-max space-y-2 p-2">
+        <div v-else class="min-w-max space-y-1 p-1">
           <section v-for="(hunk, index) in diffHunks" :key="`${path}-${index}`" class="min-w-0">
             <button
               type="button"

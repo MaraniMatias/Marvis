@@ -353,4 +353,29 @@ describe("SessionPane terminal UI", () => {
     );
     wrapper.unmount();
   });
+
+  it("heals a mismatched persisted layout without showing an internal validation error", async () => {
+    vi.mocked(loadTerminalLayout).mockResolvedValue({
+      activeTabId: "tab:stale",
+      tabs: [
+        { id: "tab:old", root: { kind: "session", sessionId: "session:old" } },
+        { id: "tab:duplicate", root: { kind: "session", sessionId: "session:old" } },
+        { id: "tab:stale", root: { kind: "session", sessionId: "session:stale" } },
+      ],
+      sessionOrder: ["session:old", "session:old", "session:stale"],
+    });
+    const wrapper = mount(SessionPane, {
+      props: { checkout, activeSessionId: null, isOpening: true },
+    });
+
+    await wrapper.setProps({ isOpening: false });
+    await flushPromises();
+
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect(saveTerminalLayout).toHaveBeenCalledWith(
+      checkout.id,
+      expect.objectContaining({ sessionOrder: ["session:old"] }),
+    );
+    wrapper.unmount();
+  });
 });

@@ -64,6 +64,9 @@ let searchIndexCheckoutId: string | null = null;
 let searchIndexPromise: { checkoutId: string; promise: Promise<FileSearchResult> } | null = null;
 let generation = 0;
 let searchGeneration = 0;
+let refreshMicrotaskQueued = false;
+let refreshInFlight = false;
+let pendingRefreshCheckoutId: string | null = null;
 
 const TREE_ROW_HEIGHT = 32;
 const TREE_WINDOW_SIZE = 80;
@@ -92,7 +95,20 @@ function errorText(error: unknown): string {
 }
 
 async function loadDirectory(checkoutId: string, path: string, requestGeneration: number) {
-  directoryStates.value = { ...directoryStates.value, [path]: "loading" };
+  const hasCachedEntries = Object.hasOwn(directories.value, path);
+  if (!hasCachedEntries) {
+    directoryStates.value = { ...directoryStates.value, [path]: "loading" };
+    if (path === ".") rootState.value = "loading";
+  } else {
+    const currentState = directoryStates.value[path];
+    if (currentState === "loading" || currentState === "error") {
+      const nextStates = { ...directoryStates.value };
+      delete nextStates[path];
+      if (directories.value[path].length === 0) nextStates[path] = "empty";
+      directoryStates.value = nextStates;
+    }
+    if (path === "." && rootState.value === "error") rootState.value = "ready";
+  }
   try {
     const result = await listCheckoutFiles(checkoutId, path);
     if (requestGeneration !== generation) return;
@@ -107,9 +123,11 @@ async function loadDirectory(checkoutId: string, path: string, requestGeneration
     if (requestGeneration !== generation) return;
     const message = errorText(error);
     if (path === ".") {
-      rootState.value = isIpcError(error) && error.code === "folder_missing" ? "missing" : "error";
+      if (!hasCachedEntries) {
+        rootState.value = isIpcError(error) && error.code === "folder_missing" ? "missing" : "error";
+      }
       rootError.value = message;
-    } else {
+    } else if (!hasCachedEntries) {
       directoryStates.value = { ...directoryStates.value, [path]: "error" };
       rootError.value = message;
     }
@@ -230,7 +248,7 @@ watch(
       props.repo?.kind === "git" &&
       activeTab.value !== "changes"
     ) {
-      void refreshAfterGitChange(checkoutId);
+      requestRefresh(checkoutId);
     }
   },
 );
@@ -238,32 +256,39 @@ watch(
 watch(activeTab, (tab) => {
   const checkoutId = props.checkout?.id;
   if (tab === "files" && checkoutId && props.repo?.kind === "git") {
-    void refreshAfterGitChange(checkoutId);
+    requestRefresh(checkoutId);
   }
 });
 
+function requestRefresh(checkoutId: string) {
+  pendingRefreshCheckoutId = checkoutId;
+  if (refreshInFlight || refreshMicrotaskQueued) return;
+  refreshMicrotaskQueued = true;
+  queueMicrotask(() => {
+    refreshMicrotaskQueued = false;
+    const requestedCheckoutId = pendingRefreshCheckoutId;
+    pendingRefreshCheckoutId = null;
+    if (!requestedCheckoutId) return;
+    refreshInFlight = true;
+    void refreshAfterGitChange(requestedCheckoutId).finally(() => {
+      refreshInFlight = false;
+      if (pendingRefreshCheckoutId) requestRefresh(pendingRefreshCheckoutId);
+    });
+  });
+}
+
 async function refreshAfterGitChange(checkoutId: string) {
   const requestGeneration = generation;
-  for (const path of Object.keys(directories.value)) {
+  const paths = [
+    ".",
+    ...Object.keys(directories.value).filter((path) => path !== "." && expanded.value.includes(path)),
+  ];
+  for (const path of paths) {
     if (requestGeneration !== generation || props.checkout?.id !== checkoutId) return;
     await loadDirectory(checkoutId, path, requestGeneration);
   }
   if (searchQuery.value.trim() && props.checkout?.id === checkoutId) {
-    searchIndexCheckoutId = null;
-    searchIndexPromise = null;
-    searchEntries.value = [];
-    searchTruncated.value = false;
-    const searchRequest = ++searchGeneration;
-    searchState.value = "loading";
-    try {
-      await loadSearchIndex(checkoutId);
-      if (searchRequest === searchGeneration) searchState.value = "ready";
-    } catch (error) {
-      if (searchRequest === searchGeneration) {
-        searchError.value = errorText(error);
-        searchState.value = "error";
-      }
-    }
+    await refreshSearchIndex(checkoutId);
   }
 }
 
@@ -340,8 +365,8 @@ function fuzzyScore(path: string, query: string): number {
   return score;
 }
 
-async function loadSearchIndex(checkoutId: string): Promise<FileSearchResult> {
-  if (searchIndexCheckoutId === checkoutId) {
+async function loadSearchIndex(checkoutId: string, force = false): Promise<FileSearchResult> {
+  if (!force && searchIndexCheckoutId === checkoutId) {
     return { entries: searchEntries.value, truncated: searchTruncated.value };
   }
   if (searchIndexPromise?.checkoutId === checkoutId) return searchIndexPromise.promise;
@@ -358,6 +383,28 @@ async function loadSearchIndex(checkoutId: string): Promise<FileSearchResult> {
     return result;
   } finally {
     if (searchIndexPromise?.promise === promise) searchIndexPromise = null;
+  }
+}
+
+async function refreshSearchIndex(checkoutId: string) {
+  const searchRequest = ++searchGeneration;
+  const hadCachedIndex = searchIndexCheckoutId === checkoutId;
+  searchIndexCheckoutId = null;
+  if (!hadCachedIndex) {
+    searchEntries.value = [];
+    searchTruncated.value = false;
+    searchState.value = "loading";
+  }
+  try {
+    await loadSearchIndex(checkoutId, true);
+    if (searchRequest === searchGeneration) searchState.value = "ready";
+  } catch (error) {
+    if (searchRequest !== searchGeneration) return;
+    if (hadCachedIndex) searchState.value = "ready";
+    else {
+      searchError.value = errorText(error);
+      searchState.value = "error";
+    }
   }
 }
 
@@ -438,7 +485,7 @@ function onTreeScroll(event: Event) {
     <div
       role="tablist"
       aria-label="Inspector sections"
-      class="flex h-11 shrink-0 items-center gap-1 border-b border-white/8 px-3"
+      class="flex h-10 shrink-0 items-center gap-1 border-b border-white/8 px-2"
       @keydown="onInspectorTabKeydown"
     >
       <button
@@ -449,7 +496,7 @@ function onTreeScroll(event: Event) {
         :aria-selected="activeTab === 'files'"
         aria-controls="inspector-panel-files"
         :tabindex="activeTab === 'files' ? 0 : -1"
-        class="rounded px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em]"
+        class="rounded px-2 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em]"
         :class="activeTab === 'files' ? 'bg-white/8 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'"
         @click="activeTab = 'files'"
       >
@@ -463,7 +510,7 @@ function onTreeScroll(event: Event) {
         :aria-selected="activeTab === 'changes'"
         aria-controls="inspector-panel-changes"
         :tabindex="activeTab === 'changes' ? 0 : -1"
-        class="rounded px-3 py-2 text-[11px] font-semibold uppercase tracking-[0.12em]"
+        class="rounded px-2 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em]"
         :class="activeTab === 'changes' ? 'bg-white/8 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'"
         @click="activeTab = 'changes'"
       >
@@ -478,7 +525,7 @@ function onTreeScroll(event: Event) {
       :tabindex="checkout ? 0 : undefined"
       class="flex min-h-0 flex-1 flex-col"
     >
-      <div v-if="rootState === 'ready'" class="shrink-0 border-b border-white/8 p-2">
+      <div v-if="rootState === 'ready'" class="shrink-0 border-b border-white/8 p-1">
         <input
           ref="searchInput"
           v-model="searchQuery"
@@ -490,7 +537,7 @@ function onTreeScroll(event: Event) {
       </div>
       <section
         ref="treeViewport"
-        class="min-h-0 flex-1 overflow-auto p-2"
+        class="min-h-0 flex-1 overflow-auto p-1"
         aria-label="Checkout files"
         @scroll="onTreeScroll"
       >
@@ -549,14 +596,14 @@ function onTreeScroll(event: Event) {
             <div
               v-for="(item, index) in visibleTreeWindow.rows"
               :key="item.entry?.path ?? `${item.depth}-${index}-${item.message}`"
-              :style="{ paddingLeft: `${8 + item.depth * 14}px` }"
+              :style="{ paddingLeft: `${4 + item.depth * 12}px` }"
               class="flex h-8 items-center overflow-hidden"
             >
               <span v-if="!item.entry" class="truncate py-1 text-xs text-zinc-500">{{ item.message }}</span>
               <button
                 v-else-if="item.entry.kind === 'directory'"
                 type="button"
-                class="flex h-8 w-full min-w-0 items-center truncate rounded px-2 text-left text-xs text-zinc-300 hover:bg-white/6"
+                class="flex h-8 w-full min-w-0 items-center truncate rounded px-1 text-left text-xs text-zinc-300 hover:bg-white/6"
                 :aria-expanded="expanded.includes(item.entry.path)"
                 @click="toggleDirectory(item.entry)"
               >
@@ -571,7 +618,7 @@ function onTreeScroll(event: Event) {
               <button
                 v-else
                 type="button"
-                class="flex h-8 w-full min-w-0 items-center truncate rounded px-2 text-left text-xs hover:bg-white/6"
+                class="flex h-8 w-full min-w-0 items-center truncate rounded px-1 text-left text-xs hover:bg-white/6"
                 :class="selectedPath === item.entry.path ? 'bg-white/8 text-zinc-100' : 'text-zinc-400'"
                 @click="selectFile(item.entry)"
               >

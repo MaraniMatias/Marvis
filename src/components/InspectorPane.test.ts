@@ -217,24 +217,38 @@ describe("InspectorPane", () => {
   });
 
   it("refreshes the file tree when the shared owner reports a Git status event", async () => {
+    let resolveRefresh!: (value: {
+      entries: { name: string; path: string; kind: "file" }[];
+      truncated: boolean;
+    }) => void;
     mocks.listCheckoutFiles
       .mockResolvedValueOnce({ entries: [{ name: "before.txt", path: "before.txt", kind: "file" }], truncated: false })
-      .mockResolvedValueOnce({
-        entries: [
-          { name: "before.txt", path: "before.txt", kind: "file" },
-          { name: "after.txt", path: "after.txt", kind: "file" },
-        ],
-        truncated: false,
-      });
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            resolveRefresh = resolve;
+          }),
+      );
     const snapshot = gitSnapshot("git");
     const wrapper = mountInspector({ checkout: checkout("git"), repo, gitSnapshot: snapshot });
     await flushPromises();
     expect(wrapper.text()).not.toContain("after.txt");
 
     snapshot.statusEventCheckoutId = "git";
-    snapshot.statusEventRevision += 1;
+    snapshot.statusEventRevision += 3;
+    await vi.waitFor(() => expect(resolveRefresh).toBeTypeOf("function"));
+    expect(wrapper.text()).toContain("before.txt");
+    expect(wrapper.text()).not.toContain("Loading files");
+    resolveRefresh({
+      entries: [
+        { name: "before.txt", path: "before.txt", kind: "file" },
+        { name: "after.txt", path: "after.txt", kind: "file" },
+      ],
+      truncated: false,
+    });
     await flushPromises();
     expect(wrapper.text()).toContain("after.txt");
+    expect(mocks.listCheckoutFiles).toHaveBeenCalledTimes(2);
     wrapper.unmount();
   });
 });

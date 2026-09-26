@@ -42,6 +42,7 @@ const emit = defineEmits<{
 const content = ref("");
 const contentState = ref<"idle" | "loading" | "ready" | "error">("idle");
 const contentError = ref("");
+const contentIdentity = ref<string | null>(null);
 const fileViewport = ref<HTMLElement | null>(null);
 const wrapCode = ref(false);
 const deleted = computed(
@@ -58,6 +59,11 @@ const isMarkdown = computed(() => isMarkdownPath(props.document.path));
 const sourceLines = computed(() => content.value.split(/\r?\n/));
 const sourceLineNumbers = computed(() => sourceLines.value.map((_, index) => index + 1).join("\n"));
 const compactSource = computed(() => sourceLines.value.length > 5000);
+const diffReadyIdentity = ref<string | null>(null);
+const staleContent = computed(() => contentIdentity.value !== null && contentIdentity.value !== identity.value);
+const staleDiff = computed(
+  () => props.document.mode === "diff" && staleContent.value && diffReadyIdentity.value !== identity.value,
+);
 const highlightedSource = computed(() => {
   const extension = props.document.path.split(".").pop()?.toLowerCase();
   const language = extension && hljs.getLanguage(extension) ? extension : undefined;
@@ -132,6 +138,7 @@ async function loadFile(preservePosition = false) {
   if (!available.value) {
     requestGeneration += 1;
     content.value = "";
+    contentIdentity.value = fileIdentity;
     contentState.value = "error";
     contentError.value = deleted.value
       ? "This file was deleted; its previous contents are available in the diff."
@@ -140,13 +147,13 @@ async function loadFile(preservePosition = false) {
   }
   const request = ++requestGeneration;
   const previousPosition = preservePosition ? readingPosition.value : props.readingPosition;
-  content.value = "";
   contentState.value = "loading";
   contentError.value = "";
   try {
     const result = await readCheckoutFile(checkoutId, path);
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
     content.value = result.content;
+    contentIdentity.value = fileIdentity;
     contentState.value = "ready";
     loadedIdentity = fileIdentity;
     await nextTick();
@@ -162,6 +169,8 @@ async function loadFile(preservePosition = false) {
     }
   } catch (error) {
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
+    content.value = "";
+    contentIdentity.value = fileIdentity;
     contentError.value = errorText(error);
     contentState.value = "error";
     loadedIdentity = fileIdentity;
@@ -198,9 +207,9 @@ watch(
     if (loadedIdentity !== fileIdentity) {
       requestGeneration += 1;
       loadedIdentity = null;
-      content.value = "";
-      contentState.value = "idle";
+      contentState.value = contentIdentity.value === null ? "idle" : "loading";
       contentError.value = "";
+      diffReadyIdentity.value = null;
       clear();
       readingPosition.value = props.readingPosition;
       if (fileViewport.value) {
@@ -216,6 +225,7 @@ watch(
     if (isAvailable === false) {
       requestGeneration += 1;
       content.value = "";
+      contentIdentity.value = fileIdentity;
       contentState.value = "error";
       contentError.value = deleted.value
         ? "This file was deleted; its previous contents are available in the diff."
@@ -267,6 +277,10 @@ function setFileMode() {
   emit("updateMode", isMarkdown.value ? "view" : "code");
 }
 
+function onDiffReady(path: string) {
+  if (path === props.document.path && props.document.mode === "diff") diffReadyIdentity.value = identity.value;
+}
+
 function onFileScroll(event: Event) {
   const viewport = event.currentTarget as HTMLElement;
   readingPosition.value = { top: viewport.scrollTop, left: viewport.scrollLeft };
@@ -301,7 +315,7 @@ function onMarkdownLink(event: MouseEvent) {
 
 <template>
   <main class="document-pane flex min-h-0 flex-1 flex-col">
-    <header class="flex h-11 shrink-0 items-center justify-between gap-3 border-b border-white/8 px-4">
+    <header class="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-white/8 px-2">
       <span class="min-w-0 truncate font-mono text-[11px] text-zinc-400" :title="document.path">{{
         document.path
       }}</span>
@@ -388,17 +402,28 @@ function onMarkdownLink(event: MouseEvent) {
         </span>
       </div>
     </header>
-    <FileDiff
-      v-if="document.source === 'change' && document.mode === 'diff' && checkout"
-      :key="`${document.checkoutId}:${document.path}`"
-      class="min-h-0 flex-1"
-      :checkout="checkout"
-      :git-snapshot="gitSnapshot"
-      :path="document.path"
-      :active="active"
-      :scroll-top="diffScrollTop"
-      @scroll-position-changed="$emit('diffPositionChanged', $event)"
-    />
+    <div v-if="document.source === 'change' && document.mode === 'diff' && checkout" class="relative min-h-0 flex-1">
+      <FileDiff
+        class="h-full"
+        :checkout="checkout"
+        :git-snapshot="gitSnapshot"
+        :path="document.path"
+        :active="active"
+        :scroll-top="diffScrollTop"
+        @ready="onDiffReady"
+        @scroll-position-changed="$emit('diffPositionChanged', $event)"
+      />
+      <section
+        v-if="staleDiff"
+        class="absolute inset-0 overflow-auto bg-[var(--surface-document)] px-3 py-2"
+        aria-label="File contents"
+      >
+        <pre v-if="content" class="whitespace-pre-wrap font-mono text-[13px] leading-5 text-zinc-300">{{
+          content
+        }}</pre>
+        <p v-else class="text-sm text-zinc-500">Updating document…</p>
+      </section>
+    </div>
     <section
       v-else
       ref="fileViewport"
@@ -406,30 +431,42 @@ function onMarkdownLink(event: MouseEvent) {
       aria-label="File contents"
       @scroll="onFileScroll"
     >
-      <p v-if="available === false" role="status" class="p-5 text-sm text-amber-300">
+      <p v-if="available === false" role="status" class="p-3 text-sm text-amber-300">
         {{
           deleted
             ? "This file was deleted; its previous contents are available in the diff."
             : "The current file is unavailable in this checkout."
         }}
       </p>
-      <p v-else-if="contentState === 'loading'" role="status" class="p-5 text-sm text-zinc-400">Loading file…</p>
-      <p v-else-if="contentState === 'error'" role="alert" class="p-5 text-sm text-amber-300">{{ contentError }}</p>
-      <p v-else-if="contentState === 'ready' && content.length === 0" role="status" class="p-5 text-sm text-zinc-500">
+      <p
+        v-else-if="contentState === 'loading' && !staleContent && contentIdentity !== identity"
+        role="status"
+        class="p-3 text-sm text-zinc-400"
+      >
+        Loading file…
+      </p>
+      <template v-else-if="staleContent">
+        <pre v-if="content" class="whitespace-pre-wrap p-3 font-mono text-[13px] leading-5 text-zinc-300">{{
+          content
+        }}</pre>
+        <p v-else class="p-3 text-sm text-zinc-500">Updating document…</p>
+      </template>
+      <p v-else-if="contentState === 'error'" role="alert" class="p-3 text-sm text-amber-300">{{ contentError }}</p>
+      <p v-else-if="contentState === 'ready' && content.length === 0" role="status" class="p-3 text-sm text-zinc-500">
         This file is empty.
       </p>
-      <template v-else-if="contentState === 'ready'">
+      <template v-else-if="contentState === 'ready' || (contentState === 'loading' && contentIdentity === identity)">
         <template v-if="document.mode === 'view' && isMarkdown">
-          <p v-if="markdownPreviewState === 'loading'" role="status" class="px-5 pt-4 text-xs text-zinc-500">
+          <p v-if="markdownPreviewState === 'loading'" role="status" class="px-3 pt-3 text-xs text-zinc-500">
             Loading relative images…
           </p>
-          <p v-if="markdownImageWarning" role="status" class="px-5 pt-4 text-xs text-amber-300">
+          <p v-if="markdownImageWarning" role="status" class="px-3 pt-3 text-xs text-amber-300">
             Some Markdown images were missing, unsupported, or over the preview limits.
           </p>
           <!-- eslint-disable vue/no-v-html -- Content is generated and DOMPurify-sanitized in markdown-preview.ts. -->
           <article
             v-if="markdownPreviewState === 'ready'"
-            class="markdown-preview p-5 text-sm"
+            class="markdown-preview p-3 text-sm"
             @click="onMarkdownLink"
             v-html="markdownHtml"
           />
@@ -437,7 +474,7 @@ function onMarkdownLink(event: MouseEvent) {
         </template>
         <div
           v-else-if="compactSource"
-          class="flex py-3 font-mono text-[13px] leading-5 text-zinc-300"
+          class="flex py-2 font-mono text-[13px] leading-5 text-zinc-300"
           aria-label="Source code"
         >
           <pre class="source-line-number" aria-hidden="true">{{ sourceLineNumbers }}</pre>
@@ -450,7 +487,7 @@ function onMarkdownLink(event: MouseEvent) {
         </div>
         <div
           v-else
-          class="py-3 font-mono text-[13px] leading-5 text-zinc-300"
+          class="py-2 font-mono text-[13px] leading-5 text-zinc-300"
           :class="wrapCode ? 'w-full min-w-0' : 'min-w-max'"
           aria-label="Source code"
         >

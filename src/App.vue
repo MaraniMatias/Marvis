@@ -86,6 +86,7 @@ const nvimRequest = ref<{
   token: number;
 } | null>(null);
 const documents = ref<Record<string, MainDocument>>({});
+const emptyDocument: MainDocument = { checkoutId: "", path: "", source: "file", mode: "code" };
 const mainViews = ref<Record<string, "terminal" | "document">>({});
 const inspectorCommand = ref<{
   action: "open-file" | "open-changes";
@@ -156,6 +157,7 @@ const activeDocument = computed(() => {
   if (!checkout || !document || document.checkoutId !== checkout.id) return null;
   return document;
 });
+const documentPaneDocument = computed(() => activeDocument.value ?? emptyDocument);
 const activeMainView = computed(() => {
   return resolveMainView(mainViews.value, activeCheckout.value?.id ?? null, activeDocument.value);
 });
@@ -923,22 +925,21 @@ async function closeCheckout(checkoutId: string) {
             class="absolute inset-0"
           >
             <DocumentPane
-              v-if="activeDocument && checkoutUiReady"
               :checkout="activeCheckout"
-              :document="activeDocument"
+              :document="documentPaneDocument"
               :git-snapshot="gitSnapshot"
               :active="activeMainView === 'document'"
-              :refresh-revision="documentRefreshRevisions[activeDocument.checkoutId] ?? 0"
+              :refresh-revision="documentRefreshRevisions[documentPaneDocument.checkoutId] ?? 0"
               :zed-available="editorAvailability.zed"
               :reading-position="{
-                top: checkoutUiStates[activeDocument.checkoutId]?.documentScrollTop ?? 0,
-                left: checkoutUiStates[activeDocument.checkoutId]?.documentScrollLeft ?? 0,
+                top: checkoutUiStates[documentPaneDocument.checkoutId]?.documentScrollTop ?? 0,
+                left: checkoutUiStates[documentPaneDocument.checkoutId]?.documentScrollLeft ?? 0,
               }"
-              :diff-scroll-top="checkoutUiStates[activeDocument.checkoutId]?.diffScrollTop ?? 0"
+              :diff-scroll-top="checkoutUiStates[documentPaneDocument.checkoutId]?.diffScrollTop ?? 0"
               @update-mode="setDocumentMode"
-              @reading-position-changed="updateDocumentReadingPosition(activeDocument.checkoutId, $event)"
-              @diff-position-changed="updateDiffReadingPosition(activeDocument.checkoutId, $event)"
-              @open-markdown-link="openFileDocument({ checkoutId: activeDocument.checkoutId, path: $event })"
+              @reading-position-changed="updateDocumentReadingPosition(documentPaneDocument.checkoutId, $event)"
+              @diff-position-changed="updateDiffReadingPosition(documentPaneDocument.checkoutId, $event)"
+              @open-markdown-link="openFileDocument({ checkoutId: documentPaneDocument.checkoutId, path: $event })"
               @open-in-zed="runPaletteCommand('open-zed')"
             />
           </section>

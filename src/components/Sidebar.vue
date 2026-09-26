@@ -60,7 +60,7 @@ function checkoutLabel(checkout: Checkout) {
 
 <template>
   <aside class="app-sidebar flex h-full min-h-0 flex-col border-r border-white/8">
-    <div class="flex h-10 shrink-0 items-center gap-1 border-b border-white/8 px-2">
+    <div class="flex h-10 shrink-0 items-center gap-1 border-b border-white/8 px-1">
       <input
         v-model="repoQuery"
         type="search"
@@ -79,8 +79,8 @@ function checkoutLabel(checkout: Checkout) {
         +
       </button>
     </div>
-    <div v-if="filteredRepos.length" class="min-h-0 flex-1 overflow-y-auto px-2 py-2">
-      <div v-for="repo in filteredRepos" :key="repo.id" class="mb-2">
+    <div v-if="filteredRepos.length" class="min-h-0 flex-1 overflow-y-auto px-1 py-1">
+      <div v-for="repo in filteredRepos" :key="repo.id" class="mb-1">
         <div class="group/repo flex h-7 items-center rounded hover:bg-white/5">
           <button
             type="button"

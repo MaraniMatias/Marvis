@@ -280,6 +280,63 @@ mod tests {
     }
 
     #[test]
+    fn reconciles_missing_extra_and_duplicate_checkout_sessions() {
+        let mut layout = CheckoutTerminalLayout {
+            active_tab_id: Some("tab-one".into()),
+            tabs: vec![
+                TerminalLayoutTab {
+                    id: "tab-one".into(),
+                    root: TerminalLayoutNode::Session {
+                        session_id: "session-one".into(),
+                    },
+                },
+                TerminalLayoutTab {
+                    id: "tab-duplicate".into(),
+                    root: TerminalLayoutNode::Session {
+                        session_id: "session-one".into(),
+                    },
+                },
+                TerminalLayoutTab {
+                    id: "tab-stale".into(),
+                    root: TerminalLayoutNode::Session {
+                        session_id: "session-stale".into(),
+                    },
+                },
+            ],
+            session_order: vec![
+                "session-one".into(),
+                "session-one".into(),
+                "session-stale".into(),
+            ],
+        };
+
+        layout.reconcile_sessions(&["session-one".into(), "session-two".into()]);
+
+        assert_eq!(
+            layout
+                .tabs
+                .iter()
+                .map(|tab| match &tab.root {
+                    TerminalLayoutNode::Session { session_id } => session_id.as_str(),
+                    TerminalLayoutNode::Split { .. } => "split",
+                })
+                .collect::<Vec<_>>(),
+            ["session-one", "session-two"]
+        );
+        assert_eq!(
+            layout.session_order,
+            vec!["session-one".to_string(), "session-two".to_string()]
+        );
+        assert_eq!(layout.active_tab_id.as_deref(), Some("tab-one"));
+        assert!(layout
+            .validate(&HashSet::from([
+                "session-one".to_string(),
+                "session-two".to_string()
+            ]))
+            .is_ok());
+    }
+
+    #[test]
     fn serializes_the_webview_layout_shape_with_camel_case_session_ids() {
         let value = serde_json::json!({
             "activeTabId": "tab-one",
