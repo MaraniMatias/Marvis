@@ -2330,6 +2330,79 @@ mod tests {
         assert_eq!(resolved.status, "resolved");
     }
 
+    /// D2-04: three line comments across two files, still drafts after a restart.
+    ///
+    /// A restart reopens the file, so anything held only in memory would be lost here; the
+    /// drafts are asserted from the reopened handle rather than the one that wrote them.
+    #[test]
+    fn review_drafts_across_two_files_survive_a_database_restart() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("workspace.sqlite3");
+        let folder = temp.path().join("checkout");
+        fs::create_dir(&folder).unwrap();
+
+        let checkout_id = {
+            let database = Database::open(&db_path).unwrap();
+            let repo = plain_repo(&folder, "now");
+            let checkout_id = repo.checkouts[0].id.clone();
+            database.register_plain_repo(repo).unwrap();
+            let now = "2026-09-26T00:00:00Z";
+            // Two notes on one file and one on another: the batch spans files, not just lines.
+            let notes = [("src/main.rs", 4), ("src/main.rs", 12), ("src/lib.rs", 7)];
+            for (index, (path, line)) in notes.into_iter().enumerate() {
+                let code = format!("let value{index} = {index};");
+                database
+                    .add_review_note(&ReviewNote {
+                        id: format!("note:{index}"),
+                        checkout_id: checkout_id.clone(),
+                        path: path.into(),
+                        side: "new".into(),
+                        line_start: line,
+                        line_end: None,
+                        content: format!("draft {index}"),
+                        code: code.clone(),
+                        status: "draft".into(),
+                        code_hash: review_anchor_hash(&code),
+                        outdated: false,
+                        round_id: None,
+                        created_at: now.into(),
+                        updated_at: now.into(),
+                    })
+                    .unwrap();
+            }
+            checkout_id
+        };
+
+        let reopened = Database::open(&db_path).expect("reopened database");
+        let drafts = reopened
+            .review_notes(&checkout_id)
+            .expect("drafts after restart");
+        assert_eq!(drafts.len(), 3, "{drafts:?}");
+        assert!(drafts.iter().all(|note| note.status == "draft"));
+        assert!(drafts.iter().all(|note| !note.outdated));
+        assert_eq!(
+            drafts
+                .iter()
+                .filter(|note| note.path == "src/main.rs")
+                .count(),
+            2
+        );
+        assert_eq!(
+            drafts
+                .iter()
+                .filter(|note| note.path == "src/lib.rs")
+                .count(),
+            1
+        );
+        // The unbounded line is what still has to point at the right code after the restart.
+        assert!(drafts
+            .iter()
+            .any(|note| note.line_start == 12 && note.line_end.is_none()));
+        assert!(drafts
+            .iter()
+            .all(|note| !note.code_hash.is_empty() && !note.code.is_empty()));
+    }
+
     #[test]
     fn ui_state_round_trips_migrates_and_discards_invalid_saved_data() {
         let temp = tempdir().unwrap();

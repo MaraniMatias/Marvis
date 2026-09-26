@@ -709,7 +709,10 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use crate::{domain::review::review_round_marker, services::review_round::build_round_prompt};
+    use crate::{
+        domain::review::{review_anchor_hash, review_round_marker},
+        services::review_round::build_round_prompt,
+    };
 
     use super::{
         agent_program, basic_credentials, same_directory, validate_session_id, AgentEvent,
@@ -975,5 +978,147 @@ mod tests {
 
         agents.stop("checkout:first");
         agents.stop("checkout:second");
+    }
+
+    /// D2-05, D2-09, D2-10 and D2-15 in one pass, against two real servers running in two
+    /// different checkouts — the shape the acceptance runbook asks for.
+    ///
+    /// What is proven here is the loop itself: one message carrying the whole review, a turn
+    /// that ends, a line the agent actually rewrote, and a second checkout that stays out of
+    /// the way. What is not proven here is the presentation layer, which is judged from the
+    /// diff by the frontend and cannot be seen from a test.
+    ///
+    /// `MARVIS_AGENT_BRIDGE=1 cargo test two_checkouts_run_the_review_loop -- --nocapture`
+    #[test]
+    fn two_checkouts_run_the_review_loop() {
+        if std::env::var("MARVIS_AGENT_BRIDGE").as_deref() != Ok("1") {
+            eprintln!("skipped: set MARVIS_AGENT_BRIDGE=1 to exercise a real agent server");
+            return;
+        }
+        let first = PathBuf::from(
+            std::env::var("MARVIS_AGENT_BRIDGE_DIR").expect("MARVIS_AGENT_BRIDGE_DIR"),
+        );
+        let second = PathBuf::from(
+            std::env::var("MARVIS_AGENT_BRIDGE_OTHER_DIR").expect("MARVIS_AGENT_BRIDGE_OTHER_DIR"),
+        );
+        let target = first.join("marvis_loop_target.txt");
+        let second_file = first.join("marvis_second_target.txt");
+        let original = "alpha\nbravo\n";
+        std::fs::write(&target, original).expect("write the file under review");
+        std::fs::write(&second_file, "one\ntwo\n").expect("write the second file under review");
+
+        let agents = AgentService::new();
+        let mine = agents
+            .create_session("checkout:loop", &first, "loop")
+            .expect("session in the first checkout");
+        let other = agents
+            .create_session("checkout:loop-other", &second, "other loop")
+            .expect("session in the second checkout");
+
+        // Two agents means two servers: an id from one checkout is meaningless in the other.
+        assert!(
+            agents
+                .owned_session("checkout:loop-other", &second, &mine.id)
+                .is_err(),
+            "a session id resolved in another checkout's server"
+        );
+
+        // D2-05: both files' drafts leave as one message, marker included. Each instruction
+        // is unambiguous on purpose: a review the model has to guess at makes it stop and
+        // ask, and an unanswered question is not something this server version can settle.
+        let marker = review_round_marker("round:loop");
+        let review = [
+            "### `marvis_loop_target.txt`".to_string(),
+            String::new(),
+            "- line 1: replace the whole file with exactly: `done by agent`.".to_string(),
+            String::new(),
+            "### `marvis_second_target.txt`".to_string(),
+            String::new(),
+            "- line 1: replace the whole file with exactly: `also done by agent`.".to_string(),
+        ]
+        .join("\n");
+        let prompt = build_round_prompt(&review, &marker);
+        assert!(prompt.contains(&marker), "the marker is not in the prompt");
+        assert!(
+            prompt.contains("marvis_loop_target.txt")
+                && prompt.contains("marvis_second_target.txt"),
+            "the two files did not leave in the same message"
+        );
+        agents
+            .prompt("checkout:loop", &first, &mine.id, &prompt)
+            .expect("send the round");
+
+        // D2-09 needs the turn to be over before anything can be judged, and v2.0.18 reports
+        // that only as an idle time on the session.
+        let deadline = Instant::now() + Duration::from_secs(180);
+        loop {
+            let session = agents.owned_session("checkout:loop", &first, &mine.id);
+            let finished = matches!(&session, Ok(session) if session.idle_at.is_some());
+            let seen = match &session {
+                Ok(session) => format!("still running, idle_at={:?}", session.idle_at),
+                Err(error) => format!("session read failed: {error:?}"),
+            };
+            if finished {
+                break;
+            }
+            assert!(
+                Instant::now() <= deadline,
+                "the review turn never came back to idle ({seen})"
+            );
+            sleep(Duration::from_millis(500));
+        }
+
+        // D2-05, second half: the message that carried the review is really in the
+        // transcript, so a reconnect would recognize this exact send.
+        assert!(
+            agents
+                .session_mentions("checkout:loop", &first, &mine.id, &marker)
+                .expect("read the transcript"),
+            "the round marker never landed in the session"
+        );
+
+        // D2-15: the agent kept working, so the working tree moved — on both files, which is
+        // what makes this a batch rather than a single comment that got through.
+        let changed = std::fs::read_to_string(&target).expect("read the file again");
+        assert_ne!(changed, original, "the agent did not touch the first file");
+        assert!(
+            std::fs::read_to_string(&second_file)
+                .expect("read the second file")
+                .contains("also done by agent"),
+            "the second file's comment did not reach the agent's work"
+        );
+
+        // D2-10: a note anchored on the old first line has drifted, and that is exactly what
+        // marks it outdated — the hash is what decides, not who edited the line.
+        assert_ne!(
+            review_anchor_hash(original),
+            review_anchor_hash(&changed),
+            "the rewritten line still hashes the same"
+        );
+
+        // The second agent was never dragged into this: its session exists, has no turn, and
+        // does not know about the first checkout's session.
+        let untouched = agents
+            .sessions("checkout:loop-other", &second)
+            .expect("list the other checkout's sessions");
+        assert!(
+            untouched.iter().any(|session| session.id == other.id),
+            "the second agent's session vanished"
+        );
+        assert!(
+            untouched.iter().all(|session| session.id != mine.id),
+            "the first checkout's session leaked into the second"
+        );
+        assert!(
+            untouched
+                .iter()
+                .find(|session| session.id == other.id)
+                .and_then(|session| session.idle_at)
+                .is_none(),
+            "the second agent reports a turn it never ran"
+        );
+
+        agents.stop("checkout:loop");
+        agents.stop("checkout:loop-other");
     }
 }
