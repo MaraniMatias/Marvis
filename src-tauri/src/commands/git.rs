@@ -3,7 +3,10 @@ use tauri::{AppHandle, Emitter, State};
 use crate::{
     domain::ipc::{IpcError, IpcErrorCode},
     persistence::Database,
-    services::git::{self, GitDiffPage, GitFileDiff, GitStatus, GitWatcherManager},
+    services::git::{
+        self, GitCheckoutDiffStats, GitDiffPage, GitFileDiff, GitFileDiffStats, GitStatus,
+        GitWatcherManager,
+    },
 };
 
 #[tauri::command]
@@ -13,6 +16,33 @@ pub async fn git_status(
 ) -> Result<GitStatus, IpcError> {
     let database = database.inner().clone();
     tauri::async_runtime::spawn_blocking(move || git::status(&database, &checkout_id))
+        .await
+        .map_err(operation_error)?
+}
+
+#[tauri::command]
+pub async fn git_diff_stats(
+    checkout_id: String,
+    database: State<'_, Database>,
+    watchers: State<'_, std::sync::Arc<GitWatcherManager>>,
+) -> Result<GitFileDiffStats, IpcError> {
+    let database = database.inner().clone();
+    let watchers = watchers.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        git::diff_stats(&database, &watchers, &checkout_id)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+#[tauri::command]
+pub async fn git_checkout_diff_stats(
+    database: State<'_, Database>,
+    watchers: State<'_, std::sync::Arc<GitWatcherManager>>,
+) -> Result<GitCheckoutDiffStats, IpcError> {
+    let database = database.inner().clone();
+    let watchers = watchers.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || git::checkout_diff_stats(&database, &watchers))
         .await
         .map_err(operation_error)?
 }

@@ -13,6 +13,7 @@ import type { Checkout, Repo } from "../domain/workspace";
 import type { CheckoutUiState } from "../domain/ui-state";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
+import { useDiffStats } from "../presentation/diff-stats";
 import { listCheckoutFiles } from "../lib/ipc";
 
 const props = defineProps<{
@@ -50,8 +51,9 @@ const emit = defineEmits<{
 
 type InspectorTab = "files" | "changes";
 type DirectoryState = "loading" | "error" | "empty" | "truncated";
-/** `+N`/`-N` have no source yet: `GitChangedFile` carries no counts. The markup waits for the
- *  `git diff --numstat` call that comes with the diff view (phase 4/6). */
+/** The file tree rows carry the same optional counts as the change rows, but nothing fills
+ *  them in yet: the tree lists the whole checkout, not its diff, and the counts belong to the
+ *  diff view that the file rows are about to become. */
 interface DiffStats {
   additions?: number;
   deletions?: number;
@@ -65,6 +67,13 @@ interface VisibleEntry extends DiffStats {
  *  grouped list virtualizes with the same math as the tree. */
 type ChangeFile = { kind: "file"; key: string; name: string; status: string; oldPath?: string } & DiffStats;
 type ChangeRow = ChangeFile | { kind: "group"; key: string; dir: string };
+
+// The counts come from the same store the sidebar reads and from the same base ref the file
+// list below is built from, so a row's number always describes the change it sits next to.
+const diffStats = useDiffStats(
+  computed(() => (props.repo ? [props.repo] : [])),
+  computed(() => (props.repo?.kind === "git" ? (props.checkout?.id ?? null) : null)),
+);
 
 const directories = ref<Record<string, FileEntry[]>>({});
 const directoryStates = ref<Record<string, DirectoryState>>({});
@@ -362,6 +371,7 @@ const changedFileCount = computed(() => changedFiles.value.length);
 /** Grouped by parent directory, then flattened: a group header is a row of the same height, so
  *  the whole list windows with `virtualWindow`. Files at the root are labelled "/". */
 const changeRows = computed<ChangeRow[]>(() => {
+  const counts = diffStats.fileCounts;
   const groups = new Map<string, ChangeFile[]>();
   for (const file of changedFiles.value) {
     const slash = file.path.lastIndexOf("/");
@@ -372,6 +382,9 @@ const changeRows = computed<ChangeRow[]>(() => {
       name: slash < 0 ? file.path : file.path.slice(slash + 1),
       status: file.status,
       oldPath: file.oldPath,
+      // A file Git cannot count keeps both absent, so the row shows no number at all.
+      additions: counts[file.path]?.additions,
+      deletions: counts[file.path]?.deletions,
     };
     const bucket = groups.get(dir);
     if (bucket) bucket.push(row);

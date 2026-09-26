@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from "vue";
+import { computed, toRef } from "vue";
 import {
   Folder as FolderIcon,
   FolderGit2 as FolderGit2Icon,
@@ -11,6 +11,7 @@ import {
   X as XIcon,
 } from "@lucide/vue";
 import type { Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
+import { useDiffStats } from "../presentation/diff-stats";
 
 defineOptions({ name: "FolderSidebar" });
 
@@ -63,6 +64,9 @@ interface Workdir {
   checkout: Checkout;
   title: string;
   branch?: string;
+  /** The checkout's own line counts, absent when Git has none to show. */
+  additions?: number;
+  deletions?: number;
   kind: IconKind;
   /** Repo roots can host a new worktree. */
   gitdir: boolean;
@@ -71,6 +75,11 @@ interface Workdir {
   active: boolean;
   items: WorkdirItem[];
 }
+
+// The sidebar names every checkout at once, so it asks for the totals of all of them in one
+// call rather than per row. The active checkout is named too, so the Changes tab of the
+// inspector shares the same refresh instead of running a second listener.
+const diffStats = useDiffStats(toRef(props, "repos"), toRef(props, "activeCheckoutId"));
 
 const groups = computed(() =>
   props.repos.map((repo) => ({
@@ -81,11 +90,14 @@ const groups = computed(() =>
 
 function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
   const isGit = repo.kind === "git";
+  const counts = isGit ? diffStats.checkoutTotals[checkout.id] : undefined;
   return {
     checkout,
     // The repo root is "Base" and carries its branch aside; a worktree is named by its branch.
     title: checkout.isPrimary ? "Base" : checkout.branch || checkout.path,
     branch: checkout.isPrimary ? checkout.branch : undefined,
+    additions: counts?.additions || undefined,
+    deletions: counts?.deletions || undefined,
     kind: !isGit ? "folder" : checkout.isPrimary ? "git" : "worktree",
     gitdir: isGit && checkout.isPrimary,
     worktree: isGit && !checkout.isPrimary,
@@ -132,7 +144,10 @@ function sessionState(session: Session) {
                       <span>{{ workdir.branch }}</span>
                     </div>
                   </div>
-                  <div class="workdir-meta" />
+                  <div class="workdir-meta">
+                    <span v-if="workdir.additions" class="diff-add">+{{ workdir.additions }}</span>
+                    <span v-if="workdir.deletions" class="diff-del">-{{ workdir.deletions }}</span>
+                  </div>
                 </div>
               </button>
 

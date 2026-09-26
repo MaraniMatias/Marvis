@@ -19,6 +19,8 @@ const mocks = vi.hoisted(() => ({
   readCheckoutMarkdownImage: vi.fn(),
   getGitDiff: vi.fn(),
   getGitDiffPage: vi.fn(),
+  getGitCheckoutDiffStats: vi.fn(async () => ({})),
+  getGitDiffStats: vi.fn(async () => []),
 }));
 
 vi.mock("../lib/ipc", () => ({
@@ -28,6 +30,9 @@ vi.mock("../lib/ipc", () => ({
   readCheckoutMarkdownImage: mocks.readCheckoutMarkdownImage,
   getGitDiff: mocks.getGitDiff,
   getGitDiffPage: mocks.getGitDiffPage,
+  // The mounted InspectorPane reads the diff counts; it only renders them when present.
+  getGitCheckoutDiffStats: mocks.getGitCheckoutDiffStats,
+  getGitDiffStats: mocks.getGitDiffStats,
 }));
 
 vi.mock("@git-diff-view/vue", async () => {

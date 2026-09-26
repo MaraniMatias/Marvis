@@ -44,7 +44,27 @@ pub struct GitChangedFile {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub old_path: Option<String>,
     pub status: String,
+    /// Absent rather than zero when Git has no count for the file: `--numstat` prints `-` for
+    /// both columns of one it cannot measure, a binary file among them.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub additions: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub deletions: Option<u64>,
 }
+
+/// The lines a change set adds and removes.
+#[derive(Debug, Clone, Copy, Default, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GitDiffStats {
+    pub additions: u64,
+    pub deletions: u64,
+}
+
+/// The totals of every registered Git checkout, keyed by checkout id.
+pub type GitCheckoutDiffStats = BTreeMap<String, GitDiffStats>;
+
+/// The changed files of one checkout, each with the lines it adds and removes.
+pub type GitFileDiffStats = Vec<GitChangedFile>;
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -112,6 +132,10 @@ pub struct GitDiffPage {
 #[derive(Default)]
 pub struct GitWatcherManager {
     watchers: Mutex<BTreeMap<String, (RecommendedWatcher, mpsc::SyncSender<WatchMessage>)>>,
+    /// The line counts of a checkout, kept here because the same debounced change that
+    /// refreshes the file list is what makes them stale. `Arc` so a watch thread can mark its
+    /// own entry without borrowing the manager.
+    diff_stats: Arc<GitDiffStatsCache>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -136,6 +160,31 @@ struct GitContext {
 struct Snapshot {
     status: GitStatus,
     merge_base: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct GitCounts {
+    files: GitFileDiffStats,
+    totals: GitDiffStats,
+}
+
+/// One checkout's counts plus the base they were taken against, kept next to the watchers
+/// because answering costs several `git` processes per checkout and the sidebar asks for all
+/// of them at once. Only a watched checkout is ever held: an unwatched one has no change
+/// signal, so a stored entry would be a lie.
+#[derive(Clone)]
+struct CachedGitCounts {
+    checkout_id: String,
+    /// Choosing another default branch moves the base ref, which no watcher can see, so the
+    /// entry is matched against it instead of invalidated.
+    default_branch: Option<String>,
+    stale: bool,
+    counts: GitCounts,
+}
+
+#[derive(Default)]
+struct GitDiffStatsCache {
+    entries: Mutex<BTreeMap<String, CachedGitCounts>>,
 }
 
 impl GitWatcherManager {
@@ -192,12 +241,17 @@ impl GitWatcherManager {
 
         let event_checkout_id = checkout_id.clone();
         let activity_checkout_id = checkout_id.clone();
+        let stale_checkout_id = checkout_id.clone();
         let worker_activity_pending = file_activity_pending;
+        let worker_diff_stats = self.diff_stats.clone();
         thread::Builder::new()
             .name("marvis-git-watch".into())
             .spawn(move || {
                 while let WatchWakeup::Changed = receive_debounced_change(&receiver, WATCH_DEBOUNCE)
                 {
+                    // Before the event, so a refresh it triggers never reads the counts the
+                    // same change just invalidated.
+                    worker_diff_stats.mark_stale(&stale_checkout_id);
                     let _ = app.emit(STATUS_CHANGED_EVENT, &event_checkout_id);
                     if worker_activity_pending.swap(false, Ordering::Relaxed) {
                         let _ = app.emit(FILE_ACTIVITY_EVENT, &activity_checkout_id);
@@ -221,6 +275,69 @@ impl GitWatcherManager {
                 let _ = sender.send(WatchMessage::Stop);
                 drop(watcher);
             }
+        }
+        self.diff_stats.forget(checkout_id);
+    }
+
+    /// The counts already held for a watched checkout, or `None` when they must be asked for.
+    fn cached_diff_stats(
+        &self,
+        checkout_id: &str,
+        default_branch: Option<&str>,
+    ) -> Option<GitCounts> {
+        if !self.is_watched(checkout_id) {
+            return None;
+        }
+        self.diff_stats.fresh(checkout_id, default_branch)
+    }
+
+    fn store_diff_stats(&self, counts: CachedGitCounts) {
+        if !self.is_watched(&counts.checkout_id) {
+            return;
+        }
+        self.diff_stats.store(counts);
+    }
+
+    fn is_watched(&self, checkout_id: &str) -> bool {
+        self.watchers
+            .lock()
+            .is_ok_and(|watchers| watchers.contains_key(checkout_id))
+    }
+}
+
+impl GitDiffStatsCache {
+    fn fresh(&self, checkout_id: &str, default_branch: Option<&str>) -> Option<GitCounts> {
+        self.entries
+            .lock()
+            .ok()?
+            .get(checkout_id)
+            .filter(|entry| !entry.stale && entry.default_branch.as_deref() == default_branch)
+            .map(|entry| entry.counts.clone())
+    }
+
+    fn store(&self, counts: CachedGitCounts) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.insert(
+                counts.checkout_id.clone(),
+                CachedGitCounts {
+                    stale: false,
+                    ..counts
+                },
+            );
+        }
+    }
+
+    fn mark_stale(&self, checkout_id: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            if let Some(entry) = entries.get_mut(checkout_id) {
+                entry.stale = true;
+            }
+        }
+    }
+
+    fn forget(&self, checkout_id: &str) {
+        if let Ok(mut entries) = self.entries.lock() {
+            entries.remove(checkout_id);
         }
     }
 }
@@ -283,6 +400,243 @@ fn is_checkout_file_activity(path: &Path, checkout_root: &Path) -> bool {
 
 pub fn status(database: &Database, checkout_id: &str) -> Result<GitStatus, IpcError> {
     Ok(snapshot(&registered_git_context(database, checkout_id)?)?.status)
+}
+
+/// The counts of one checkout's changed files, from the same snapshot the file list is built
+/// from, so the numbers on a row and the row's own base ref cannot disagree.
+pub fn diff_stats(
+    database: &Database,
+    watchers: &GitWatcherManager,
+    checkout_id: &str,
+) -> Result<GitFileDiffStats, IpcError> {
+    let repos = workspace_repos(database)?;
+    Ok(counts_for_checkout(&repos, watchers, checkout_id)?.files)
+}
+
+/// The same counts folded into one number per checkout, for the rows that name every checkout
+/// at once. A checkout Git cannot answer for is left out rather than reported as zero, so a
+/// missing, plain or base-less checkout shows no counts instead of a false clean bill.
+pub fn checkout_diff_stats(
+    database: &Database,
+    watchers: &GitWatcherManager,
+) -> Result<GitCheckoutDiffStats, IpcError> {
+    let repos = workspace_repos(database)?;
+    let mut totals = GitCheckoutDiffStats::new();
+    for repo in &repos {
+        if repo.kind != RepoKind::Git {
+            continue;
+        }
+        for checkout in &repo.checkouts {
+            if checkout.is_missing {
+                continue;
+            }
+            if let Ok(counts) = counts_for_checkout(&repos, watchers, &checkout.id) {
+                totals.insert(checkout.id.clone(), counts.totals);
+            }
+        }
+    }
+    Ok(totals)
+}
+
+fn counts_for_checkout(
+    repos: &[Repo],
+    watchers: &GitWatcherManager,
+    checkout_id: &str,
+) -> Result<GitCounts, IpcError> {
+    let context = git_context(repos, checkout_id)?;
+    let default_branch = context.repo.default_branch.clone();
+    if let Some(counts) = watchers.cached_diff_stats(checkout_id, default_branch.as_deref()) {
+        return Ok(counts);
+    }
+    let snapshot = snapshot(&context)?;
+    let counts = counted_files(&context, &snapshot)?;
+    watchers.store_diff_stats(CachedGitCounts {
+        checkout_id: checkout_id.to_owned(),
+        default_branch,
+        stale: false,
+        counts: counts.clone(),
+    });
+    Ok(counts)
+}
+
+fn workspace_repos(database: &Database) -> Result<Vec<Repo>, IpcError> {
+    database
+        .load_workspace()
+        .map(|workspace| workspace.repos)
+        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
+}
+
+/// The snapshot's own file list with the lines each file adds and removes attached, and their
+/// sum. Both come from the same snapshot the file list is served from, so a number and the row
+/// it decorates are always about the same base ref.
+fn counted_files(context: &GitContext, snapshot: &Snapshot) -> Result<GitCounts, IpcError> {
+    let counted = numstat_counts(context, snapshot)?;
+    let mut totals = GitDiffStats::default();
+    let files = snapshot
+        .status
+        .files
+        .iter()
+        .map(|file| {
+            let counts = counted.get(&file.path).copied();
+            if let Some(counts) = counts {
+                totals.additions += counts.additions;
+                totals.deletions += counts.deletions;
+            }
+            GitChangedFile {
+                additions: counts.map(|counts| counts.additions),
+                deletions: counts.map(|counts| counts.deletions),
+                ..file.clone()
+            }
+        })
+        .collect();
+    Ok(GitCounts { files, totals })
+}
+
+/// Counts the lines every changed file adds and removes, against exactly the base the file
+/// list uses: `snapshot.merge_base` for the tracked files, which is the ref `diff_args` diffs a
+/// tracked file against, and `/dev/null` for the untracked ones, which is how it diffs those.
+fn numstat_counts(
+    context: &GitContext,
+    snapshot: &Snapshot,
+) -> Result<BTreeMap<String, GitDiffStats>, IpcError> {
+    let tracked = checked_git(
+        &context.root,
+        [
+            "diff",
+            "--no-ext-diff",
+            "--no-textconv",
+            "--numstat",
+            "-z",
+            "--find-renames",
+            &snapshot.merge_base,
+        ],
+        "could not count changed lines",
+    )?;
+    let mut counts = parse_numstat(&tracked.stdout)?;
+    for file in snapshot
+        .status
+        .files
+        .iter()
+        .filter(|file| file.status == "??")
+    {
+        // `git diff` says nothing about an untracked path, so each one is counted on its own
+        // against an empty file, the same comparison the diff view makes.
+        let Ok(path) = contained_untracked_path(context, &file.path) else {
+            continue;
+        };
+        let output = run_git(
+            &context.root,
+            vec![
+                "diff".into(),
+                "--no-ext-diff".into(),
+                "--no-textconv".into(),
+                "--numstat".into(),
+                "--no-index".into(),
+                "--".into(),
+                "/dev/null".into(),
+                path.into_os_string(),
+            ],
+        )?;
+        // `--no-index` reports a difference as exit code 1, the way `diff` does.
+        if !matches!(output.status.code(), Some(0) | Some(1)) {
+            continue;
+        }
+        if let Some(untracked) = first_numstat_record(&output.stdout) {
+            counts.insert(file.path.clone(), untracked);
+        }
+    }
+    Ok(counts)
+}
+
+/// Every `--numstat` record is one NUL-terminated field, so a path that holds a newline, a
+/// tab or a NUL of its own cannot be split apart: a plain change is `adds<tab>deletes<tab>path`
+/// and a rename or copy is `adds<tab>deletes<tab>` followed by the old and the new path as two
+/// more fields. The counts are keyed by the new path, the one the file list shows, and a
+/// record Git declined to count is left out instead of being reported as zero lines.
+fn parse_numstat(output: &[u8]) -> Result<BTreeMap<String, GitDiffStats>, IpcError> {
+    let mut fields = output.split(|byte| *byte == 0);
+    let mut stats = BTreeMap::new();
+    while let Some(record) = fields.next() {
+        if record.is_empty() {
+            continue;
+        }
+        let (additions, deletions, path) = numstat_columns(record).ok_or_else(malformed_numstat)?;
+        let path = if path.is_empty() {
+            // A rename or copy: the counts came first, then the two paths.
+            fields.next().ok_or_else(malformed_numstat)?;
+            fields.next().ok_or_else(malformed_numstat)?
+        } else {
+            path
+        };
+        if let (Some(additions), Some(deletions)) = (additions, deletions) {
+            stats.insert(
+                path_text(path)?,
+                GitDiffStats {
+                    additions,
+                    deletions,
+                },
+            );
+        }
+    }
+    Ok(stats)
+}
+
+/// The counts of the only record a single-file `--numstat` produces. The path Git echoes back
+/// there names the two files it compared, not the checkout-relative path the file list is
+/// keyed by, so only the counts are read out of it.
+fn first_numstat_record(output: &[u8]) -> Option<GitDiffStats> {
+    let record = output.split(|byte| *byte == b'\n').next()?;
+    let (additions, deletions, _) = numstat_columns(record)?;
+    Some(GitDiffStats {
+        additions: additions?,
+        deletions: deletions?,
+    })
+}
+
+/// Splits one `--numstat` record into its two counts and its path, or `None` when the bytes
+/// are not a record at all. A `-` column is Git declining to count the file, which is not a
+/// zero, and is carried out as a `None` of its own.
+fn numstat_columns(record: &[u8]) -> Option<(Option<u64>, Option<u64>, &[u8])> {
+    let mut columns = record.splitn(3, |byte| *byte == b'\t');
+    let additions = numstat_count(columns.next()?)?;
+    let deletions = numstat_count(columns.next()?)?;
+    Some((additions, deletions, columns.next()?))
+}
+
+fn numstat_count(column: &[u8]) -> Option<Option<u64>> {
+    let text = std::str::from_utf8(column).ok()?;
+    if text == "-" {
+        return Some(None);
+    }
+    Some(Some(text.parse().ok()?))
+}
+
+fn malformed_numstat() -> IpcError {
+    IpcError::new(
+        IpcErrorCode::GitFailed,
+        "Git returned an invalid line count record",
+    )
+}
+
+/// An untracked entry is the one path the counts read straight from the working tree, so it
+/// goes through the same containment as every other path a command touches: relative to the
+/// checkout, resolving to a file inside it. A link that leaves the checkout, or that points at
+/// a folder, is refused rather than followed.
+fn contained_untracked_path(context: &GitContext, path: &str) -> Result<PathBuf, IpcError> {
+    let target = context.root.join(validate_relative_path(path)?);
+    let resolved = fs::canonicalize(&target).map_err(|error| {
+        IpcError::new(
+            IpcErrorCode::FolderMissing,
+            format!("untracked file is no longer available: {error}"),
+        )
+    })?;
+    if !resolved.starts_with(&context.root) || !resolved.is_file() {
+        return Err(IpcError::new(
+            IpcErrorCode::PathOutsideCheckout,
+            "untracked path does not resolve to a file inside the checkout",
+        ));
+    }
+    Ok(target)
 }
 
 pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFileDiff, IpcError> {
@@ -709,11 +1063,12 @@ pub fn watch_paths(database: &Database, checkout_id: &str) -> Result<Vec<PathBuf
 }
 
 fn registered_git_context(database: &Database, checkout_id: &str) -> Result<GitContext, IpcError> {
-    let workspace = database
-        .load_workspace()
-        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?;
+    git_context(&workspace_repos(database)?, checkout_id)
+}
+
+fn git_context(repos: &[Repo], checkout_id: &str) -> Result<GitContext, IpcError> {
     let (repo, checkout) = crate::services::checkout::registered_checkout(
-        &workspace.repos,
+        repos,
         checkout_id,
         "checkout ID is not registered",
     )?;
@@ -971,6 +1326,8 @@ pub(crate) fn parse_porcelain_v2(
                 path,
                 old_path,
                 status,
+                additions: None,
+                deletions: None,
             },
         );
     }
@@ -1000,6 +1357,8 @@ fn parse_name_status(output: &[u8]) -> Result<Vec<GitChangedFile>, IpcError> {
                 path,
                 old_path: Some(path_text(old_path)?),
                 status: String::from_utf8_lossy(&status_record[..1]).into_owned(),
+                additions: None,
+                deletions: None,
             });
         } else {
             let path = records.get(index).ok_or_else(malformed_status)?;
@@ -1009,6 +1368,8 @@ fn parse_name_status(output: &[u8]) -> Result<Vec<GitChangedFile>, IpcError> {
                 path,
                 old_path: None,
                 status: String::from_utf8_lossy(&status_record[..1]).into_owned(),
+                additions: None,
+                deletions: None,
             });
         }
     }
@@ -1163,7 +1524,9 @@ fn output_text(output: &Output) -> String {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, process::Command, sync::mpsc, time::Duration};
+    use std::{
+        collections::BTreeMap, fs, path::Path, process::Command, sync::mpsc, time::Duration,
+    };
 
     use notify::Watcher;
     use tempfile::tempdir;
@@ -1175,9 +1538,10 @@ mod tests {
     };
 
     use super::{
-        diff, diff_page, parse_diff_display_line, parse_name_status, parse_porcelain_v2,
-        receive_debounced_change, resolve_default_ref, should_refresh_path, status, WatchMessage,
-        WatchWakeup,
+        diff, diff_page, first_numstat_record, parse_diff_display_line, parse_name_status,
+        parse_numstat, parse_porcelain_v2, receive_debounced_change, resolve_default_ref,
+        should_refresh_path, status, CachedGitCounts, GitCounts, GitDiffStats, GitWatcherManager,
+        WatchMessage, WatchWakeup,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -1523,5 +1887,252 @@ line.txt";
             Path::new("/other/file.rs"),
             root
         ));
+    }
+
+    #[test]
+    fn numstat_records_are_keyed_by_the_new_path_of_a_rename_and_skip_uncounted_files() {
+        // The two literals are concatenated so no `\0` sits next to a digit, which would
+        // read as an octal escape rather than a NUL.
+        let parsed = parse_numstat(
+            b"2\t0\tbase.txt\0-\t-\tbinary.dat\0\
+              1\t0\t\0old name.txt\0new name.txt\0\
+              2\t3\tweird\tname.txt\0",
+        )
+        .unwrap();
+
+        assert_eq!(parsed.len(), 3);
+        assert_eq!(
+            parsed["base.txt"],
+            GitDiffStats {
+                additions: 2,
+                deletions: 0
+            }
+        );
+        // A rename is keyed by the path the file list shows, not the one it came from.
+        assert_eq!(
+            parsed["new name.txt"],
+            GitDiffStats {
+                additions: 1,
+                deletions: 0
+            }
+        );
+        // A tab inside a path stays inside that path, because only NUL ends a record.
+        assert_eq!(
+            parsed["weird\tname.txt"],
+            GitDiffStats {
+                additions: 2,
+                deletions: 3
+            }
+        );
+        // A file Git could not count has no numbers, rather than zero lines.
+        assert!(!parsed.contains_key("binary.dat"));
+        assert!(parse_numstat(b"not a record\0").is_err());
+    }
+
+    #[test]
+    fn a_single_file_numstat_reads_the_only_record_it_prints() {
+        assert_eq!(
+            first_numstat_record(b"2\t0\t/{dev/null => /tmp/checkout/added.txt}\n"),
+            Some(GitDiffStats {
+                additions: 2,
+                deletions: 0
+            })
+        );
+        assert_eq!(
+            first_numstat_record(b"-\t-\t/{dev/null => /tmp/checkout/a.dat}\n"),
+            None
+        );
+        assert_eq!(first_numstat_record(b""), None);
+    }
+
+    #[test]
+    fn counts_lines_against_the_same_base_as_the_file_list() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join("gone.txt"), "gone\n").unwrap();
+        fs::write(root.join("old name.txt"), "one\ntwo\n").unwrap();
+        git(&root, &["add", "gone.txt", "old name.txt"]);
+        git(&root, &["commit", "-m", "more files"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        let watchers = GitWatcherManager::default();
+
+        git(&root, &["mv", "old name.txt", "new name.txt"]);
+        fs::write(root.join("new name.txt"), "one\ntwo\nthree\n").unwrap();
+        fs::write(root.join("base.txt"), "base\none\ntwo\n").unwrap();
+        fs::write(root.join("added.txt"), "one\ntwo\n").unwrap();
+        fs::write(root.join("binary.dat"), [0, 1, 2]).unwrap();
+        fs::remove_file(root.join("gone.txt")).unwrap();
+
+        let listed = status(&database, &checkout_id).unwrap();
+        let counted = super::diff_stats(&database, &watchers, &checkout_id).unwrap();
+        let totals = super::checkout_diff_stats(&database, &watchers).unwrap();
+
+        // The counted list is the same list, with the same paths in the same order, so a row
+        // and the numbers on it can never describe different things.
+        let paths: Vec<_> = counted.iter().map(|file| file.path.as_str()).collect();
+        assert_eq!(
+            paths,
+            listed
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>()
+        );
+        let counts = |path: &str| {
+            let file = counted.iter().find(|file| file.path == path).unwrap();
+            (file.additions, file.deletions)
+        };
+        assert_eq!(counts("base.txt"), (Some(2), Some(0)));
+        assert_eq!(counts("added.txt"), (Some(2), Some(0)));
+        assert_eq!(counts("gone.txt"), (Some(0), Some(1)));
+        // A rename is counted under the path the file list shows, not the one it came from.
+        assert_eq!(counts("new name.txt"), (Some(1), Some(0)));
+        // Git has no count for a binary file, and the row says so instead of showing zero.
+        assert_eq!(counts("binary.dat"), (None, None));
+        // The per-checkout total is exactly the sum of its files.
+        assert_eq!(
+            totals[&checkout_id],
+            GitDiffStats {
+                additions: 5,
+                deletions: 1
+            }
+        );
+    }
+
+    #[test]
+    fn counts_default_to_the_whole_change_set_rather_than_the_default_branch_tip() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        git(&root, &["checkout", "-b", "feature"]);
+        fs::write(root.join("feature.txt"), "feature\n").unwrap();
+        git(&root, &["add", "feature.txt"]);
+        git(&root, &["commit", "-m", "feature"]);
+        git(&root, &["checkout", "trunk"]);
+        fs::write(root.join("default-only.txt"), "default\n").unwrap();
+        git(&root, &["add", "default-only.txt"]);
+        git(&root, &["commit", "-m", "new default commit"]);
+        git(&root, &["checkout", "feature"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        let watchers = GitWatcherManager::default();
+
+        let listed = status(&database, &checkout_id).unwrap();
+        let counted = super::diff_stats(&database, &watchers, &checkout_id).unwrap();
+        let counts: BTreeMap<_, _> = counted
+            .iter()
+            .map(|file| (file.path.as_str(), (file.additions, file.deletions)))
+            .collect();
+
+        assert_eq!(counts["feature.txt"], (Some(1), Some(0)));
+        assert!(!counts.contains_key("default-only.txt"));
+        assert!(!listed
+            .files
+            .iter()
+            .any(|file| file.path == "default-only.txt"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sec_07_diff_stats_refuses_an_untracked_path_that_leaves_the_checkout() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        let outside = temp.path().join("outside");
+        fs::create_dir(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "secret\n").unwrap();
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        symlink(&outside, root.join("link")).unwrap();
+        fs::write(root.join("added.txt"), "one\n").unwrap();
+
+        let counted =
+            super::diff_stats(&database, &GitWatcherManager::default(), &checkout_id).unwrap();
+        let counts: BTreeMap<_, _> = counted
+            .iter()
+            .map(|file| (file.path.as_str(), file.additions))
+            .collect();
+
+        // A path that stays inside the checkout is still counted: the refusal is containment.
+        assert_eq!(counts["added.txt"], Some(1));
+        assert_eq!(counts["link"], None);
+        assert!(!counts.contains_key("secret.txt"));
+    }
+
+    #[test]
+    fn sec_08_diff_stats_answers_only_for_registered_git_checkouts() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("plain");
+        fs::create_dir_all(&root).unwrap();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let watchers = GitWatcherManager::default();
+
+        let plain = state.repos[0].checkouts[0].id.clone();
+        let error = super::diff_stats(&database, &watchers, &plain).unwrap_err();
+        assert!(matches!(error.code, IpcErrorCode::InvalidCheckout));
+        let error = super::diff_stats(&database, &watchers, "checkout:unknown").unwrap_err();
+        assert!(matches!(error.code, IpcErrorCode::InvalidCheckout));
+        // A plain folder is left out of the totals instead of being reported as a clean bill.
+        assert_eq!(state.repos[0].kind, RepoKind::Plain);
+        assert!(super::checkout_diff_stats(&database, &watchers)
+            .unwrap()
+            .is_empty());
+    }
+
+    fn cached_counts(additions: u64) -> CachedGitCounts {
+        CachedGitCounts {
+            checkout_id: "checkout:a".to_owned(),
+            default_branch: Some("trunk".to_owned()),
+            stale: false,
+            counts: GitCounts {
+                files: Vec::new(),
+                totals: GitDiffStats {
+                    additions,
+                    deletions: 0,
+                },
+            },
+        }
+    }
+
+    #[test]
+    fn a_watched_checkout_is_counted_once_until_its_watcher_reports_a_change() {
+        let cache = super::GitDiffStatsCache::default();
+        let stored = cached_counts(3);
+
+        assert!(cache.fresh("checkout:a", Some("trunk")).is_none());
+        cache.store(stored.clone());
+        assert_eq!(
+            cache.fresh("checkout:a", Some("trunk")),
+            Some(stored.counts)
+        );
+        // Another default branch is another base ref, which no watcher can see.
+        assert!(cache.fresh("checkout:a", Some("main")).is_none());
+        cache.mark_stale("checkout:a");
+        assert!(cache.fresh("checkout:a", Some("trunk")).is_none());
+        cache.store(cached_counts(4));
+        assert_eq!(
+            cache
+                .fresh("checkout:a", Some("trunk"))
+                .map(|counts| counts.totals),
+            Some(GitDiffStats {
+                additions: 4,
+                deletions: 0
+            })
+        );
+        cache.forget("checkout:a");
+        assert!(cache.fresh("checkout:a", Some("trunk")).is_none());
+    }
+
+    #[test]
+    fn an_unwatched_checkout_has_no_held_counts_because_it_has_no_change_signal() {
+        let watchers = GitWatcherManager::default();
+
+        watchers.store_diff_stats(cached_counts(3));
+
+        assert!(watchers
+            .cached_diff_stats("checkout:a", Some("trunk"))
+            .is_none());
     }
 }

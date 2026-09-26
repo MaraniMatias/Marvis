@@ -23,7 +23,9 @@ import {
   updateReviewNote,
   verifyReviewNoteAnchors,
   getEditorAvailability,
+  getGitCheckoutDiffStats,
   getGitDiffPage,
+  getGitDiffStats,
   getGitViewedFiles,
   loadTerminalLayout,
   markGitFileViewed,
@@ -178,6 +180,19 @@ describe("Git review IPC client", () => {
       checkoutId: "checkout:one",
       path: "src/file.ts",
     });
+  });
+
+  it("asks for diff counts with a checkout id and never a ref or a path", async () => {
+    vi.mocked(invoke)
+      .mockResolvedValueOnce({ "checkout:one": { additions: 3, deletions: 1 } })
+      .mockResolvedValueOnce([]);
+
+    await getGitCheckoutDiffStats();
+    await getGitDiffStats("checkout:one");
+
+    // The all-checkouts call carries no argument at all: the base ref is resolved in Rust.
+    expect(invoke).toHaveBeenNthCalledWith(1, "git_checkout_diff_stats");
+    expect(invoke).toHaveBeenNthCalledWith(2, "git_diff_stats", { checkoutId: "checkout:one" });
   });
 });
 

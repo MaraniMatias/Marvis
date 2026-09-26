@@ -119,6 +119,8 @@ fn main() {
             commands::files::file_read,
             commands::files::file_read_markdown_image,
             commands::git::git_status,
+            commands::git::git_diff_stats,
+            commands::git::git_checkout_diff_stats,
             commands::git::git_diff,
             commands::git::git_diff_page,
             commands::git::git_viewed_files,

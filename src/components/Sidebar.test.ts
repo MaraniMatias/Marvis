@@ -1,7 +1,19 @@
 // @vitest-environment happy-dom
-import { mount } from "@vue/test-utils";
-import { describe, expect, it } from "vitest";
-import type { Repo } from "../domain/workspace";
+import { flushPromises, mount } from "@vue/test-utils";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import type { Checkout, Repo } from "../domain/workspace";
+
+const mocks = vi.hoisted(() => ({
+  getGitCheckoutDiffStats: vi.fn(),
+  getGitDiffStats: vi.fn(),
+}));
+
+vi.mock("../lib/ipc", () => ({
+  getGitCheckoutDiffStats: mocks.getGitCheckoutDiffStats,
+  getGitDiffStats: mocks.getGitDiffStats,
+}));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
+
 import Sidebar from "./Sidebar.vue";
 
 function repo(overrides: Partial<Repo> = {}): Repo {
@@ -17,7 +29,28 @@ function repo(overrides: Partial<Repo> = {}): Repo {
   };
 }
 
+function checkout(overrides: Partial<Checkout> = {}): Checkout {
+  return {
+    id: "checkout:primary",
+    repoId: "repo:test",
+    path: "/test",
+    canonicalPath: "/test",
+    isPrimary: true,
+    branch: "main",
+    changedFiles: 0,
+    isMissing: false,
+    sessions: [],
+    ...overrides,
+  };
+}
+
 describe("Sidebar workdir rows", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    mocks.getGitCheckoutDiffStats.mockResolvedValue({});
+    mocks.getGitDiffStats.mockResolvedValue([]);
+  });
+
   it("groups checkouts by repo and ends with Open directory", async () => {
     const wrapper = mount(Sidebar, {
       props: {
@@ -245,5 +278,75 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.get(".workdir-title").element.className).toBe("workdir-title");
     expect(wrapper.get(".workdir-item .workdir-select").element.className).toBe("workdir-select");
     expect(wrapper.find(".workdir-meta").exists()).toBe(true);
+  });
+
+  it("shows every checkout's own line counts, not only the active one's", async () => {
+    mocks.getGitCheckoutDiffStats.mockResolvedValue({
+      "checkout:primary": { additions: 12, deletions: 4 },
+      "checkout:feature": { additions: 0, deletions: 7 },
+    });
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              {
+                id: "checkout:primary",
+                repoId: "repo:test",
+                path: "/test",
+                canonicalPath: "/test",
+                isPrimary: true,
+                branch: "main",
+                changedFiles: 0,
+                isMissing: false,
+                sessions: [],
+              },
+              {
+                id: "checkout:feature",
+                repoId: "repo:test",
+                path: "/test-feature",
+                canonicalPath: "/test-feature",
+                isPrimary: false,
+                branch: "feature",
+                changedFiles: 0,
+                isMissing: false,
+                sessions: [],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:feature",
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    await flushPromises();
+
+    // One call covers the sidebar: the inactive checkout is counted without being visited.
+    expect(mocks.getGitCheckoutDiffStats).toHaveBeenCalledTimes(1);
+    const [base, feature] = wrapper.findAll(".workdir-item .workdir-meta");
+    expect(base.get(".diff-add").text()).toBe("+12");
+    expect(base.get(".diff-del").text()).toBe("-4");
+    // A zero addition has nothing to draw, and the deletion stands on its own.
+    expect(feature.find(".diff-add").exists()).toBe(false);
+    expect(feature.get(".diff-del").text()).toBe("-7");
+    wrapper.unmount();
+  });
+
+  it("draws no counts for a checkout Git cannot answer for", async () => {
+    mocks.getGitCheckoutDiffStats.mockResolvedValue({ "checkout:primary": { additions: 0, deletions: 0 } });
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [repo({ checkouts: [{ ...checkout(), id: "checkout:primary" }] })],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    await flushPromises();
+
+    // An absent checkout is not a clean bill of health, and neither is a real zero.
+    expect(wrapper.get(".workdir-meta").text()).toBe("");
+    wrapper.unmount();
   });
 });

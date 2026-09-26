@@ -2,7 +2,7 @@ import { invoke } from "@tauri-apps/api/core";
 import type { Channel } from "@tauri-apps/api/core";
 import type { OpenedFolder } from "../domain/folder";
 import type { CheckoutImage, FileContent, FileSearchResult, FileTree } from "../domain/files";
-import type { GitDiffPage, GitFileDiff, GitStatus } from "../domain/git";
+import type { GitCheckoutDiffStats, GitDiffPage, GitFileDiff, GitFileDiffStats, GitStatus } from "../domain/git";
 import type { ReviewNote, ReviewRound, ReviewSide } from "../domain/review";
 import type { Session, TerminalLaunchType, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalInfo } from "../domain/worktree";
@@ -61,6 +61,18 @@ export function readCheckoutMarkdownImage(
 
 export function getGitStatus(checkoutId: string): Promise<GitStatus> {
   return invoke<GitStatus>("git_status", { checkoutId });
+}
+
+/** One call for the line counts of every registered Git checkout, so the sidebar does not
+ *  have to ask checkout by checkout. The base ref is resolved in Rust, never sent from here. */
+export function getGitCheckoutDiffStats(): Promise<GitCheckoutDiffStats> {
+  return invoke<GitCheckoutDiffStats>("git_checkout_diff_stats");
+}
+
+/** The line counts of one checkout's changed files, against the same base ref the file list
+ *  is built from. */
+export function getGitDiffStats(checkoutId: string): Promise<GitFileDiffStats> {
+  return invoke<GitFileDiffStats>("git_diff_stats", { checkoutId });
 }
 
 export function getGitDiff(checkoutId: string, path: string): Promise<GitFileDiff> {

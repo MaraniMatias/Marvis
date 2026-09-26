@@ -8,9 +8,18 @@ import type { CheckoutUiState } from "../domain/ui-state";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 
-const mocks = vi.hoisted(() => ({ listCheckoutFiles: vi.fn() }));
+const mocks = vi.hoisted(() => ({
+  listCheckoutFiles: vi.fn(),
+  getGitCheckoutDiffStats: vi.fn(),
+  getGitDiffStats: vi.fn(),
+}));
 
-vi.mock("../lib/ipc", () => ({ listCheckoutFiles: mocks.listCheckoutFiles }));
+vi.mock("../lib/ipc", () => ({
+  listCheckoutFiles: mocks.listCheckoutFiles,
+  getGitCheckoutDiffStats: mocks.getGitCheckoutDiffStats,
+  getGitDiffStats: mocks.getGitDiffStats,
+}));
+vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
 
 import InspectorPane from "./InspectorPane.vue";
 
@@ -82,6 +91,8 @@ function publishedRowHeight(wrapper: ReturnType<typeof mountInspector>): number 
 describe("InspectorPane", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    mocks.getGitCheckoutDiffStats.mockResolvedValue({});
+    mocks.getGitDiffStats.mockResolvedValue([]);
   });
 
   it("opens a selected file in the central document and marks the open row per checkout", async () => {
@@ -247,6 +258,46 @@ describe("InspectorPane", () => {
     expect(names).toEqual(["Mmain.ts", "Aio.ts", "Rname.ts", "DREADME.md", "??untracked.ts"]);
     // A rename keeps its source path reachable without spending a second row on it.
     expect(changes.find("button.change-row[title='src/lib/old.ts → old/name.ts']").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("puts each file's own line counts on its change row", async () => {
+    mocks.listCheckoutFiles.mockResolvedValue({ entries: [], truncated: false });
+    mocks.getGitDiffStats.mockResolvedValue([
+      { path: "src/main.ts", status: "M", additions: 12, deletions: 3 },
+      { path: "README.md", status: "D", additions: 0, deletions: 8 },
+      // Git has no count for a binary file, and the row draws nothing rather than "+0".
+      { path: "assets/logo.png", status: "M" },
+    ]);
+    const status: GitStatus = {
+      branch: "feature",
+      defaultBranch: "main",
+      aheadCount: 1,
+      files: [
+        { path: "src/main.ts", status: "M" },
+        { path: "README.md", status: "D" },
+        { path: "assets/logo.png", status: "M" },
+      ],
+    };
+    const wrapper = mountInspector({
+      checkout: checkout("git"),
+      repo,
+      gitSnapshot: gitSnapshot("git", status),
+      savedState: { ...DEFAULT_CHECKOUT_UI_STATE, inspectorTab: "changes" },
+    });
+    await flushPromises();
+
+    const changes = wrapper.get('[aria-label="Changed files"]');
+    const rows = changes.findAll("button.change-row");
+    expect(rows[0]!.get(".diff-add").text()).toBe("+12");
+    expect(rows[0]!.get(".diff-del").text()).toBe("-3");
+    // A zero addition has nothing to draw, and the deletion stands on its own.
+    expect(rows[1]!.find(".diff-add").exists()).toBe(false);
+    expect(rows[1]!.get(".diff-del").text()).toBe("-8");
+    expect(rows[2]!.find(".diff-add").exists()).toBe(false);
+    expect(rows[2]!.find(".diff-del").exists()).toBe(false);
+    // The counts describe the listed files, not a different change set.
+    expect(mocks.getGitDiffStats).toHaveBeenCalledWith("git");
     wrapper.unmount();
   });
 

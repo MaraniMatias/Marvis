@@ -2,7 +2,24 @@ export interface GitChangedFile {
   path: string;
   oldPath?: string;
   status: string;
+  /** Absent rather than zero when Git has no line count for the file: `--numstat` prints `-`
+   *  for both columns of a file it cannot count, such as a binary one. */
+  additions?: number;
+  deletions?: number;
 }
+
+/** The lines a change set adds and removes. */
+export interface GitDiffStats {
+  additions: number;
+  deletions: number;
+}
+
+/** The totals of every registered Git checkout, keyed by checkout id. One call covers the
+ *  whole sidebar, so it does not have to ask checkout by checkout. */
+export type GitCheckoutDiffStats = Record<string, GitDiffStats>;
+
+/** The changed files of one checkout, each with the lines it adds and removes. */
+export type GitFileDiffStats = GitChangedFile[];
 
 export interface GitStatus {
   branch?: string;
