@@ -228,6 +228,7 @@ const SidebarStub = defineComponent({
     return () =>
       h("div", [
         h("button", { "data-testid": "select-checkout-two", onClick: () => emit("selectCheckout", "checkout:two") }),
+        h("button", { "data-testid": "select-session-one", onClick: () => emit("selectSession", "session:one") }),
         h("button", { "data-testid": "select-session-two", onClick: () => emit("selectSession", "session:two") }),
       ]);
   },
@@ -248,7 +249,7 @@ const SessionPaneStub = defineComponent({
 const InspectorPaneStub = defineComponent({
   name: "InspectorPane",
   props: { checkout: Object },
-  emits: ["openFile", "updateUiState", "sendReview"],
+  emits: ["openFile", "openAllChanges", "updateUiState", "sendReview"],
   setup(props, { emit }) {
     return () =>
       h("div", [
@@ -265,6 +266,11 @@ const InspectorPaneStub = defineComponent({
           disabled: !props.checkout,
           onClick: () =>
             props.checkout && emit("openFile", { checkoutId: (props.checkout as Checkout).id, path: "README.md" }),
+        }),
+        h("button", {
+          "data-testid": "open-all-changes",
+          disabled: !props.checkout,
+          onClick: () => props.checkout && emit("openAllChanges", { checkoutId: (props.checkout as Checkout).id }),
         }),
         h("button", {
           "data-testid": "changes-scroll",
@@ -285,17 +291,29 @@ const InspectorPaneStub = defineComponent({
 
 const DocumentPaneStub = defineComponent({
   name: "DocumentPane",
-  props: { document: Object },
-  emits: ["diffPositionChanged", "readingPositionChanged"],
+  props: { path: String },
+  emits: ["readingPositionChanged"],
   setup(props, { emit }) {
     return () =>
       h("div", [
-        h("span", { "data-testid": "document-pane" }, (props.document as { path: string }).path),
-        h("button", { "data-testid": "diff-scroll", onClick: () => emit("diffPositionChanged", 132) }),
+        h("span", { "data-testid": "document-pane" }, props.path ?? ""),
         h("button", {
           "data-testid": "document-scroll",
           onClick: () => emit("readingPositionChanged", { top: 240, left: 12 }),
         }),
+      ]);
+  },
+});
+
+const FileDiffStub = defineComponent({
+  name: "FileDiff",
+  props: { path: String },
+  emits: ["scrollPositionChanged"],
+  setup(props, { emit }) {
+    return () =>
+      h("div", [
+        h("span", { "data-testid": "file-diff" }, props.path ?? "all"),
+        h("button", { "data-testid": "diff-scroll", onClick: () => emit("scrollPositionChanged", 132) }),
       ]);
   },
 });
@@ -349,6 +367,7 @@ async function mountApp(
         SessionPane: SessionPaneStub,
         InspectorPane: InspectorPaneStub,
         DocumentPane: DocumentPaneStub,
+        FileDiff: FileDiffStub,
         WorktreeDialog: EmptyStub,
       },
     },
@@ -721,14 +740,27 @@ describe("App UI integration", () => {
   it("switches the main view from the inspector and back from a crumb, without unmounting the terminal", async () => {
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
 
+    // The whole change set, then one file's diff: both are the diff view.
+    await wrapper.get('[data-testid="open-all-changes"]').trigger("click");
+    await flushPromises();
+    expect((wrapper.get("#main-view-diff").element as HTMLElement).style.display).not.toBe("none");
+    expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("All changes");
+    await wrapper.get('[data-testid="diff-scroll"]').trigger("click");
+    await vi.advanceTimersByTimeAsync(300);
+    await flushPromises();
+    expect(mocks.saveCheckoutUiState).toHaveBeenLastCalledWith(
+      "checkout:one",
+      expect.objectContaining({ diffScrollTop: 132, diffAllFiles: true, document: null }),
+    );
+
     await wrapper.get('[data-testid="open-file"]').trigger("click");
     await flushPromises();
-    expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).toBe("none");
+    expect((wrapper.get("#main-view-diff").element as HTMLElement).style.display).toBe("none");
     expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
-    // The document is not what the titlebar names: the crumb still points at the session.
-    expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("Terminal 1");
+    // The crumb names the view that is open, not the session behind it.
+    expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("README.md");
+    expect(wrapper.get('[data-testid="document-pane"]').text()).toBe("README.md");
 
-    await wrapper.get('[data-testid="diff-scroll"]').trigger("click");
     await wrapper.get('[data-testid="document-scroll"]').trigger("click");
     await wrapper.get('[data-testid="changes-scroll"]').trigger("click");
     await vi.advanceTimersByTimeAsync(300);
@@ -736,19 +768,45 @@ describe("App UI integration", () => {
     expect(mocks.saveCheckoutUiState).toHaveBeenLastCalledWith(
       "checkout:one",
       expect.objectContaining({
+        mainView: "document",
+        document: { checkoutId: "checkout:one", path: "README.md", source: "file", mode: "view" },
         documentScrollTop: 240,
         documentScrollLeft: 12,
-        diffScrollTop: 132,
+        // A new view starts at the top, so the diff offset does not follow the document.
+        diffScrollTop: 0,
         changesScrollTop: 84,
       }),
     );
 
-    const siblings = wrapper.findAll(".surface-popover button");
-    await siblings[0]!.trigger("click");
+    // Back to the terminal from the sidebar: the crumb's session dropdown only exists while a
+    // terminal is what the panel is showing.
+    expect(wrapper.find(".surface-popover").exists()).toBe(false);
+    await wrapper.get('[data-testid="select-session-one"]').trigger("click");
     await flushPromises();
     expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).not.toBe("none");
     expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
+    expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("Terminal 1");
     expect(mocks.sessionPaneMounts).toBe(1);
+    wrapper.unmount();
+  });
+
+  it("saves the whole change set as the checkout's restored view", async () => {
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
+
+    await wrapper.get('[data-testid="open-all-changes"]').trigger("click");
+    await flushPromises();
+    expect((wrapper.get("#main-view-diff").element as HTMLElement).style.display).not.toBe("none");
+    expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).toBe("none");
+    expect(wrapper.get('[data-testid="file-diff"]').text()).toBe("all");
+    expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("All changes");
+    expect(mocks.sessionPaneMounts).toBe(1);
+
+    await vi.advanceTimersByTimeAsync(300);
+    await flushPromises();
+    expect(mocks.saveCheckoutUiState).toHaveBeenLastCalledWith(
+      "checkout:one",
+      expect.objectContaining({ mainView: "terminal", diffAllFiles: true, document: null }),
+    );
     wrapper.unmount();
   });
 
@@ -778,7 +836,7 @@ describe("App UI integration", () => {
     await flushPromises();
     expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("Other");
     expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
-    expect(wrapper.get('[data-testid="document-pane"]').text()).toBe("two.md");
+    expect(wrapper.get('[data-testid="document-pane"]').text()).toBe("");
 
     resolveOne({
       ...DEFAULT_CHECKOUT_UI_STATE,
@@ -786,7 +844,10 @@ describe("App UI integration", () => {
       mainView: "document",
     });
     await flushPromises();
-    expect(wrapper.get('[data-testid="document-pane"]').text()).toBe("two.md");
+    expect(wrapper.get('[data-testid="document-pane"]').text()).toBe("");
+    // The late load of the checkout left behind is dropped: the view that is open is the one
+    // the active checkout was switched to.
+    expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).not.toBe("none");
     expect(mocks.saveCheckoutUiState).not.toHaveBeenCalled();
     wrapper.unmount();
   });

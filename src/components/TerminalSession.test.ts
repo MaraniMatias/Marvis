@@ -102,10 +102,18 @@ describe("TerminalSession UI", () => {
 
     expect(terminalMock.output).toEqual([Array.from(output)]);
     expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "shell", expect.anything(), undefined);
+    // B.1: the face, size and ligatures are fixed. Only the colors come from the tokens.
     expect(terminalMock.options).toMatchObject({
       fontFamily: '"FiraCode Nerd Font Mono", monospace',
       fontSize: 16,
       lineHeight: 1.2,
+      scrollback: 10000,
+      theme: {
+        background: "#17191f", // --marvis-bg-0
+        foreground: "#d6d9e0", // --marvis-text
+        cursor: "#7c9eff", // --marvis-accent
+        selectionBackground: "#22252e", // --marvis-bg-2
+      },
     });
     expect(writeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", new TextEncoder().encode("λ pasted"));
     expect(resizeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", 97, 31);

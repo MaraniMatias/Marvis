@@ -1,7 +1,6 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-self-closing */
 import { listen } from "@tauri-apps/api/event";
-import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import {
@@ -16,22 +15,15 @@ import { ChevronDown as ChevronDownIcon, GitFork as GitForkIcon, Settings as Set
 import type { Checkout } from "./domain/workspace";
 import { parseEditorPosition } from "./domain/editor";
 import type { EditorPosition } from "./domain/editor";
-import { resolveMainView } from "./domain/main-document";
-import type { MainDocument, MainDocumentMode } from "./domain/main-document";
+import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
+import type { DocumentMode, MainView } from "./domain/main-document";
 import InspectorPane from "./components/InspectorPane.vue";
-import DocumentPane from "./components/DocumentPane.vue";
-import SessionPane from "./components/SessionPane.vue";
+import MainPane from "./components/MainPane.vue";
 import Sidebar from "./components/Sidebar.vue";
 import WorktreeDialog from "./components/WorktreeDialog.vue";
 import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
 import { isIpcError } from "./domain/ipc";
-import {
-  closeMissingCheckout,
-  getEditorAvailability,
-  locateMissingCheckout,
-  openInZed,
-  selectCheckout as persistCheckoutSelection,
-} from "./lib/ipc";
+import { getEditorAvailability, openInZed, selectCheckout as persistCheckoutSelection } from "./lib/ipc";
 import type { EditorAvailability } from "./lib/ipc";
 import { useWorkspaceState } from "./presentation/workspace";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
@@ -68,7 +60,7 @@ const appLayout = ref<AppLayoutState>({ ...DEFAULT_APP_LAYOUT });
 const appLayoutReady = ref(false);
 const checkoutUiStates = ref<Record<string, CheckoutUiState>>({});
 const checkoutUiReady = ref(false);
-const sessionPane = ref<InstanceType<typeof SessionPane> | null>(null);
+const mainPane = ref<InstanceType<typeof MainPane> | null>(null);
 const sidebarPanel = ref<{ resize(size: number): void } | null>(null);
 const inspectorPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
 const searchField = ref<HTMLInputElement | null>(null);
@@ -119,28 +111,11 @@ const nvimRequest = ref<{
   column?: number;
   token: number;
 } | null>(null);
-const agentRequest = ref<{ checkoutId: string; prompt: string; token: number } | null>(null);
 const sendingReview = ref(false);
-const documents = ref<Record<string, MainDocument>>({});
-const emptyDocument: MainDocument = { checkoutId: "", path: "", source: "file", mode: "code" };
-const mainViews = ref<Record<string, "terminal" | "document">>({});
+const mainViews = ref<Record<string, MainView>>({});
 const editorAvailability = ref<EditorAvailability>({ zed: false, neovim: false });
 const sessionRuntimeStatuses = ref<Record<string, TerminalSessionStatus>>({});
-const recentFileWrites = ref<Record<string, boolean>>({});
 const documentRefreshRevisions = ref<Record<string, number>>({});
-const activityByCheckout = computed(() => {
-  const activity: Record<string, string[]> = {};
-  for (const checkout of allCheckouts.value) {
-    const actors = checkout.sessions.flatMap((session) => {
-      const status = sessionRuntimeStatuses.value[session.id];
-      if (status?.state !== "running" || !status.foregroundProcess) return [];
-      return [`${session.type === "nvim" ? "Neovim" : "Terminal"} · ${session.name}`];
-    });
-    if (recentFileWrites.value[checkout.id]) actors.push("Recent file writes");
-    activity[checkout.id] = actors;
-  }
-  return activity;
-});
 let shellRequestToken = 0;
 let nvimRequestToken = 0;
 let unlistenFileActivity: (() => void) | undefined;
@@ -154,7 +129,6 @@ let uiStateWriteQueue: Promise<void> = Promise.resolve();
 const loadedCheckoutUiIds = new Set<string>();
 const pendingCheckoutUiPatches = new Map<string, Partial<CheckoutUiState>>();
 let checkoutUiLoadGeneration = 0;
-const activityExpiryTimers = new Map<string, number>();
 const lifecycleCheckout = computed<Checkout | null>(
   () =>
     workspace.value.repos
@@ -167,18 +141,9 @@ const lifecycleRepo = computed(
       repo.checkouts.some((checkout) => checkout.id === lifecycle.value?.checkoutId),
     ) ?? null,
 );
-const activeDocument = computed(() => {
-  const checkout = activeCheckout.value;
-  const document = checkout ? documents.value[checkout.id] : undefined;
-  if (!checkout || !document || document.checkoutId !== checkout.id) return null;
-  return document;
-});
-const documentPaneDocument = computed(() => activeDocument.value ?? emptyDocument);
-const activeMainView = computed(() => {
-  return resolveMainView(mainViews.value, activeCheckout.value?.id ?? null, activeDocument.value);
-});
-/** What the titlebar names: the active session of the active checkout, or its last one. */
-const activeItem = computed(() => {
+const activeMainView = computed(() => resolveMainView(mainViews.value, activeCheckout.value?.id ?? null));
+/** The active session of the active checkout, or its last one. */
+const activeSession = computed(() => {
   const checkout = activeCheckout.value;
   if (!checkout) return null;
   return (
@@ -187,42 +152,55 @@ const activeItem = computed(() => {
     null
   );
 });
+/** What the last crumb names. A file or a change set is not a session, so it is named as itself. */
+const activeViewLabel = computed(() => mainViewLabel(activeMainView.value, activeSession.value?.name ?? null));
+/** The file an external editor would open, or null when the view is the whole change set. */
+const activeViewFile = computed(() => {
+  const view = activeMainView.value;
+  return view.kind === "terminal" ? null : view.path;
+});
+const activeCheckoutUiState = computed(() => {
+  const checkoutId = activeCheckout.value?.id;
+  return checkoutId ? checkoutUiStates.value[checkoutId] : undefined;
+});
+
+/** Shows one view in the main panel and saves it as this checkout's restored view. */
+function showView(checkoutId: string, view: MainView) {
+  const previous = mainViews.value[checkoutId];
+  mainViews.value = { ...mainViews.value, [checkoutId]: view };
+  updateCheckoutUiState(checkoutId, {
+    ...mainViewToState(view, checkoutId),
+    // A different file starts at the top: the offsets belong to what was read.
+    ...(viewPath(previous) !== viewPath(view) && { documentScrollTop: 0, documentScrollLeft: 0, diffScrollTop: 0 }),
+  });
+}
+
+function viewPath(view: MainView | undefined): string | null {
+  if (!view || view.kind === "terminal") return null;
+  return view.path;
+}
 
 function openFileDocument(selection: { checkoutId: string; path: string }) {
-  const previousDocument = documents.value[selection.checkoutId];
-  documents.value = {
-    ...documents.value,
-    [selection.checkoutId]: {
-      ...selection,
-      source: "file",
-      mode: isMarkdownPath(selection.path) ? "view" : "code",
-    },
-  };
-  mainViews.value = { ...mainViews.value, [selection.checkoutId]: "document" };
-  updateCheckoutUiState(selection.checkoutId, {
-    document: documents.value[selection.checkoutId],
-    mainView: "document",
-    ...(previousDocument?.path !== selection.path && { documentScrollTop: 0, documentScrollLeft: 0 }),
+  showView(selection.checkoutId, {
+    kind: "document",
+    path: selection.path,
+    mode: isMarkdownPath(selection.path) ? "view" : "code",
   });
 }
 
 function openChangedDocument(selection: { checkoutId: string; path: string }) {
-  const previousDocument = documents.value[selection.checkoutId];
-  documents.value = { ...documents.value, [selection.checkoutId]: { ...selection, source: "change", mode: "diff" } };
-  mainViews.value = { ...mainViews.value, [selection.checkoutId]: "document" };
-  updateCheckoutUiState(selection.checkoutId, {
-    document: documents.value[selection.checkoutId],
-    mainView: "document",
-    ...(previousDocument?.path !== selection.path && { documentScrollTop: 0, documentScrollLeft: 0 }),
-  });
+  showView(selection.checkoutId, { kind: "diff", path: selection.path });
 }
 
-function setDocumentMode(mode: MainDocumentMode) {
+function openAllChanges(selection: { checkoutId: string }) {
+  showView(selection.checkoutId, { kind: "diff", path: null });
+}
+
+function setDocumentMode(mode: DocumentMode) {
   const checkoutId = activeCheckout.value?.id;
-  const document = activeDocument.value;
-  if (!checkoutId || !document) return;
-  documents.value = { ...documents.value, [checkoutId]: { ...document, mode } };
-  updateCheckoutUiState(checkoutId, { document: documents.value[checkoutId] });
+  const view = activeMainView.value;
+  if (!checkoutId || view.kind !== "document") return;
+  showView(checkoutId, { ...view, mode });
 }
 
 function activateCheckoutTerminal(checkoutId: string) {
@@ -234,10 +212,9 @@ async function activateTerminalSession(sessionId: string) {
   const checkout = allCheckouts.value.find((item) => item.sessions.some((session) => session.id === sessionId));
   if (!checkout) return;
   await selectWorkspaceSession(sessionId);
-  mainViews.value = { ...mainViews.value, [checkout.id]: "terminal" };
-  updateCheckoutUiState(checkout.id, { mainView: "terminal" });
+  showView(checkout.id, { kind: "terminal", sessionId });
   await nextTick();
-  sessionPane.value?.focusActiveTerminal();
+  mainPane.value?.focusActiveTerminal();
 }
 
 function updateCheckoutUiState(checkoutId: string, patch: Partial<CheckoutUiState>) {
@@ -384,13 +361,7 @@ watch(
         state = normalizeCheckoutUiState({ ...state, ...pendingCheckoutUiPatches.get(checkoutId) });
         pendingCheckoutUiPatches.delete(checkoutId);
         checkoutUiStates.value = { ...checkoutUiStates.value, [checkoutId]: state };
-        if (state.document?.checkoutId === checkoutId)
-          documents.value = { ...documents.value, [checkoutId]: state.document };
-        mainViews.value = {
-          ...mainViews.value,
-          [checkoutId]:
-            state.mainView === "document" && state.document?.checkoutId === checkoutId ? "document" : "terminal",
-        };
+        mainViews.value = { ...mainViews.value, [checkoutId]: mainViewFromState(state) };
         loadedCheckoutUiIds.add(checkoutId);
         checkoutUiReady.value = true;
       }
@@ -421,22 +392,10 @@ onMounted(async () => {
   }
   try {
     const dispose = await listen<string>("checkout-file-activity", (event) => {
-      recentFileWrites.value = { ...recentFileWrites.value, [event.payload]: true };
       documentRefreshRevisions.value = {
         ...documentRefreshRevisions.value,
         [event.payload]: (documentRefreshRevisions.value[event.payload] ?? 0) + 1,
       };
-      const previous = activityExpiryTimers.get(event.payload);
-      if (previous !== undefined) window.clearTimeout(previous);
-      activityExpiryTimers.set(
-        event.payload,
-        window.setTimeout(() => {
-          const remaining = { ...recentFileWrites.value };
-          delete remaining[event.payload];
-          recentFileWrites.value = remaining;
-          activityExpiryTimers.delete(event.payload);
-        }, 5000),
-      );
     });
     if (activityListenerDisposed) dispose();
     else unlistenFileActivity = dispose;
@@ -455,8 +414,6 @@ onUnmounted(() => {
   unlistenCloseRequested?.();
   window.removeEventListener("resize", onViewportResize);
   unlistenFileActivity?.();
-  for (const timer of activityExpiryTimers.values()) window.clearTimeout(timer);
-  activityExpiryTimers.clear();
   if (uiLayoutSaveTimer !== undefined) window.clearTimeout(uiLayoutSaveTimer);
   for (const timer of checkoutUiSaveTimers.values()) window.clearTimeout(timer);
   checkoutUiSaveTimers.clear();
@@ -502,8 +459,7 @@ function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
 }
 
 async function requestShell(checkoutId: string) {
-  mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
-  updateCheckoutUiState(checkoutId, { mainView: "terminal" });
+  showView(checkoutId, { kind: "terminal", sessionId: null });
   try {
     workspace.value = await persistCheckoutSelection(checkoutId);
     shellRequest.value = { checkoutId, token: ++shellRequestToken };
@@ -513,8 +469,7 @@ async function requestShell(checkoutId: string) {
 }
 
 async function requestNvim(checkoutId: string, filePath?: string, position?: EditorPosition) {
-  mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
-  updateCheckoutUiState(checkoutId, { mainView: "terminal" });
+  showView(checkoutId, { kind: "terminal", sessionId: null });
   const request = {
     checkoutId,
     ...(filePath && position && { filePath, line: position.line, column: position.column }),
@@ -530,13 +485,13 @@ async function requestNvim(checkoutId: string, filePath?: string, position?: Edi
 }
 
 /**
- * Hands the active document to an external editor. A line is asked for only when there is a
- * file to place the cursor in, so opening an editor without a document takes no input.
+ * Hands the file the main panel is showing to an external editor. A line is asked for only when
+ * there is a file to place the cursor in, so opening an editor without one takes no input.
  */
 async function requestEditor(editor: "zed" | "neovim") {
   const checkout = activeCheckout.value;
   if (!checkout || checkout.isMissing) return;
-  const file = activeDocument.value?.checkoutId === checkout.id ? activeDocument.value.path : undefined;
+  const file = activeViewFile.value ?? undefined;
   const position = file ? promptEditorPosition() : undefined;
   if (file && !position) return;
   if (editor === "neovim") {
@@ -613,7 +568,7 @@ function updateSessionStatus(sessionId: string, status: TerminalSessionStatus | 
 }
 
 async function closeTerminalSession(sessionId: string) {
-  await sessionPane.value?.requestClose(sessionId);
+  await mainPane.value?.requestClose(sessionId);
 }
 
 function applyWorkspace(next: WorkspaceState) {
@@ -622,41 +577,6 @@ function applyWorkspace(next: WorkspaceState) {
 
 function reportWarning(message: string) {
   error.value = message;
-}
-
-async function locateCheckout(checkoutId: string) {
-  const checkout = allCheckouts.value.find((item) => item.id === checkoutId);
-  if (!checkout) return;
-  error.value = null;
-  isOpening.value = true;
-  try {
-    const parent = checkout.path.replace(/[\\/][^\\/]*$/, "") || "/";
-    const path = await open({
-      directory: true,
-      multiple: false,
-      title: "Locate missing checkout",
-      defaultPath: parent,
-    });
-    if (typeof path === "string") workspace.value = await locateMissingCheckout(checkoutId, path);
-  } catch (cause) {
-    error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
-  } finally {
-    isOpening.value = false;
-  }
-}
-
-async function closeCheckout(checkoutId: string) {
-  const checkout = allCheckouts.value.find((item) => item.id === checkoutId);
-  const repo = workspace.value.repos.find((item) => item.checkouts.some((entry) => entry.id === checkoutId));
-  if (!checkout || !repo) return;
-  const closesRepo = checkout.isPrimary || repo.kind === "plain";
-  const scope = closesRepo ? `“${repo.name}” and its checkout list` : `“${checkout.path}”`;
-  if (!window.confirm(`Close ${scope} in Marvis? No files will be deleted.`)) return;
-  try {
-    workspace.value = await closeMissingCheckout(checkoutId);
-  } catch (cause) {
-    error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
-  }
 }
 </script>
 
@@ -695,13 +615,16 @@ async function closeCheckout(checkoutId: string) {
             </span>
           </template>
           <span aria-hidden="true" class="text-(--marvis-text-faint)">/</span>
-          <PopoverRoot>
+          <!-- The last crumb names the view that is open. A file or a change set is picked from
+               the details panel, so it is plain text there: a session dropdown over a diff
+               would name something that is not on screen. -->
+          <PopoverRoot v-if="activeMainView.kind === 'terminal'">
             <PopoverTrigger
               data-testid="item-crumb"
               class="flex min-w-0 items-center gap-1 text-(--marvis-text)"
-              :title="activeItem?.name"
+              :title="activeViewLabel"
             >
-              <span class="truncate">{{ activeItem?.name ?? "Terminal" }}</span>
+              <span class="truncate">{{ activeViewLabel }}</span>
               <ChevronDownIcon class="icon-xs shrink-0" aria-hidden="true" />
             </PopoverTrigger>
             <PopoverContent
@@ -724,6 +647,9 @@ async function closeCheckout(checkoutId: string) {
               </span>
             </PopoverContent>
           </PopoverRoot>
+          <span v-else data-testid="item-crumb" class="min-w-0 truncate text-(--marvis-text)" :title="activeViewLabel">
+            {{ activeViewLabel }}
+          </span>
         </template>
       </nav>
       <button
@@ -749,14 +675,11 @@ async function closeCheckout(checkoutId: string) {
           :repos="workspace.repos"
           :active-checkout-id="workspace.activeCheckoutId"
           :active-session-id="workspace.activeSessionId"
-          :activity-by-checkout="activityByCheckout"
           :session-runtime-statuses="sessionRuntimeStatuses"
           :is-opening="isOpening"
           @open-folder="chooseFolder"
           @select-checkout="activateCheckoutTerminal"
           @select-session="activateTerminalSession"
-          @locate-missing="locateCheckout"
-          @close-missing="closeCheckout"
           @create-worktree="openWorktreeDialog('create', $event)"
           @new-terminal="requestShell"
           @remove-worktree="openWorktreeDialog('remove', $event)"
@@ -775,56 +698,36 @@ async function closeCheckout(checkoutId: string) {
         />
       </SplitterResizeHandle>
       <SplitterPanel id="main-panel" :min-size="420" size-unit="px" class="main-column min-h-0 min-w-0 flex-1">
-        <div class="relative min-h-0 flex-1" :aria-busy="!checkoutUiReady">
-          <section
-            v-show="activeMainView === 'terminal'"
-            id="main-view-terminal"
-            key="terminal"
-            class="absolute inset-0"
-          >
-            <SessionPane
-              ref="sessionPane"
-              class="absolute inset-0"
-              :checkout="checkoutUiReady ? activeCheckout : null"
-              :active-session-id="workspace.activeSessionId"
-              :is-opening="isOpening || !checkoutUiReady"
-              :visible="checkoutUiReady && activeMainView === 'terminal'"
-              :shell-request="shellRequest"
-              :nvim-request="nvimRequest"
-              :agent-request="agentRequest"
-              :registered-session-ids="registeredSessionIds"
-              @open-folder="chooseFolder"
-              @workspace-updated="updateWorkspace"
-              @session-status-changed="updateSessionStatus"
-            />
-          </section>
-          <section
-            v-show="activeMainView === 'document' && activeDocument && checkoutUiReady"
-            id="main-view-document"
-            key="document"
-            class="absolute inset-0"
-          >
-            <DocumentPane
-              :checkout="activeCheckout"
-              :document="documentPaneDocument"
-              :git-snapshot="gitSnapshot"
-              :review="review"
-              :active="activeMainView === 'document'"
-              :refresh-revision="documentRefreshRevisions[documentPaneDocument.checkoutId] ?? 0"
-              :zed-available="editorAvailability.zed"
-              :reading-position="{
-                top: checkoutUiStates[documentPaneDocument.checkoutId]?.documentScrollTop ?? 0,
-                left: checkoutUiStates[documentPaneDocument.checkoutId]?.documentScrollLeft ?? 0,
-              }"
-              :diff-scroll-top="checkoutUiStates[documentPaneDocument.checkoutId]?.diffScrollTop ?? 0"
-              @update-mode="setDocumentMode"
-              @reading-position-changed="updateDocumentReadingPosition(documentPaneDocument.checkoutId, $event)"
-              @diff-position-changed="updateDiffReadingPosition(documentPaneDocument.checkoutId, $event)"
-              @open-markdown-link="openFileDocument({ checkoutId: documentPaneDocument.checkoutId, path: $event })"
-              @open-in-zed="requestEditor('zed')"
-            />
-          </section>
-        </div>
+        <MainPane
+          ref="mainPane"
+          :checkout="activeCheckout"
+          :view="activeMainView"
+          :ready="checkoutUiReady"
+          :git-snapshot="gitSnapshot"
+          :review="review"
+          :active-session-id="workspace.activeSessionId"
+          :is-opening="isOpening"
+          :shell-request="shellRequest"
+          :nvim-request="nvimRequest"
+          :registered-session-ids="registeredSessionIds"
+          :zed-available="editorAvailability.zed"
+          :neovim-available="editorAvailability.neovim"
+          :refresh-revision="documentRefreshRevisions[activeCheckout?.id ?? ''] ?? 0"
+          :reading-position="{
+            top: activeCheckoutUiState?.documentScrollTop ?? 0,
+            left: activeCheckoutUiState?.documentScrollLeft ?? 0,
+          }"
+          :diff-scroll-top="activeCheckoutUiState?.diffScrollTop ?? 0"
+          @open-folder="chooseFolder"
+          @workspace-updated="updateWorkspace"
+          @session-status-changed="updateSessionStatus"
+          @update-document-mode="setDocumentMode"
+          @reading-position-changed="activeCheckout && updateDocumentReadingPosition(activeCheckout.id, $event)"
+          @diff-position-changed="activeCheckout && updateDiffReadingPosition(activeCheckout.id, $event)"
+          @open-markdown-link="activeCheckout && openFileDocument({ checkoutId: activeCheckout.id, path: $event })"
+          @open-in-zed="requestEditor('zed')"
+          @open-in-neovim="requestEditor('neovim')"
+        />
       </SplitterPanel>
       <SplitterResizeHandle
         id="inspector-resize-handle"
@@ -848,6 +751,8 @@ async function closeCheckout(checkoutId: string) {
         size-unit="px"
         class="inspector-splitter-panel relative min-h-0 shrink-0 overflow-visible"
       >
+        <!-- Phase 6 gives the diff its "Send to opencode" button, which is what the review, the
+             agent list and its target are still bound here for. -->
         <InspectorPane
           :class="{ 'right-inspector-drawer': isNarrow }"
           :checkout="checkoutUiReady ? activeCheckout : null"
@@ -859,6 +764,7 @@ async function closeCheckout(checkoutId: string) {
           :saved-state="activeCheckout ? checkoutUiStates[activeCheckout.id] : null"
           @open-file="openFileDocument"
           @open-change="openChangedDocument"
+          @open-all-changes="openAllChanges"
           @select-agent-target="agent.selectTarget"
           @send-review="sendReviewToAgent"
           @update-ui-state="activeCheckout && updateInspectorUiState(activeCheckout.id, $event)"

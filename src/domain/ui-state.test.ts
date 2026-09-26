@@ -80,4 +80,26 @@ describe("persisted UI state", () => {
       }),
     ).toMatchObject({ document: null, selectedFilePath: null, expandedDirectories: ["safe"] });
   });
+
+  it("keeps a state saved before the change set existed, and drops a shape it cannot read", () => {
+    // A state written when the panel had two views still reads: a document is a file view.
+    expect(
+      normalizeCheckoutUiState({
+        version: 1,
+        mainView: "document",
+        document: { checkoutId: "checkout:/repo", path: "docs/guide.md", source: "file", mode: "view" },
+        inspectorTab: "files",
+      }),
+    ).toMatchObject({
+      mainView: "document",
+      diffAllFiles: false,
+      document: { path: "docs/guide.md", source: "file", mode: "view" },
+    });
+    // An unreadable mainView or flag falls to the terminal rather than failing the load.
+    expect(normalizeCheckoutUiState({ version: 1, mainView: "diff", diffAllFiles: "yes" })).toMatchObject({
+      mainView: "terminal",
+      diffAllFiles: false,
+    });
+    expect(normalizeCheckoutUiState({ version: 1, diffAllFiles: true })).toMatchObject({ diffAllFiles: true });
+  });
 });

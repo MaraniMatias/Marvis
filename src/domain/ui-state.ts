@@ -1,4 +1,4 @@
-import type { MainDocument } from "./main-document";
+import type { MainDocument, MainViewState } from "./main-document";
 
 export interface AppLayoutState {
   version: 1;
@@ -6,10 +6,8 @@ export interface AppLayoutState {
   inspectorWidth: number;
 }
 
-export interface CheckoutUiState {
+export interface CheckoutUiState extends MainViewState {
   version: 1;
-  document: MainDocument | null;
-  mainView: "terminal" | "document";
   inspectorTab: "files" | "changes";
   selectedFilePath: string | null;
   selectedChangePath: string | null;
@@ -36,6 +34,7 @@ export const DEFAULT_CHECKOUT_UI_STATE: CheckoutUiState = {
   version: 1,
   document: null,
   mainView: "terminal",
+  diffAllFiles: false,
   inspectorTab: "files",
   selectedFilePath: null,
   selectedChangePath: null,
@@ -102,6 +101,7 @@ export function normalizeCheckoutUiState(value: unknown): CheckoutUiState {
     version: 1,
     document,
     mainView: value.mainView === "document" ? "document" : "terminal",
+    diffAllFiles: value.diffAllFiles === true,
     inspectorTab: value.inspectorTab === "changes" ? "changes" : "files",
     selectedFilePath: safePath(value.selectedFilePath) ? value.selectedFilePath : null,
     selectedChangePath: safePath(value.selectedChangePath) ? value.selectedChangePath : null,

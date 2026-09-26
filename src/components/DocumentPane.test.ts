@@ -4,13 +4,14 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, reactive, ref } from "vue";
 import type { VNodeChild } from "vue";
 import type { GitStatus } from "../domain/git";
-import type { MainDocument } from "../domain/main-document";
+import type { DocumentMode, MainView } from "../domain/main-document";
 import type { ReviewNote } from "../domain/review";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import DocumentPane from "./DocumentPane.vue";
 import FileDiff from "./FileDiff.vue";
 import InspectorPane from "./InspectorPane.vue";
+import MainPane from "./MainPane.vue";
 
 const mocks = vi.hoisted(() => ({
   listCheckoutFiles: vi.fn(),
@@ -21,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   getGitDiffPage: vi.fn(),
   getGitCheckoutDiffStats: vi.fn(async () => ({})),
   getGitDiffStats: vi.fn(async () => []),
+  loadTerminalLayout: vi.fn(async () => null),
+  saveTerminalLayout: vi.fn(async () => undefined),
 }));
 
 vi.mock("../lib/ipc", () => ({
@@ -33,6 +36,9 @@ vi.mock("../lib/ipc", () => ({
   // The mounted InspectorPane reads the diff counts; it only renders them when present.
   getGitCheckoutDiffStats: mocks.getGitCheckoutDiffStats,
   getGitDiffStats: mocks.getGitDiffStats,
+  // MainPane imports the terminal pane; only its stub is mounted.
+  loadTerminalLayout: mocks.loadTerminalLayout,
+  saveTerminalLayout: mocks.saveTerminalLayout,
 }));
 
 vi.mock("@git-diff-view/vue", async () => {
@@ -145,11 +151,12 @@ const repo: Repo = {
 };
 
 function documentPaneProps(
-  document: MainDocument,
-  currentCheckout = checkout(document.checkoutId),
-  gitSnapshot = snapshot(document.checkoutId),
+  path: string | null,
+  mode: DocumentMode = "code",
+  currentCheckout = checkout("checkout:one"),
+  gitSnapshot = snapshot(currentCheckout.id),
 ) {
-  return { checkout: currentCheckout, document, gitSnapshot, review: reviewApi(), active: true };
+  return { checkout: currentCheckout, path, mode, gitSnapshot };
 }
 
 describe("DocumentPane", () => {
@@ -175,7 +182,7 @@ describe("DocumentPane", () => {
   });
 
   it("opens a file selection in the central document, rendering Markdown by default and allowing Code mode", async () => {
-    const selected = ref<MainDocument | null>(null);
+    const view = ref<MainView>({ kind: "terminal", sessionId: null });
     const currentCheckout = checkout("checkout:one");
     const gitSnapshot = snapshot(currentCheckout.id, [{ path: "src/app.ts", status: "M" }]);
     mocks.listCheckoutFiles.mockResolvedValue({
@@ -190,23 +197,34 @@ describe("DocumentPane", () => {
       content: path.endsWith(".md") ? "# Marvis\n\n[unsafe](javascript:alert(1))" : "const answer: number = 42;",
     }));
     const harness = defineComponent({
-      components: { InspectorPane, DocumentPane },
+      components: { InspectorPane, MainPane },
       setup() {
         function openFile(file: { checkoutId: string; path: string }) {
-          selected.value = { ...file, source: "file", mode: "view" };
+          view.value = { kind: "document", path: file.path, mode: "view" };
         }
         function openChange(file: { checkoutId: string; path: string }) {
-          selected.value = { ...file, source: "change", mode: "diff" };
+          view.value = { kind: "diff", path: file.path };
         }
-        return { selected, currentCheckout, gitSnapshot, review: reviewApi(), openFile, openChange };
+        return { view, currentCheckout, gitSnapshot, review: reviewApi(), openFile, openChange };
       },
       data: () => ({ repo }),
       template: `<div>
         <InspectorPane :checkout="currentCheckout" :repo="repo" :git-snapshot="gitSnapshot" @open-file="openFile" @open-change="openChange" />
-        <DocumentPane v-if="selected" :checkout="currentCheckout" :document="selected" :git-snapshot="gitSnapshot" :review="review" @update-mode="selected.mode = $event" />
+        <MainPane
+          :checkout="currentCheckout"
+          :view="view"
+          :ready="true"
+          :git-snapshot="gitSnapshot"
+          :review="review"
+          :active-session-id="null"
+          :is-opening="false"
+          @update-document-mode="view = { ...view, mode: $event }"
+        />
       </div>`,
     });
-    const wrapper = mount(harness);
+    const wrapper = mount(harness, {
+      global: { stubs: { SessionPane: true } },
+    });
     await flushPromises();
     await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
     await vi.waitFor(() => expect(wrapper.find('[aria-label="File contents"] article').exists()).toBe(true));
@@ -226,36 +244,39 @@ describe("DocumentPane", () => {
     expect(wrapper.text()).toContain("docs/readme.md");
     await wrapper.get('[aria-label="Changed files"] button').trigger("click");
     await flushPromises();
+    // A change is the diff view now, not a mode of the document view (F.1, F.3).
     expect(mocks.getGitDiff).toHaveBeenCalledWith(currentCheckout.id, "src/app.ts");
-    expect(wrapper.get('[aria-label="Document mode"]').text()).toContain("Diff");
+    expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
+    expect((wrapper.get("#main-view-diff").element as HTMLElement).style.display).not.toBe("none");
     expect(wrapper.find('[data-testid="diff-view"]').exists()).toBe(true);
-    expect(wrapper.findComponent({ name: "FileDiff" }).props("active")).toBe(true);
     await vi.waitFor(() => expect(gitSnapshot.markViewed).toHaveBeenCalledWith(currentCheckout.id, "src/app.ts"));
+
+    view.value = { kind: "diff", path: null };
+    await vi.waitFor(() => expect(wrapper.get(".diff-file-header").text()).toContain("src/app.ts"));
+    expect(wrapper.get('[aria-label="File diff"] header').text()).toContain("All changes");
+    // The file's own diff is a diff of this same component, loaded the same lazy way.
+    await wrapper.get(".diff-file-header").trigger("click");
+    await vi.waitFor(() => expect(wrapper.findAll('[data-testid="diff-view"]')).toHaveLength(1));
     wrapper.unmount();
   });
 
   it("navigates safe relative Markdown document links within the active checkout", async () => {
     const checkoutId = "checkout:markdown-links";
-    const document: MainDocument = { checkoutId, path: "docs/start.md", source: "file", mode: "view" };
-    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: "[Next guide](../guide.md)" });
-    const wrapper = mount(DocumentPane, { props: documentPaneProps(document, checkout(checkoutId)) });
+    mocks.readCheckoutFile.mockResolvedValue({ path: "docs/start.md", content: "[Next guide](../guide.md)" });
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps("docs/start.md", "view", checkout(checkoutId)),
+    });
     await vi.waitFor(() => expect(wrapper.find('[aria-label="File contents"] article').exists()).toBe(true));
     await wrapper.get('[aria-label="File contents"] a[href="../guide.md"]').trigger("click");
     expect(wrapper.emitted("openMarkdownLink")).toEqual([["guide.md"]]);
     wrapper.unmount();
   });
 
-  it("offers Diff/View/Code for a Markdown change and only reads it after leaving Diff", async () => {
-    const checkoutId = "checkout:markdown-change";
-    const document: MainDocument = {
-      checkoutId,
-      path: "docs/readme.md",
-      source: "change",
-      mode: "diff",
-    };
-    const gitSnapshot = snapshot(checkoutId, [{ path: document.path, status: "M" }]);
-    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: "# Current file" });
-    const wrapper = mount(DocumentPane, { props: documentPaneProps(document, checkout(checkoutId), gitSnapshot) });
+  it("offers View/Code for a Markdown file, and the two editor buttons", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "docs/readme.md", content: "# Current file" });
+    const wrapper = mount(DocumentPane, {
+      props: { ...documentPaneProps("docs/readme.md", "view"), zedAvailable: true, neovimAvailable: true },
+    });
     await flushPromises();
 
     expect(
@@ -263,36 +284,28 @@ describe("DocumentPane", () => {
         .get('[aria-label="Document mode"]')
         .findAll("button")
         .map((button) => button.text()),
-    ).toEqual(["↗ Zed", "Diff", "View", "Code"]);
-    expect(mocks.readCheckoutFile).not.toHaveBeenCalled();
+    ).toEqual(["↗ Zed", "↗ Neovim", "Wrap", "View", "Code"]);
+
+    await wrapper.get('button[aria-label="Open file in Zed"]').trigger("click");
+    await wrapper.get('button[aria-label="Open file in Neovim"]').trigger("click");
+    expect(wrapper.emitted("openInZed")).toHaveLength(1);
+    expect(wrapper.emitted("openInNeovim")).toHaveLength(1);
 
     await wrapper
       .get('[aria-label="Document mode"]')
       .findAll("button")
-      .find((button) => button.text() === "View")!
+      .find((button) => button.text() === "Code")!
       .trigger("click");
-    expect(wrapper.emitted("updateMode")?.at(-1)).toEqual(["view"]);
-    await wrapper.setProps({ document: { ...document, mode: "view" } });
-    await flushPromises();
-    expect(mocks.readCheckoutFile).toHaveBeenCalledWith(checkoutId, document.path);
-    await vi.waitFor(() =>
-      expect(wrapper.get('[aria-label="File contents"] article').text()).toContain("Current file"),
-    );
+    expect(wrapper.emitted("updateMode")?.at(-1)).toEqual(["code"]);
     wrapper.unmount();
   });
 
   it("highlights multiline source with Shiki and displays line numbers", async () => {
-    const document: MainDocument = {
-      checkoutId: "checkout:multiline-source",
-      path: "src/example.ts",
-      source: "file",
-      mode: "code",
-    };
     mocks.readCheckoutFile.mockResolvedValue({
-      path: document.path,
+      path: "src/example.ts",
       content: "const answer: number = 42;\nreturn answer;",
     });
-    const wrapper = mount(DocumentPane, { props: documentPaneProps(document) });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/example.ts") });
     await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(2));
     const source = wrapper.get('[aria-label="Source code"]');
     expect(source.findAll(".shiki .line").map((line) => line.text())).toEqual([
@@ -305,14 +318,8 @@ describe("DocumentPane", () => {
   });
 
   it("uses compact source rendering above the line bound", async () => {
-    const document: MainDocument = {
-      checkoutId: "checkout:many-lines",
-      path: "logs/output.txt",
-      source: "file",
-      mode: "code",
-    };
-    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: Array(5001).fill("line").join("\n") });
-    const wrapper = mount(DocumentPane, { props: documentPaneProps(document) });
+    mocks.readCheckoutFile.mockResolvedValue({ path: "logs/output.txt", content: Array(5001).fill("line").join("\n") });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("logs/output.txt") });
     await flushPromises();
     const source = wrapper.get('[aria-label="Source code"]');
     expect(source.findAll(".source-line-number")).toHaveLength(1);
@@ -327,11 +334,10 @@ describe("DocumentPane", () => {
       if (path === "old.ts") return new Promise((resolve) => (resolveOld = resolve));
       return Promise.resolve({ path, content: "new checkout content" });
     });
-    const oldDocument: MainDocument = { checkoutId: "checkout:old", path: "old.ts", source: "file", mode: "code" };
-    const wrapper = mount(DocumentPane, { props: documentPaneProps(oldDocument) });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("old.ts") });
     await wrapper.setProps({
       checkout: checkout("checkout:new"),
-      document: { checkoutId: "checkout:new", path: "new.ts", source: "file", mode: "code" },
+      path: "new.ts",
       gitSnapshot: snapshot("checkout:new"),
     });
     await flushPromises();
@@ -342,46 +348,26 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
-  it("keeps the previous file visible while a fast file-to-change selection settles", async () => {
-    const checkoutId = "checkout:quick-selection";
-    const fileDocument: MainDocument = { checkoutId, path: "a.ts", source: "file", mode: "code" };
-    const changeDocument: MainDocument = { checkoutId, path: "b.ts", source: "change", mode: "diff" };
+  it("hides the previous file while the next one loads, and keeps it once loaded", async () => {
     mocks.readCheckoutFile.mockResolvedValue({ path: "a.ts", content: "const fileA = true;" });
-    let resolveDiff!: (value: {
-      path: string;
-      patch: string;
-      isBinary: boolean;
-      large: boolean;
-      tooLarge: boolean;
-      totalLines: number;
-      hunks: { startLine: number; endLine: number; title: string }[];
-    }) => void;
-    mocks.getGitDiff.mockImplementation(
-      () =>
-        new Promise((resolve) => {
-          resolveDiff = resolve;
-        }),
+    let resolveB!: (value: { path: string; content: string }) => void;
+    mocks.readCheckoutFile.mockImplementation((_checkoutId: string, path: string) =>
+      path === "a.ts"
+        ? Promise.resolve({ path, content: "const fileA = true;" })
+        : new Promise((resolve) => {
+            resolveB = resolve;
+          }),
     );
-    const wrapper = mount(DocumentPane, { props: documentPaneProps(fileDocument, checkout(checkoutId)) });
-    await flushPromises();
-    expect(wrapper.text()).toContain("const fileA = true;");
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("a.ts") });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("const fileA = true;"));
 
-    await wrapper.setProps({ document: changeDocument });
-    await vi.waitFor(() => expect(resolveDiff).toBeTypeOf("function"));
-    expect(wrapper.get('[aria-label="File contents"]').text()).toContain("const fileA = true;");
-    expect(wrapper.text()).not.toContain("No text hunks are available for this change.");
+    await wrapper.setProps({ path: "b.ts" });
+    await vi.waitFor(() => expect(wrapper.get('[role="status"]').text()).toBe("Loading file…"));
+    // E.3: the file that was open is not what stays on screen.
+    expect(wrapper.text()).not.toContain("const fileA = true;");
 
-    resolveDiff({
-      path: "b.ts",
-      patch: "diff --git a/b.ts b/b.ts\n@@ -1 +1 @@\n-old\n+new\n",
-      isBinary: false,
-      large: false,
-      tooLarge: false,
-      totalLines: 3,
-      hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
-    });
-    await flushPromises();
-    expect(wrapper.find('[data-testid="diff-view"]').exists()).toBe(true);
+    resolveB({ path: "b.ts", content: "const fileB = true;" });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("const fileB = true;"));
     expect(wrapper.text()).not.toContain("const fileA = true;");
     wrapper.unmount();
   });
@@ -390,9 +376,8 @@ describe("DocumentPane", () => {
     mocks.readCheckoutFile
       .mockResolvedValueOnce({ path: "src/app.ts", content: "const first = true;" })
       .mockResolvedValueOnce({ path: "src/app.ts", content: "const second = true;" });
-    const document: MainDocument = { checkoutId: "checkout:refresh", path: "src/app.ts", source: "file", mode: "code" };
     const wrapper = mount(DocumentPane, {
-      props: { ...documentPaneProps(document), refreshRevision: 0 },
+      props: { ...documentPaneProps("src/app.ts"), refreshRevision: 0 },
     });
     await flushPromises();
     const viewport = wrapper.get('[aria-label="File contents"]');
@@ -409,22 +394,7 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
-  it("restores a diff position independently and reports later scrolling", async () => {
-    const checkoutId = "checkout:diff-position";
-    const document: MainDocument = { checkoutId, path: "src/app.ts", source: "change", mode: "diff" };
-    const wrapper = mount(DocumentPane, {
-      props: { ...documentPaneProps(document), diffScrollTop: 72 },
-    });
-    await flushPromises();
-    const viewport = wrapper.get('[aria-label="Diff contents"]');
-    expect((viewport.element as HTMLElement).scrollTop).toBe(72);
-    (viewport.element as HTMLElement).scrollTop = 144;
-    await viewport.trigger("scroll");
-    expect(wrapper.emitted("diffPositionChanged")).toEqual([[144]]);
-    wrapper.unmount();
-  });
-
-  it("restores Markdown reading position after relative images finish decoding", async () => {
+  it("restores the Markdown reading position after relative images finish decoding", async () => {
     const descriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "decode");
     const decode = vi.fn(function (this: HTMLImageElement) {
       const viewport = this.closest(".document-pane")?.querySelector('[aria-label="File contents"]') as HTMLElement;
@@ -432,16 +402,10 @@ describe("DocumentPane", () => {
       return Promise.resolve();
     });
     Object.defineProperty(HTMLImageElement.prototype, "decode", { configurable: true, value: decode });
-    const document: MainDocument = {
-      checkoutId: "checkout:markdown-scroll",
-      path: "docs/readme.md",
-      source: "file",
-      mode: "view",
-    };
-    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: "![preview](image.png)" });
+    mocks.readCheckoutFile.mockResolvedValue({ path: "docs/readme.md", content: "![preview](image.png)" });
     const wrapper = mount(DocumentPane, {
       props: {
-        ...documentPaneProps(document),
+        ...documentPaneProps("docs/readme.md", "view"),
         readingPosition: { top: 240, left: 12 },
       },
     });
@@ -456,11 +420,10 @@ describe("DocumentPane", () => {
     }
   });
 
-  it("does not read the current file for a deleted change", async () => {
+  it("does not read a file that is gone from the working tree", async () => {
     const gitSnapshot = snapshot("checkout:deleted", [{ path: "gone.ts", status: "D" }]);
-    const document: MainDocument = { checkoutId: "checkout:deleted", path: "gone.ts", source: "change", mode: "code" };
     const wrapper = mount(DocumentPane, {
-      props: documentPaneProps(document, checkout(document.checkoutId), gitSnapshot),
+      props: documentPaneProps("gone.ts", "code", checkout("checkout:deleted"), gitSnapshot),
     });
     await flushPromises();
     expect(mocks.readCheckoutFile).not.toHaveBeenCalled();
@@ -471,9 +434,10 @@ describe("DocumentPane", () => {
   it("keeps the current file readable after its change is removed from Git status", async () => {
     const checkoutId = "checkout:cleaned";
     const gitSnapshot = snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]);
-    const document: MainDocument = { checkoutId, path: "src/app.ts", source: "change", mode: "code" };
-    mocks.readCheckoutFile.mockResolvedValue({ path: document.path, content: "const stillHere = true;" });
-    const wrapper = mount(DocumentPane, { props: documentPaneProps(document, checkout(checkoutId), gitSnapshot) });
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const stillHere = true;" });
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps("src/app.ts", "code", checkout(checkoutId), gitSnapshot),
+    });
     await flushPromises();
     expect(wrapper.text()).toContain("const stillHere = true;");
 
@@ -482,6 +446,85 @@ describe("DocumentPane", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("const stillHere = true;");
     expect(wrapper.text()).not.toContain("current file is unavailable");
+    wrapper.unmount();
+  });
+
+  it("shows the whole change set as one diff per changed file", async () => {
+    const checkoutId = "checkout:all-changes";
+    const gitSnapshot = snapshot(checkoutId, [
+      { path: "src/app.ts", status: "M", additions: 3, deletions: 1 },
+      { path: "README.md", status: "A" },
+    ]);
+    mocks.getGitDiff.mockImplementation(async (_checkoutId: string, path: string) => ({
+      path,
+      patch: `diff --git a/${path} b/${path}\n@@ -1 +1 @@\n-old\n+new\n`,
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
+    }));
+    const wrapper = mount(FileDiff, {
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot,
+        review: reviewApi(),
+        path: null,
+        active: true,
+        scrollTop: 0,
+      },
+    });
+    await flushPromises();
+
+    // Nothing is diffed until a file is opened: the backend pages one path at a time.
+    expect(wrapper.get("header").text()).toContain("All changes");
+    expect(wrapper.get("header").text()).toContain("feature");
+    const headers = wrapper.findAll(".diff-file-header");
+    expect(headers.map((header) => header.text())).toEqual(["Msrc/app.ts+3-1", "AREADME.md"]);
+    expect(mocks.getGitDiff).not.toHaveBeenCalled();
+
+    await headers[0]!.trigger("click");
+    await vi.waitFor(() => expect(mocks.getGitDiff).toHaveBeenCalledWith(checkoutId, "src/app.ts"));
+    expect(wrapper.findAll('[data-testid="diff-view"]')).toHaveLength(1);
+    expect(mocks.getGitDiff).toHaveBeenCalledTimes(1);
+
+    // A note made in a file of the change set belongs to that file, so the stack comments.
+    const review = reviewApi();
+    review.notes = [reviewNote({ id: "note:1", path: "src/app.ts", lineStart: 1 })];
+    await wrapper.setProps({ review });
+    await headers[1]!.trigger("click");
+    await vi.waitFor(() => expect(mocks.getGitDiff).toHaveBeenCalledWith(checkoutId, "README.md"));
+    expect(wrapper.text()).toContain("revisit this calculation");
+    wrapper.unmount();
+  });
+
+  it("says the change set is loading, failing, or empty from the Git status", async () => {
+    const checkoutId = "checkout:changes-status";
+    const loading = snapshot(checkoutId);
+    loading.statusState = "loading";
+    const wrapper = mount(FileDiff, {
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot: loading,
+        review: reviewApi(),
+        path: null,
+        active: true,
+        scrollTop: 0,
+      },
+    });
+    await flushPromises();
+    expect(wrapper.get('[role="status"]').text()).toBe("Loading changes…");
+
+    const failing = snapshot(checkoutId);
+    failing.statusState = "error";
+    failing.changesStatusError = "could not read the index";
+    await wrapper.setProps({ gitSnapshot: failing });
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toBe("could not read the index");
+
+    await wrapper.setProps({ gitSnapshot: snapshot(checkoutId) });
+    await flushPromises();
+    expect(wrapper.get('[role="status"]').text()).toBe("No changed files.");
     wrapper.unmount();
   });
 
@@ -522,6 +565,27 @@ describe("DocumentPane", () => {
 
     await wrapper.setProps({ active: true });
     await vi.waitFor(() => expect(gitSnapshot.markViewed).toHaveBeenCalledWith(checkoutId, "large.txt"));
+    wrapper.unmount();
+  });
+
+  it("restores a diff position independently and reports later scrolling", async () => {
+    const checkoutId = "checkout:diff-position";
+    const wrapper = mount(FileDiff, {
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot: snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]),
+        review: reviewApi(),
+        path: "src/app.ts",
+        active: true,
+        scrollTop: 72,
+      },
+    });
+    await flushPromises();
+    const viewport = wrapper.get('[aria-label="Diff contents"]');
+    expect((viewport.element as HTMLElement).scrollTop).toBe(72);
+    (viewport.element as HTMLElement).scrollTop = 144;
+    await viewport.trigger("scroll");
+    expect(wrapper.emitted("scrollPositionChanged")).toEqual([[144]]);
     wrapper.unmount();
   });
 

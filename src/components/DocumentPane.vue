@@ -1,46 +1,32 @@
 <script setup lang="ts">
-import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
-import type { MainDocument, MainDocumentMode } from "../domain/main-document";
+import { computed, nextTick, ref, watch } from "vue";
+import type { DocumentMode } from "../domain/main-document";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
-import type { ActiveReviewNotes } from "../presentation/review-notes";
 import { useMarkdownPreview } from "../presentation/markdown-preview";
 import { isIpcError } from "../domain/ipc";
 import { readCheckoutFile } from "../lib/ipc";
 
-const FileDiff = defineAsyncComponent(() => import("./FileDiff.vue"));
-
-type ReviewApi = Pick<
-  ActiveReviewNotes,
-  "notes" | "addNote" | "updateNote" | "deleteNote" | "verifyAnchors" | "clearOutdated" | "resolveNote"
->;
-
 const props = withDefaults(
   defineProps<{
     checkout: Checkout | null;
-    document: MainDocument;
+    /** Null while the terminal or the diff owns the panel; the loaded document stays put. */
+    path: string | null;
+    mode: DocumentMode;
     gitSnapshot: ActiveGitSnapshot;
-    review: ReviewApi;
-    active?: boolean;
     refreshRevision?: number;
     readingPosition?: { top: number; left: number };
-    diffScrollTop?: number;
     zedAvailable?: boolean;
+    neovimAvailable?: boolean;
   }>(),
-  {
-    active: true,
-    refreshRevision: 0,
-    readingPosition: () => ({ top: 0, left: 0 }),
-    diffScrollTop: 0,
-    zedAvailable: false,
-  },
+  { refreshRevision: 0, readingPosition: () => ({ top: 0, left: 0 }), zedAvailable: false, neovimAvailable: false },
 );
 const emit = defineEmits<{
-  updateMode: [mode: MainDocumentMode];
+  updateMode: [mode: DocumentMode];
   readingPositionChanged: [position: { top: number; left: number }];
-  diffPositionChanged: [top: number];
   openMarkdownLink: [path: string];
   openInZed: [];
+  openInNeovim: [];
 }>();
 
 const content = ref("");
@@ -51,23 +37,19 @@ const fileViewport = ref<HTMLElement | null>(null);
 const wrapCode = ref(false);
 const deleted = computed(
   () =>
-    props.gitSnapshot.status?.files.some((file) => file.path === props.document.path && file.status === "D") ?? false,
+    props.path !== null &&
+    (props.gitSnapshot.status?.files.some((file) => file.path === props.path && file.status === "D") ?? false),
 );
 const available = computed(() => !deleted.value);
 const readingPosition = ref(props.readingPosition);
 const { markdownHtml, markdownPreviewState, markdownImageWarning, isMarkdownPath, load, clear } = useMarkdownPreview(
   () => props.checkout?.id ?? null,
 );
-const identity = computed(() => `${props.document.checkoutId}\0${props.document.source}\0${props.document.path}`);
-const isMarkdown = computed(() => isMarkdownPath(props.document.path));
+const identity = computed(() => (props.path === null ? null : `${props.checkout?.id ?? ""}\0${props.path}`));
+const isMarkdown = computed(() => props.path !== null && isMarkdownPath(props.path));
 const sourceLines = computed(() => content.value.split(/\r?\n/));
 const sourceLineNumbers = computed(() => sourceLines.value.map((_, index) => index + 1).join("\n"));
 const compactSource = computed(() => sourceLines.value.length > 5000);
-const diffReadyIdentity = ref<string | null>(null);
-const staleContent = computed(() => contentIdentity.value !== null && contentIdentity.value !== identity.value);
-const staleDiff = computed(
-  () => props.document.mode === "diff" && staleContent.value && diffReadyIdentity.value !== identity.value,
-);
 const highlightedLines = ref<readonly string[] | null>(null);
 const highlightedSource = ref<string | null>(null);
 const highlighting = ref(false);
@@ -129,7 +111,8 @@ function invalidateHighlight(clear = true) {
 }
 
 function startHighlight(fileIdentity: string, source: string) {
-  const path = props.document.path;
+  const path = props.path;
+  if (path === null) return;
   const request = ++highlightGeneration;
   highlightedLines.value = null;
   highlightedSource.value = null;
@@ -143,7 +126,7 @@ function startHighlight(fileIdentity: string, source: string) {
         request !== highlightGeneration ||
         identity.value !== fileIdentity ||
         content.value !== source ||
-        (props.document.mode === "view" && isMarkdown.value)
+        (props.mode === "view" && isMarkdown.value)
       )
         return;
       highlightedLines.value = lines;
@@ -179,20 +162,24 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
+function unavailableText() {
+  return deleted.value
+    ? "This file was deleted in this checkout."
+    : "The current file is unavailable in this checkout.";
+}
+
 async function loadFile(preservePosition = false) {
   const checkoutId = props.checkout?.id;
-  const path = props.document.path;
+  const path = props.path;
   const fileIdentity = identity.value;
-  if (!checkoutId || props.document.checkoutId !== checkoutId || props.document.mode === "diff") return;
+  if (!checkoutId || path === null || fileIdentity === null) return;
   if (!available.value) {
     requestGeneration += 1;
     invalidateHighlight();
     content.value = "";
     contentIdentity.value = fileIdentity;
     contentState.value = "error";
-    contentError.value = deleted.value
-      ? "This file was deleted; its previous contents are available in the diff."
-      : "The current file is unavailable in this checkout.";
+    contentError.value = unavailableText();
     return;
   }
   const request = ++requestGeneration;
@@ -206,7 +193,7 @@ async function loadFile(preservePosition = false) {
     contentIdentity.value = fileIdentity;
     contentState.value = "ready";
     loadedIdentity = fileIdentity;
-    if (props.document.mode === "view" && isMarkdown.value) {
+    if (props.mode === "view" && isMarkdown.value) {
       invalidateHighlight();
     } else {
       startHighlight(fileIdentity, result.content);
@@ -218,7 +205,7 @@ async function loadFile(preservePosition = false) {
       fileViewport.value.scrollLeft = previousPosition.left;
     }
     readingPosition.value = previousPosition;
-    if (props.document.mode === "view" && isMarkdown.value) {
+    if (props.mode === "view" && isMarkdown.value) {
       await load(checkoutId, path, result.content);
       await restoreMarkdownReadingPosition(previousPosition, request, fileIdentity, checkoutId);
     }
@@ -241,10 +228,7 @@ async function restoreMarkdownReadingPosition(
   checkoutId: string,
 ) {
   const isCurrent = () =>
-    request === requestGeneration &&
-    props.checkout?.id === checkoutId &&
-    identity.value === fileIdentity &&
-    props.document.mode === "view";
+    request === requestGeneration && props.checkout?.id === checkoutId && identity.value === fileIdentity;
   await nextTick();
   if (!isCurrent()) return;
   const images = fileViewport.value?.querySelectorAll("img") ?? [];
@@ -258,15 +242,17 @@ async function restoreMarkdownReadingPosition(
 }
 
 watch(
-  () => [identity.value, props.document.mode, available.value] as const,
+  () => [identity.value, props.mode, available.value] as const,
   async ([fileIdentity, mode, isAvailable]) => {
+    // Another view owns the main panel: what is loaded here stays loaded, and E.3 does not
+    // apply because nothing is being selected.
+    if (fileIdentity === null) return;
     if (loadedIdentity !== fileIdentity) {
       requestGeneration += 1;
       invalidateHighlight(false);
       loadedIdentity = null;
       contentState.value = contentIdentity.value === null ? "idle" : "loading";
       contentError.value = "";
-      diffReadyIdentity.value = null;
       clear();
       readingPosition.value = props.readingPosition;
       if (fileViewport.value) {
@@ -274,21 +260,13 @@ watch(
         fileViewport.value.scrollLeft = 0;
       }
     }
-    if (mode === "diff") {
-      requestGeneration += 1;
-      invalidateHighlight();
-      clear();
-      return;
-    }
     if (isAvailable === false) {
       requestGeneration += 1;
       invalidateHighlight();
       content.value = "";
       contentIdentity.value = fileIdentity;
       contentState.value = "error";
-      contentError.value = deleted.value
-        ? "This file was deleted; its previous contents are available in the diff."
-        : "The current file is unavailable in this checkout.";
+      contentError.value = unavailableText();
       clear();
       return;
     }
@@ -300,9 +278,8 @@ watch(
       const checkoutId = props.checkout?.id;
       if (checkoutId) {
         const request = requestGeneration;
-        const fileIdentity = identity.value;
         const position = readingPosition.value;
-        await load(checkoutId, props.document.path, content.value);
+        await load(checkoutId, props.path!, content.value);
         await restoreMarkdownReadingPosition(position, request, fileIdentity, checkoutId);
       }
     } else {
@@ -317,7 +294,7 @@ watch(
   () => [props.gitSnapshot.statusEventRevision, props.gitSnapshot.statusEventCheckoutId] as const,
   ([, eventCheckoutId]) => {
     if (
-      props.document.mode !== "diff" &&
+      props.path !== null &&
       props.checkout?.id === eventCheckoutId &&
       props.gitSnapshot.checkoutId === eventCheckoutId
     ) {
@@ -329,19 +306,9 @@ watch(
 watch(
   () => props.refreshRevision,
   (revision, previous) => {
-    if (revision !== previous && props.checkout?.id === props.document.checkoutId && props.document.mode !== "diff") {
-      void loadFile(true);
-    }
+    if (revision !== previous && props.checkout?.id && props.path !== null) void loadFile(true);
   },
 );
-
-function setFileMode() {
-  emit("updateMode", isMarkdown.value ? "view" : "code");
-}
-
-function onDiffReady(path: string) {
-  if (path === props.document.path && props.document.mode === "diff") diffReadyIdentity.value = identity.value;
-}
 
 function onFileScroll(event: Event) {
   const viewport = event.currentTarget as HTMLElement;
@@ -351,13 +318,13 @@ function onFileScroll(event: Event) {
 
 function onMarkdownLink(event: MouseEvent) {
   const target = event.target;
-  if (!(target instanceof Element)) return;
+  if (!(target instanceof Element) || props.path === null) return;
   const link = target.closest("a[href]");
   const href = link?.getAttribute("href");
   if (!href || href.startsWith("#") || /^[a-z][a-z\d+.-]*:/i.test(href) || href.startsWith("/") || href.includes("\\"))
     return;
   try {
-    const base = props.document.path.split("/").slice(0, -1);
+    const base = props.path.split("/").slice(0, -1);
     for (const part of decodeURIComponent(href.split(/[?#]/, 1)[0] ?? "").split("/")) {
       if (!part || part === ".") continue;
       if (part === "..") {
@@ -378,8 +345,8 @@ function onMarkdownLink(event: MouseEvent) {
 <template>
   <main class="document-pane flex min-h-0 flex-1 flex-col">
     <header class="document-toolbar flex h-10 shrink-0 items-center justify-between gap-3 border-b px-3">
-      <span class="min-w-0 truncate font-mono text-[11px] text-zinc-400" :title="document.path">{{
-        document.path
+      <span class="min-w-0 truncate text-[11px] text-(--marvis-text-dim)" :title="path ?? undefined">{{
+        path ?? ""
       }}</span>
       <div role="group" aria-label="Document mode" class="document-mode-control flex shrink-0 items-center gap-0.5">
         <button
@@ -387,13 +354,23 @@ function onMarkdownLink(event: MouseEvent) {
           :disabled="!zedAvailable"
           title="Open in Zed"
           aria-label="Open file in Zed"
-          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-zinc-500 hover:bg-white/8 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
           @click="$emit('openInZed')"
         >
           ↗ Zed
         </button>
         <button
-          v-if="document.mode !== 'diff'"
+          type="button"
+          :disabled="!neovimAvailable"
+          title="Open in Neovim"
+          aria-label="Open file in Neovim"
+          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
+          @click="$emit('openInNeovim')"
+        >
+          ↗ Neovim
+        </button>
+        <button
+          v-if="path"
           type="button"
           :aria-pressed="wrapCode"
           :disabled="compactSource"
@@ -402,129 +379,50 @@ function onMarkdownLink(event: MouseEvent) {
               ? 'Wrapping is unavailable for files with more than 5,000 lines'
               : 'Toggle source line wrapping'
           "
-          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-zinc-500 hover:bg-white/8 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
           @click="wrapCode = !wrapCode"
         >
           Wrap
         </button>
-        <template v-if="document.source === 'change'">
-          <button
-            type="button"
-            :aria-pressed="document.mode === 'diff'"
-            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
-            :class="document.mode === 'diff' ? 'bg-white/10 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
-            @click="$emit('updateMode', 'diff')"
-          >
-            Diff
-          </button>
-          <button
-            v-if="!isMarkdown"
-            type="button"
-            :aria-pressed="document.mode !== 'diff'"
-            :disabled="available === false"
-            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-40"
-            :class="document.mode !== 'diff' ? 'bg-white/10 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
-            @click="setFileMode"
-          >
-            File
-          </button>
-        </template>
         <template v-if="isMarkdown">
           <button
             type="button"
-            :aria-pressed="document.mode === 'view'"
-            :disabled="document.source === 'change' && available === false"
+            :aria-pressed="mode === 'view'"
             class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
-            :class="
-              document.mode === 'view'
-                ? 'bg-white/10 text-zinc-100'
-                : 'text-zinc-500 hover:text-zinc-300 disabled:opacity-40'
-            "
             @click="$emit('updateMode', 'view')"
           >
             View
           </button>
           <button
             type="button"
-            :aria-pressed="document.mode === 'code'"
-            :disabled="document.source === 'change' && available === false"
+            :aria-pressed="mode === 'code'"
             class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
-            :class="
-              document.mode === 'code'
-                ? 'bg-white/10 text-zinc-100'
-                : 'text-zinc-500 hover:text-zinc-300 disabled:opacity-40'
-            "
             @click="$emit('updateMode', 'code')"
           >
             Code
           </button>
         </template>
         <span
-          v-else-if="document.mode !== 'diff'"
-          class="document-mode-button rounded-sm bg-white/6 px-2.5 py-1 text-[11px] text-zinc-500"
+          v-else-if="path"
+          class="document-mode-button rounded-sm bg-(--marvis-border) px-2.5 py-1 text-[11px] text-(--marvis-text-secondary)"
         >
           Code
         </span>
       </div>
     </header>
-    <div v-if="document.source === 'change' && document.mode === 'diff' && checkout" class="relative min-h-0 flex-1">
-      <FileDiff
-        class="h-full"
-        :checkout="checkout"
-        :git-snapshot="gitSnapshot"
-        :review="review"
-        :path="document.path"
-        :active="active"
-        :scroll-top="diffScrollTop"
-        @ready="onDiffReady"
-        @scroll-position-changed="$emit('diffPositionChanged', $event)"
-      />
-      <section
-        v-if="staleDiff"
-        class="absolute inset-0 overflow-auto bg-[var(--marvis-bg-0)] px-3 py-2"
-        aria-label="File contents"
-      >
-        <pre v-if="content" class="whitespace-pre-wrap font-mono text-[13px] leading-5 text-zinc-300">{{
-          content
-        }}</pre>
-        <p v-else class="text-sm text-zinc-500">Updating document…</p>
-      </section>
-    </div>
-    <section
-      v-else
-      ref="fileViewport"
-      class="min-h-0 flex-1 overflow-auto"
-      aria-label="File contents"
-      @scroll="onFileScroll"
-    >
-      <p v-if="available === false" role="status" class="pane-state text-sm text-amber-300">
-        {{
-          deleted
-            ? "This file was deleted; its previous contents are available in the diff."
-            : "The current file is unavailable in this checkout."
-        }}
+    <section ref="fileViewport" class="min-h-0 flex-1 overflow-auto" aria-label="File contents" @scroll="onFileScroll">
+      <p v-if="available === false" role="status" class="pane-state text-sm">
+        {{ unavailableText() }}
       </p>
+      <!-- E.3: the previous document is not what stays on screen while a new one is read. -->
       <p
-        v-else-if="contentState === 'loading' && !staleContent && contentIdentity !== identity"
+        v-else-if="contentState === 'loading' && contentIdentity !== identity"
         role="status"
         class="pane-state text-sm"
       >
         Loading file…
       </p>
-      <template v-else-if="staleContent">
-        <pre
-          v-if="content && highlightedLines !== null && highlightedSource === content"
-          class="whitespace-pre-wrap p-3 font-mono text-[13px] leading-5 text-zinc-300"
-        >
-          <!-- eslint-disable-next-line vue/no-v-html -- Code is generated by Shiki and DOMPurify-sanitized. -->
-          <code class="shiki" v-html="highlightedLines.join('\n')" />
-        </pre>
-        <pre v-else-if="content" class="whitespace-pre-wrap p-3 font-mono text-[13px] leading-5 text-zinc-300">{{
-          content
-        }}</pre>
-        <p v-else class="pane-state text-sm">Updating document…</p>
-      </template>
-      <p v-else-if="contentState === 'error'" role="alert" class="pane-state text-sm text-amber-300">
+      <p v-else-if="contentState === 'error'" role="alert" class="pane-state text-sm">
         {{ contentError }}
       </p>
       <p v-else-if="contentState === 'ready' && content.length === 0" role="status" class="pane-state text-sm">
@@ -532,11 +430,15 @@ function onMarkdownLink(event: MouseEvent) {
       </p>
       <p v-else-if="highlighting" role="status" class="pane-state text-sm">Highlighting source…</p>
       <template v-else-if="contentState === 'ready' || (contentState === 'loading' && contentIdentity === identity)">
-        <template v-if="document.mode === 'view' && isMarkdown">
-          <p v-if="markdownPreviewState === 'loading'" role="status" class="px-3 pt-3 text-xs text-zinc-500">
+        <template v-if="mode === 'view' && isMarkdown">
+          <p
+            v-if="markdownPreviewState === 'loading'"
+            role="status"
+            class="px-3 pt-3 text-xs text-(--marvis-text-faint)"
+          >
             Loading relative images…
           </p>
-          <p v-if="markdownImageWarning" role="status" class="px-3 pt-3 text-xs text-amber-300">
+          <p v-if="markdownImageWarning" role="status" class="px-3 pt-3 text-xs text-(--marvis-red)">
             Some Markdown images were missing, unsupported, or over the preview limits.
           </p>
           <!-- eslint-disable vue/no-v-html -- Content is generated and DOMPurify-sanitized in markdown-preview.ts. -->
@@ -550,7 +452,7 @@ function onMarkdownLink(event: MouseEvent) {
         </template>
         <div
           v-else-if="compactSource"
-          class="flex py-2 font-mono text-[13px] leading-5 text-zinc-300"
+          class="flex py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
           aria-label="Source code"
         >
           <pre class="source-line-number" aria-hidden="true">{{ sourceLineNumbers }}</pre>
@@ -563,7 +465,7 @@ function onMarkdownLink(event: MouseEvent) {
         </div>
         <div
           v-else
-          class="py-2 font-mono text-[13px] leading-5 text-zinc-300"
+          class="py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
           :class="wrapCode ? 'w-full min-w-0' : 'min-w-max'"
           aria-label="Source code"
         >
@@ -597,7 +499,7 @@ function onMarkdownLink(event: MouseEvent) {
   max-width: 78ch;
   margin: 0 auto;
   padding: 2rem 1.5rem 3rem;
-  color: #d4d4d8;
+  color: var(--marvis-text);
   font-size: 0.875rem;
   line-height: 1.75;
 }
@@ -606,7 +508,7 @@ function onMarkdownLink(event: MouseEvent) {
 .markdown-preview :deep(h2),
 .markdown-preview :deep(h3) {
   margin: 2rem 0 0.65rem;
-  color: #e4e4e7;
+  color: var(--marvis-text);
   font-weight: 650;
   line-height: 1.3;
 }
@@ -625,7 +527,7 @@ function onMarkdownLink(event: MouseEvent) {
 .markdown-preview :deep(ol),
 .markdown-preview :deep(blockquote) {
   margin: 0.9rem 0;
-  color: #d4d4d8;
+  color: var(--marvis-text);
 }
 
 .markdown-preview :deep(ul),
@@ -635,13 +537,14 @@ function onMarkdownLink(event: MouseEvent) {
 }
 
 .markdown-preview :deep(a) {
-  color: #93c5fd;
+  color: var(--marvis-accent);
   text-decoration: underline;
 }
 
 .markdown-preview :deep(blockquote) {
-  border-left: 2px solid #52525b;
+  border-left: 2px solid var(--marvis-border);
   padding-left: 0.75rem;
+  color: var(--marvis-text-secondary);
 }
 
 .markdown-preview :deep(table) {
@@ -653,7 +556,7 @@ function onMarkdownLink(event: MouseEvent) {
 
 .markdown-preview :deep(th),
 .markdown-preview :deep(td) {
-  border: 1px solid #353b46;
+  border: 1px solid var(--marvis-border);
   padding: 0.45rem 0.65rem;
   text-align: left;
 }
@@ -661,19 +564,19 @@ function onMarkdownLink(event: MouseEvent) {
 .markdown-preview :deep(pre) {
   overflow: auto;
   margin: 1.1rem 0;
-  border: 1px solid #252c36;
-  border-radius: 0.25rem;
-  background: #11161d;
+  border: 1px solid var(--marvis-border);
+  border-radius: var(--marvis-radius);
+  background: var(--marvis-bg-1);
   padding: 0.85rem 1rem;
   font-size: 0.75rem;
   line-height: 1.65;
 }
 
 .markdown-preview :deep(code:not(pre code)) {
-  border-radius: 0.15rem;
-  background: #242a33;
+  border-radius: 2px;
+  background: var(--marvis-bg-2);
   padding: 0.1rem 0.25rem;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-family: var(--marvis-font);
   font-size: 0.85em;
 }
 

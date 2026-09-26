@@ -4,6 +4,7 @@ import { DiffFile, DiffModeEnum, DiffView } from "@git-diff-view/vue";
 import "@git-diff-view/vue/styles/diff-view-pure.css";
 import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
 import type { GitFileDiff, GitDiffPageLine } from "../domain/git";
+import { ALL_CHANGES_LABEL } from "../domain/main-document";
 import { isIpcError } from "../domain/ipc";
 import { buildDiffLineTexts, diffLineText, reviewRangeCode } from "../domain/review";
 import type { AnchorOutcome, ReviewNote, ReviewSide } from "../domain/review";
@@ -16,20 +17,28 @@ import { DIFF_ROW_HEIGHT, useLargeDiff } from "./use-large-diff";
 import ReviewComposer from "./ReviewComposer.vue";
 import ReviewNoteList from "./ReviewNoteList.vue";
 
-const props = defineProps<{
-  checkout: Checkout;
-  gitSnapshot: ActiveGitSnapshot;
-  review: Pick<
-    ActiveReviewNotes,
-    "notes" | "addNote" | "updateNote" | "deleteNote" | "verifyAnchors" | "clearOutdated" | "resolveNote"
-  >;
-  path: string;
-  active: boolean;
-  scrollTop: number;
-}>();
+const props = withDefaults(
+  defineProps<{
+    checkout: Checkout;
+    gitSnapshot: ActiveGitSnapshot;
+    review: Pick<
+      ActiveReviewNotes,
+      "notes" | "addNote" | "updateNote" | "deleteNote" | "verifyAnchors" | "clearOutdated" | "resolveNote"
+    >;
+    /** Null is the whole change set: one diff per changed file, stacked in status order. */
+    path: string | null;
+    active: boolean;
+    scrollTop: number;
+    zedAvailable?: boolean;
+    neovimAvailable?: boolean;
+  }>(),
+  { zedAvailable: false, neovimAvailable: false },
+);
 const emit = defineEmits<{
   ready: [path: string];
   scrollPositionChanged: [top: number];
+  openInZed: [];
+  openInNeovim: [];
 }>();
 
 const diff = shallowRef<GitFileDiff | null>(null);
@@ -49,6 +58,11 @@ const showNoTextHunks = computed(
 const diffViewport = ref<HTMLElement | null>(null);
 const diffScrollTop = ref(props.scrollTop);
 const selectedPath = ref<string | null>(null);
+/** The files of the whole change set the user has opened. */
+const expandedPaths = ref<string[]>([]);
+const changedFiles = computed(() => props.gitSnapshot.status?.files ?? []);
+const title = computed(() => props.path ?? ALL_CHANGES_LABEL);
+const branch = computed(() => props.gitSnapshot.status?.branch ?? props.gitSnapshot.status?.head ?? "");
 const largeDiff = useLargeDiff(() => props.checkout.id, selectedPath, diff, collapsedHunks, diffScrollTop);
 const { diffPageError, largeDiffLineCount, loadVisiblePages, visibleLargeDiffWindow } = largeDiff;
 const draft = ref<{ side: ReviewSide; lineStart: number; lineEnd: number } | null>(null);
@@ -157,6 +171,7 @@ async function saveNoteAt(
   lineEnd: number | null,
   content: string,
 ): Promise<boolean> {
+  if (props.path === null) return false;
   const range = lineEnd && lineEnd > lineStart ? lineEnd : null;
   return props.review.addNote({
     path: props.path,
@@ -227,7 +242,9 @@ async function loadDiff(path: string, preservePosition = false) {
   const request = ++diffGeneration;
   const checkoutId = props.checkout.id;
   const oldScrollTop = preservePosition ? diffScrollTop.value : props.scrollTop;
-  const keepPreviousDiff = diff.value !== null;
+  // E.3: a different file is a different selection, so the previous diff goes away rather
+  // than sitting under the loading state. A refresh of the same file keeps its place.
+  const keepPreviousDiff = diff.value !== null && selectedPath.value === path;
   if (selectedPath.value === path) largeDiff.reset();
   selectedPath.value = path;
   if (!keepPreviousDiff) {
@@ -272,10 +289,26 @@ async function loadDiff(path: string, preservePosition = false) {
   }
 }
 
+function toggleFile(path: string) {
+  expandedPaths.value = expandedPaths.value.includes(path)
+    ? expandedPaths.value.filter((open) => open !== path)
+    : [...expandedPaths.value, path];
+}
+
 watch(
   () => [props.checkout.id, props.path] as const,
-  ([, path]) => void loadDiff(path),
+  ([, path]) => {
+    if (path !== null) void loadDiff(path);
+  },
   { immediate: true, flush: "sync" },
+);
+
+// What is open in the change set belongs to the workdir it was opened in.
+watch(
+  () => props.checkout.id,
+  () => {
+    expandedPaths.value = [];
+  },
 );
 
 watch(
@@ -290,7 +323,7 @@ watch(
 watch(
   anchorChecks,
   (checks) => {
-    if (checks.length > 0) void props.review.verifyAnchors(props.path, checks);
+    if (checks.length > 0 && props.path !== null) void props.review.verifyAnchors(props.path, checks);
   },
   { deep: true },
 );
@@ -298,8 +331,8 @@ watch(
 watch(
   () => props.gitSnapshot.statusRevision,
   async (revision, previous) => {
-    if (revision === previous || props.gitSnapshot.checkoutId !== props.checkout.id || !props.gitSnapshot.status)
-      return;
+    if (revision === previous || props.path === null) return;
+    if (props.gitSnapshot.checkoutId !== props.checkout.id || !props.gitSnapshot.status) return;
     if (props.gitSnapshot.status.files.some((file) => file.path === props.path)) await loadDiff(props.path, true);
     else {
       diffGeneration += 1;
@@ -316,6 +349,8 @@ watch(
   [() => props.active, diffState, diff, visibleLargeDiffWindow],
   async ([active, state, currentDiff, largeWindow]) => {
     if (!active || state !== "ready" || !currentDiff) return;
+    const path = props.path;
+    if (path === null) return;
     const canMark =
       !currentDiff.tooLarge &&
       !currentDiff.isBinary &&
@@ -323,7 +358,6 @@ watch(
       (currentDiff.large ? largeWindow.rows.some((row) => row.line) : hasTextHunks.value);
     if (!canMark) return;
     const checkoutId = props.checkout.id;
-    const path = props.path;
     const request = diffGeneration;
     const key = `${checkoutId}:${path}:${request}`;
     if (markedViewedKey === key) return;
@@ -371,187 +405,319 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="flex min-h-0 flex-1 flex-col overflow-hidden" aria-label="File diff">
-    <p v-if="diffState === 'loading' && !diff" role="status" class="text-xs text-zinc-500">Loading diff…</p>
-    <p v-else-if="diffState === 'error'" role="alert" class="text-xs text-red-300">{{ diffError }}</p>
-    <p v-else-if="diff?.isBinary" role="status" class="text-xs text-amber-300">
-      Binary file; text diff is unavailable.
-    </p>
-    <p v-else-if="diff?.symlinkTarget !== undefined" role="status" class="text-xs text-zinc-400">
-      Symlink target: <code class="break-all text-zinc-200">{{ diff.symlinkTarget }}</code>
-    </p>
-    <p v-else-if="diff?.tooLarge" role="status" class="text-xs text-amber-300">
-      This diff exceeds safe preview limits (100,000 lines, 10,000 hunks, 32 MiB, 4 KiB hunk headers, or 64 KiB per
-      line). Reduce the change size to view it.
-    </p>
-    <p v-else-if="showNoTextHunks" role="status" class="text-xs text-zinc-500">
-      No text hunks are available for this change.
-    </p>
-    <template v-else-if="(diffState === 'ready' || diffState === 'loading') && diff">
-      <p v-if="diff.large" class="mb-2 shrink-0 text-[10px] text-zinc-500">
-        {{ diff.totalLines.toLocaleString() }} diff rows · virtualized view · all rows available by scrolling
-      </p>
-      <p v-if="diffPageError" role="alert" class="mb-2 shrink-0 text-xs text-red-300">{{ diffPageError }}</p>
-      <div
-        ref="diffViewport"
-        class="diff-viewport min-h-0 flex-1 overflow-auto border-t border-white/8 font-mono text-[12px]"
-        aria-label="Diff contents"
-        @scroll="onDiffScroll"
-      >
-        <template v-if="diff.large && !diff.tooLarge">
-          <div
-            :style="{
-              paddingTop: `${visibleLargeDiffWindow.paddingTop}px`,
-              paddingBottom: `${visibleLargeDiffWindow.paddingBottom}px`,
-            }"
-          >
-            <template v-for="row in visibleLargeDiffWindow.rows" :key="row.visualIndex">
-              <div
-                data-testid="large-diff-row"
-                class="group flex h-6 min-w-max items-center overflow-hidden whitespace-pre text-[12px]"
-              >
-                <button
-                  v-if="row.line?.kind === 'hunk'"
-                  type="button"
-                  class="h-full w-full truncate bg-white/4 px-2 text-left text-sky-300 hover:bg-white/8"
-                  :aria-expanded="!row.collapsed"
-                  @click="toggleHunk(row.hunkIndex)"
-                >
-                  {{ row.collapsed ? "▸" : "▾" }} {{ row.line.text }}
-                </button>
-                <template v-else-if="row.line">
-                  <span class="w-12 shrink-0 select-none pr-2 text-right text-zinc-600">{{
-                    row.line.oldLineNumber ?? ""
-                  }}</span>
-                  <span class="w-12 shrink-0 select-none pr-2 text-right text-zinc-600">{{
-                    row.line.newLineNumber ?? ""
-                  }}</span>
-                  <span
-                    class="w-4 shrink-0 text-center"
-                    :class="
-                      row.line.kind === 'added'
-                        ? 'text-green-400'
-                        : row.line.kind === 'removed'
-                          ? 'text-red-400'
-                          : 'text-zinc-600'
-                    "
-                    >{{ row.line.text[0] }}</span
-                  >
-                  <code
-                    class="pr-4"
-                    :class="
-                      row.line.kind === 'added'
-                        ? 'text-green-200'
-                        : row.line.kind === 'removed'
-                          ? 'text-red-200'
-                          : 'text-zinc-300'
-                    "
-                    >{{ row.line.text.slice(1) }}</code
-                  >
-                  <button
-                    v-if="rowAnchor(row.line)"
-                    type="button"
-                    class="ml-auto shrink-0 px-2 text-[11px] text-sky-300 opacity-0 group-hover:opacity-100"
-                    :aria-label="`Add review note on line ${rowAnchor(row.line)!.line}`"
-                    @click="openDraft(rowAnchor(row.line)!.side, rowAnchor(row.line)!.line)"
-                  >
-                    + note
-                  </button>
-                </template>
-                <span v-else class="px-2 text-zinc-600">{{ row.error || "Loading diff page…" }}</span>
-              </div>
-              <template v-if="row.line">
-                <ReviewComposer
-                  v-if="isDraftRow(row.line)"
-                  :side="rowAnchor(row.line)!.side"
-                  :line="rowAnchor(row.line)!.line"
-                  :line-end="draft?.lineEnd && draft.lineEnd !== draft.lineStart ? draft.lineEnd : null"
-                  :code="
-                    reviewRangeCode(
-                      lineTexts,
-                      rowAnchor(row.line)!.side,
-                      rowAnchor(row.line)!.line,
-                      draft?.lineEnd ?? null,
-                    )
-                  "
-                  @submit="saveDraft"
-                  @cancel="cancelDraft"
-                />
-                <ReviewNoteList
-                  v-if="notesForRow(row.line).length > 0"
-                  :notes="notesForRow(row.line)"
-                  :outcomes="anchorOutcomes"
-                  @update-note="review.updateNote"
-                  @delete-note="review.deleteNote"
-                  @clear-outdated="review.clearOutdated"
-                  @resolve-note="review.resolveNote"
-                />
-              </template>
-            </template>
-          </div>
-        </template>
-        <div v-else class="min-w-max space-y-1 p-1">
-          <section v-for="(hunk, index) in diffHunks" :key="`${path}-${index}`" class="min-w-0">
+  <section class="flex min-h-0 flex-1 flex-col" aria-label="File diff">
+    <header class="document-toolbar flex h-10 shrink-0 items-center justify-between gap-3 border-b px-3">
+      <div class="min-w-0">
+        <p class="truncate text-[11px] text-(--marvis-text-dim)" :title="title">{{ title }}</p>
+        <p v-if="!path && branch" class="truncate text-[11px] text-(--marvis-text-faint)">{{ branch }}</p>
+      </div>
+      <div role="group" aria-label="Diff actions" class="document-mode-control flex shrink-0 items-center gap-0.5">
+        <button
+          type="button"
+          :disabled="!zedAvailable"
+          title="Open in Zed"
+          aria-label="Open file in Zed"
+          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
+          @click="$emit('openInZed')"
+        >
+          ↗ Zed
+        </button>
+        <button
+          type="button"
+          :disabled="!neovimAvailable"
+          title="Open in Neovim"
+          aria-label="Open file in Neovim"
+          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
+          @click="$emit('openInNeovim')"
+        >
+          ↗ Neovim
+        </button>
+      </div>
+    </header>
+    <template v-if="path === null">
+      <div class="diff-files min-h-0 flex-1 overflow-auto">
+        <p v-if="gitSnapshot.statusState === 'loading'" role="status" class="pane-state text-sm">Loading changes…</p>
+        <p v-else-if="gitSnapshot.statusState === 'error'" role="alert" class="pane-state text-sm">
+          {{ gitSnapshot.changesStatusError || gitSnapshot.statusError }}
+        </p>
+        <p v-else-if="changedFiles.length === 0" role="status" class="pane-state text-sm">No changed files.</p>
+        <template v-else>
+          <section v-for="file in changedFiles" :key="file.path" class="diff-file">
             <button
               type="button"
-              class="mb-1 w-full truncate border-b border-white/6 bg-white/4 px-2 py-1 text-left font-mono text-[10px] text-zinc-400 hover:bg-white/8"
-              :aria-expanded="!collapsedHunks.includes(index)"
-              @click="toggleHunk(index)"
+              class="diff-file-header"
+              :aria-expanded="expandedPaths.includes(file.path)"
+              :title="file.oldPath ? `${file.oldPath} → ${file.path}` : file.path"
+              @click="toggleFile(file.path)"
             >
-              {{ collapsedHunks.includes(index) ? "▸" : "▾" }} {{ hunk.title }}
+              <span class="diff-status" :data-status="file.status">{{ file.status }}</span>
+              <span class="truncate">{{ file.path }}</span>
+              <span v-if="file.additions" class="diff-add">+{{ file.additions }}</span>
+              <span v-if="file.deletions" class="diff-del">-{{ file.deletions }}</span>
             </button>
-            <DiffView
-              v-if="!collapsedHunks.includes(index)"
-              :diff-file="hunk.file"
-              :diff-view-mode="DiffModeEnum.Unified"
-              diff-view-theme="dark"
-              :diff-view-add-widget="true"
-              :extend-data="extendData"
-              :diff-view-highlight="true"
-              :diff-view-font-size="13"
-              class="min-w-0"
-            >
-              <template #widget="{ lineNumber, side, onClose }">
-                <ReviewComposer
-                  :side="sideName(side)"
-                  :line="lineNumber"
-                  :code="lineCode(sideName(side), lineNumber)"
-                  @submit="
-                    async (content: string) => {
-                      if (await saveNoteAt(sideName(side), lineNumber, null, content)) onClose();
-                    }
-                  "
-                  @cancel="onClose"
-                />
-              </template>
-              <template #extend="{ data }">
-                <ReviewNoteList
-                  :notes="data"
-                  :outcomes="anchorOutcomes"
-                  @update-note="review.updateNote"
-                  @delete-note="review.deleteNote"
-                  @clear-outdated="review.clearOutdated"
-                  @resolve-note="review.resolveNote"
-                />
-              </template>
-            </DiffView>
+            <!-- Git pages one path at a time, so the whole change set is a stack of single-file
+                 diffs rather than one merged patch. Each file is diffed when it is opened. -->
+            <FileDiff
+              v-if="expandedPaths.includes(file.path)"
+              :checkout="checkout"
+              :git-snapshot="gitSnapshot"
+              :review="review"
+              :path="file.path"
+              :active="false"
+              :scroll-top="0"
+              :zed-available="zedAvailable"
+              :neovim-available="neovimAvailable"
+            />
           </section>
-        </div>
+        </template>
       </div>
-      <div v-if="notesWithoutLine.length > 0" class="shrink-0 border-t border-white/8">
-        <p class="px-2 py-1 text-[10px] text-zinc-500">
-          {{ notesWithoutLine.length }}
-          {{ notesWithoutLine.length === 1 ? "note points" : "notes point" }} at a line that is no longer in this diff
+    </template>
+    <template v-else>
+      <p v-if="diffState === 'loading' && !diff" role="status" class="pane-state text-sm">Loading diff…</p>
+      <p v-else-if="diffState === 'error'" role="alert" class="pane-state text-sm">{{ diffError }}</p>
+      <p v-else-if="diff?.isBinary" role="status" class="pane-state text-sm">Binary file; text diff is unavailable.</p>
+      <p v-else-if="diff?.symlinkTarget !== undefined" role="status" class="pane-state text-sm">
+        Symlink target: <code class="break-all text-(--marvis-text)">{{ diff.symlinkTarget }}</code>
+      </p>
+      <p v-else-if="diff?.tooLarge" role="status" class="pane-state text-sm">
+        This diff exceeds safe preview limits (100,000 lines, 10,000 hunks, 32 MiB, 4 KiB hunk headers, or 64 KiB per
+        line). Reduce the change size to view it.
+      </p>
+      <p v-else-if="showNoTextHunks" role="status" class="pane-state text-sm">
+        No text hunks are available for this change.
+      </p>
+      <template v-else-if="(diffState === 'ready' || diffState === 'loading') && diff">
+        <p v-if="diff.large" class="shrink-0 px-3 py-1 text-[10px] text-(--marvis-text-faint)">
+          {{ diff.totalLines.toLocaleString() }} diff rows · virtualized view · all rows available by scrolling
         </p>
-        <ReviewNoteList
-          :notes="notesWithoutLine"
-          :outcomes="anchorOutcomes"
-          @update-note="review.updateNote"
-          @delete-note="review.deleteNote"
-          @clear-outdated="review.clearOutdated"
-          @resolve-note="review.resolveNote"
-        />
-      </div>
+        <p v-if="diffPageError" role="alert" class="shrink-0 px-3 py-1 text-xs text-(--marvis-red)">
+          {{ diffPageError }}
+        </p>
+        <div
+          ref="diffViewport"
+          class="diff-viewport min-h-0 flex-1 overflow-auto font-mono text-[12px]"
+          aria-label="Diff contents"
+          @scroll="onDiffScroll"
+        >
+          <template v-if="diff.large && !diff.tooLarge">
+            <div
+              :style="{
+                paddingTop: `${visibleLargeDiffWindow.paddingTop}px`,
+                paddingBottom: `${visibleLargeDiffWindow.paddingBottom}px`,
+              }"
+            >
+              <template v-for="row in visibleLargeDiffWindow.rows" :key="row.visualIndex">
+                <div
+                  data-testid="large-diff-row"
+                  class="group flex h-6 min-w-max items-center overflow-hidden whitespace-pre text-[12px]"
+                >
+                  <button
+                    v-if="row.line?.kind === 'hunk'"
+                    type="button"
+                    class="diff-hunk h-full w-full truncate px-2 text-left text-(--marvis-accent)"
+                    :aria-expanded="!row.collapsed"
+                    @click="toggleHunk(row.hunkIndex)"
+                  >
+                    {{ row.collapsed ? "▸" : "▾" }} {{ row.line.text }}
+                  </button>
+                  <template v-else-if="row.line">
+                    <span class="w-12 shrink-0 select-none pr-2 text-right text-(--marvis-text-faint)">{{
+                      row.line.oldLineNumber ?? ""
+                    }}</span>
+                    <span class="w-12 shrink-0 select-none pr-2 text-right text-(--marvis-text-faint)">{{
+                      row.line.newLineNumber ?? ""
+                    }}</span>
+                    <span
+                      class="w-4 shrink-0 text-center"
+                      :class="
+                        row.line.kind === 'added'
+                          ? 'text-(--marvis-green)'
+                          : row.line.kind === 'removed'
+                            ? 'text-(--marvis-red)'
+                            : 'text-(--marvis-text-faint)'
+                      "
+                      >{{ row.line.text[0] }}</span
+                    >
+                    <code
+                      class="pr-4"
+                      :class="
+                        row.line.kind === 'added'
+                          ? 'text-(--marvis-green)'
+                          : row.line.kind === 'removed'
+                            ? 'text-(--marvis-red)'
+                            : 'text-(--marvis-text-secondary)'
+                      "
+                      >{{ row.line.text.slice(1) }}</code
+                    >
+                    <button
+                      v-if="rowAnchor(row.line)"
+                      type="button"
+                      class="ml-auto shrink-0 px-2 text-[11px] text-(--marvis-accent) opacity-0 group-hover:opacity-100"
+                      :aria-label="`Add review note on line ${rowAnchor(row.line)!.line}`"
+                      @click="openDraft(rowAnchor(row.line)!.side, rowAnchor(row.line)!.line)"
+                    >
+                      + note
+                    </button>
+                  </template>
+                  <span v-else class="px-2 text-(--marvis-text-faint)">{{ row.error || "Loading diff page…" }}</span>
+                </div>
+                <template v-if="row.line">
+                  <ReviewComposer
+                    v-if="isDraftRow(row.line)"
+                    :side="rowAnchor(row.line)!.side"
+                    :line="rowAnchor(row.line)!.line"
+                    :line-end="draft?.lineEnd && draft.lineEnd !== draft.lineStart ? draft.lineEnd : null"
+                    :code="
+                      reviewRangeCode(
+                        lineTexts,
+                        rowAnchor(row.line)!.side,
+                        rowAnchor(row.line)!.line,
+                        draft?.lineEnd ?? null,
+                      )
+                    "
+                    @submit="saveDraft"
+                    @cancel="cancelDraft"
+                  />
+                  <ReviewNoteList
+                    v-if="notesForRow(row.line).length > 0"
+                    :notes="notesForRow(row.line)"
+                    :outcomes="anchorOutcomes"
+                    @update-note="review.updateNote"
+                    @delete-note="review.deleteNote"
+                    @clear-outdated="review.clearOutdated"
+                    @resolve-note="review.resolveNote"
+                  />
+                </template>
+              </template>
+            </div>
+          </template>
+          <div v-else class="min-w-max space-y-1 p-1">
+            <section v-for="(hunk, index) in diffHunks" :key="`${path}-${index}`" class="min-w-0">
+              <button
+                type="button"
+                class="diff-hunk mb-1 w-full truncate border-b border-(--marvis-border) px-2 py-1 text-left font-mono text-[10px] text-(--marvis-text-dim)"
+                :aria-expanded="!collapsedHunks.includes(index)"
+                @click="toggleHunk(index)"
+              >
+                {{ collapsedHunks.includes(index) ? "▸" : "▾" }} {{ hunk.title }}
+              </button>
+              <DiffView
+                v-if="!collapsedHunks.includes(index)"
+                :diff-file="hunk.file"
+                :diff-view-mode="DiffModeEnum.Unified"
+                diff-view-theme="dark"
+                :diff-view-add-widget="true"
+                :extend-data="extendData"
+                :diff-view-highlight="true"
+                :diff-view-font-size="13"
+                class="min-w-0"
+              >
+                <template #widget="{ lineNumber, side, onClose }">
+                  <ReviewComposer
+                    :side="sideName(side)"
+                    :line="lineNumber"
+                    :code="lineCode(sideName(side), lineNumber)"
+                    @submit="
+                      async (content: string) => {
+                        if (await saveNoteAt(sideName(side), lineNumber, null, content)) onClose();
+                      }
+                    "
+                    @cancel="onClose"
+                  />
+                </template>
+                <template #extend="{ data }">
+                  <ReviewNoteList
+                    :notes="data"
+                    :outcomes="anchorOutcomes"
+                    @update-note="review.updateNote"
+                    @delete-note="review.deleteNote"
+                    @clear-outdated="review.clearOutdated"
+                    @resolve-note="review.resolveNote"
+                  />
+                </template>
+              </DiffView>
+            </section>
+          </div>
+        </div>
+        <div v-if="notesWithoutLine.length > 0" class="shrink-0 border-t border-(--marvis-border)">
+          <p class="px-2 py-1 text-[10px] text-(--marvis-text-faint)">
+            {{ notesWithoutLine.length }}
+            {{ notesWithoutLine.length === 1 ? "note points" : "notes point" }} at a line that is no longer in this diff
+          </p>
+          <ReviewNoteList
+            :notes="notesWithoutLine"
+            :outcomes="anchorOutcomes"
+            @update-note="review.updateNote"
+            @delete-note="review.deleteNote"
+            @clear-outdated="review.clearOutdated"
+            @resolve-note="review.resolveNote"
+          />
+        </div>
+      </template>
     </template>
   </section>
 </template>
+
+<style scoped>
+/* Hunk headers sit on the change's own surface, as the mockup's group rows do. */
+.diff-hunk {
+  background: var(--marvis-bg-1);
+  color: var(--marvis-text-secondary);
+}
+
+.diff-hunk:hover {
+  background: var(--marvis-bg-2);
+  color: var(--marvis-text);
+}
+
+/* One row per changed file in the whole change set, and its diff under it. */
+.diff-file + .diff-file {
+  border-top: 1px solid var(--marvis-border);
+}
+
+.diff-file-header {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  min-height: 24px;
+  padding: 4px 6px;
+  border: none;
+  background: transparent;
+  color: var(--marvis-text);
+  font-family: inherit;
+  font-size: 12px;
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.diff-file-header:hover {
+  background: var(--marvis-bg-2);
+}
+
+.diff-status {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--marvis-text-secondary);
+}
+
+.diff-status[data-status="A"] {
+  color: var(--marvis-green);
+}
+
+.diff-status[data-status="D"] {
+  color: var(--marvis-red);
+}
+
+.diff-status[data-status="U"] {
+  color: var(--marvis-text-faint);
+}
+
+/* A file inside the change-set stack scrolls on its own, so the virtual window of a large
+   diff has a container to follow. */
+.diff-file :deep(.diff-viewport) {
+  max-height: 60vh;
+}
+</style>

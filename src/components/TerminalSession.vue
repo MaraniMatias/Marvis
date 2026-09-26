@@ -38,11 +38,13 @@ const terminal = new Terminal({
   fontSize: 16,
   lineHeight: 1.2,
   scrollback: 10000,
+  // Only the colors come from the design tokens (B.1): the face, size and ligatures are the
+  // ones the app has always had.
   theme: {
-    background: "#0b0f15",
-    foreground: "#d9e2f0",
-    cursor: "#7dd3fc",
-    selectionBackground: "#334155",
+    background: "#17191f", // --marvis-bg-0
+    foreground: "#d6d9e0", // --marvis-text
+    cursor: "#7c9eff", // --marvis-accent
+    selectionBackground: "#22252e", // --marvis-bg-2
   },
 });
 const fit = new FitAddon();
@@ -216,7 +218,7 @@ onUnmounted(() => {
 <template>
   <section class="terminal-surface flex h-full min-h-0 flex-col overflow-hidden">
     <div ref="terminalElement" class="terminal-host min-h-0 flex-1" aria-label="Shell terminal" />
-    <p v-if="error" role="alert" class="m-0 border-t border-red-400/20 px-3 py-2 text-xs text-red-200">
+    <p v-if="error" role="alert" class="m-0 border-t border-(--marvis-border) px-3 py-2 text-xs text-(--marvis-red)">
       {{ error }}
     </p>
   </section>
