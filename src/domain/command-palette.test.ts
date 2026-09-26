@@ -26,6 +26,8 @@ describe("command palette capabilities", () => {
   it("filters checkout actions when no usable checkout exists and gates preview on a selected file", () => {
     expect(commandsFor({ hasCheckout: false })).toContain("toggle-focus");
     expect(commandsFor({ hasCheckout: false })).toContain("toggle-sidebar");
+    expect(commandsFor({ hasCheckout: false })).toContain("reset-layout");
+    expect(commandsFor({ hasCheckout: false })).not.toContain("toggle-status-bar");
     expect(commandsFor({ hasCheckout: false })).not.toContain("new-terminal");
     expect(commandsFor({ isMissing: true })).not.toContain("open-file");
     expect(commandsFor()).not.toContain("open-preview");

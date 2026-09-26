@@ -3,12 +3,11 @@ import { Channel } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type { TerminalLaunchType, TerminalSessionStatus } from "../domain/workspace";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
 import type { TerminalLaunchTarget } from "../lib/ipc";
 import { renderPtyOutput } from "../lib/terminal-renderer";
-import Button from "./ui/button/Button.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -30,9 +29,6 @@ const emit = defineEmits<{
 
 const terminalElement = ref<HTMLElement | null>(null);
 const state = ref<TerminalSessionStatus>({ state: "running", foregroundProcess: false });
-const sessionLabel = computed(() =>
-  props.sessionType === "nvim" ? "Neovim" : props.sessionType.charAt(0).toUpperCase() + props.sessionType.slice(1),
-);
 const error = ref<string | null>(null);
 const closing = ref(false);
 const terminal = new Terminal({
@@ -219,14 +215,6 @@ onUnmounted(() => {
 
 <template>
   <section class="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-white/8 bg-[#10151d]">
-    <header class="flex h-9 shrink-0 items-center justify-between border-b border-white/8 px-3">
-      <span class="truncate font-mono text-xs text-zinc-400">{{
-        state.state === "running" ? `${sessionLabel} running` : `Exited · code ${state.exitCode ?? "unknown"}`
-      }}</span>
-      <Button variant="quiet" :disabled="closing" @click="requestClose">
-        {{ closing ? "Closing…" : "Close session" }}
-      </Button>
-    </header>
     <div ref="terminalElement" class="min-h-0 flex-1 p-2" aria-label="Shell terminal" />
     <p v-if="error" role="alert" class="m-0 border-t border-red-400/20 px-3 py-2 text-xs text-red-200">
       {{ error }}

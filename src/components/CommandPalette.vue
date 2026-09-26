@@ -75,7 +75,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeydown));
 <template>
   <div
     v-if="open"
-    class="absolute inset-0 z-50 flex items-start justify-center bg-black/55 px-4 pt-[12vh]"
+    class="absolute inset-x-0 bottom-0 top-12 z-50 flex items-start justify-center bg-black/55 px-4 pt-[12vh]"
     @click.self="close"
   >
     <section

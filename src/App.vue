@@ -14,7 +14,6 @@ import type { MainDocument, MainDocumentMode } from "./domain/main-document";
 import InspectorPane from "./components/InspectorPane.vue";
 import CommandPalette from "./components/CommandPalette.vue";
 import DocumentPane from "./components/DocumentPane.vue";
-import GitStatusBar from "./components/GitStatusBar.vue";
 import SessionPane from "./components/SessionPane.vue";
 import Sidebar from "./components/Sidebar.vue";
 import WorktreeDialog from "./components/WorktreeDialog.vue";
@@ -31,7 +30,6 @@ import type { EditorAvailability } from "./lib/ipc";
 import { useWorkspaceState } from "./presentation/workspace";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
 import { isMarkdownPath } from "./presentation/markdown-preview";
-import AppToolbar from "./components/AppToolbar.vue";
 import {
   DEFAULT_APP_LAYOUT,
   DEFAULT_CHECKOUT_UI_STATE,
@@ -199,16 +197,6 @@ function setDocumentMode(mode: MainDocumentMode) {
   updateCheckoutUiState(checkoutId, { document: documents.value[checkoutId] });
 }
 
-function closeDocument() {
-  const checkoutId = activeCheckout.value?.id;
-  if (!checkoutId) return;
-  const next = { ...documents.value };
-  delete next[checkoutId];
-  documents.value = next;
-  mainViews.value = { ...mainViews.value, [checkoutId]: "terminal" };
-  updateCheckoutUiState(checkoutId, { document: null, mainView: "terminal" });
-}
-
 function activateCheckoutTerminal(checkoutId: string) {
   // Selecting a checkout restores its saved main view. Only explicit terminal actions switch views.
   void selectCheckout(checkoutId);
@@ -314,7 +302,7 @@ function toggleFocusMode() {
   flushAfterLayoutInteraction();
 }
 
-function toggleLayoutVisibility(key: "sidebarVisible" | "inspectorVisible" | "statusBarVisible") {
+function toggleLayoutVisibility(key: "sidebarVisible" | "inspectorVisible") {
   appLayout.value = toggleLayoutVisibilityState(appLayout.value, key);
   flushAfterLayoutInteraction();
 }
@@ -446,28 +434,6 @@ function setMainView(view: "terminal" | "document") {
   mainViews.value = { ...mainViews.value, [checkoutId]: view };
   updateCheckoutUiState(checkoutId, { mainView: view });
   if (view === "terminal") void nextTick(() => sessionPane.value?.focusActiveTerminal());
-}
-
-function onMainTabKeydown(event: KeyboardEvent) {
-  if (!(event.target instanceof HTMLElement) || event.target.getAttribute("role") !== "tab") return;
-  const tabs: Array<"terminal" | "document"> = ["terminal"];
-  if (activeDocument.value) tabs.push("document");
-  const current = event.target.id === "main-tab-document" ? "document" : "terminal";
-  const index = tabs.indexOf(current);
-  const next =
-    event.key === "Home"
-      ? tabs[0]
-      : event.key === "End"
-        ? tabs[tabs.length - 1]
-        : event.key === "ArrowRight"
-          ? tabs[(index + 1) % tabs.length]
-          : event.key === "ArrowLeft"
-            ? tabs[(index + tabs.length - 1) % tabs.length]
-            : null;
-  if (!next) return;
-  event.preventDefault();
-  setMainView(next);
-  void nextTick(() => document.getElementById(`main-tab-${next}`)?.focus());
 }
 
 watch(appLayout, () => scheduleAppLayoutSave(), { deep: true });
@@ -614,9 +580,31 @@ function requestWindowClose(currentWindow: ReturnType<typeof getCurrentWindow>):
 }
 
 function onWindowKeydown(event: KeyboardEvent) {
-  if (!(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "q") return;
-  event.preventDefault();
-  void requestWindowClose(getCurrentWindow());
+  if (!(event.metaKey || event.ctrlKey)) return;
+  if (event.key.toLowerCase() === "q") {
+    event.preventDefault();
+    void requestWindowClose(getCurrentWindow());
+    return;
+  }
+  if (isLayoutShortcutTarget(event.target)) return;
+  if (event.key === "0" && !event.altKey && !event.shiftKey) {
+    event.preventDefault();
+    toggleLayoutVisibility("sidebarVisible");
+  } else if (event.key === "0" && event.altKey && !event.shiftKey) {
+    event.preventDefault();
+    toggleLayoutVisibility("inspectorVisible");
+  }
+}
+
+function isLayoutShortcutTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target instanceof HTMLInputElement ||
+    target instanceof HTMLSelectElement ||
+    target instanceof HTMLTextAreaElement ||
+    target.isContentEditable ||
+    Boolean(target.closest(".xterm"))
+  );
 }
 
 function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
@@ -684,11 +672,11 @@ async function runPaletteCommand(command: PaletteCommandId) {
     case "toggle-inspector":
       toggleLayoutVisibility("inspectorVisible");
       break;
-    case "toggle-status-bar":
-      toggleLayoutVisibility("statusBarVisible");
-      break;
     case "toggle-transparency":
       toggleTransparency();
+      break;
+    case "reset-layout":
+      resetLayout();
       break;
     case "new-worktree":
       if (activeRepo.value?.kind === "git") {
@@ -792,17 +780,71 @@ async function closeCheckout(checkoutId: string) {
     :class="{ 'reduce-transparency': appLayout.reduceTransparency }"
     :style="{ '--inspector-width': `${appLayout.inspectorWidth}px` }"
   >
-    <AppToolbar
-      :layout="appLayout"
-      :narrow="isNarrow"
-      @toggle-sidebar="toggleLayoutVisibility('sidebarVisible')"
-      @toggle-inspector="toggleLayoutVisibility('inspectorVisible')"
-      @toggle-status-bar="toggleLayoutVisibility('statusBarVisible')"
-      @toggle-focus="toggleFocusMode"
-      @toggle-transparency="toggleTransparency"
-      @reset-layout="resetLayout"
-      @open-commands="paletteRequestToken += 1"
-    />
+    <header class="window-header flex h-12 shrink-0 items-center border-b border-white/8 text-zinc-300">
+      <div class="flex h-full shrink-0 items-center pl-[82px] pr-3">
+        <button
+          type="button"
+          data-testid="command-field"
+          aria-label="Search files and commands"
+          class="flex h-8 w-[min(300px,34vw)] items-center gap-2 rounded-md border border-white/8 bg-black/15 px-2.5 text-left text-xs text-zinc-400 hover:bg-white/6 hover:text-zinc-200"
+          @click="paletteRequestToken += 1"
+        >
+          <span aria-hidden="true" class="text-sm">⌕</span>
+          <span class="min-w-0 flex-1 truncate">Search files and commands…</span>
+          <kbd class="shrink-0 rounded border border-white/10 px-1 py-0.5 font-sans text-[10px] text-zinc-500">⌘K</kbd>
+        </button>
+      </div>
+      <!-- Keep native dragging on this empty spacer only, clear of controls and visual effects. -->
+      <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-4 flex-1" />
+      <nav
+        aria-label="Repository location"
+        class="flex h-full min-w-0 max-w-[42%] shrink-0 items-center gap-2 pr-4 text-xs"
+      >
+        <button
+          v-if="activeCheckout"
+          type="button"
+          title="Toggle navigation sidebar"
+          class="max-w-40 truncate text-zinc-300 hover:text-white"
+          @click="toggleLayoutVisibility('sidebarVisible')"
+        >
+          {{ activeRepo?.name ?? activeCheckout.path.split(/[\\/]/).at(-1) }}
+        </button>
+        <template v-if="activeCheckout && activeRepo?.kind === 'git'">
+          <span aria-hidden="true" class="text-zinc-600">/</span>
+          <span class="max-w-32 truncate text-zinc-500">{{ activeCheckout.branch || "Detached" }}</span>
+        </template>
+        <template v-if="activeCheckout">
+          <span aria-hidden="true" class="text-zinc-600">/</span>
+          <template v-if="activeDocument">
+            <button
+              v-if="activeMainView === 'terminal'"
+              type="button"
+              data-testid="document-breadcrumb"
+              class="max-w-48 truncate text-zinc-500 hover:text-zinc-200"
+              :title="activeDocument.path"
+              @click="setMainView('document')"
+            >
+              {{ activeDocument.path.split(/[\\/]/).at(-1) }}
+            </button>
+            <span v-else class="max-w-48 truncate text-zinc-200" :title="activeDocument.path">
+              {{ activeDocument.path.split(/[\\/]/).at(-1) }}
+            </span>
+            <span aria-hidden="true" class="text-zinc-600">/</span>
+            <button
+              v-if="activeMainView === 'document'"
+              type="button"
+              data-testid="terminal-breadcrumb"
+              class="text-zinc-500 hover:text-zinc-200"
+              @click="setMainView('terminal')"
+            >
+              Terminal
+            </button>
+            <span v-else class="text-zinc-200">Terminal</span>
+          </template>
+          <span v-else class="text-zinc-200">Terminal</span>
+        </template>
+      </nav>
+    </header>
     <SplitterGroup direction="horizontal" class="app-splitter flex min-h-0 flex-1" @layout="onSplitterLayout">
       <SplitterPanel
         id="navigation-panel"
@@ -846,72 +888,14 @@ async function closeCheckout(checkoutId: string) {
         @dblclick.stop="resetPanelWidth('sidebar')"
       />
       <SplitterPanel id="main-panel" :min-size="420" size-unit="px" class="main-column min-h-0 min-w-0 flex-1">
-        <nav
-          role="tablist"
-          aria-label="Main view"
-          class="main-tabs flex h-10 shrink-0 items-center gap-1 border-b border-white/8 px-3"
-          @keydown="onMainTabKeydown"
-        >
-          <button
-            id="main-tab-terminal"
-            role="tab"
-            type="button"
-            :aria-selected="activeMainView === 'terminal'"
-            aria-controls="main-view-terminal"
-            :tabindex="activeMainView === 'terminal' ? 0 : -1"
-            class="rounded px-3 py-1.5 text-[13px]"
-            :class="activeMainView === 'terminal' ? 'bg-white/8 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
-            @click="setMainView('terminal')"
-          >
-            Terminal
-          </button>
-          <div
-            v-if="activeDocument"
-            class="flex h-full items-center gap-1 border-b px-2"
-            :class="activeMainView === 'document' ? 'border-sky-400/60' : 'border-transparent'"
-          >
-            <button
-              id="main-tab-document"
-              role="tab"
-              type="button"
-              :aria-selected="activeMainView === 'document'"
-              aria-controls="main-view-document"
-              :tabindex="activeMainView === 'document' ? 0 : -1"
-              class="max-w-64 truncate px-1 py-1.5 text-[13px]"
-              :class="activeMainView === 'document' ? 'text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
-              @click="setMainView('document')"
-            >
-              {{ activeDocument.path.split(/[\\/]/).at(-1) }}
-            </button>
-            <button
-              type="button"
-              aria-label="Close document"
-              title="Close document"
-              class="rounded px-1 text-zinc-500 hover:bg-white/8 hover:text-zinc-200"
-              @click="closeDocument"
-            >
-              ×
-            </button>
-          </div>
-          <span
-            v-if="activeCheckout"
-            class="ml-auto max-w-[45%] truncate pr-2 text-xs text-zinc-500"
-            :title="activeCheckout.path"
-          >
-            {{ activeCheckout.branch || activeCheckout.path.split(/[\\/]/).at(-1) }}
-          </span>
-        </nav>
         <div class="relative min-h-0 flex-1" :aria-busy="!checkoutUiReady">
           <section
             v-show="activeMainView === 'terminal'"
             id="main-view-terminal"
-            role="tabpanel"
-            aria-labelledby="main-tab-terminal"
-            tabindex="0"
+            key="terminal"
             class="absolute inset-0"
           >
             <SessionPane
-              v-show="activeMainView === 'terminal'"
               ref="sessionPane"
               class="absolute inset-0"
               :checkout="checkoutUiReady ? activeCheckout : null"
@@ -927,15 +911,13 @@ async function closeCheckout(checkoutId: string) {
             />
           </section>
           <section
-            v-if="activeDocument && checkoutUiReady"
-            v-show="activeMainView === 'document'"
+            v-show="activeMainView === 'document' && activeDocument && checkoutUiReady"
             id="main-view-document"
-            role="tabpanel"
-            aria-labelledby="main-tab-document"
-            tabindex="0"
+            key="document"
             class="absolute inset-0"
           >
             <DocumentPane
+              v-if="activeDocument && checkoutUiReady"
               :checkout="activeCheckout"
               :document="activeDocument"
               :git-snapshot="gitSnapshot"
@@ -1001,14 +983,6 @@ async function closeCheckout(checkoutId: string) {
       @workspace-updated="applyWorkspace"
       @request-shell="requestShell"
       @warning="reportWarning"
-    />
-    <GitStatusBar
-      v-if="appLayout.statusBarVisible"
-      class="app-statusbar"
-      :checkout="activeCheckout"
-      :repo="activeRepo"
-      :git-snapshot="gitSnapshot"
-      :concurrent-actors="activeCheckout ? activityByCheckout[activeCheckout.id] : []"
     />
     <CommandPalette :commands="paletteCommands" :open-request-token="paletteRequestToken" @select="runPaletteCommand" />
     <div

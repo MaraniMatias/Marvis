@@ -145,7 +145,10 @@ const SessionPaneStub = defineComponent({
   setup(_, { expose }) {
     onMounted(() => (mocks.sessionPaneMounts += 1));
     expose({ focusActiveTerminal: vi.fn() });
-    return () => h("div", { "data-testid": "session-pane" });
+    return () =>
+      h("div", { "data-testid": "session-pane" }, [
+        h("div", { class: "xterm" }, [h("textarea", { "data-testid": "terminal-input" })]),
+      ]);
   },
 });
 
@@ -236,8 +239,6 @@ async function mountApp(workspace: WorkspaceState, layout = { ...DEFAULT_APP_LAY
         InspectorPane: InspectorPaneStub,
         DocumentPane: DocumentPaneStub,
         WorktreeDialog: EmptyStub,
-        GitStatusBar: EmptyStub,
-        CommandPalette: EmptyStub,
       },
     },
   });
@@ -247,6 +248,28 @@ async function mountApp(workspace: WorkspaceState, layout = { ...DEFAULT_APP_LAY
   mocks.saveAppLayout.mockClear();
   mocks.saveCheckoutUiState.mockClear();
   return wrapper;
+}
+
+function dispatchShortcut(key: string, options: { altKey?: boolean; ctrlKey?: boolean } = {}) {
+  const event = new KeyboardEvent("keydown", {
+    key,
+    metaKey: !options.ctrlKey,
+    ctrlKey: options.ctrlKey ?? false,
+    altKey: options.altKey ?? false,
+    bubbles: true,
+    cancelable: true,
+  });
+  window.dispatchEvent(event);
+  return event;
+}
+
+async function runPaletteCommand(wrapper: ReturnType<typeof mount>, label: string) {
+  await wrapper.get('[data-testid="command-field"]').trigger("click");
+  await flushPromises();
+  const command = wrapper.findAll('button[role="option"]').find((button) => button.text().includes(label));
+  expect(command, `palette command ${label} should be available`).toBeDefined();
+  await command!.trigger("click");
+  await flushPromises();
 }
 
 describe("App UI integration", () => {
@@ -277,6 +300,45 @@ describe("App UI integration", () => {
     vi.useRealTimers();
   });
 
+  it("toggles the sidebar and inspector with shortcuts and ignores typing targets", async () => {
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+    expect(dispatchShortcut("0").defaultPrevented).toBe(true);
+    await vi.advanceTimersByTimeAsync(300);
+    await flushPromises();
+    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarVisible: false }));
+
+    expect(dispatchShortcut("0", { altKey: true, ctrlKey: true }).defaultPrevented).toBe(true);
+    await vi.advanceTimersByTimeAsync(300);
+    await flushPromises();
+    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(expect.objectContaining({ inspectorVisible: false }));
+
+    mocks.saveAppLayout.mockClear();
+    const input = document.createElement("input");
+    const terminal = document.createElement("div");
+    const terminalInput = document.createElement("textarea");
+    terminal.className = "xterm";
+    terminal.append(terminalInput);
+    document.body.append(input, terminal);
+    const inputShortcut = new KeyboardEvent("keydown", { key: "0", metaKey: true, bubbles: true, cancelable: true });
+    const terminalShortcut = new KeyboardEvent("keydown", {
+      key: "0",
+      metaKey: true,
+      altKey: true,
+      bubbles: true,
+      cancelable: true,
+    });
+    input.dispatchEvent(inputShortcut);
+    terminalInput.dispatchEvent(terminalShortcut);
+    await vi.advanceTimersByTimeAsync(300);
+    await flushPromises();
+    expect(inputShortcut.defaultPrevented).toBe(false);
+    expect(terminalShortcut.defaultPrevented).toBe(false);
+    expect(mocks.saveAppLayout).not.toHaveBeenCalled();
+    input.remove();
+    terminal.remove();
+    wrapper.unmount();
+  });
+
   it("does not persist synchronized splitter or viewport layouts over preferred widths", async () => {
     const preferred = { ...DEFAULT_APP_LAYOUT, sidebarWidth: 345, inspectorWidth: 450 };
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), preferred);
@@ -289,11 +351,11 @@ describe("App UI integration", () => {
     await flushPromises();
     expect(mocks.saveAppLayout).not.toHaveBeenCalled();
 
-    await wrapper.get('button[aria-label="Hide inspector"]').trigger("click");
+    dispatchShortcut("0", { altKey: true });
     await flushPromises();
-    await wrapper.get('button[aria-label="Show inspector"]').trigger("click");
-    await wrapper.get("button.focus-button").trigger("click");
-    await wrapper.get("button.focus-button").trigger("click");
+    dispatchShortcut("0", { altKey: true });
+    await runPaletteCommand(wrapper, "Toggle Focus Mode");
+    await runPaletteCommand(wrapper, "Toggle Focus Mode");
     await flushPromises();
     await vi.advanceTimersByTimeAsync(300);
     await flushPromises();
@@ -324,8 +386,8 @@ describe("App UI integration", () => {
     await flushPromises();
     expect(mocks.saveAppLayout).not.toHaveBeenCalled();
 
-    await wrapper.get('button[aria-label="Show navigation"]').trigger("click");
-    await wrapper.get('button[aria-label="Show inspector"]').trigger("click");
+    dispatchShortcut("0");
+    dispatchShortcut("0", { altKey: true });
     await flushPromises();
     expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -360,7 +422,7 @@ describe("App UI integration", () => {
       }),
     );
 
-    await wrapper.get('button[aria-label="Show navigation"]').trigger("click");
+    dispatchShortcut("0");
     await flushPromises();
     expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
       expect.objectContaining({
@@ -412,7 +474,7 @@ describe("App UI integration", () => {
     wrapper.unmount();
   });
 
-  it("provides a global layout reset in the toolbar disclosure", async () => {
+  it("provides a global layout reset in the command palette", async () => {
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
       ...DEFAULT_APP_LAYOUT,
       sidebarWidth: 345,
@@ -420,8 +482,7 @@ describe("App UI integration", () => {
     });
     const resizeCalls = vi.fn();
     mocks.onProgrammaticPanelResize = (panelId, size) => resizeCalls(panelId, size);
-    await wrapper.get(".toolbar-settings summary").trigger("click");
-    await wrapper.get(".toolbar-menu button:last-child").trigger("click");
+    await runPaletteCommand(wrapper, "Reset Layout");
     await flushPromises();
     expect(resizeCalls).toHaveBeenCalledWith("navigation-panel", DEFAULT_APP_LAYOUT.sidebarWidth);
     expect(resizeCalls).toHaveBeenCalledWith("inspector-panel", DEFAULT_APP_LAYOUT.inspectorWidth);
@@ -452,16 +513,16 @@ describe("App UI integration", () => {
     wrapper.unmount();
   });
 
-  it("associates main tabs with panels, supports arrow keys, and keeps the terminal mounted", async () => {
+  it("switches between plain view sections from the breadcrumb without unmounting the terminal", async () => {
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
     await wrapper.get('[data-testid="open-file"]').trigger("click");
     await flushPromises();
-    const terminalTab = wrapper.get("#main-tab-terminal");
-    const documentTab = wrapper.get("#main-tab-document");
-    expect(terminalTab.attributes("aria-controls")).toBe("main-view-terminal");
-    expect(documentTab.attributes("aria-controls")).toBe("main-view-document");
-    expect(wrapper.get("#main-view-terminal").attributes("aria-labelledby")).toBe("main-tab-terminal");
-    expect(wrapper.get("#main-view-document").attributes("aria-labelledby")).toBe("main-tab-document");
+    expect(wrapper.find('[role="tablist"]').exists()).toBe(false);
+    expect(wrapper.get("#main-view-terminal").attributes("role")).toBeUndefined();
+    expect(wrapper.get("#main-view-document").attributes("role")).toBeUndefined();
+    expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).toBe("none");
+    expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
+    expect(wrapper.get('[data-testid="terminal-breadcrumb"]').text()).toBe("Terminal");
 
     await wrapper.get('[data-testid="diff-scroll"]').trigger("click");
     await wrapper.get('[data-testid="document-scroll"]').trigger("click");
@@ -478,12 +539,14 @@ describe("App UI integration", () => {
       }),
     );
 
-    await terminalTab.trigger("keydown", { key: "ArrowRight" });
-    expect(documentTab.attributes("aria-selected")).toBe("true");
-    await documentTab.trigger("keydown", { key: "ArrowLeft" });
-    expect(terminalTab.attributes("aria-selected")).toBe("true");
-    await wrapper.get('button[aria-label="Hide navigation"]').trigger("click");
-    await wrapper.get("button.focus-button").trigger("click");
+    await wrapper.get('[data-testid="terminal-breadcrumb"]').trigger("click");
+    expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).not.toBe("none");
+    expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
+    await wrapper.get('[data-testid="document-breadcrumb"]').trigger("click");
+    expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).toBe("none");
+    expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
+    dispatchShortcut("0");
+    await runPaletteCommand(wrapper, "Toggle Focus Mode");
     expect(mocks.sessionPaneMounts).toBe(1);
     wrapper.unmount();
   });
@@ -519,7 +582,8 @@ describe("App UI integration", () => {
       mainView: "document",
     });
     await flushPromises();
-    expect(wrapper.get("#main-tab-terminal").attributes("aria-selected")).toBe("true");
+    expect(wrapper.get('[data-testid="document-breadcrumb"]').text()).toBe("two.md");
+    expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
     expect(wrapper.get('[data-testid="document-pane"]').text()).toBe("two.md");
 
     resolveOne({
@@ -537,7 +601,7 @@ describe("App UI integration", () => {
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
     let resolveWrite!: () => void;
     mocks.saveAppLayout.mockImplementation(() => new Promise<void>((resolve) => (resolveWrite = resolve)));
-    await wrapper.get('button[aria-label="Hide navigation"]').trigger("click");
+    dispatchShortcut("0");
     await flushPromises();
     expect(mocks.saveAppLayout).toHaveBeenCalled();
 
@@ -558,7 +622,7 @@ describe("App UI integration", () => {
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
     let resolveWrite!: () => void;
     mocks.saveAppLayout.mockImplementation(() => new Promise<void>((resolve) => (resolveWrite = resolve)));
-    await wrapper.get('button[aria-label="Hide navigation"]').trigger("click");
+    dispatchShortcut("0");
     await flushPromises();
     const event = new KeyboardEvent("keydown", { key: "q", metaKey: true, cancelable: true });
     window.dispatchEvent(event);

@@ -23,7 +23,6 @@ describe("persisted UI state", () => {
         inspectorWidth: 360,
         sidebarVisible: true,
         inspectorVisible: true,
-        statusBarVisible: true,
       },
     };
     expect(normalizeAppLayout(JSON.parse(JSON.stringify(saved)))).toEqual(saved);
@@ -36,6 +35,15 @@ describe("persisted UI state", () => {
       sidebarWidth: 380,
       inspectorWidth: 260,
     });
+  });
+
+  it("ignores the removed status bar field in persisted layouts and focus snapshots", () => {
+    const normalized = normalizeAppLayout({
+      ...DEFAULT_APP_LAYOUT,
+      statusBarVisible: false,
+      focusSnapshot: { ...snapshotLayout(DEFAULT_APP_LAYOUT), statusBarVisible: false },
+    });
+    expect(normalized).toEqual({ ...DEFAULT_APP_LAYOUT, focusSnapshot: snapshotLayout(DEFAULT_APP_LAYOUT) });
   });
 
   it("keeps expanded widths across collapse and clamps user resizing", () => {
@@ -56,9 +64,9 @@ describe("persisted UI state", () => {
   });
 
   it("restores the full previous layout after focus mode", () => {
-    const previous = { ...DEFAULT_APP_LAYOUT, sidebarWidth: 300, statusBarVisible: false };
+    const previous = { ...DEFAULT_APP_LAYOUT, sidebarWidth: 300 };
     const focused = toggleFocusLayout(previous);
-    expect(focused).toMatchObject({ sidebarVisible: false, inspectorVisible: false, statusBarVisible: false });
+    expect(focused).toMatchObject({ sidebarVisible: false, inspectorVisible: false });
     expect(toggleFocusLayout(focused)).toEqual(previous);
   });
 

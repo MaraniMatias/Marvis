@@ -5,7 +5,6 @@ export interface LayoutSnapshot {
   inspectorWidth: number;
   sidebarVisible: boolean;
   inspectorVisible: boolean;
-  statusBarVisible: boolean;
 }
 
 export interface AppLayoutState extends LayoutSnapshot {
@@ -36,7 +35,6 @@ export const DEFAULT_APP_LAYOUT: AppLayoutState = {
   inspectorWidth: 320,
   sidebarVisible: true,
   inspectorVisible: true,
-  statusBarVisible: true,
   focusSnapshot: null,
   collapsedRepoIds: [],
   reduceTransparency: false,
@@ -77,7 +75,6 @@ function snapshot(value: unknown): LayoutSnapshot | null {
     inspectorWidth: boundedNumber(value.inspectorWidth, 320, 260, 560),
     sidebarVisible: typeof value.sidebarVisible === "boolean" ? value.sidebarVisible : true,
     inspectorVisible: typeof value.inspectorVisible === "boolean" ? value.inspectorVisible : true,
-    statusBarVisible: typeof value.statusBarVisible === "boolean" ? value.statusBarVisible : true,
   };
 }
 
@@ -131,8 +128,8 @@ export function normalizeCheckoutUiState(value: unknown): CheckoutUiState {
 }
 
 export function snapshotLayout(layout: AppLayoutState): LayoutSnapshot {
-  const { sidebarWidth, inspectorWidth, sidebarVisible, inspectorVisible, statusBarVisible } = layout;
-  return { sidebarWidth, inspectorWidth, sidebarVisible, inspectorVisible, statusBarVisible };
+  const { sidebarWidth, inspectorWidth, sidebarVisible, inspectorVisible } = layout;
+  return { sidebarWidth, inspectorWidth, sidebarVisible, inspectorVisible };
 }
 
 export function toggleFocusLayout(layout: AppLayoutState): AppLayoutState {
@@ -142,13 +139,12 @@ export function toggleFocusLayout(layout: AppLayoutState): AppLayoutState {
     focusSnapshot: snapshotLayout(layout),
     sidebarVisible: false,
     inspectorVisible: false,
-    statusBarVisible: false,
   };
 }
 
 export function toggleLayoutVisibility(
   layout: AppLayoutState,
-  key: "sidebarVisible" | "inspectorVisible" | "statusBarVisible",
+  key: "sidebarVisible" | "inspectorVisible",
 ): AppLayoutState {
   if (layout.focusSnapshot) {
     const restored = { ...layout.focusSnapshot, [key]: !layout.focusSnapshot[key] };

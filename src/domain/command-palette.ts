@@ -3,8 +3,8 @@ export type PaletteCommandId =
   | "toggle-focus"
   | "toggle-sidebar"
   | "toggle-inspector"
-  | "toggle-status-bar"
   | "toggle-transparency"
+  | "reset-layout"
   | "new-worktree"
   | "new-terminal"
   | "open-file"
@@ -35,8 +35,8 @@ export function getPaletteCommands(capabilities: PaletteCapabilities): PaletteCo
     { id: "toggle-focus", label: "Toggle Focus Mode", enabled: true },
     { id: "toggle-sidebar", label: "Toggle Navigation Sidebar", enabled: true },
     { id: "toggle-inspector", label: "Toggle Files and Changes Inspector", enabled: true },
-    { id: "toggle-status-bar", label: "Toggle Status Bar", enabled: true },
     { id: "toggle-transparency", label: "Toggle Reduce Transparency", enabled: true },
+    { id: "reset-layout", label: "Reset Layout", enabled: true },
   ];
   if (!capabilities.hasCheckout || capabilities.isMissing) return commands;
 

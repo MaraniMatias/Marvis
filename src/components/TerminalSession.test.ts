@@ -117,7 +117,7 @@ describe("TerminalSession UI", () => {
     const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
     await flushPromises();
 
-    await wrapper.get("button").trigger("click");
+    await wrapper.vm.requestClose();
     await flushPromises();
     expect(confirm).toHaveBeenCalledWith(
       "This terminal session is still running. Close the session and stop its process?",
@@ -125,7 +125,7 @@ describe("TerminalSession UI", () => {
     expect(closeTerminal).not.toHaveBeenCalled();
 
     confirm.mockReturnValue(true);
-    await wrapper.get("button").trigger("click");
+    await wrapper.vm.requestClose();
     await flushPromises();
     expect(closeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new");
     expect(wrapper.emitted("closed")).toHaveLength(1);
@@ -140,7 +140,7 @@ describe("TerminalSession UI", () => {
     await flushPromises();
 
     expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "nvim", expect.anything(), undefined);
-    expect(wrapper.text()).toContain("Neovim running");
+    expect(wrapper.text()).not.toContain("Neovim running");
     wrapper.unmount();
   });
 
@@ -222,7 +222,7 @@ describe("TerminalSession UI", () => {
     const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
     await flushPromises();
 
-    expect(wrapper.text()).toContain("Exited · code 17");
+    expect(wrapper.text()).not.toContain("Exited · code 17");
     expect(wrapper.emitted("statusChanged")).toEqual([[{ state: "exited", exitCode: 17 }]]);
     wrapper.unmount();
   });
