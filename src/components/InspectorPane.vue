@@ -1,34 +1,38 @@
 <script setup lang="ts">
-/* eslint-disable vue/html-self-closing */
 import { computed, nextTick, ref, watch } from "vue";
+import {
+  ChevronRight as ChevronRightIcon,
+  File as FileIcon,
+  Folder as FolderIcon,
+  SquareArrowOutUpRight as SquareArrowOutUpRightIcon,
+} from "@lucide/vue";
 import { isIpcError } from "../domain/ipc";
-import type { FileEntry, FileSearchResult } from "../domain/files";
+import type { FileEntry } from "../domain/files";
+import type { AgentSession } from "../domain/agent";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { CheckoutUiState } from "../domain/ui-state";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
-import type { AgentSession } from "../domain/agent";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
-import { listCheckoutFiles, searchCheckoutFiles } from "../lib/ipc";
-import ChangesPane from "./ChangesPane.vue";
+import { listCheckoutFiles } from "../lib/ipc";
 
 const props = defineProps<{
   checkout: Checkout | null;
   repo?: Repo | null;
   gitSnapshot: ActiveGitSnapshot;
+  /** The review round moves to the diff view (phase 6). App.vue still binds these three, so
+   *  they stay declared and unused until it does. */
   review?: Pick<ActiveReviewNotes, "notes" | "rounds" | "markSent">;
   agentSessions?: AgentSession[];
   agentTargetId?: string | null;
-  commandRequest?: { action: "open-file" | "open-changes"; token: number } | null;
   savedState?: CheckoutUiState | null;
 }>();
-/** Forwards the send and its mode: the choice the user made belongs to the caller. */
-function forwardSendReview(ids: string[], queue: boolean) {
-  emit("sendReview", ids, queue);
-}
 
 const emit = defineEmits<{
   openFile: [value: { checkoutId: string; path: string }];
   openChange: [value: { checkoutId: string; path: string }];
+  /** Every changed file in one diff. App.vue binds it in phase 4, when main becomes a diff. */
+  openAllChanges: [value: { checkoutId: string }];
+  /** Dead until phase 6 takes the send: kept declared so App.vue stays bound to it. */
   sendReview: [ids: string[], queue: boolean];
   selectAgentTarget: [sessionId: string];
   updateUiState: [
@@ -44,12 +48,23 @@ const emit = defineEmits<{
   ];
 }>();
 
+type InspectorTab = "files" | "changes";
 type DirectoryState = "loading" | "error" | "empty" | "truncated";
-interface VisibleEntry {
+/** `+N`/`-N` have no source yet: `GitChangedFile` carries no counts. The markup waits for the
+ *  `git diff --numstat` call that comes with the diff view (phase 4/6). */
+interface DiffStats {
+  additions?: number;
+  deletions?: number;
+}
+interface VisibleEntry extends DiffStats {
   entry?: FileEntry;
   depth: number;
   message?: string;
 }
+/** A change row is either a group header or one of its files. Both are one row tall, so the
+ *  grouped list virtualizes with the same math as the tree. */
+type ChangeFile = { kind: "file"; key: string; name: string; status: string; oldPath?: string } & DiffStats;
+type ChangeRow = ChangeFile | { kind: "group"; key: string; dir: string };
 
 const directories = ref<Record<string, FileEntry[]>>({});
 const directoryStates = ref<Record<string, DirectoryState>>({});
@@ -62,27 +77,36 @@ const selectedPath = computed(() => (props.checkout ? (selectedPaths.value[props
 const selectedChangedPath = computed(() =>
   props.checkout ? (selectedChangedPaths.value[props.checkout.id] ?? null) : null,
 );
-const activeTab = ref<"files" | "changes">("files");
-const searchQuery = ref("");
-const searchInput = ref<HTMLInputElement | null>(null);
-const searchEntries = ref<FileEntry[]>([]);
-const searchTruncated = ref(false);
-const searchState = ref<"idle" | "loading" | "ready" | "error">("idle");
-const searchError = ref("");
+const activeTab = ref<InspectorTab>("files");
 const treeScrollTop = ref(0);
 const changesScrollTop = ref(0);
 const treeViewport = ref<HTMLElement | null>(null);
-let searchIndexCheckoutId: string | null = null;
-let searchIndexPromise: { checkoutId: string; promise: Promise<FileSearchResult> } | null = null;
+const changesViewport = ref<HTMLElement | null>(null);
 let generation = 0;
-let searchGeneration = 0;
 let refreshMicrotaskQueued = false;
 let refreshInFlight = false;
 let pendingRefreshCheckoutId: string | null = null;
 
-const TREE_ROW_HEIGHT = 28;
-const TREE_WINDOW_SIZE = 80;
-const TREE_OVERSCAN = 12;
+/**
+ * Every row of both lists is this tall, and `--tree-row-height` below is set from it, so the
+ * `.file-row` box is `3px + (22 - 6px) line box + 3px` = 22px exactly. Change one without the
+ * other and the virtual window drifts from the rendered rows. 80 rows x 28px was 2240px of
+ * tree; the same surface at 22px is ~64 rows, with ~10 of them as overscan.
+ */
+const TREE_ROW_HEIGHT = 22;
+const TREE_WINDOW_SIZE = 64;
+const TREE_OVERSCAN = 10;
+
+/** The status vocabulary the row decorations know (E.5): no `??`, no per-folder bubble. */
+const ROW_STATUSES = new Set(["M", "A", "D", "U"]);
+
+const showChanges = computed(() => props.repo?.kind === "git" && !!props.checkout && !props.checkout.isMissing);
+const tabs = computed((): { id: InspectorTab; label: string }[] => {
+  if (!props.checkout) return [];
+  const result: { id: InspectorTab; label: string }[] = [{ id: "files", label: "Files" }];
+  if (showChanges.value) result.push({ id: "changes", label: "Changes" });
+  return result;
+});
 
 function errorText(error: unknown): string {
   if (isIpcError(error)) {
@@ -153,18 +177,11 @@ watch(
     directories.value = {};
     directoryStates.value = {};
     expanded.value = [];
-    searchQuery.value = "";
-    searchEntries.value = [];
-    searchTruncated.value = false;
-    searchIndexCheckoutId = null;
-    searchIndexPromise = null;
-    searchState.value = "idle";
-    searchGeneration += 1;
     const saved = props.savedState;
     treeScrollTop.value = saved?.filesScrollTop ?? 0;
     changesScrollTop.value = saved?.changesScrollTop ?? 0;
     expanded.value = saved?.expandedDirectories ?? [];
-    activeTab.value = saved?.inspectorTab === "changes" && props.repo?.kind === "git" ? "changes" : "files";
+    activeTab.value = saved?.inspectorTab === "changes" && showChanges.value ? "changes" : "files";
     if (checkoutId && saved?.selectedFilePath)
       selectedPaths.value = { ...selectedPaths.value, [checkoutId]: saved.selectedFilePath };
     if (checkoutId && saved?.selectedChangePath)
@@ -206,47 +223,26 @@ watch([activeTab, selectedPath, selectedChangedPath, expanded, treeScrollTop, ch
   });
 });
 
-function onChangesScroll(top: number) {
-  changesScrollTop.value = top;
-}
-
 function onInspectorTabKeydown(event: KeyboardEvent) {
   if (!(event.target instanceof HTMLElement) || event.target.getAttribute("role") !== "tab") return;
-  const tabs = [
-    "files",
-    ...(props.repo?.kind === "git" && props.checkout && !props.checkout.isMissing ? ["changes"] : []),
-  ];
-  const current = event.target.id === "inspector-tab-changes" ? "changes" : "files";
-  const index = tabs.indexOf(current);
+  const ids = tabs.value.map((tab) => tab.id);
+  const current: InspectorTab = event.target.id === "inspector-tab-changes" ? "changes" : "files";
+  const index = ids.indexOf(current);
   const next =
     event.key === "Home"
-      ? tabs[0]
+      ? ids[0]
       : event.key === "End"
-        ? tabs[tabs.length - 1]
+        ? ids[ids.length - 1]
         : event.key === "ArrowRight"
-          ? tabs[(index + 1) % tabs.length]
+          ? ids[(index + 1) % ids.length]
           : event.key === "ArrowLeft"
-            ? tabs[(index + tabs.length - 1) % tabs.length]
+            ? ids[(index + ids.length - 1) % ids.length]
             : null;
   if (!next) return;
   event.preventDefault();
-  activeTab.value = next as "files" | "changes";
+  activeTab.value = next;
   void nextTick(() => document.getElementById(`inspector-tab-${next}`)?.focus());
 }
-
-watch(
-  () => props.commandRequest?.token,
-  async () => {
-    const request = props.commandRequest;
-    if (!request) return;
-    if (request.action === "open-changes" && props.repo?.kind === "git") activeTab.value = "changes";
-    else if (request.action === "open-file") {
-      activeTab.value = "files";
-      await nextTick();
-      searchInput.value?.focus();
-    }
-  },
-);
 
 watch(
   () => [props.gitSnapshot.statusEventRevision, props.gitSnapshot.statusEventCheckoutId] as const,
@@ -271,6 +267,13 @@ watch(activeTab, (tab) => {
     requestRefresh(checkoutId);
   }
 });
+
+watch(
+  () => props.repo?.kind,
+  (kind) => {
+    if (kind !== "git") activeTab.value = "files";
+  },
+);
 
 function requestRefresh(checkoutId: string) {
   pendingRefreshCheckoutId = checkoutId;
@@ -299,17 +302,7 @@ async function refreshAfterGitChange(checkoutId: string) {
     if (requestGeneration !== generation || props.checkout?.id !== checkoutId) return;
     await loadDirectory(checkoutId, path, requestGeneration);
   }
-  if (searchQuery.value.trim() && props.checkout?.id === checkoutId) {
-    await refreshSearchIndex(checkoutId);
-  }
 }
-
-watch(
-  () => props.repo?.kind,
-  (kind) => {
-    if (kind !== "git") activeTab.value = "files";
-  },
-);
 
 async function toggleDirectory(entry: FileEntry) {
   if (expanded.value.includes(entry.path)) {
@@ -330,11 +323,16 @@ function selectFile(entry: FileEntry) {
   emit("openFile", { checkoutId, path: entry.path });
 }
 
-function selectChange(selection: { checkoutId: string; path: string }) {
-  const { checkoutId, path } = selection;
-  if (props.checkout?.id !== checkoutId) return;
+function selectChange(path: string) {
+  const checkoutId = props.checkout?.id;
+  if (!checkoutId) return;
   selectedChangedPaths.value = { ...selectedChangedPaths.value, [checkoutId]: path };
   emit("openChange", { checkoutId, path });
+}
+
+function openAllChanges() {
+  const checkoutId = props.checkout?.id;
+  if (checkoutId) emit("openAllChanges", { checkoutId });
 }
 
 const visibleEntries = computed<VisibleEntry[]>(() => {
@@ -359,6 +357,88 @@ const visibleEntries = computed<VisibleEntry[]>(() => {
   return result;
 });
 
+const changedFiles = computed(() => props.gitSnapshot.status?.files ?? []);
+const changedFileCount = computed(() => changedFiles.value.length);
+/** Grouped by parent directory, then flattened: a group header is a row of the same height, so
+ *  the whole list windows with `virtualWindow`. Files at the root are labelled "/". */
+const changeRows = computed<ChangeRow[]>(() => {
+  const groups = new Map<string, ChangeFile[]>();
+  for (const file of changedFiles.value) {
+    const slash = file.path.lastIndexOf("/");
+    const dir = slash < 0 ? "" : file.path.slice(0, slash);
+    const row: ChangeFile = {
+      kind: "file",
+      key: file.path,
+      name: slash < 0 ? file.path : file.path.slice(slash + 1),
+      status: file.status,
+      oldPath: file.oldPath,
+    };
+    const bucket = groups.get(dir);
+    if (bucket) bucket.push(row);
+    else groups.set(dir, [row]);
+  }
+  const rows: ChangeRow[] = [];
+  for (const [dir, files] of groups) rows.push({ kind: "group", key: `group:${dir}`, dir }, ...files);
+  return rows;
+});
+
+const gitStatuses = computed(() => {
+  const statuses = new Map<string, string>();
+  for (const file of props.gitSnapshot.status?.files ?? []) {
+    if (ROW_STATUSES.has(file.status)) statuses.set(file.path, file.status);
+  }
+  return statuses;
+});
+
+function rowStatus(path: string): string | undefined {
+  return gitStatuses.value.get(path);
+}
+
+function rowIndent(depth: number): string {
+  return `${6 + depth * 14}px`;
+}
+
+/** Both lists are flat and every row is TREE_ROW_HEIGHT tall, so one window serves both. */
+function virtualWindow<T>(rows: T[], scrollTop: number) {
+  const maximumStart = Math.max(0, rows.length - TREE_WINDOW_SIZE);
+  const start = Math.min(maximumStart, Math.max(0, Math.floor(scrollTop / TREE_ROW_HEIGHT) - TREE_OVERSCAN));
+  const end = Math.min(rows.length, start + TREE_WINDOW_SIZE);
+  return {
+    rows: rows.slice(start, end),
+    paddingTop: start * TREE_ROW_HEIGHT,
+    paddingBottom: (rows.length - end) * TREE_ROW_HEIGHT,
+  };
+}
+
+const treeWindow = computed(() => virtualWindow(visibleEntries.value, treeScrollTop.value));
+const changeWindow = computed(() => virtualWindow(changeRows.value, changesScrollTop.value));
+
+function onTreeScroll(event: Event) {
+  treeScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
+}
+
+function onChangesScroll(event: Event) {
+  changesScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
+}
+
+watch(
+  () => [props.checkout?.id, props.gitSnapshot.statusState] as const,
+  async ([, state]) => {
+    if (state !== "ready") return;
+    const savedTop = changesScrollTop.value;
+    await nextTick();
+    if (changesViewport.value) changesViewport.value.scrollTop = savedTop;
+  },
+  { immediate: true, flush: "post" },
+);
+
+/* E.1: the file search is out of this panel, and the block below is the whole search path,
+   commented out rather than deleted because the decision is reversible: `searchCheckoutFiles`
+   (src/lib/ipc.ts) and this scorer are untouched, and the input that fed them is the only
+   thing missing. Restoring it means uncommenting this block plus `searchCheckoutFiles` and
+   `FileSearchResult` in the imports, putting the input back in the files panel, and letting
+   the tree window read the matches instead of `visibleEntries`.
+
 function fuzzyScore(path: string, query: string): number {
   const candidate = path.toLocaleLowerCase();
   const normalized = query.toLocaleLowerCase().trim();
@@ -377,12 +457,11 @@ function fuzzyScore(path: string, query: string): number {
   return score;
 }
 
-async function loadSearchIndex(checkoutId: string, force = false): Promise<FileSearchResult> {
+async function loadSearchIndex(checkoutId: string, force = false) {
   if (!force && searchIndexCheckoutId === checkoutId) {
     return { entries: searchEntries.value, truncated: searchTruncated.value };
   }
   if (searchIndexPromise?.checkoutId === checkoutId) return searchIndexPromise.promise;
-
   const promise = searchCheckoutFiles(checkoutId);
   searchIndexPromise = { checkoutId, promise };
   try {
@@ -398,135 +477,40 @@ async function loadSearchIndex(checkoutId: string, force = false): Promise<FileS
   }
 }
 
-async function refreshSearchIndex(checkoutId: string) {
-  const searchRequest = ++searchGeneration;
-  const hadCachedIndex = searchIndexCheckoutId === checkoutId;
-  searchIndexCheckoutId = null;
-  if (!hadCachedIndex) {
-    searchEntries.value = [];
-    searchTruncated.value = false;
-    searchState.value = "loading";
-  }
-  try {
-    await loadSearchIndex(checkoutId, true);
-    if (searchRequest === searchGeneration) searchState.value = "ready";
-  } catch (error) {
-    if (searchRequest !== searchGeneration) return;
-    if (hadCachedIndex) searchState.value = "ready";
-    else {
-      searchError.value = errorText(error);
-      searchState.value = "error";
-    }
-  }
-}
-
-watch(
-  () => [props.checkout?.id, props.checkout?.isMissing, searchQuery.value] as const,
-  async ([checkoutId, isMissing, query]) => {
-    const requestGeneration = ++searchGeneration;
-    treeScrollTop.value = 0;
-    searchError.value = "";
-    if (!query.trim() || !checkoutId || isMissing) {
-      searchState.value = "idle";
-      return;
-    }
-    searchState.value = "loading";
-    try {
-      await loadSearchIndex(checkoutId);
-      if (requestGeneration === searchGeneration) searchState.value = "ready";
-    } catch (error) {
-      if (requestGeneration === searchGeneration) {
-        searchError.value = errorText(error);
-        searchState.value = "error";
-      }
-    }
-  },
-);
-
-const matchedSearchEntries = computed<VisibleEntry[]>(() => {
-  const query = searchQuery.value.trim();
-  if (!query) return [];
-  return searchEntries.value
-    .map((entry) => ({ entry, score: fuzzyScore(entry.path, query) }))
-    .filter((match) => match.score >= 0)
-    .sort((left, right) => left.score - right.score || left.entry.path.localeCompare(right.entry.path))
-    .slice(0, 200)
-    .map(({ entry }) => ({ entry, depth: 0 }));
-});
-
-const fileRows = computed<VisibleEntry[]>(() =>
-  searchQuery.value.trim() ? matchedSearchEntries.value : visibleEntries.value,
-);
-
-const visibleTreeWindow = computed(() => {
-  const maximumStart = Math.max(0, fileRows.value.length - TREE_WINDOW_SIZE);
-  const start = Math.min(maximumStart, Math.max(0, Math.floor(treeScrollTop.value / TREE_ROW_HEIGHT) - TREE_OVERSCAN));
-  const end = Math.min(fileRows.value.length, start + TREE_WINDOW_SIZE);
-  return {
-    rows: fileRows.value.slice(start, end),
-    paddingTop: start * TREE_ROW_HEIGHT,
-    paddingBottom: (fileRows.value.length - end) * TREE_ROW_HEIGHT,
-  };
-});
-
-const gitDecorations = computed(() => {
-  const decorations = new Map<string, string>();
-  for (const file of props.gitSnapshot.status?.files ?? []) {
-    decorations.set(file.path, file.status);
-    const parents = file.path.split("/");
-    parents.pop();
-    for (let index = 1; index <= parents.length; index += 1) {
-      const directory = parents.slice(0, index).join("/");
-      if (!decorations.has(directory)) decorations.set(directory, "•");
-    }
-  }
-  return decorations;
-});
-
-function decorationFor(path: string): string | undefined {
-  return gitDecorations.value.get(path);
-}
-
-function onTreeScroll(event: Event) {
-  treeScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
-}
+const matchedSearchEntries = searchEntries.value
+  .map((entry) => ({ entry, score: fuzzyScore(entry.path, searchQuery.value.trim()) }))
+  .filter((match) => match.score >= 0)
+  .sort((left, right) => left.score - right.score || left.entry.path.localeCompare(right.entry.path))
+  .slice(0, 200)
+  .map(({ entry }) => ({ entry, depth: 0 }));
+*/
 </script>
 
 <template>
-  <aside class="app-inspector flex h-full w-full min-w-0 flex-col border-l">
-    <div
-      role="tablist"
-      aria-label="Inspector sections"
-      class="inspector-tablist flex h-10 shrink-0 items-center gap-0.5 border-b px-2"
-      @keydown="onInspectorTabKeydown"
-    >
+  <aside
+    class="app-inspector flex h-full w-full min-w-0 flex-col border-l"
+    :style="{ '--tree-row-height': `${TREE_ROW_HEIGHT}px` }"
+  >
+    <div class="details-tabs" role="tablist" aria-label="Inspector sections" @keydown="onInspectorTabKeydown">
       <button
-        v-if="checkout"
-        id="inspector-tab-files"
-        role="tab"
+        v-for="tab in tabs"
+        :id="`inspector-tab-${tab.id}`"
+        :key="tab.id"
         type="button"
-        :aria-selected="activeTab === 'files'"
-        aria-controls="inspector-panel-files"
-        :tabindex="activeTab === 'files' ? 0 : -1"
-        class="inspector-tab rounded-sm px-2.5 py-1 text-[11px] font-medium tracking-wide"
-        @click="activeTab = 'files'"
-      >
-        Files
-      </button>
-      <button
-        v-if="repo?.kind === 'git' && checkout && !checkout.isMissing"
-        id="inspector-tab-changes"
         role="tab"
-        type="button"
-        :aria-selected="activeTab === 'changes'"
-        aria-controls="inspector-panel-changes"
-        :tabindex="activeTab === 'changes' ? 0 : -1"
-        class="inspector-tab rounded-sm px-2.5 py-1 text-[11px] font-medium tracking-wide"
-        @click="activeTab = 'changes'"
+        class="details-tab"
+        :aria-selected="activeTab === tab.id"
+        :aria-controls="`inspector-panel-${tab.id}`"
+        :tabindex="activeTab === tab.id ? 0 : -1"
+        @click="activeTab = tab.id"
       >
-        Changes
+        {{ tab.label }}
+        <span v-if="tab.id === 'changes' && changedFileCount > 0" class="details-tab-count">
+          {{ changedFileCount }}
+        </span>
       </button>
     </div>
+
     <div
       v-show="activeTab === 'files'"
       :id="checkout ? 'inspector-panel-files' : undefined"
@@ -535,143 +519,306 @@ function onTreeScroll(event: Event) {
       :tabindex="checkout ? 0 : undefined"
       class="flex min-h-0 flex-1 flex-col"
     >
-      <div v-if="checkout && !checkout.isMissing" class="shrink-0 border-b p-1.5">
-        <input
-          ref="searchInput"
-          v-model="searchQuery"
-          type="search"
-          aria-label="Search files"
-          placeholder="Search files…"
-          class="inspector-filter h-7 w-full rounded-sm px-2 text-xs outline-none placeholder:text-zinc-600"
-        />
-      </div>
-      <section
-        ref="treeViewport"
-        class="min-h-0 flex-1 overflow-auto p-1"
-        aria-label="Checkout files"
-        @scroll="onTreeScroll"
-      >
-        <p v-if="rootState === 'idle'" class="pane-state text-sm">Open a checkout to browse files.</p>
-        <p v-else-if="rootState === 'loading'" role="status" class="pane-state text-sm">Loading files…</p>
-        <p v-else-if="rootState === 'missing'" role="status" class="pane-state text-sm text-amber-300">
-          Checkout is missing.
-        </p>
-        <p v-else-if="rootState === 'error'" role="alert" class="pane-state text-sm text-red-300">{{ rootError }}</p>
+      <div ref="treeViewport" class="details-scroll" aria-label="Checkout files" @scroll="onTreeScroll">
+        <p v-if="rootState === 'idle'" class="pane-state">Open a checkout to browse files.</p>
+        <p v-else-if="rootState === 'loading'" role="status" class="pane-state">Loading files…</p>
+        <p v-else-if="rootState === 'missing'" role="status" class="pane-state">Checkout is missing.</p>
+        <!-- Phase 5: the per-folder error goes to a toast, same text as `errorText()` -->
+        <p v-else-if="rootState === 'error'" role="alert" class="pane-state">{{ rootError }}</p>
         <p
           v-else-if="directories['.']?.length === 0 && directoryStates['.'] !== 'truncated'"
           role="status"
-          class="pane-state text-sm"
+          class="pane-state"
         >
           This checkout is empty.
         </p>
         <template v-else>
-          <p
-            v-if="searchQuery.trim() && searchState === 'loading'"
-            role="status"
-            class="px-2 py-2 text-xs text-zinc-500"
-          >
-            Searching checkout files…
-          </p>
-          <p
-            v-else-if="searchQuery.trim() && searchState === 'error'"
-            role="alert"
-            class="px-2 py-2 text-xs text-red-300"
-          >
-            {{ searchError }}
-          </p>
-          <template v-else-if="searchQuery.trim() && searchState === 'ready'">
-            <p v-if="matchedSearchEntries.length === 0" role="status" class="px-2 py-2 text-xs text-zinc-500">
-              No files match this search.
-            </p>
-            <p v-else-if="matchedSearchEntries.length === 200" class="px-2 pb-1 text-[10px] text-zinc-600">
-              Showing the best 200 matches; refine the search for more.
-            </p>
-          </template>
-          <p v-if="searchQuery.trim() && searchTruncated" class="px-2 pb-1 text-[10px] text-amber-300">
-            Search is limited to the first 50,000 files in this checkout.
-          </p>
-          <p v-if="directoryStates['.'] === 'truncated'" class="px-2 py-1 text-xs text-zinc-500">
+          <p v-if="directoryStates['.'] === 'truncated'" class="file-row file-note" :style="{ paddingLeft: '6px' }">
             Some entries omitted (folder is large).
           </p>
-          <p v-if="searchQuery.trim() && searchState !== 'ready'" class="px-2 py-1 text-xs text-zinc-500">
-            Search filters files across the checkout.
-          </p>
           <div
-            v-else
             :style="{
-              paddingTop: `${visibleTreeWindow.paddingTop}px`,
-              paddingBottom: `${visibleTreeWindow.paddingBottom}px`,
+              paddingTop: `${treeWindow.paddingTop}px`,
+              paddingBottom: `${treeWindow.paddingBottom}px`,
             }"
           >
-            <div
-              v-for="(item, index) in visibleTreeWindow.rows"
+            <template
+              v-for="(item, index) in treeWindow.rows"
               :key="item.entry?.path ?? `${item.depth}-${index}-${item.message}`"
-              :style="{ paddingLeft: `${4 + item.depth * 12}px` }"
-              class="flex h-7 items-center overflow-hidden"
             >
-              <span v-if="!item.entry" class="truncate py-1 text-xs text-zinc-500">{{ item.message }}</span>
+              <p v-if="!item.entry" class="file-row file-note" :style="{ paddingLeft: rowIndent(item.depth) }">
+                {{ item.message }}
+              </p>
               <button
                 v-else-if="item.entry.kind === 'directory'"
                 type="button"
-                class="inspector-tree-row flex h-7 w-full min-w-0 items-center truncate rounded-sm px-1 text-left text-xs text-zinc-300"
+                class="file-row file-folder"
+                :style="{ paddingLeft: rowIndent(item.depth) }"
                 :aria-expanded="expanded.includes(item.entry.path)"
+                :title="item.entry.path"
                 @click="toggleDirectory(item.entry)"
               >
-                <span class="mr-2 shrink-0 text-zinc-500">
-                  {{ expanded.includes(item.entry.path) ? "▾" : "▸" }}
-                </span>
-                <span class="truncate">{{ item.entry.name }}</span>
-                <span v-if="decorationFor(item.entry.path)" class="ml-auto pl-2 text-[10px] text-amber-300">
-                  {{ decorationFor(item.entry.path) }}
-                </span>
+                <ChevronRightIcon
+                  class="icon-xxs chevron"
+                  :class="{ expanded: expanded.includes(item.entry.path) }"
+                  aria-hidden="true"
+                />
+                <FolderIcon class="icon-xs file-icon" aria-hidden="true" />
+                <span class="file-name">{{ item.entry.name }}</span>
               </button>
               <button
                 v-else
                 type="button"
-                class="inspector-tree-row flex h-7 w-full min-w-0 items-center truncate rounded-sm px-1 text-left text-xs"
-                :class="selectedPath === item.entry.path ? 'bg-white/8 text-zinc-100' : 'text-zinc-400'"
+                class="file-row"
+                :class="{ 'is-selected': selectedPath === item.entry.path }"
+                :style="{ paddingLeft: rowIndent(item.depth) }"
+                :aria-current="selectedPath === item.entry.path ? 'true' : undefined"
+                :title="item.entry.path"
                 @click="selectFile(item.entry)"
               >
-                <span class="mr-2 shrink-0 text-zinc-600">
-                  {{ item.entry.kind === "symlink" ? "↗" : "·" }}
+                <span class="chevron-spacer" aria-hidden="true" />
+                <FileIcon class="icon-xs file-icon" aria-hidden="true" />
+                <span class="file-name">{{ item.entry.name }}</span>
+                <span v-if="rowStatus(item.entry.path)" class="file-status" :data-status="rowStatus(item.entry.path)">
+                  {{ rowStatus(item.entry.path) }}
                 </span>
-                <span class="truncate">{{ item.entry.name }}</span>
-                <span
-                  v-if="decorationFor(item.entry.path)"
-                  class="ml-auto pl-2 text-[10px] font-semibold"
-                  :class="decorationFor(item.entry.path) === '??' ? 'text-green-400' : 'text-amber-300'"
-                >
-                  {{ decorationFor(item.entry.path) }}
-                </span>
+                <span v-if="item.additions" class="diff-add">+{{ item.additions }}</span>
+                <span v-if="item.deletions" class="diff-del">-{{ item.deletions }}</span>
               </button>
-            </div>
+            </template>
           </div>
         </template>
-      </section>
+      </div>
     </div>
-    <div
-      v-if="checkout && !checkout.isMissing && repo?.kind === 'git'"
-      v-show="activeTab === 'changes'"
-      id="inspector-panel-changes"
-      role="tabpanel"
-      aria-labelledby="inspector-tab-changes"
-      tabindex="0"
-      class="flex min-h-0 flex-1 flex-col"
-    >
-      <ChangesPane
-        :key="checkout.id"
-        :checkout="checkout"
-        :git-snapshot="gitSnapshot"
-        :review="review"
-        :agent-sessions="agentSessions"
-        :agent-target-id="agentTargetId"
-        :selected-path="selectedChangedPath"
-        :scroll-top="changesScrollTop"
-        @open-change="selectChange"
-        @scroll-position-changed="onChangesScroll"
-        @send-review="forwardSendReview"
-        @select-agent-target="$emit('selectAgentTarget', $event)"
-      />
+
+    <div v-if="showChanges" v-show="activeTab === 'changes'" class="flex min-h-0 flex-1 flex-col">
+      <div class="details-all-changes">
+        <button type="button" class="file-row new-item" @click="openAllChanges">
+          <SquareArrowOutUpRightIcon class="icon-xs file-icon" aria-hidden="true" />
+          <span>All changes</span>
+        </button>
+      </div>
+      <div
+        id="inspector-panel-changes"
+        role="tabpanel"
+        aria-labelledby="inspector-tab-changes"
+        tabindex="0"
+        class="flex min-h-0 flex-1 flex-col"
+      >
+        <div ref="changesViewport" class="details-scroll" aria-label="Changed files" @scroll="onChangesScroll">
+          <p v-if="gitSnapshot.statusState === 'loading'" role="status" class="pane-state">Loading Git status…</p>
+          <p v-else-if="gitSnapshot.statusState === 'error'" role="alert" class="pane-state">
+            {{ gitSnapshot.changesStatusError || gitSnapshot.statusError }}
+          </p>
+          <p v-else-if="changedFileCount === 0" role="status" class="pane-state">No changed files.</p>
+          <template v-else>
+            <p v-if="gitSnapshot.changesWatchError" class="file-row file-note" :style="{ paddingLeft: '6px' }">
+              Live updates unavailable: {{ gitSnapshot.changesWatchError }}
+            </p>
+            <div
+              :style="{
+                paddingTop: `${changeWindow.paddingTop}px`,
+                paddingBottom: `${changeWindow.paddingBottom}px`,
+              }"
+            >
+              <template v-for="row in changeWindow.rows" :key="row.key">
+                <div v-if="row.kind === 'group'" class="details-group-header">{{ row.dir || "/" }}</div>
+                <button
+                  v-else
+                  type="button"
+                  class="file-row change-row"
+                  :class="{ 'is-selected': selectedChangedPath === row.key }"
+                  :aria-current="selectedChangedPath === row.key ? 'true' : undefined"
+                  :title="row.oldPath ? `${row.oldPath} → ${row.key}` : row.key"
+                  @click="selectChange(row.key)"
+                >
+                  <span class="file-status" :data-status="row.status">{{ row.status }}</span>
+                  <span class="file-name">{{ row.name }}</span>
+                  <span v-if="row.additions" class="diff-add">+{{ row.additions }}</span>
+                  <span v-if="row.deletions" class="diff-del">-{{ row.deletions }}</span>
+                </button>
+              </template>
+            </div>
+          </template>
+        </div>
+      </div>
     </div>
   </aside>
 </template>
+
+<style scoped>
+/* The tab strip stays put */
+.details-tabs {
+  display: flex;
+  align-items: stretch;
+  flex-shrink: 0;
+  border-bottom: 1px solid var(--marvis-border);
+}
+
+.details-tab {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: -1px;
+  padding: 7px 6px;
+  border: none;
+  border-bottom: 1px solid transparent;
+  background: transparent;
+  color: var(--marvis-text-faint);
+  font-family: inherit;
+  font-size: 11px;
+  letter-spacing: 0.02em;
+  text-align: left;
+  cursor: pointer;
+}
+
+.details-tab:hover {
+  color: var(--marvis-text-secondary);
+}
+
+.details-tab[aria-selected="true"] {
+  color: var(--marvis-text);
+  border-bottom-color: var(--marvis-accent);
+}
+
+.details-tab-count {
+  color: var(--marvis-text-faint);
+  font-size: 10px;
+}
+
+/* The tab strip stays put, each list scrolls on its own */
+.details-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: 4px 0;
+}
+
+/*
+ * Every row in both lists is exactly TREE_ROW_HEIGHT tall, which the component publishes as
+ * `--tree-row-height`: 3px of padding + a (height - 6px) line box + 3px of padding. The
+ * virtual window multiplies and divides by the same number, so this box and TREE_ROW_HEIGHT
+ * have to move together.
+ */
+.file-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: 100%;
+  height: var(--tree-row-height);
+  padding: 3px 6px;
+  border: none;
+  background: transparent;
+  color: var(--marvis-text-secondary);
+  font-family: inherit;
+  font-size: 12px;
+  line-height: calc(var(--tree-row-height) - 6px);
+  text-align: left;
+  white-space: nowrap;
+  overflow: hidden;
+  cursor: pointer;
+}
+
+.file-row:hover {
+  background: var(--marvis-bg-2);
+  color: var(--marvis-text);
+}
+
+/* What is open, or the change under review, is the one row with a surface (E.3) */
+.file-row.is-selected {
+  background: var(--marvis-bg-2);
+  color: var(--marvis-text);
+}
+
+.file-folder {
+  color: var(--marvis-text);
+}
+
+.file-name {
+  flex: 1;
+  min-width: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-icon,
+.chevron {
+  flex-shrink: 0;
+  color: var(--marvis-text-faint);
+}
+
+.chevron {
+  transition: transform 0.12s ease;
+}
+
+.chevron.expanded {
+  transform: rotate(90deg);
+}
+
+.chevron-spacer {
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
+}
+
+/* Folder states and watch errors, one line tall like any other row */
+.file-note {
+  color: var(--marvis-text-faint);
+  cursor: default;
+}
+
+.file-note:hover {
+  background: transparent;
+}
+
+.file-status {
+  flex-shrink: 0;
+  font-size: 10px;
+  color: var(--marvis-text-secondary);
+}
+
+.file-status[data-status="M"] {
+  color: var(--marvis-text);
+}
+
+.file-status[data-status="A"] {
+  color: var(--marvis-green);
+}
+
+.file-status[data-status="D"] {
+  color: var(--marvis-red);
+}
+
+.file-status[data-status="U"] {
+  color: var(--marvis-text-faint);
+}
+
+.details-all-changes {
+  flex-shrink: 0;
+  padding: 2px 0;
+}
+
+.file-row.new-item {
+  color: var(--marvis-text-dim);
+}
+
+/* Group header sits on the panel gutter, its rows one level in */
+.details-group-header {
+  display: flex;
+  align-items: center;
+  height: var(--tree-row-height);
+  padding: 0 6px;
+  color: var(--marvis-text-faint);
+  font-size: 11px;
+  line-height: var(--tree-row-height);
+  letter-spacing: 0.02em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.change-row {
+  padding-left: 20px;
+}
+</style>

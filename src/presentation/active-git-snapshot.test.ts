@@ -8,7 +8,6 @@ import type { Checkout, Repo } from "../domain/workspace";
 
 const mocks = vi.hoisted(() => ({
   getGitStatus: vi.fn(),
-  getGitViewedFiles: vi.fn(),
   markGitFileViewed: vi.fn(),
   watchGitCheckout: vi.fn(),
   unwatchGitCheckout: vi.fn(),
@@ -19,7 +18,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../lib/ipc", () => ({
   getGitStatus: mocks.getGitStatus,
-  getGitViewedFiles: mocks.getGitViewedFiles,
   markGitFileViewed: mocks.markGitFileViewed,
   watchGitCheckout: mocks.watchGitCheckout,
   unwatchGitCheckout: mocks.unwatchGitCheckout,
@@ -76,7 +74,7 @@ function host(
         computed(() => repoRef.value),
         onDefaultBranchUnknown,
       );
-      return () => h("div", `${snapshot.status?.branch ?? "no status"}|${snapshot.viewedPaths.join(",")}`);
+      return () => h("div", snapshot.status?.branch ?? "no status");
     },
   });
 }
@@ -90,7 +88,6 @@ describe("useActiveGitSnapshot", () => {
       return mocks.unlisten;
     });
     mocks.getGitStatus.mockImplementation(async (id: string) => status(id));
-    mocks.getGitViewedFiles.mockImplementation(async (id: string) => [`${id}.txt`]);
     mocks.watchGitCheckout.mockResolvedValue(undefined);
     mocks.unwatchGitCheckout.mockResolvedValue(undefined);
   });
@@ -101,7 +98,7 @@ describe("useActiveGitSnapshot", () => {
     const wrapper = mount(host(activeCheckout, activeRepo));
     await flushPromises();
 
-    expect(mocks.listen).toHaveBeenCalledTimes(2);
+    expect(mocks.listen).toHaveBeenCalledTimes(1);
     expect(mocks.watchGitCheckout).toHaveBeenCalledTimes(1);
     expect(mocks.watchGitCheckout).toHaveBeenCalledWith("first");
     expect(mocks.getGitStatus).toHaveBeenCalledTimes(1);
@@ -114,28 +111,22 @@ describe("useActiveGitSnapshot", () => {
     mocks.handlers.get("git-status-changed")?.({ payload: "first" });
     await flushPromises();
     expect(mocks.getGitStatus).toHaveBeenCalledTimes(2);
-    expect(mocks.getGitViewedFiles).toHaveBeenCalledTimes(2);
-
-    mocks.handlers.get("git-viewed-changed")?.({ payload: "first" });
-    await flushPromises();
-    expect(mocks.getGitStatus).toHaveBeenCalledTimes(2);
-    expect(mocks.getGitViewedFiles).toHaveBeenCalledTimes(3);
 
     activeCheckout.value = checkout("second");
     await flushPromises();
     expect(mocks.unwatchGitCheckout).toHaveBeenCalledWith("first");
     expect(mocks.watchGitCheckout).toHaveBeenLastCalledWith("second");
-    expect(mocks.listen).toHaveBeenCalledTimes(4);
-    expect(mocks.unlisten).toHaveBeenCalledTimes(2);
+    expect(mocks.listen).toHaveBeenCalledTimes(2);
+    expect(mocks.unlisten).toHaveBeenCalledTimes(1);
     expect(wrapper.text()).toContain("second");
 
     wrapper.unmount();
     await flushPromises();
     expect(mocks.unwatchGitCheckout).toHaveBeenLastCalledWith("second");
-    expect(mocks.unlisten).toHaveBeenCalledTimes(4);
+    expect(mocks.unlisten).toHaveBeenCalledTimes(2);
   });
 
-  it("ignores status and viewed responses that finish after switching checkout", async () => {
+  it("ignores a status response that finishes after switching checkout", async () => {
     const activeCheckout = ref<Checkout | null>(checkout("first"));
     const activeRepo = ref<Repo | null>(repo());
     let resolveFirst!: (value: GitStatus) => void;
@@ -152,66 +143,39 @@ describe("useActiveGitSnapshot", () => {
     resolveFirst(status("stale-first"));
     await flushPromises();
     expect(wrapper.text()).toContain("second");
-    expect(mocks.getGitViewedFiles).toHaveBeenCalledTimes(1);
-    expect(mocks.getGitViewedFiles).toHaveBeenCalledWith("second");
+    expect(mocks.getGitStatus).toHaveBeenCalledTimes(2);
+    expect(mocks.getGitStatus).toHaveBeenLastCalledWith("second");
     wrapper.unmount();
   });
 
-  it("does not apply an old checkout's delayed viewed-file result", async () => {
+  it("does not advance to later registration phases when git-status-changed rejects after checkout change", async () => {
     const activeCheckout = ref<Checkout | null>(checkout("first"));
     const activeRepo = ref<Repo | null>(repo());
-    let resolveFirstViewed!: (paths: string[]) => void;
-    mocks.getGitViewedFiles.mockImplementation((id: string) =>
-      id === "first"
-        ? new Promise<string[]>((resolve) => (resolveFirstViewed = resolve))
-        : Promise.resolve(["second.txt"]),
-    );
+    let rejectDelayed!: (cause: unknown) => void;
+    let delayed = false;
+    mocks.listen.mockImplementation(async (_name: string, handler: (event: { payload: string }) => void) => {
+      if (!delayed) {
+        delayed = true;
+        return await new Promise<() => void>((_resolve, reject) => (rejectDelayed = reject));
+      }
+      mocks.handlers.set("git-status-changed", handler);
+      return mocks.unlisten;
+    });
+
     const wrapper = mount(host(activeCheckout, activeRepo));
     await flushPromises();
-    expect(wrapper.text()).toContain("first|");
-
     activeCheckout.value = checkout("second");
     await flushPromises();
-    expect(wrapper.text()).toContain("second|second.txt");
+    expect(mocks.watchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["second"]);
+    expect(mocks.getGitStatus.mock.calls.map(([id]) => id)).toEqual(["second"]);
 
-    resolveFirstViewed(["first.txt"]);
+    rejectDelayed(new Error("late listener registration failure"));
     await flushPromises();
-    expect(wrapper.text()).toContain("second|second.txt");
-    expect(wrapper.text()).not.toContain("first.txt");
+    expect(mocks.watchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["second"]);
+    expect(mocks.getGitStatus.mock.calls.map(([id]) => id)).toEqual(["second"]);
+    expect(mocks.listen).toHaveBeenCalledTimes(2);
     wrapper.unmount();
   });
-
-  it.each(["git-status-changed", "git-viewed-changed"] as const)(
-    "does not advance to later registration phases when %s rejects after checkout change",
-    async (delayedEvent) => {
-      const activeCheckout = ref<Checkout | null>(checkout("first"));
-      const activeRepo = ref<Repo | null>(repo());
-      let rejectDelayed!: (cause: unknown) => void;
-      let delayed = false;
-      mocks.listen.mockImplementation(async (name: string, handler: (event: { payload: string }) => void) => {
-        if (name === delayedEvent && !delayed) {
-          delayed = true;
-          return await new Promise<() => void>((_resolve, reject) => (rejectDelayed = reject));
-        }
-        mocks.handlers.set(name, handler);
-        return mocks.unlisten;
-      });
-
-      const wrapper = mount(host(activeCheckout, activeRepo));
-      await flushPromises();
-      activeCheckout.value = checkout("second");
-      await flushPromises();
-      expect(mocks.watchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["second"]);
-      expect(mocks.getGitStatus.mock.calls.map(([id]) => id)).toEqual(["second"]);
-
-      rejectDelayed(new Error("late listener registration failure"));
-      await flushPromises();
-      expect(mocks.watchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["second"]);
-      expect(mocks.getGitStatus.mock.calls.map(([id]) => id)).toEqual(["second"]);
-      expect(mocks.listen).toHaveBeenCalledTimes(delayedEvent === "git-status-changed" ? 3 : 4);
-      wrapper.unmount();
-    },
-  );
 
   it("serializes same-checkout teardown/start across A→B→A transitions", async () => {
     const activeCheckout = ref<Checkout | null>(checkout("A"));

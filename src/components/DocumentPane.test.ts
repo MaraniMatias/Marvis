@@ -82,7 +82,6 @@ function snapshot(checkoutId: string, files: GitStatus["files"] = []): ActiveGit
   return reactive<ActiveGitSnapshot>({
     checkoutId,
     status: { branch: "feature", defaultBranch: "main", aheadCount: 1, files },
-    viewedPaths: [],
     loading: false,
     statusState: "ready",
     statusError: "",

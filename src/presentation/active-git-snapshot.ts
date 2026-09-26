@@ -4,12 +4,11 @@ import type { ComputedRef } from "vue";
 import type { GitStatus } from "../domain/git";
 import { isIpcError } from "../domain/ipc";
 import type { Checkout, Repo } from "../domain/workspace";
-import { getGitStatus, getGitViewedFiles, markGitFileViewed, unwatchGitCheckout, watchGitCheckout } from "../lib/ipc";
+import { getGitStatus, markGitFileViewed, unwatchGitCheckout, watchGitCheckout } from "../lib/ipc";
 
 export interface ActiveGitSnapshot {
   checkoutId: string | null;
   status: GitStatus | null;
-  viewedPaths: string[];
   loading: boolean;
   statusState: "loading" | "ready" | "error";
   statusError: string;
@@ -40,7 +39,6 @@ export function useActiveGitSnapshot(
   const state = reactive<Omit<ActiveGitSnapshot, "markViewed">>({
     checkoutId: null,
     status: null,
-    viewedPaths: [],
     loading: false,
     statusState: "ready",
     statusError: "",
@@ -68,15 +66,13 @@ export function useActiveGitSnapshot(
     return queued;
   }
 
+  /** E.7: nothing in the UI tracks "viewed" anymore. `FileDiff` still reports it to the
+   *  backend, so the call and its error stay until the diff view owns them (phase 6). */
   async function markViewed(checkoutId: string, path: string) {
     const requestGeneration = generation;
-    if (state.checkoutId !== checkoutId || state.viewedPaths.includes(path)) return;
     try {
       await markGitFileViewed(checkoutId, path);
-      if (requestGeneration === generation && state.checkoutId === checkoutId && !state.viewedPaths.includes(path)) {
-        state.viewedPaths = [...state.viewedPaths, path];
-        state.viewedError = "";
-      }
+      if (requestGeneration === generation && state.checkoutId === checkoutId) state.viewedError = "";
     } catch (cause) {
       if (requestGeneration === generation && state.checkoutId === checkoutId) state.viewedError = errorText(cause);
     }
@@ -89,9 +85,7 @@ export function useActiveGitSnapshot(
       let current = true;
       let watchQueued = false;
       let unlistenStatus: (() => void) | undefined;
-      let unlistenViewed: (() => void) | undefined;
       let statusRequest = 0;
-      let viewedRequest = 0;
       const isCurrent = () => current && requestGeneration === generation;
 
       onCleanup(() => {
@@ -99,7 +93,6 @@ export function useActiveGitSnapshot(
         generation += 1;
         if (refreshCurrentStatusGeneration === requestGeneration) refreshCurrentStatus = undefined;
         unlistenStatus?.();
-        unlistenViewed?.();
         if (watchQueued && checkoutId) {
           void queueWatcherOperation(checkoutId, () => unwatchGitCheckout(checkoutId)).catch(() => undefined);
         }
@@ -107,7 +100,6 @@ export function useActiveGitSnapshot(
 
       state.checkoutId = checkoutId ?? null;
       state.status = null;
-      state.viewedPaths = [];
       state.loading = false;
       state.statusState = "ready";
       state.statusError = "";
@@ -129,33 +121,8 @@ export function useActiveGitSnapshot(
       state.loading = true;
       state.statusState = "loading";
 
-      const refreshViewed = async (expectedStatusRequest?: number) => {
-        const viewedGeneration = ++viewedRequest;
-        state.viewedError = "";
-        try {
-          const paths = await getGitViewedFiles(checkoutId);
-          if (
-            isCurrent() &&
-            viewedGeneration === viewedRequest &&
-            (expectedStatusRequest === undefined || expectedStatusRequest === statusRequest)
-          ) {
-            state.viewedPaths = paths;
-          }
-        } catch (cause) {
-          if (
-            isCurrent() &&
-            viewedGeneration === viewedRequest &&
-            (expectedStatusRequest === undefined || expectedStatusRequest === statusRequest)
-          ) {
-            state.viewedPaths = [];
-            state.viewedError = errorText(cause);
-          }
-        }
-      };
-
       const refreshStatus = async () => {
         const refreshRequest = ++statusRequest;
-        viewedRequest += 1;
         state.changesStatusError = "";
         if (!state.status) state.statusState = "loading";
         try {
@@ -166,7 +133,6 @@ export function useActiveGitSnapshot(
           state.changesStatusError = "";
           state.statusState = "ready";
           state.statusRevision += 1;
-          await refreshViewed(refreshRequest);
         } catch (cause) {
           if (!isCurrent() || refreshRequest !== statusRequest) return;
           state.status = null;
@@ -201,23 +167,6 @@ export function useActiveGitSnapshot(
         if (isCurrent()) {
           state.watchError = errorText(cause);
           state.changesWatchError = errorText(cause);
-        }
-      }
-      if (!isCurrent()) return;
-
-      try {
-        const dispose = await listen<string>("git-viewed-changed", (event) => {
-          if (event.payload === checkoutId && isCurrent()) void refreshViewed();
-        });
-        if (!isCurrent()) {
-          dispose();
-          return;
-        }
-        unlistenViewed = dispose;
-      } catch (cause) {
-        if (isCurrent()) {
-          state.watchError = errorText(cause);
-          state.viewedError = errorText(cause);
         }
       }
       if (!isCurrent()) return;

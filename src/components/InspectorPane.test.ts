@@ -8,14 +8,17 @@ import type { CheckoutUiState } from "../domain/ui-state";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 
-const mocks = vi.hoisted(() => ({ listCheckoutFiles: vi.fn(), searchCheckoutFiles: vi.fn() }));
+const mocks = vi.hoisted(() => ({ listCheckoutFiles: vi.fn() }));
 
-vi.mock("../lib/ipc", () => ({
-  listCheckoutFiles: mocks.listCheckoutFiles,
-  searchCheckoutFiles: mocks.searchCheckoutFiles,
-}));
+vi.mock("../lib/ipc", () => ({ listCheckoutFiles: mocks.listCheckoutFiles }));
 
 import InspectorPane from "./InspectorPane.vue";
+
+/** Mirrors TREE_ROW_HEIGHT, TREE_WINDOW_SIZE and TREE_OVERSCAN: the window math is only right
+ *  when the rendered rows are exactly this tall, so the test pins both sides. */
+const ROW_HEIGHT = 22;
+const WINDOW_SIZE = 64;
+const OVERSCAN = 10;
 
 function checkout(id: string, isMissing = false): Checkout {
   return {
@@ -34,7 +37,6 @@ function gitSnapshot(checkoutId: string, status: GitStatus | null = null): Activ
   return reactive({
     checkoutId,
     status,
-    viewedPaths: [],
     loading: false,
     statusState: status ? ("ready" as const) : ("error" as const),
     statusError: "",
@@ -61,24 +63,28 @@ const repo: Repo = {
 };
 
 function mountInspector(props: {
-  checkout: Checkout;
+  checkout: Checkout | null;
   repo?: Repo;
   gitSnapshot?: ActiveGitSnapshot;
-  commandRequest?: { action: "open-file" | "open-changes"; token: number } | null;
   savedState?: CheckoutUiState | null;
 }) {
   return mount(InspectorPane, {
-    props: { ...props, gitSnapshot: props.gitSnapshot ?? gitSnapshot(props.checkout.id) },
+    props: { ...props, gitSnapshot: props.gitSnapshot ?? gitSnapshot(props.checkout?.id ?? "none") },
   });
+}
+
+/** The panel publishes its row height, so the test can do the window math with the real value. */
+function publishedRowHeight(wrapper: ReturnType<typeof mountInspector>): number {
+  const style = wrapper.get("aside").attributes("style") ?? "";
+  return Number.parseFloat(/--tree-row-height:\s*([\d.]+)px/.exec(style)?.[1] ?? "0");
 }
 
 describe("InspectorPane", () => {
   beforeEach(() => {
     vi.resetAllMocks();
-    mocks.searchCheckoutFiles.mockResolvedValue({ entries: [], truncated: false });
   });
 
-  it("opens a selected file in the central document and preserves file selection per checkout", async () => {
+  it("opens a selected file in the central document and marks the open row per checkout", async () => {
     mocks.listCheckoutFiles.mockImplementation(async (checkoutId: string) => ({
       entries: [{ name: `${checkoutId}.txt`, path: `${checkoutId}.txt`, kind: "file" }],
       truncated: false,
@@ -86,10 +92,13 @@ describe("InspectorPane", () => {
     const wrapper = mountInspector({ checkout: checkout("checkout:first") });
     await flushPromises();
 
-    await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
+    const first = wrapper.get('[aria-label="Checkout files"] button');
+    expect(first.attributes("aria-current")).toBeUndefined();
+    await first.trigger("click");
     expect(wrapper.emitted("openFile")).toEqual([[{ checkoutId: "checkout:first", path: "checkout:first.txt" }]]);
-    expect(wrapper.text()).not.toContain("Selected file");
-    expect(wrapper.text()).not.toContain("Preview");
+    // E.3: the open file is the row that says so.
+    expect(first.classes()).toContain("is-selected");
+    expect(first.attributes("aria-current")).toBe("true");
 
     await wrapper.setProps({ checkout: checkout("checkout:second") });
     await flushPromises();
@@ -100,7 +109,9 @@ describe("InspectorPane", () => {
 
     await wrapper.setProps({ checkout: checkout("checkout:first") });
     await flushPromises();
-    expect(wrapper.get('[aria-label="Checkout files"] button').classes()).toContain("bg-white/8");
+    const restored = wrapper.get('[aria-label="Checkout files"] button');
+    expect(restored.classes()).toContain("is-selected");
+    expect(restored.attributes("aria-current")).toBe("true");
     wrapper.unmount();
   });
 
@@ -114,47 +125,47 @@ describe("InspectorPane", () => {
     mocks.listCheckoutFiles.mockRejectedValueOnce({ code: "permission_denied", message: "denied" });
     await wrapper.setProps({ checkout: checkout("denied") });
     await flushPromises();
-    expect(wrapper.text()).toContain("Permission denied");
+    expect(wrapper.get('[role="alert"]').text()).toContain("Permission denied");
 
     await wrapper.setProps({ checkout: checkout("gone", true) });
     expect(wrapper.text()).toContain("Checkout is missing.");
     wrapper.unmount();
   });
 
-  it("virtualizes large trees and fuzzy-searches the checkout file index", async () => {
+  it("windows a large tree with the row height the row CSS is built from", async () => {
     const entries = Array.from({ length: 500 }, (_, index) => ({
       name: `file-${index}.txt`,
       path: `file-${index}.txt`,
       kind: "file" as const,
     }));
     mocks.listCheckoutFiles.mockResolvedValue({ entries, truncated: false });
-    mocks.searchCheckoutFiles.mockResolvedValue({
-      entries: [
-        { name: "UserConfig.ts", path: "src/UserConfig.ts", kind: "file" },
-        { name: "unrelated.txt", path: "docs/unrelated.txt", kind: "file" },
-      ],
-      truncated: false,
-    });
     const wrapper = mountInspector({ checkout: checkout("large") });
     await flushPromises();
 
-    const fileTree = wrapper.get('[aria-label="Checkout files"]');
-    expect(fileTree.findAll("button").length).toBeLessThan(100);
-    (fileTree.element as HTMLElement).scrollTop = 500 * 32;
-    await fileTree.trigger("scroll");
-    expect(fileTree.text()).toContain("file-499.txt");
-    expect(fileTree.text()).not.toContain("file-0.txt");
+    const tree = wrapper.get('[aria-label="Checkout files"]');
+    const rowHeight = publishedRowHeight(wrapper);
+    expect(rowHeight).toBe(ROW_HEIGHT);
+    expect(tree.findAll("button").length).toBe(WINDOW_SIZE);
 
-    const search = wrapper.get('input[aria-label="Search files"]');
-    await search.setValue("usrcfg");
-    await flushPromises();
-    expect(mocks.searchCheckoutFiles).toHaveBeenCalledWith("large");
-    expect(wrapper.text()).toContain("UserConfig.ts");
-    expect(wrapper.text()).not.toContain("unrelated.txt");
+    (tree.element as HTMLElement).scrollTop = 100 * rowHeight;
+    await tree.trigger("scroll");
+    const rows = tree.findAll("button");
+    expect(rows.length).toBe(WINDOW_SIZE);
+    // Window math and the rendered box agree: the first row is `scrollTop / height` minus the
+    // overscan, and the padding above it is exactly that many rows tall.
+    const first = 100 - OVERSCAN;
+    expect(rows[0]!.text()).toContain(`file-${first}.txt`);
+    expect(rows.at(-1)!.text()).toContain(`file-${first + WINDOW_SIZE - 1}.txt`);
+    expect(tree.find("div[style]").attributes("style")).toContain(`padding-top: ${first * rowHeight}px`);
+
+    (tree.element as HTMLElement).scrollTop = entries.length * rowHeight;
+    await tree.trigger("scroll");
+    expect(tree.text()).toContain("file-499.txt");
+    expect(tree.text()).not.toContain("file-0.txt");
     wrapper.unmount();
   });
 
-  it("keeps only Files and Changes navigation and sends a change selection to the main document", async () => {
+  it("keeps the tab keyboard navigation and sends a change selection to the main document", async () => {
     mocks.listCheckoutFiles.mockResolvedValue({
       entries: [{ name: "main.ts", path: "src/main.ts", kind: "file" }],
       truncated: false,
@@ -168,26 +179,74 @@ describe("InspectorPane", () => {
     const wrapper = mountInspector({ checkout: checkout("git"), repo, gitSnapshot: gitSnapshot("git", status) });
     await flushPromises();
     const sections = wrapper.get('[aria-label="Inspector sections"]').findAll("button");
-    expect(sections.map((button) => button.text())).toEqual(["Files", "Changes"]);
+    expect(sections.map((button) => button.text())).toEqual(["Files", "Changes 1"]);
     expect(sections[0]!.attributes("aria-controls")).toBe("inspector-panel-files");
     expect(sections[1]!.attributes("aria-controls")).toBe("inspector-panel-changes");
     expect(wrapper.get("#inspector-panel-files").attributes("aria-labelledby")).toBe("inspector-tab-files");
+    expect(wrapper.get("#inspector-panel-files").attributes("tabindex")).toBe("0");
     expect(wrapper.get("#inspector-panel-changes").attributes("aria-labelledby")).toBe("inspector-tab-changes");
 
     await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
     await wrapper.get('[aria-label="Inspector sections"]').findAll("button")[0]!.trigger("keydown", { key: "End" });
     await flushPromises();
     expect(wrapper.get("#inspector-tab-changes").attributes("aria-selected")).toBe("true");
-    const changesViewport = wrapper.get('[aria-label="Changed files"]');
-    (changesViewport.element as HTMLElement).scrollTop = 72;
-    await changesViewport.trigger("scroll");
-    await flushPromises();
-    expect(wrapper.emitted("updateUiState")?.at(-1)?.[0]).toMatchObject({ changesScrollTop: 72 });
-    await wrapper.get('[aria-label="Changed files"] button').trigger("click");
-    expect(wrapper.emitted("openChange")).toEqual([[{ checkoutId: "git", path: "src/main.ts" }]]);
 
-    await wrapper.get('[aria-label="Inspector sections"]').findAll("button")[0].trigger("click");
-    expect(wrapper.get('[aria-label="Checkout files"] button').classes()).toContain("bg-white/8");
+    const changes = wrapper.get('[aria-label="Changed files"]');
+    (changes.element as HTMLElement).scrollTop = 66;
+    await changes.trigger("scroll");
+    await flushPromises();
+    expect(wrapper.emitted("updateUiState")?.at(-1)?.[0]).toMatchObject({ changesScrollTop: 66 });
+
+    const change = changes.get("button.change-row");
+    await change.trigger("click");
+    expect(wrapper.emitted("openChange")).toEqual([[{ checkoutId: "git", path: "src/main.ts" }]]);
+    expect(change.classes()).toContain("is-selected");
+    expect(change.attributes("aria-current")).toBe("true");
+
+    await wrapper.get(".new-item").trigger("click");
+    expect(wrapper.emitted("openAllChanges")).toEqual([[{ checkoutId: "git" }]]);
+
+    await wrapper.get("#inspector-tab-files").trigger("click");
+    expect(wrapper.get('[aria-label="Checkout files"] button').classes()).toContain("is-selected");
+    wrapper.unmount();
+  });
+
+  it("groups the changed files by parent directory", async () => {
+    mocks.listCheckoutFiles.mockResolvedValue({ entries: [], truncated: false });
+    const status: GitStatus = {
+      branch: "feature",
+      defaultBranch: "main",
+      aheadCount: 1,
+      files: [
+        { path: "src/main.ts", status: "M" },
+        { path: "src/lib/io.ts", status: "A" },
+        { path: "old/name.ts", oldPath: "src/lib/old.ts", status: "R" },
+        { path: "README.md", status: "D" },
+        { path: "untracked.ts", status: "??" },
+      ],
+    };
+    const wrapper = mountInspector({
+      checkout: checkout("git"),
+      repo,
+      gitSnapshot: gitSnapshot("git", status),
+      savedState: { ...DEFAULT_CHECKOUT_UI_STATE, inspectorTab: "changes" },
+    });
+    await flushPromises();
+
+    const changes = wrapper.get('[aria-label="Changed files"]');
+    // Groups follow the order the status reports its files, root files under "/".
+    expect(changes.findAll(".details-group-header").map((header) => header.text())).toEqual([
+      "src",
+      "src/lib",
+      "old",
+      "/",
+    ]);
+    // Every changed file gets a row, status included: E.5 drops the `??` case from the tree
+    // decorations, not from the list of what changed.
+    const names = changes.findAll("button.change-row").map((row) => row.text());
+    expect(names).toEqual(["Mmain.ts", "Aio.ts", "Rname.ts", "DREADME.md", "??untracked.ts"]);
+    // A rename keeps its source path reachable without spending a second row on it.
+    expect(changes.find("button.change-row[title='src/lib/old.ts → old/name.ts']").exists()).toBe(true);
     wrapper.unmount();
   });
 
@@ -212,7 +271,16 @@ describe("InspectorPane", () => {
     expect(mocks.listCheckoutFiles).toHaveBeenCalledWith("nested", ".");
     expect(mocks.listCheckoutFiles).toHaveBeenCalledWith("nested", "src");
     expect(mocks.listCheckoutFiles).toHaveBeenCalledWith("nested", "src/nested");
-    expect(wrapper.text()).toContain("main.ts");
+    const tree = wrapper.get('[aria-label="Checkout files"]');
+    expect(tree.text()).toContain("main.ts");
+    // The depth gutter is the mockup's: 6px plus 14px per level.
+    expect(tree.findAll("button").map((row) => row.attributes("style"))).toEqual([
+      "padding-left: 6px;",
+      "padding-left: 20px;",
+      "padding-left: 34px;",
+    ]);
+    await tree.findAll("button")[0]!.trigger("click");
+    expect(wrapper.get('[aria-label="Checkout files"]').findAll("button")).toHaveLength(1);
     wrapper.unmount();
   });
 

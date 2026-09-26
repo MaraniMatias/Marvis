@@ -160,7 +160,6 @@ vi.mock("./presentation/active-git-snapshot", () => ({
   useActiveGitSnapshot: () => ({
     checkoutId: null,
     status: mocks.gitStatus ? { aheadCount: 1, files: [], ...mocks.gitStatus } : null,
-    viewedPaths: [],
     loading: false,
     statusState: "idle",
     statusError: "",
