@@ -2,7 +2,7 @@
 /* eslint-disable vue/html-self-closing, vue/html-indent, vue/html-closing-bracket-newline */
 import { computed, nextTick, ref, watch } from "vue";
 import type { Checkout } from "../domain/workspace";
-import { agentAttention } from "../domain/agent";
+import { agentAttention, defaultAgentSession } from "../domain/agent";
 import type { AgentSession } from "../domain/agent";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
@@ -20,7 +20,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   openChange: [value: { checkoutId: string; path: string }];
   scrollPositionChanged: [top: number];
-  sendReview: [ids: string[]];
+  sendReview: [ids: string[], queue: boolean];
   selectAgentTarget: [sessionId: string];
 }>();
 
@@ -119,16 +119,51 @@ const sendableNotes = computed(() =>
   (props.review?.notes ?? []).filter((note) => includeOutdated.value || !note.outdated),
 );
 
+/** The session this round would go to, resolved the same way the sender resolves it. */
+const targetSession = computed(() => {
+  const sessions = props.agentSessions ?? [];
+  const id = props.agentTargetId ?? defaultAgentSession(sessions)?.id ?? null;
+  return sessions.find((session) => session.id === id) ?? null;
+});
+/**
+ * Mid-turn, so sending would land in the middle of what the agent is doing now.
+ *
+ * A permission the agent is stuck on counts as mid-turn too: it has not finished, and this
+ * OpenCode version has no way to cancel it either.
+ */
+const targetWorking = computed(() =>
+  Boolean(targetSession.value && (targetSession.value.busy || targetSession.value.blockedOnPermission)),
+);
+/** The ids waiting for the user to choose; null when there is nothing to ask about. */
+const pendingSend = ref<string[] | null>(null);
+
 async function sendReviewToAgent() {
   const notes = sendableNotes.value;
   if (sendingReview.value || notes.length === 0) return;
+  const ids = notes.map((note) => note.id);
+  // Hold the notes untouched until the user has chosen: marking them sent before the
+  // decision would make "not now" leave notes that look delivered but were not.
+  if (targetWorking.value) {
+    pendingSend.value = ids;
+    return;
+  }
+  await deliver(ids, false);
+}
+
+async function deliverPending(queue: boolean) {
+  const ids = pendingSend.value;
+  if (!ids) return;
+  await deliver(ids, queue);
+}
+
+async function deliver(ids: string[], queue: boolean) {
   sendingReview.value = true;
   try {
-    const ids = notes.map((note) => note.id);
     await props.review?.markSent(ids);
-    emit("sendReview", ids);
+    emit("sendReview", ids, queue);
   } finally {
     sendingReview.value = false;
+    pendingSend.value = null;
   }
 }
 </script>
@@ -176,6 +211,43 @@ async function sendReviewToAgent() {
           {{ noteCount }} {{ noteCount === 1 ? "note" : "notes"
           }}<template v-if="draftCount > 0"> · {{ draftCount }} draft</template>
         </span>
+      </div>
+      <div
+        v-if="pendingSend"
+        class="mt-2 rounded-sm border border-amber-500/30 bg-amber-500/10 p-2 text-[10px] leading-relaxed text-amber-200"
+        role="alert"
+        data-testid="busy-agent-choice"
+      >
+        <p>
+          {{ targetSession ? `“${targetSession.title}” is mid-task` : "The agent is mid-task" }}. Sending now lands
+          inside its current turn; queueing waits for it to finish. This OpenCode version cannot cancel a turn.
+        </p>
+        <div class="mt-1.5 flex flex-wrap gap-1.5">
+          <button
+            type="button"
+            class="rounded-sm border border-amber-500/50 bg-amber-500/20 px-2 py-0.5 text-amber-100"
+            data-testid="send-now"
+            @click="deliverPending(false)"
+          >
+            Send now
+          </button>
+          <button
+            type="button"
+            class="rounded-sm border border-amber-500/50 bg-amber-500/20 px-2 py-0.5 text-amber-100"
+            data-testid="send-queued"
+            @click="deliverPending(true)"
+          >
+            Queue
+          </button>
+          <button
+            type="button"
+            class="rounded-sm border border-white/15 px-2 py-0.5 text-zinc-300"
+            data-testid="send-not-now"
+            @click="pendingSend = null"
+          >
+            Not now
+          </button>
+        </div>
       </div>
       <label v-if="outdatedCount > 0" class="mt-1 flex items-center gap-1.5 text-[10px] text-amber-400">
         <input v-model="includeOutdated" type="checkbox" data-testid="include-outdated" />

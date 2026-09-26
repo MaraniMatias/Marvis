@@ -154,8 +154,85 @@ describe("ChangesPane", () => {
     await wrapper.get('[data-testid="send-review"]').trigger("click");
     await flushPromises();
     expect(review.markSent).toHaveBeenCalledWith(["note:1", "note:2"]);
-    expect(wrapper.emitted("sendReview")).toEqual([[["note:1", "note:2"]]]);
+    expect(wrapper.emitted("sendReview")).toEqual([[["note:1", "note:2"], false]]);
     wrapper.unmount();
+  });
+
+  it("asks the user what to do instead of interrupting an agent that is mid-task", async () => {
+    const review = reviewApi([reviewNote()]);
+    const wrapper = mount(ChangesPane, {
+      props: {
+        checkout,
+        gitSnapshot: snapshot(),
+        review,
+        agentSessions: [agentSessionFixture("ses_busy", { busy: true })],
+        agentTargetId: "ses_busy",
+        selectedPath: null,
+        scrollTop: 0,
+      },
+    });
+
+    await wrapper.get('[data-testid="send-review"]').trigger("click");
+    await flushPromises();
+    // Held back: nothing was marked sent, so "not now" cannot leave notes that look
+    // delivered but were never sent.
+    expect(wrapper.find('[data-testid="busy-agent-choice"]').exists()).toBe(true);
+    expect(review.markSent).not.toHaveBeenCalled();
+    expect(wrapper.emitted("sendReview")).toBeUndefined();
+
+    await wrapper.get('[data-testid="send-not-now"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.find('[data-testid="busy-agent-choice"]').exists()).toBe(false);
+    expect(wrapper.emitted("sendReview")).toBeUndefined();
+
+    await wrapper.get('[data-testid="send-review"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="send-queued"]').trigger("click");
+    await flushPromises();
+    expect(review.markSent).toHaveBeenCalledWith(["note:1"]);
+    expect(wrapper.emitted("sendReview")).toEqual([[["note:1"], true]]);
+    expect(wrapper.find('[data-testid="busy-agent-choice"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("lets the user interrupt anyway, and only then", async () => {
+    const review = reviewApi([reviewNote()]);
+    const wrapper = mount(ChangesPane, {
+      props: {
+        checkout,
+        gitSnapshot: snapshot(),
+        review,
+        agentSessions: [agentSessionFixture("ses_busy", { busy: true })],
+        agentTargetId: "ses_busy",
+        selectedPath: null,
+        scrollTop: 0,
+      },
+    });
+
+    await wrapper.get('[data-testid="send-review"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="send-now"]').trigger("click");
+    await flushPromises();
+    expect(wrapper.emitted("sendReview")).toEqual([[["note:1"], false]]);
+    wrapper.unmount();
+
+    // An agent that is not mid-task is not asked about at all.
+    const idle = mount(ChangesPane, {
+      props: {
+        checkout,
+        gitSnapshot: snapshot(),
+        review: reviewApi([reviewNote()]),
+        agentSessions: [agentSessionFixture("ses_idle")],
+        agentTargetId: "ses_idle",
+        selectedPath: null,
+        scrollTop: 0,
+      },
+    });
+    await idle.get('[data-testid="send-review"]').trigger("click");
+    await flushPromises();
+    expect(idle.find('[data-testid="busy-agent-choice"]').exists()).toBe(false);
+    expect(idle.emitted("sendReview")).toEqual([[["note:1"], false]]);
+    idle.unmount();
   });
 
   it("offers a target only when there is a real choice, and names a blocked agent", async () => {
@@ -227,12 +304,15 @@ describe("ChangesPane", () => {
     await wrapper.get('[data-testid="send-review"]').trigger("click");
     await flushPromises();
     expect(review.markSent).toHaveBeenCalledWith(["note:1"]);
-    expect(wrapper.emitted("sendReview")).toEqual([[["note:1"]]]);
+    expect(wrapper.emitted("sendReview")).toEqual([[["note:1"], false]]);
 
     await wrapper.get('[data-testid="include-outdated"]').setValue(true);
     await wrapper.get('[data-testid="send-review"]').trigger("click");
     await flushPromises();
-    expect(wrapper.emitted("sendReview")).toEqual([[["note:1"]], [["note:1", "note:2"]]]);
+    expect(wrapper.emitted("sendReview")).toEqual([
+      [["note:1"], false],
+      [["note:1", "note:2"], false],
+    ]);
     wrapper.unmount();
   });
 });

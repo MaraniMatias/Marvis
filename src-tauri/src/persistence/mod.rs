@@ -13,7 +13,7 @@ use crate::domain::workspace::{
     Checkout, Repo, RepoKind, Session, SessionStatus, SessionType, WorkspaceState,
 };
 
-const SCHEMA_VERSION: i64 = 9;
+const SCHEMA_VERSION: i64 = 10;
 const REVIEW_NOTE_COLUMNS: &str = "id, checkout_id, path, side, line_start, line_end, content, code, status, code_hash, outdated, round_id, created_at, updated_at";
 const ACTIVE_CHECKOUT: &str = "active_checkout_id";
 const ACTIVE_SESSION: &str = "active_session_id";
@@ -1298,10 +1298,12 @@ impl Database {
     ///
     /// `round.status` is written before the agent is called, so a crash between here and
     /// the send leaves a `dispatching` round that reconciliation can resolve.
+    /// Stores a round with the exact message it will be sent with, if it has one yet.
     pub fn add_review_round(
         &self,
         round: &ReviewRound,
         note_ids: &[String],
+        prompt: Option<&str>,
     ) -> Result<ReviewRound, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.unchecked_transaction().map_err(db_error)?;
@@ -1309,8 +1311,8 @@ impl Database {
             .map_err(|error| format!("could not encode notes: {error}"))?;
         transaction
             .execute(
-                "INSERT INTO review_rounds (id, checkout_id, session_id, status, marker, note_ids, created_at, updated_at)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                "INSERT INTO review_rounds (id, checkout_id, session_id, status, marker, note_ids, prompt, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     round.id,
                     round.checkout_id,
@@ -1318,6 +1320,7 @@ impl Database {
                     round.status,
                     round.marker,
                     encoded,
+                    prompt,
                     round.created_at,
                     round.updated_at,
                 ],
@@ -1339,6 +1342,31 @@ impl Database {
         }
         transaction.commit().map_err(db_error)?;
         Ok(round.clone())
+    }
+
+    /// The message a queued round is waiting to be sent with.
+    ///
+    /// Kept off [`ReviewRound`] on purpose: the prompt can be half a megabyte and the UI
+    /// never asks for it, only the flush that is about to send it does.
+    pub fn review_round_prompt(
+        &self,
+        id: &str,
+        checkout_id: &str,
+    ) -> Result<Option<String>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        // A round of another checkout must read as "no message", not as an error: the caller
+        // is asking what to send, and "not ours" is a plain answer to that.
+        connection
+            .query_row(
+                "SELECT prompt FROM review_rounds WHERE id = ?1 AND checkout_id = ?2",
+                params![id, checkout_id],
+                |row| row.get::<_, Option<String>>(0),
+            )
+            // `.optional()` turns "no such round" into `None`; the closure's own `Option`
+            // is there for a round whose message column is NULL. The two must not stack.
+            .optional()
+            .map_err(db_error)
+            .map(|stored| stored.flatten())
     }
 
     pub fn review_rounds(&self, checkout_id: &str) -> Result<Vec<ReviewRound>, String> {
@@ -1898,6 +1926,18 @@ fn migrate(connection: &Connection) -> Result<(), String> {
                  );
                  CREATE INDEX review_rounds_checkout ON review_rounds (checkout_id, created_at);
                  PRAGMA user_version = 9;",
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+    }
+    if version < 10 {
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        // A round queued while the agent was busy has to be able to send itself later,
+        // without the UI that wrote it, and with exactly the bytes it was accepted with.
+        transaction
+            .execute_batch(
+                "ALTER TABLE review_rounds ADD COLUMN prompt TEXT;
+                 PRAGMA user_version = 10;",
             )
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;

@@ -10,6 +10,7 @@ import {
   dispatchReviewRound,
   listReviewRounds,
   reconcileReviewRound,
+  flushReviewRounds,
   requeueReviewRounds,
   resolveReviewNote,
   verifyReviewNoteAnchors,
@@ -44,7 +45,13 @@ export interface ActiveReviewNotes {
    * Delivers the chosen notes to one session as a single message, recording the round
    * first. The caller must have picked a session; nothing is sent without a target.
    */
-  dispatchRound(sessionId: string, ids: string[], markdown: string): Promise<ReviewRound | null>;
+  dispatchRound(sessionId: string, ids: string[], markdown: string, queue?: boolean): Promise<ReviewRound | null>;
+  /**
+   * Sends the rounds that were held back while the agent was busy.
+   *
+   * Called when a turn ends, which is what those rounds were waiting for.
+   */
+  flushQueuedRounds(): Promise<number>;
   /**
    * Settles rounds left unconfirmed by an interrupted send.
    *
@@ -88,6 +95,7 @@ export function useReviewNotes(
       | "clearOutdated"
       | "resolveNote"
       | "dispatchRound"
+      | "flushQueuedRounds"
       | "reconcileRounds"
       | "ackFinishedTurn"
     >
@@ -178,11 +186,11 @@ export function useReviewNotes(
     }
   }
 
-  async function dispatchRound(sessionId: string, ids: string[], markdown: string) {
+  async function dispatchRound(sessionId: string, ids: string[], markdown: string, queue = false) {
     const checkoutId = state.checkoutId;
     if (!checkoutId || ids.length === 0 || !sessionId) return null;
     try {
-      const round = await dispatchReviewRound({ checkoutId, sessionId, ids, markdown });
+      const round = await dispatchReviewRound({ checkoutId, sessionId, ids, markdown, queue });
       if (state.checkoutId !== checkoutId) return null;
       state.rounds = [round, ...state.rounds.filter((item) => item.id !== round.id)];
       // The backend owns the notes now: re-read instead of assuming what it decided.
@@ -192,6 +200,21 @@ export function useReviewNotes(
     } catch (cause) {
       if (state.checkoutId === checkoutId) fail(cause);
       return null;
+    }
+  }
+
+  async function flushQueuedRounds() {
+    const checkoutId = state.checkoutId;
+    if (!checkoutId) return 0;
+    try {
+      const sent = await flushReviewRounds(checkoutId);
+      if (state.checkoutId !== checkoutId) return 0;
+      if (sent > 0) state.rounds = await listReviewRounds(checkoutId);
+      state.error = "";
+      return sent;
+    } catch (cause) {
+      if (state.checkoutId === checkoutId) fail(cause);
+      return 0;
     }
   }
 
@@ -319,6 +342,7 @@ export function useReviewNotes(
     clearOutdated,
     resolveNote,
     dispatchRound,
+    flushQueuedRounds,
     reconcileRounds,
     ackFinishedTurn,
   });

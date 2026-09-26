@@ -21,10 +21,15 @@ const props = defineProps<{
   commandRequest?: { action: "open-file" | "open-changes"; token: number } | null;
   savedState?: CheckoutUiState | null;
 }>();
+/** Forwards the send and its mode: the choice the user made belongs to the caller. */
+function forwardSendReview(ids: string[], queue: boolean) {
+  emit("sendReview", ids, queue);
+}
+
 const emit = defineEmits<{
   openFile: [value: { checkoutId: string; path: string }];
   openChange: [value: { checkoutId: string; path: string }];
-  sendReview: [ids: string[]];
+  sendReview: [ids: string[], queue: boolean];
   selectAgentTarget: [sessionId: string];
   updateUiState: [
     value: Pick<
@@ -664,7 +669,7 @@ function onTreeScroll(event: Event) {
         :scroll-top="changesScrollTop"
         @open-change="selectChange"
         @scroll-position-changed="onChangesScroll"
-        @send-review="$emit('sendReview', $event)"
+        @send-review="forwardSendReview"
         @select-agent-target="$emit('selectAgentTarget', $event)"
       />
     </div>

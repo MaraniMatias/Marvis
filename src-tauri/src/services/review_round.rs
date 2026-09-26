@@ -56,6 +56,47 @@ pub fn begin_round(
     checkout_id: &str,
     session_id: &str,
     note_ids: &[String],
+    markdown: &str,
+) -> Result<ReviewRound, IpcError> {
+    record_round(
+        database,
+        checkout_id,
+        session_id,
+        note_ids,
+        markdown,
+        "dispatching",
+    )
+}
+
+/// Records the same round, but waiting for the agent to become free.
+///
+/// Everything is decided and stored up front — the notes, the marker, and the message
+/// itself — because the send happens later, possibly after a restart, and has to carry
+/// exactly what the user accepted.
+pub fn queue_round(
+    database: &Database,
+    checkout_id: &str,
+    session_id: &str,
+    note_ids: &[String],
+    markdown: &str,
+) -> Result<ReviewRound, IpcError> {
+    record_round(
+        database,
+        checkout_id,
+        session_id,
+        note_ids,
+        markdown,
+        "queued",
+    )
+}
+
+fn record_round(
+    database: &Database,
+    checkout_id: &str,
+    session_id: &str,
+    note_ids: &[String],
+    markdown: &str,
+    status: &str,
 ) -> Result<ReviewRound, IpcError> {
     if note_ids.is_empty() || note_ids.len() > MAX_ROUND_NOTES {
         return Err(failed(format!(
@@ -76,14 +117,17 @@ pub fn begin_round(
         id: id.clone(),
         checkout_id: checkout_id.to_string(),
         session_id: Some(session_id.to_string()),
-        status: "dispatching".into(),
+        status: status.into(),
         marker: review_round_marker(&id),
         note_ids: note_ids.to_vec(),
         created_at: now.clone(),
         updated_at: now,
     };
+    // Stored with the message it will actually be sent with, marker included: a round that
+    // goes out later must carry exactly the bytes the user accepted, not a re-derivation.
+    let prompt = build_round_prompt(markdown, &round.marker);
     database
-        .add_review_round(&round, note_ids)
+        .add_review_round(&round, note_ids, Some(&prompt))
         .map_err(|error| foreign(&error))
 }
 
@@ -164,6 +208,72 @@ pub fn requeue_all(database: &Database, checkout_id: &str) -> Result<usize, IpcE
     database.requeue_review_rounds(checkout_id).map_err(failed)
 }
 
+/// Sends the rounds that are waiting for the agent to be free, oldest first.
+///
+/// Each round is checked against the transcript before it is sent: a marker that is already
+/// there means the message landed earlier, so the round is confirmed instead of sent again.
+/// That is what makes this safe to run after a reconnect has requeued a send which in fact
+/// went out — the duplicate is what this check exists to prevent.
+///
+/// Returns how many rounds were actually sent.
+pub fn flush_rounds(
+    database: &Database,
+    agents: &AgentService,
+    checkout_id: &str,
+    directory: &std::path::Path,
+) -> Result<usize, IpcError> {
+    // Oldest first: a batch of queued reviews should reach the agent in the order they were
+    // written, not in the order the list happens to return them.
+    let pending = database
+        .review_rounds(checkout_id)
+        .map_err(failed)?
+        .into_iter()
+        .filter(|round| round.status == "queued")
+        .collect::<Vec<_>>();
+    let mut sent = 0;
+    for round in pending.into_iter().rev() {
+        let Some(session_id) = round.session_id.clone() else {
+            // Never had a target, so there is nowhere to send it.
+            continue;
+        };
+        // Read before asking the agent: a round with no stored message cannot go out, so
+        // there is no reason to query a server about it.
+        let Some(prompt) = database
+            .review_round_prompt(&round.id, checkout_id)
+            .map_err(failed)?
+        else {
+            // A round recorded before its message was stored cannot be rebuilt from the
+            // notes alone: the Markdown belongs to the UI. It waits rather than guessing.
+            continue;
+        };
+        let landed = agents
+            .session_mentions(checkout_id, directory, &session_id, &round.marker)
+            .map_err(agent_error)?;
+        if landed {
+            database
+                .set_review_round_status(&round.id, checkout_id, "queued", "dispatched")
+                .map_err(|error| foreign(&error))?;
+            continue;
+        }
+        // Claim before the call, so a second flush cannot send this one while it is in flight.
+        database
+            .set_review_round_status(&round.id, checkout_id, "queued", "dispatching")
+            .map_err(|error| foreign(&error))?;
+        match agents.prompt(checkout_id, directory, &session_id, &prompt) {
+            Ok(_) => {
+                database
+                    .set_review_round_status(&round.id, checkout_id, "dispatching", "dispatched")
+                    .map_err(|error| foreign(&error))?;
+                sent += 1;
+            }
+            // Left `dispatching` on purpose: the marker is what lets reconciliation learn
+            // whether this send landed, and requeueing blindly could duplicate it.
+            Err(error) => return Err(agent_error(error)),
+        }
+    }
+    Ok(sent)
+}
+
 /// Marks an outstanding note as resolved by the user.
 pub fn resolve_note(
     database: &Database,
@@ -202,19 +312,19 @@ pub fn agent_error(error: crate::services::agent::BridgeError) -> IpcError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     use tempfile::{tempdir, TempDir};
 
     use crate::{
-        domain::review::{review_anchor_hash, ReviewNote},
+        domain::review::{review_anchor_hash, review_round_marker, ReviewNote, ReviewRound},
         persistence::Database,
         services::agent::AgentService,
     };
 
     use super::{
-        ack_round, begin_round, build_round_prompt, check_prompt_size, confirm_round, requeue_all,
-        resolve_note, rounds,
+        ack_round, begin_round, build_round_prompt, check_prompt_size, confirm_round, flush_rounds,
+        queue_round, requeue_all, resolve_note, rounds,
     };
 
     fn note(overrides: &ReviewNote) -> ReviewNote {
@@ -285,6 +395,7 @@ mod tests {
             &checkout_id,
             "ses_target",
             &["note:a".to_string()],
+            "# Code Review",
         )
         .unwrap();
         assert_eq!(round.status, "dispatching");
@@ -318,6 +429,7 @@ mod tests {
             &checkout_id,
             "ses_target",
             &["note:a".to_string()],
+            "# Code Review",
         )
         .unwrap();
 
@@ -330,13 +442,79 @@ mod tests {
     }
 
     #[test]
+    fn a_queued_round_stores_the_message_it_will_be_sent_with() {
+        let temp = tempdir().unwrap();
+        let (database, checkout_id, _) = database_with_two_checkouts(&temp);
+        add_note(&database, &checkout_id, "a");
+
+        let round = queue_round(
+            &database,
+            &checkout_id,
+            "ses_target",
+            &["note:a".to_string()],
+            "# Code Review",
+        )
+        .unwrap();
+        assert_eq!(round.status, "queued");
+        // The notes are committed to it before it goes out, exactly as an immediate send is.
+        assert_eq!(
+            database.review_notes(&checkout_id).unwrap()[0].status,
+            "sent"
+        );
+
+        // What is stored is the whole message, marker included, so the send that happens
+        // later carries the bytes the user accepted rather than a re-derivation.
+        let stored = database
+            .review_round_prompt(&round.id, &checkout_id)
+            .unwrap()
+            .expect("a queued round has its message");
+        assert_eq!(stored, build_round_prompt("# Code Review", &round.marker));
+        assert!(stored.contains(&round.marker));
+        // Another checkout cannot read it.
+        assert!(database
+            .review_round_prompt(&round.id, "checkout:other")
+            .unwrap()
+            .is_none());
+    }
+
+    #[test]
+    fn flushing_a_round_without_a_stored_message_leaves_it_waiting() {
+        let temp = tempdir().unwrap();
+        let (database, checkout_id, _) = database_with_two_checkouts(&temp);
+        add_note(&database, &checkout_id, "a");
+        // A round written before its message was stored: the notes are there, the body is not.
+        let round = ReviewRound {
+            id: "round:legacy".into(),
+            checkout_id: checkout_id.clone(),
+            session_id: Some("ses_target".into()),
+            status: "queued".into(),
+            marker: review_round_marker("round:legacy"),
+            note_ids: vec!["note:a".to_string()],
+            created_at: "1".into(),
+            updated_at: "1".into(),
+        };
+        database
+            .add_review_round(&round, &["note:a".to_string()], None)
+            .unwrap();
+        // It has nothing to send. It must not be guessed from the notes, and it must not be
+        // dropped either.
+
+        let agents = AgentService::new();
+        // The directory does not exist, so reaching a server would fail loudly if tried.
+        let sent = flush_rounds(&database, &agents, &checkout_id, Path::new("/nonexistent"))
+            .expect("a round with no message is skipped without touching a server");
+        assert_eq!(sent, 0);
+        assert_eq!(rounds(&database, &checkout_id).unwrap()[0].status, "queued");
+    }
+
+    #[test]
     fn only_outstanding_notes_of_this_checkout_can_be_resolved() {
         let temp = tempdir().unwrap();
         let (database, checkout_id, other_checkout_id) = database_with_two_checkouts(&temp);
         add_note(&database, &checkout_id, "a");
         add_note(&database, &checkout_id, "b");
         let ids = vec!["note:a".to_string()];
-        begin_round(&database, &checkout_id, "ses_target", &ids).unwrap();
+        begin_round(&database, &checkout_id, "ses_target", &ids, "# Code Review").unwrap();
 
         let resolved = resolve_note(&database, &checkout_id, "note:a").unwrap();
         assert_eq!(resolved.status, "resolved");
@@ -359,7 +537,8 @@ mod tests {
             &database,
             &checkout_id,
             "ses_target",
-            &["note:foreign".to_string()]
+            &["note:foreign".to_string()],
+            "# Code Review",
         )
         .is_err());
         // Nothing was written, so a foreign note is not even linked.
@@ -375,6 +554,7 @@ mod tests {
             &checkout_id,
             "ses_target",
             &["note:a".to_string()],
+            "# Code Review",
         )
         .unwrap();
         assert!(super::reconcile_round(
@@ -403,14 +583,75 @@ mod tests {
         );
     }
 
+    /// Q4 against a real `opencode serve`: a round held back while the agent was busy goes
+    /// out on its own once flushed, and a second flush does not send it twice.
+    ///
+    /// `MARVIS_AGENT_BRIDGE=1 cargo test a_queued_round_goes_out_when_flushed -- --nocapture`
+    #[test]
+    fn a_queued_round_goes_out_when_flushed() {
+        if std::env::var("MARVIS_AGENT_BRIDGE").as_deref() != Ok("1") {
+            eprintln!("skipped: set MARVIS_AGENT_BRIDGE=1 to exercise a real agent server");
+            return;
+        }
+        let directory = PathBuf::from(
+            std::env::var("MARVIS_AGENT_BRIDGE_DIR").expect("MARVIS_AGENT_BRIDGE_DIR"),
+        );
+        let temp = tempdir().unwrap();
+        let (database, checkout_id, _) = database_with_two_checkouts(&temp);
+        add_note(&database, &checkout_id, "a");
+
+        let agents = AgentService::new();
+        let session = agents
+            .create_session(&checkout_id, &directory, "queue probe")
+            .expect("create a session on the real server");
+        let round = queue_round(
+            &database,
+            &checkout_id,
+            &session.id,
+            &["note:a".to_string()],
+            "# Code Review",
+        )
+        .unwrap();
+        assert_eq!(round.status, "queued");
+        // Held back: recording the round must not have talked to the agent.
+        assert!(
+            !agents
+                .session_mentions(&checkout_id, &directory, &session.id, &round.marker)
+                .expect("read the transcript"),
+            "the marker reached the session before it was flushed"
+        );
+
+        assert_eq!(
+            flush_rounds(&database, &agents, &checkout_id, &directory).expect("flush"),
+            1
+        );
+        assert_eq!(
+            rounds(&database, &checkout_id).unwrap()[0].status,
+            "dispatched"
+        );
+        assert!(
+            agents
+                .session_mentions(&checkout_id, &directory, &session.id, &round.marker)
+                .expect("read the transcript"),
+            "the flushed round never reached the session"
+        );
+
+        // Nothing is queued any more, so flushing again sends nothing.
+        assert_eq!(
+            flush_rounds(&database, &agents, &checkout_id, &directory).expect("flush again"),
+            0
+        );
+        agents.stop(&checkout_id);
+    }
+
     #[test]
     fn a_round_needs_a_target_and_at_least_one_note() {
         let temp = tempdir().unwrap();
         let (database, checkout_id, _) = database_with_two_checkouts(&temp);
         add_note(&database, &checkout_id, "a");
 
-        assert!(begin_round(&database, &checkout_id, "ses_target", &[]).is_err());
-        assert!(begin_round(&database, &checkout_id, "", &["note:a".into()]).is_err());
+        assert!(begin_round(&database, &checkout_id, "ses_target", &[], "#").is_err());
+        assert!(begin_round(&database, &checkout_id, "", &["note:a".into()], "#").is_err());
         assert!(check_prompt_size("   ").is_err());
         assert!(check_prompt_size("fix the review").is_ok());
         assert!(check_prompt_size(&"x".repeat(600 * 1024)).is_err());

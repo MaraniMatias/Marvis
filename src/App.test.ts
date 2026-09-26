@@ -39,6 +39,10 @@ const mocks = vi.hoisted(() => ({
   sendAgentPrompt: vi.fn(),
   dispatchReviewRound: vi.fn(),
   reconcileRounds: vi.fn(),
+  flushQueuedRounds: vi.fn(),
+  ackFinishedTurn: vi.fn(),
+  // Turn completions are observed, so the watcher needs a real reactive source.
+  turns: null as { value: number } | null,
 }));
 
 vi.mock("reka-ui", async () => {
@@ -165,24 +169,35 @@ vi.mock("./presentation/review-notes", () => ({
     resolveNote: vi.fn(),
     dispatchRound: mocks.dispatchReviewRound,
     reconcileRounds: mocks.reconcileRounds,
+    flushQueuedRounds: mocks.flushQueuedRounds,
+    ackFinishedTurn: mocks.ackFinishedTurn,
   }),
 }));
-vi.mock("./presentation/agent-sessions", () => ({
-  AGENT_EVENT: "marvis://agent-event",
-  useAgentSessions: () => ({
-    checkoutId: "checkout:one",
-    sessions: mocks.agentSessions,
-    targetId: mocks.agentTargetId,
-    state: "ready",
-    error: "",
-    events: [],
-    reload: vi.fn(),
-    createSession: mocks.createAgentSession,
-    sendReview: mocks.sendAgentPrompt,
-    selectTarget: vi.fn(),
-    stop: vi.fn(),
-  }),
-}));
+vi.mock("./presentation/agent-sessions", async () => {
+  const { reactive } = await import("vue");
+  const turns = reactive({ value: 0 });
+  mocks.turns = turns;
+  return {
+    AGENT_EVENT: "marvis://agent-event",
+    useAgentSessions: () => ({
+      checkoutId: "checkout:one",
+      sessions: mocks.agentSessions,
+      targetId: mocks.agentTargetId,
+      state: "ready",
+      error: "",
+      events: [],
+      reload: vi.fn(),
+      createSession: mocks.createAgentSession,
+      sendReview: mocks.sendAgentPrompt,
+      selectTarget: vi.fn(),
+      stop: vi.fn(),
+      // A getter, so the watcher that observes turn completions tracks this source.
+      get turnsCompleted() {
+        return turns.value;
+      },
+    }),
+  };
+});
 
 import { SplitterGroup, SplitterPanel, SplitterResizeHandle } from "reka-ui";
 import App from "./App.vue";
@@ -357,6 +372,9 @@ describe("App UI integration", () => {
     mocks.sendAgentPrompt.mockReset();
     mocks.dispatchReviewRound.mockReset();
     mocks.reconcileRounds.mockReset();
+    mocks.flushQueuedRounds.mockReset();
+    mocks.ackFinishedTurn.mockReset();
+    if (mocks.turns) mocks.turns.value = 0;
     mocks.loadAppLayout.mockResolvedValue({ ...DEFAULT_APP_LAYOUT });
     mocks.loadCheckoutUiState.mockResolvedValue({ ...DEFAULT_CHECKOUT_UI_STATE });
     mocks.saveAppLayout.mockResolvedValue(undefined);
@@ -436,6 +454,23 @@ describe("App UI integration", () => {
     expect(markdown).toContain("> `main..feature` — 1 file, 1 note");
     expect(markdown).toContain("```js{10}");
     expect(markdown).toContain("> revisit this calculation");
+    wrapper.unmount();
+  });
+
+  it("sends the rounds held back for a busy agent as soon as a turn ends", async () => {
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+    expect(mocks.flushQueuedRounds).not.toHaveBeenCalled();
+
+    mocks.turns!.value = 1;
+    await flushPromises();
+
+    // The flush runs before the round is acknowledged: a queued review goes out while the
+    // agent is free, and the turn completion is what says it is.
+    expect(mocks.flushQueuedRounds).toHaveBeenCalledTimes(1);
+    expect(mocks.ackFinishedTurn).toHaveBeenCalledTimes(1);
+    expect(mocks.flushQueuedRounds.mock.invocationCallOrder[0]).toBeLessThan(
+      mocks.ackFinishedTurn.mock.invocationCallOrder[0],
+    );
     wrapper.unmount();
   });
 

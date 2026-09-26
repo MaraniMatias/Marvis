@@ -106,6 +106,16 @@ The transcript is fetched as JSON and re-serialized rather than modelled, becaus
 
 Marvis therefore reports the fact, not the verdict: the wire field is `idle_at`, and the client derives `busy` from `idle_at === null` _combined with a turn start it actually observed on the event stream_. Polling only runs while such a turn is outstanding, so an idle app is not polled, and the count of finished turns comes from the `idle_at` transition rather than from silence.
 
+### Sending while the agent is mid-turn (Q4), verified against a real server
+
+v0.4 §6.4 leaves Q4 as a decision — warn and offer _send now / queue / cancel_. The observed behaviour of 2.0.18 settles it:
+
+- `POST /api/session/{id}/prompt` against a session with **no** `time.idle` (mid-turn) answers `200` with `"delivery": "steer"`, not a new turn.
+- The steered message **cuts the running task short**: probing with a 600-word essay interrupted mid-generation left the essay's assistant message empty, answered the steer instead, and the session went idle with `outcome: "succeeded"`. So "send now" really does interrupt context, exactly as the plan warns.
+- There is still no abort route (D2-08), so the third option cannot be "cancel the agent". Marvis offers **Send now / Queue / Not now**, where "Not now" cancels the _send_.
+
+Holding a round back has to survive a restart, so the round stores the message it was accepted with (migration v10, `review_rounds.prompt`). Flush runs when a turn ends — the moment the round was waiting for — and, before sending, checks the transcript for the round's own marker: present means the message already landed (a reconnect requeued a send that went out), so it is confirmed instead of repeated; the claim is `queued → dispatching`, which a second flush cannot win twice. A round with no stored message cannot be rebuilt from the notes alone (the Markdown belongs to the UI), so it waits rather than guessing. `a_queued_round_goes_out_when_flushed` (gated by `MARVIS_AGENT_BRIDGE=1`) proves the whole path against a real server, including that recording a round does not talk to the agent and that a second flush sends nothing.
+
 ## Explicitly unverified, deferred, and known gaps
 
 - **Native WebView PTY:** real `yes` for 30 seconds, `nvim` interaction, redraw after resize, byte-loss/latency, UI responsiveness, and idle CPU (including five sessions) were **not verified**. The production path exists, and unit tests cover byte/chunk handling and IPC dimensions, but these do not establish the spike/acceptance guarantees.

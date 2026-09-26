@@ -136,6 +136,7 @@ fn main() {
             commands::review::review_rounds,
             commands::review::review_round_dispatch,
             commands::review::review_rounds_requeue,
+            commands::review::review_round_flush,
             commands::review::review_round_reconcile,
             commands::review::review_round_ack,
             commands::worktree::worktree_defaults,

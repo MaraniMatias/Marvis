@@ -280,6 +280,12 @@ tres veces seguidas.
    fallo que hay que vigilar en uso real, y por ahora la única respuesta posible es
    esperar: no hay cancelación.
 
+4. **Enviar a mitad de turno sí interrumpe.** Un prompt contra una sesión sin `time.idle`
+   responde `200` con `"delivery": "steer"` y corta lo que el agente estaba haciendo
+   (comprobado con un ensayo largo que quedó a mitad). Es lo que Q4 advierte, y por eso la
+   UI pregunta en lugar de mandar. Como tampoco hay abort (punto 1), la opción de cancelar
+   es sobre el **envío**, no sobre el turno.
+
 ---
 
 ## Cierre

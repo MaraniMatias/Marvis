@@ -16,6 +16,7 @@ const mocks = vi.hoisted(() => ({
   resolveReviewNote: vi.fn(),
   ackReviewRound: vi.fn(),
   dispatchReviewRound: vi.fn(),
+  flushReviewRounds: vi.fn(),
   requeueReviewRounds: vi.fn(),
   reconcileReviewRound: vi.fn(),
 }));
@@ -32,6 +33,7 @@ vi.mock("../lib/ipc", () => ({
   resolveReviewNote: mocks.resolveReviewNote,
   ackReviewRound: mocks.ackReviewRound,
   dispatchReviewRound: mocks.dispatchReviewRound,
+  flushReviewRounds: mocks.flushReviewRounds,
   requeueReviewRounds: mocks.requeueReviewRounds,
   reconcileReviewRound: mocks.reconcileReviewRound,
 }));
@@ -186,6 +188,7 @@ describe("useReviewNotes", () => {
       sessionId: "ses_one",
       ids: ["note:1"],
       markdown: "# Code Review\n",
+      queue: false,
     });
     expect(state.rounds.map((item) => item.id)).toEqual(["round:1"]);
     expect(state.notes[0].status).toBe("sent");
@@ -195,6 +198,74 @@ describe("useReviewNotes", () => {
     expect(await state.dispatchRound("", ["note:1"], "# Code Review")).toBeNull();
     expect(await state.dispatchRound("ses_one", [], "# Code Review")).toBeNull();
     expect(mocks.dispatchReviewRound).toHaveBeenCalledTimes(1);
+  });
+
+  it("holds a round back when the user asks to wait for the agent", async () => {
+    mocks.listReviewNotes.mockResolvedValueOnce([note()]).mockResolvedValueOnce([note({ status: "sent" })]);
+    mocks.dispatchReviewRound.mockResolvedValue({
+      id: "round:queued",
+      checkoutId: "checkout:first",
+      sessionId: "ses_one",
+      status: "queued",
+      marker: "marvis-review:round:queued",
+      noteIds: ["note:1"],
+      createdAt: "1",
+      updatedAt: "1",
+    });
+    mocks.listReviewRounds.mockResolvedValue([
+      {
+        id: "round:queued",
+        checkoutId: "checkout:first",
+        sessionId: "ses_one",
+        status: "queued",
+        marker: "marvis-review:round:queued",
+        noteIds: ["note:1"],
+        createdAt: "1",
+        updatedAt: "1",
+      },
+    ]);
+    const state = useReviewNotes(harness().checkout, harness().repo);
+    await settle();
+
+    // The choice is handed to the backend whole: the round carries its own message, so the
+    // send that happens later does not depend on anything the UI still remembers.
+    const round = await state.dispatchRound("ses_one", ["note:1"], "# Code Review\n", true);
+    expect(round?.status).toBe("queued");
+    expect(mocks.dispatchReviewRound).toHaveBeenCalledWith(expect.objectContaining({ queue: true }));
+    expect(state.rounds[0].status).toBe("queued");
+  });
+
+  it("flushes held-back rounds and re-reads the list only when something went out", async () => {
+    mocks.listReviewNotes.mockResolvedValue([note({ status: "sent" })]);
+    mocks.listReviewRounds.mockResolvedValue([
+      {
+        id: "round:queued",
+        checkoutId: "checkout:first",
+        sessionId: "ses_one",
+        status: "queued",
+        marker: "marvis-review:round:queued",
+        noteIds: ["note:1"],
+        createdAt: "1",
+        updatedAt: "1",
+      },
+    ]);
+    mocks.flushReviewRounds.mockResolvedValue(1);
+    const state = useReviewNotes(harness().checkout, harness().repo);
+    await settle();
+    expect(state.rounds[0].status).toBe("queued");
+
+    mocks.flushReviewRounds.mockClear();
+    mocks.listReviewRounds.mockClear();
+
+    expect(await state.flushQueuedRounds()).toBe(1);
+    expect(mocks.flushReviewRounds).toHaveBeenCalledWith("checkout:first");
+    // Something went out, so the local copy is stale and has to be re-read.
+    expect(mocks.listReviewRounds).toHaveBeenCalledTimes(1);
+
+    // Nothing waiting: no reason to ask the backend for a fresh list.
+    mocks.flushReviewRounds.mockResolvedValue(0);
+    expect(await state.flushQueuedRounds()).toBe(0);
+    expect(mocks.listReviewRounds).toHaveBeenCalledTimes(1);
   });
 
   it("confirms a round whose message landed and retries one that never arrived", async () => {

@@ -189,6 +189,9 @@ pub struct ReviewRoundDispatchRequest {
     pub ids: Vec<String>,
     /// The exported review. Built by the caller, which owns the Markdown format.
     pub markdown: String,
+    /// Wait for the agent instead of interrupting what it is doing now.
+    #[serde(default)]
+    pub queue: bool,
 }
 
 /// Delivers one review round to one agent session as a single message.
@@ -209,13 +212,20 @@ pub async fn review_round_dispatch(
         review_round::check_prompt_size(
             &(request.markdown.clone() + &"x".repeat(review_round::marker_budget())),
         )?;
-        // `begin_round` links the notes, which is also what rejects a foreign note id.
+        // `begin_round` links the notes, which is also what rejects a foreign note id, and
+        // stores the exact message this round will be sent with.
         let round = review_round::begin_round(
             &database,
             &request.checkout_id,
             &request.session_id,
             &request.ids,
+            &request.markdown,
         )?;
+        // Queued: the round is recorded and the notes are committed to it, but the agent is
+        // left alone. Nothing about the send has to be remembered by the caller.
+        if request.queue {
+            return Ok(round);
+        }
         let prompt = review_round::build_round_prompt(&request.markdown, &round.marker);
         match agents.prompt(
             &request.checkout_id,
@@ -228,6 +238,27 @@ pub async fn review_round_dispatch(
             // whether this send landed, and requeueing blindly could duplicate it.
             Err(error) => Err(review_round::agent_error(error)),
         }
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+/// Sends the rounds the user chose to hold back until the agent was free.
+///
+/// Called when a turn ends, which is the moment those rounds were waiting for. Each round is
+/// checked against the transcript first, so a send that actually landed before a reconnect
+/// requeued it is confirmed rather than repeated.
+#[tauri::command]
+pub async fn review_round_flush(
+    database: State<'_, Database>,
+    agents: State<'_, Arc<AgentService>>,
+    checkout_id: String,
+) -> Result<usize, IpcError> {
+    let database = database.inner().clone();
+    let agents: Arc<AgentService> = Arc::clone(agents.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = super::agent::checkout_directory(&database, &checkout_id)?;
+        review_round::flush_rounds(&database, &agents, &checkout_id, &directory)
     })
     .await
     .map_err(operation_error)?

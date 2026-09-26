@@ -98,7 +98,12 @@ watch(
 // What the turn did to each line is judged separately, by the diff.
 watch(
   () => agent.turnsCompleted,
-  () => void review.ackFinishedTurn(),
+  async () => {
+    // A queued round waited for exactly this: the agent is free now, so the reviews held
+    // back while it was busy go out, oldest first.
+    await review.flushQueuedRounds();
+    await review.ackFinishedTurn();
+  },
 );
 const shellRequest = ref<{ checkoutId: string; token: number } | null>(null);
 const nvimRequest = ref<{
@@ -673,7 +678,7 @@ async function requestNvim(checkoutId: string, filePath?: string, position?: Edi
  * afterwards instead of being repeated. The target comes from the bridge, so a review can
  * never land in a session belonging to another checkout.
  */
-async function sendReviewToAgent(ids: string[]) {
+async function sendReviewToAgent(ids: string[], queue = false) {
   const checkout = activeCheckout.value;
   // Read from the payload rather than the list: the sender decides what is included.
   const chosen = new Set(ids);
@@ -689,10 +694,14 @@ async function sendReviewToAgent(ids: string[]) {
   try {
     const target = await resolveAgentTarget();
     if (!target) return;
+    // `queue` records the round and leaves the agent alone: the message it was accepted
+    // with is stored with it, so the flush that runs at the end of the turn sends exactly
+    // those bytes, even after a restart.
     await review.dispatchRound(
       target,
       notes.map((note) => note.id),
       markdown,
+      queue,
     );
   } catch (cause) {
     error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);

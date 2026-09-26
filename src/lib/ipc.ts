@@ -148,14 +148,25 @@ export function listReviewRounds(checkoutId: string): Promise<ReviewRound[]> {
   return invoke<ReviewRound[]>("review_rounds", { checkoutId });
 }
 
-/** Records the round, then delivers it as one message. Never both or neither. */
+/**
+ * Records the round, then delivers it as one message. Never both or neither.
+ *
+ * With `queue` the round is stored and the agent is left alone: the send happens later,
+ * from the stored message, when the caller flushes it.
+ */
 export function dispatchReviewRound(request: {
   checkoutId: string;
   sessionId: string;
   ids: string[];
   markdown: string;
+  queue?: boolean;
 }): Promise<ReviewRound> {
   return invoke<ReviewRound>("review_round_dispatch", { request });
+}
+
+/** Sends the rounds held back while the agent was busy. Returns how many went out. */
+export function flushReviewRounds(checkoutId: string): Promise<number> {
+  return invoke<number>("review_round_flush", { checkoutId });
 }
 
 export function requeueReviewRounds(checkoutId: string): Promise<number> {
