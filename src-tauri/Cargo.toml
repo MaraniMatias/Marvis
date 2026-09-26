@@ -11,7 +11,7 @@ tauri-build = { version = "2", features = [] }
 base64 = "0.22"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tauri = { version = "2", features = ["macos-private-api"] }
+tauri = "2"
 tauri-plugin-dialog = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 portable-pty = "0.9"

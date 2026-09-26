@@ -178,6 +178,8 @@ mod security_tests {
                 "core:default",
                 "core:window:allow-close",
                 "core:window:allow-start-dragging",
+                // Double-clicking the title-bar drag region zooms the window.
+                "core:window:allow-toggle-maximize",
                 "dialog:allow-open"
             ]
         );

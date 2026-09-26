@@ -481,7 +481,7 @@ function onMarkdownLink(event: MouseEvent) {
       />
       <section
         v-if="staleDiff"
-        class="absolute inset-0 overflow-auto bg-[var(--surface-document)] px-3 py-2"
+        class="absolute inset-0 overflow-auto bg-[var(--marvis-bg-0)] px-3 py-2"
         aria-label="File contents"
       >
         <pre v-if="content" class="whitespace-pre-wrap font-mono text-[13px] leading-5 text-zinc-300">{{
@@ -689,10 +689,10 @@ function onMarkdownLink(event: MouseEvent) {
   width: 3rem;
   flex-shrink: 0;
   user-select: none;
-  background: var(--surface-document);
-  border-right: 1px solid var(--border-hairline);
+  background: var(--marvis-bg-0);
+  border-right: 1px solid var(--marvis-border);
   padding-right: 0.75rem;
-  color: #52525b;
+  color: var(--marvis-text-faint);
   text-align: right;
   white-space: pre;
 }

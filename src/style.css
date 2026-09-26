@@ -6,11 +6,6 @@
   text-rendering: optimizeLegibility;
   color: var(--marvis-text);
   background: var(--marvis-bg-0);
-  /* Compat aliases for the two tokens DocumentPane.vue still reads; it is
-     rewritten in phase 4 and both aliases die with it. They resolve to the
-     marvis values the surface map assigns to those roles. */
-  --surface-document: var(--marvis-bg-0);
-  --border-hairline: var(--marvis-border);
 }
 
 * {
@@ -235,9 +230,7 @@ body {
   color: var(--marvis-text-faint);
 }
 
-/* The window is opaque (B.4): no tauri transparency, no blur filters, and no
-   overrides for the transparency class the shell still applies. That class is
-   dropped together with the layout state in phase 1. */
+/* The window is opaque (B.4): no tauri transparency and no blur filters. */
 
 ::selection {
   background: rgb(124 158 255 / 30%);

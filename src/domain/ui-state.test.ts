@@ -6,68 +6,54 @@ import {
   normalizeCheckoutUiState,
   needsInspectorDrawer,
   resizeLayoutPanel,
-  snapshotLayout,
-  toggleFocusLayout,
-  toggleLayoutVisibility,
 } from "./ui-state";
 
 describe("persisted UI state", () => {
-  it("round-trips versioned global widths, visibility, collapse, and focus restore state", () => {
-    const saved = {
-      ...DEFAULT_APP_LAYOUT,
-      sidebarWidth: 340,
-      inspectorVisible: false,
-      collapsedRepoIds: ["repo:/one"],
-      focusSnapshot: {
-        sidebarWidth: 280,
-        inspectorWidth: 360,
-        sidebarVisible: true,
-        inspectorVisible: true,
-      },
-    };
+  it("keeps the marvis default panel widths", () => {
+    expect(DEFAULT_APP_LAYOUT).toEqual({ version: 1, sidebarWidth: 240, inspectorWidth: 280 });
+  });
+
+  it("round-trips the saved widths and drops the fields the layout no longer has", () => {
+    const saved = { ...DEFAULT_APP_LAYOUT, sidebarWidth: 340, inspectorWidth: 420 };
     expect(normalizeAppLayout(JSON.parse(JSON.stringify(saved)))).toEqual(saved);
-    expect(snapshotLayout(saved).sidebarWidth).toBe(340);
+    expect(
+      normalizeAppLayout({
+        ...saved,
+        sidebarVisible: false,
+        focusSnapshot: { sidebarWidth: 300 },
+        collapsedRepoIds: ["repo:/one"],
+        reduceTransparency: true,
+      }),
+    ).toEqual(saved);
   });
 
   it("uses defaults for unknown versions and clamps corrupt dimensions", () => {
     expect(normalizeAppLayout({ version: 9 })).toEqual(DEFAULT_APP_LAYOUT);
-    expect(normalizeAppLayout({ version: 1, sidebarWidth: 900, inspectorWidth: -1 })).toMatchObject({
-      sidebarWidth: 380,
-      inspectorWidth: 260,
+    expect(normalizeAppLayout({ version: 1, sidebarWidth: 900, inspectorWidth: -1 })).toEqual({
+      version: 1,
+      sidebarWidth: 500,
+      inspectorWidth: 200,
     });
+    expect(normalizeAppLayout({ version: 1 })).toEqual(DEFAULT_APP_LAYOUT);
   });
 
-  it("ignores the removed status bar field in persisted layouts and focus snapshots", () => {
-    const normalized = normalizeAppLayout({
-      ...DEFAULT_APP_LAYOUT,
-      statusBarVisible: false,
-      focusSnapshot: { ...snapshotLayout(DEFAULT_APP_LAYOUT), statusBarVisible: false },
-    });
-    expect(normalized).toEqual({ ...DEFAULT_APP_LAYOUT, focusSnapshot: snapshotLayout(DEFAULT_APP_LAYOUT) });
-  });
-
-  it("keeps expanded widths across collapse and clamps user resizing", () => {
+  it("clamps user resizing to the supported range", () => {
     const resized = resizeLayoutPanel(DEFAULT_APP_LAYOUT, "sidebar", 345.4);
-    const collapsed = toggleLayoutVisibility(resized, "sidebarVisible");
-    const expanded = toggleLayoutVisibility(collapsed, "sidebarVisible");
     expect(resized.sidebarWidth).toBe(345);
-    expect(collapsed.sidebarVisible).toBe(false);
-    expect(expanded).toMatchObject({ sidebarVisible: true, sidebarWidth: 345 });
-    expect(resizeLayoutPanel(resized, "inspector", 900).inspectorWidth).toBe(560);
+    expect(resized.inspectorWidth).toBe(DEFAULT_APP_LAYOUT.inspectorWidth);
+    expect(resizeLayoutPanel(resized, "sidebar", 10).sidebarWidth).toBe(240);
+    expect(resizeLayoutPanel(resized, "inspector", 900).inspectorWidth).toBe(480);
+    expect(resizeLayoutPanel(resized, "inspector", Number.NaN)).toEqual(resized);
   });
 
-  it("uses an inspector drawer only when needed without mutating preferred layout", () => {
-    const preferred = { ...DEFAULT_APP_LAYOUT, sidebarWidth: 380, inspectorWidth: 500 };
-    expect(needsInspectorDrawer(preferred, 900)).toBe(true);
-    expect(needsInspectorDrawer(preferred, 1400)).toBe(false);
-    expect(preferred).toMatchObject({ sidebarWidth: 380, inspectorWidth: 500, inspectorVisible: true });
-  });
-
-  it("restores the full previous layout after focus mode", () => {
-    const previous = { ...DEFAULT_APP_LAYOUT, sidebarWidth: 300 };
-    const focused = toggleFocusLayout(previous);
-    expect(focused).toMatchObject({ sidebarVisible: false, inspectorVisible: false });
-    expect(toggleFocusLayout(focused)).toEqual(previous);
+  it("asks for the inspector drawer only when the main panel would not fit", () => {
+    const defaults = DEFAULT_APP_LAYOUT;
+    expect(needsInspectorDrawer(defaults, 949)).toBe(true);
+    expect(needsInspectorDrawer(defaults, 950)).toBe(false);
+    const widened = resizeLayoutPanel(defaults, "sidebar", 500);
+    expect(needsInspectorDrawer(widened, 1210)).toBe(false);
+    expect(needsInspectorDrawer(widened, 1209)).toBe(true);
+    expect(widened).toMatchObject({ sidebarWidth: 500, inspectorWidth: 280 });
   });
 
   it("restores checkout document and inspector state while rejecting unsafe paths", () => {

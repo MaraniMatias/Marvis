@@ -21,44 +21,41 @@ const WORKTREE_LOCATION: &str = "worktree_location";
 const WINDOW_GEOMETRY: &str = "window_geometry";
 const WINDOW_MAXIMIZED: &str = "window_maximized";
 const UI_LAYOUT: &str = "ui_layout_v1";
+const SIDEBAR_WIDTH_MIN: u32 = 240;
+const SIDEBAR_WIDTH_MAX: u32 = 500;
+const INSPECTOR_WIDTH_MIN: u32 = 200;
+const INSPECTOR_WIDTH_MAX: u32 = 480;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
-pub struct LayoutSnapshot {
-    pub sidebar_width: u32,
-    pub inspector_width: u32,
-    pub sidebar_visible: bool,
-    pub inspector_visible: bool,
-    pub status_bar_visible: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
 pub struct AppLayoutState {
     pub version: u8,
     pub sidebar_width: u32,
     pub inspector_width: u32,
-    pub sidebar_visible: bool,
-    pub inspector_visible: bool,
-    pub status_bar_visible: bool,
-    pub focus_snapshot: Option<LayoutSnapshot>,
-    pub collapsed_repo_ids: Vec<String>,
-    pub reduce_transparency: bool,
 }
 
 impl Default for AppLayoutState {
     fn default() -> Self {
         Self {
             version: 1,
-            sidebar_width: 260,
-            inspector_width: 320,
-            sidebar_visible: true,
-            inspector_visible: true,
-            status_bar_visible: true,
-            focus_snapshot: None,
-            collapsed_repo_ids: Vec::new(),
-            reduce_transparency: false,
+            sidebar_width: 240,
+            inspector_width: 280,
         }
+    }
+}
+
+impl AppLayoutState {
+    /// A layout written by an older build carries fields that no longer exist and widths
+    /// from a different range. Both are pulled into the current shape rather than
+    /// discarding the record, so a resize survives the upgrade.
+    fn normalized(mut self) -> Self {
+        self.sidebar_width = self
+            .sidebar_width
+            .clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
+        self.inspector_width = self
+            .inspector_width
+            .clamp(INSPECTOR_WIDTH_MIN, INSPECTOR_WIDTH_MAX);
+        self
     }
 }
 
@@ -672,7 +669,8 @@ impl Database {
         };
         let layout = serde_json::from_str::<AppLayoutState>(&serialized)
             .ok()
-            .filter(validate_app_layout)
+            .map(AppLayoutState::normalized)
+            .filter(|layout| layout.version == 1)
             .unwrap_or_default();
         if serde_json::to_string(&layout).map_err(|error| error.to_string())? != serialized {
             connection
@@ -683,10 +681,11 @@ impl Database {
     }
 
     pub fn save_app_layout(&self, layout: &AppLayoutState) -> Result<(), String> {
-        if !validate_app_layout(layout) {
-            return Err("saved UI layout is outside the supported range".into());
+        let layout = layout.clone().normalized();
+        if layout.version != 1 {
+            return Err("saved UI layout has an unsupported version".into());
         }
-        let serialized = serde_json::to_string(layout).map_err(|error| error.to_string())?;
+        let serialized = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         connection
             .execute(
@@ -1637,27 +1636,6 @@ fn validate_terminal_layout(
     layout.validate(&session_ids)
 }
 
-fn validate_app_layout(layout: &AppLayoutState) -> bool {
-    fn valid_snapshot(snapshot: &LayoutSnapshot) -> bool {
-        (220..=380).contains(&snapshot.sidebar_width)
-            && (260..=560).contains(&snapshot.inspector_width)
-    }
-    layout.version == 1
-        && valid_snapshot(&LayoutSnapshot {
-            sidebar_width: layout.sidebar_width,
-            inspector_width: layout.inspector_width,
-            sidebar_visible: layout.sidebar_visible,
-            inspector_visible: layout.inspector_visible,
-            status_bar_visible: layout.status_bar_visible,
-        })
-        && layout.focus_snapshot.as_ref().is_none_or(valid_snapshot)
-        && layout.collapsed_repo_ids.len() <= 1000
-        && layout
-            .collapsed_repo_ids
-            .iter()
-            .all(|id| !id.is_empty() && id.len() <= 4096)
-}
-
 fn safe_checkout_relative_path(path: &str) -> bool {
     !path.is_empty()
         && path.len() <= 4096
@@ -2168,8 +2146,8 @@ mod tests {
     };
 
     use super::{
-        review_anchor_hash, AppLayoutState, CheckoutUiState, Database, LayoutSnapshot,
-        PersistedDocument, ReviewNote, SCHEMA_VERSION,
+        review_anchor_hash, AppLayoutState, CheckoutUiState, Database, PersistedDocument,
+        ReviewNote, SCHEMA_VERSION,
     };
 
     fn plain_repo(path: &Path, now: &str) -> Repo {
@@ -2457,15 +2435,6 @@ mod tests {
         let layout = AppLayoutState {
             sidebar_width: 340,
             inspector_width: 420,
-            sidebar_visible: false,
-            focus_snapshot: Some(LayoutSnapshot {
-                sidebar_width: 280,
-                inspector_width: 360,
-                sidebar_visible: true,
-                inspector_visible: true,
-                status_bar_visible: false,
-            }),
-            collapsed_repo_ids: vec!["repo:collapsed".into()],
             ..AppLayoutState::default()
         };
         database.save_app_layout(&layout).unwrap();
@@ -2558,6 +2527,47 @@ mod tests {
                 SCHEMA_VERSION
             );
         }
+    }
+
+    #[test]
+    fn app_layout_normalizes_a_layout_saved_by_an_older_build() {
+        // The retired fields are unknown to the current struct, and the widths come from
+        // the old ranges: a resize from that build is kept where it still fits.
+        let old_layout = serde_json::json!({
+            "version": 1,
+            "sidebarWidth": 260,
+            "inspectorWidth": 320,
+            "sidebarVisible": false,
+            "focusSnapshot": null,
+            "collapsedRepoIds": ["repo:collapsed"],
+            "reduceTransparency": true
+        });
+        let layout = serde_json::from_value::<AppLayoutState>(old_layout)
+            .unwrap()
+            .normalized();
+        assert_eq!(
+            layout,
+            AppLayoutState {
+                sidebar_width: 260,
+                inspector_width: 320,
+                ..Default::default()
+            }
+        );
+
+        let out_of_range = serde_json::from_value::<AppLayoutState>(serde_json::json!({
+            "sidebarWidth": 220,
+            "inspectorWidth": 560
+        }))
+        .unwrap()
+        .normalized();
+        assert_eq!(
+            out_of_range,
+            AppLayoutState {
+                sidebar_width: 240,
+                inspector_width: 480,
+                ..Default::default()
+            }
+        );
     }
 
     #[test]

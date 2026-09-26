@@ -1,17 +1,9 @@
 import type { MainDocument } from "./main-document";
 
-export interface LayoutSnapshot {
+export interface AppLayoutState {
+  version: 1;
   sidebarWidth: number;
   inspectorWidth: number;
-  sidebarVisible: boolean;
-  inspectorVisible: boolean;
-}
-
-export interface AppLayoutState extends LayoutSnapshot {
-  version: 1;
-  focusSnapshot: LayoutSnapshot | null;
-  collapsedRepoIds: string[];
-  reduceTransparency: boolean;
 }
 
 export interface CheckoutUiState {
@@ -29,15 +21,15 @@ export interface CheckoutUiState {
   diffScrollTop: number;
 }
 
+export const SIDEBAR_WIDTH_LIMITS = { min: 240, max: 500 } as const;
+export const INSPECTOR_WIDTH_LIMITS = { min: 200, max: 480 } as const;
+/** What the main panel needs before the inspector can no longer sit beside it. */
+const MIN_MAIN_WIDTH = 430;
+
 export const DEFAULT_APP_LAYOUT: AppLayoutState = {
   version: 1,
-  sidebarWidth: 260,
-  inspectorWidth: 320,
-  sidebarVisible: true,
-  inspectorVisible: true,
-  focusSnapshot: null,
-  collapsedRepoIds: [],
-  reduceTransparency: false,
+  sidebarWidth: 240,
+  inspectorWidth: 280,
 };
 
 export const DEFAULT_CHECKOUT_UI_STATE: CheckoutUiState = {
@@ -68,27 +60,22 @@ function safePath(value: unknown): value is string {
   return value.split(/[\\/]/).every((part) => part !== ".." && part !== "." && part.length > 0);
 }
 
-function snapshot(value: unknown): LayoutSnapshot | null {
-  if (!isRecord(value)) return null;
-  return {
-    sidebarWidth: boundedNumber(value.sidebarWidth, 260, 220, 380),
-    inspectorWidth: boundedNumber(value.inspectorWidth, 320, 260, 560),
-    sidebarVisible: typeof value.sidebarVisible === "boolean" ? value.sidebarVisible : true,
-    inspectorVisible: typeof value.inspectorVisible === "boolean" ? value.inspectorVisible : true,
-  };
-}
-
 export function normalizeAppLayout(value: unknown): AppLayoutState {
   if (!isRecord(value) || value.version !== 1) return { ...DEFAULT_APP_LAYOUT };
-  const collapsedRepoIds = Array.isArray(value.collapsedRepoIds)
-    ? value.collapsedRepoIds.filter((id): id is string => typeof id === "string" && id.length <= 4096).slice(0, 1000)
-    : [];
   return {
     version: 1,
-    ...(snapshot(value) ?? DEFAULT_APP_LAYOUT),
-    focusSnapshot: value.focusSnapshot === null ? null : snapshot(value.focusSnapshot),
-    collapsedRepoIds: [...new Set(collapsedRepoIds)],
-    reduceTransparency: typeof value.reduceTransparency === "boolean" ? value.reduceTransparency : false,
+    sidebarWidth: boundedNumber(
+      value.sidebarWidth,
+      DEFAULT_APP_LAYOUT.sidebarWidth,
+      SIDEBAR_WIDTH_LIMITS.min,
+      SIDEBAR_WIDTH_LIMITS.max,
+    ),
+    inspectorWidth: boundedNumber(
+      value.inspectorWidth,
+      DEFAULT_APP_LAYOUT.inspectorWidth,
+      INSPECTOR_WIDTH_LIMITS.min,
+      INSPECTOR_WIDTH_LIMITS.max,
+    ),
   };
 }
 
@@ -127,46 +114,17 @@ export function normalizeCheckoutUiState(value: unknown): CheckoutUiState {
   };
 }
 
-export function snapshotLayout(layout: AppLayoutState): LayoutSnapshot {
-  const { sidebarWidth, inspectorWidth, sidebarVisible, inspectorVisible } = layout;
-  return { sidebarWidth, inspectorWidth, sidebarVisible, inspectorVisible };
-}
-
-export function toggleFocusLayout(layout: AppLayoutState): AppLayoutState {
-  if (layout.focusSnapshot) return { ...layout, ...layout.focusSnapshot, focusSnapshot: null };
-  return {
-    ...layout,
-    focusSnapshot: snapshotLayout(layout),
-    sidebarVisible: false,
-    inspectorVisible: false,
-  };
-}
-
-export function toggleLayoutVisibility(
-  layout: AppLayoutState,
-  key: "sidebarVisible" | "inspectorVisible",
-): AppLayoutState {
-  if (layout.focusSnapshot) {
-    const restored = { ...layout.focusSnapshot, [key]: !layout.focusSnapshot[key] };
-    return { ...layout, ...restored, focusSnapshot: null };
-  }
-  return { ...layout, [key]: !layout[key] };
-}
-
 export function resizeLayoutPanel(
   layout: AppLayoutState,
   panel: "sidebar" | "inspector",
   width: number,
 ): AppLayoutState {
   if (!Number.isFinite(width)) return layout;
-  return panel === "sidebar"
-    ? { ...layout, sidebarWidth: Math.round(Math.min(380, Math.max(220, width))) }
-    : { ...layout, inspectorWidth: Math.round(Math.min(560, Math.max(260, width))) };
+  const limits = panel === "sidebar" ? SIDEBAR_WIDTH_LIMITS : INSPECTOR_WIDTH_LIMITS;
+  const clamped = Math.round(Math.min(limits.max, Math.max(limits.min, width)));
+  return panel === "sidebar" ? { ...layout, sidebarWidth: clamped } : { ...layout, inspectorWidth: clamped };
 }
 
 export function needsInspectorDrawer(layout: AppLayoutState, viewportWidth: number): boolean {
-  return (
-    layout.inspectorVisible &&
-    viewportWidth < (layout.sidebarVisible ? layout.sidebarWidth : 0) + layout.inspectorWidth + 430
-  );
+  return viewportWidth < layout.sidebarWidth + layout.inspectorWidth + MIN_MAIN_WIDTH;
 }

@@ -1,18 +1,24 @@
 <script setup lang="ts">
+/* eslint-disable vue/html-self-closing */
 import { listen } from "@tauri-apps/api/event";
 import { open } from "@tauri-apps/plugin-dialog";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import { SplitterGroup, SplitterPanel, SplitterResizeHandle } from "reka-ui";
+import {
+  PopoverContent,
+  PopoverRoot,
+  PopoverTrigger,
+  SplitterGroup,
+  SplitterPanel,
+  SplitterResizeHandle,
+} from "reka-ui";
+import { ChevronDown as ChevronDownIcon, GitFork as GitForkIcon, Settings as SettingsIcon } from "@lucide/vue";
 import type { Checkout } from "./domain/workspace";
-import type { PaletteCommandId } from "./domain/command-palette";
-import { getPaletteCommands } from "./domain/command-palette";
 import { parseEditorPosition } from "./domain/editor";
 import type { EditorPosition } from "./domain/editor";
 import { resolveMainView } from "./domain/main-document";
 import type { MainDocument, MainDocumentMode } from "./domain/main-document";
 import InspectorPane from "./components/InspectorPane.vue";
-import CommandPalette from "./components/CommandPalette.vue";
 import DocumentPane from "./components/DocumentPane.vue";
 import SessionPane from "./components/SessionPane.vue";
 import Sidebar from "./components/Sidebar.vue";
@@ -37,12 +43,12 @@ import { isMarkdownPath } from "./presentation/markdown-preview";
 import {
   DEFAULT_APP_LAYOUT,
   DEFAULT_CHECKOUT_UI_STATE,
+  INSPECTOR_WIDTH_LIMITS,
+  SIDEBAR_WIDTH_LIMITS,
   needsInspectorDrawer,
   normalizeAppLayout,
   normalizeCheckoutUiState,
   resizeLayoutPanel,
-  toggleFocusLayout,
-  toggleLayoutVisibility as toggleLayoutVisibilityState,
 } from "./domain/ui-state";
 import type { AppLayoutState, CheckoutUiState } from "./domain/ui-state";
 import { loadAppLayout, loadCheckoutUiState, saveAppLayout, saveCheckoutUiState } from "./lib/ipc";
@@ -63,9 +69,9 @@ const appLayoutReady = ref(false);
 const checkoutUiStates = ref<Record<string, CheckoutUiState>>({});
 const checkoutUiReady = ref(false);
 const sessionPane = ref<InstanceType<typeof SessionPane> | null>(null);
-const sidebarPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
+const sidebarPanel = ref<{ resize(size: number): void } | null>(null);
 const inspectorPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
-const paletteRequestToken = ref(0);
+const searchField = ref<HTMLInputElement | null>(null);
 const viewportWidth = ref(window.innerWidth);
 const isNarrow = computed(() => needsInspectorDrawer(appLayout.value, viewportWidth.value));
 const activeRepo = computed(
@@ -118,10 +124,6 @@ const sendingReview = ref(false);
 const documents = ref<Record<string, MainDocument>>({});
 const emptyDocument: MainDocument = { checkoutId: "", path: "", source: "file", mode: "code" };
 const mainViews = ref<Record<string, "terminal" | "document">>({});
-const inspectorCommand = ref<{
-  action: "open-file" | "open-changes";
-  token: number;
-} | null>(null);
 const editorAvailability = ref<EditorAvailability>({ zed: false, neovim: false });
 const sessionRuntimeStatuses = ref<Record<string, TerminalSessionStatus>>({});
 const recentFileWrites = ref<Record<string, boolean>>({});
@@ -141,7 +143,6 @@ const activityByCheckout = computed(() => {
 });
 let shellRequestToken = 0;
 let nvimRequestToken = 0;
-let inspectorCommandToken = 0;
 let unlistenFileActivity: (() => void) | undefined;
 let activityListenerDisposed = false;
 let unlistenCloseRequested: (() => void) | undefined;
@@ -153,9 +154,6 @@ let uiStateWriteQueue: Promise<void> = Promise.resolve();
 const loadedCheckoutUiIds = new Set<string>();
 const pendingCheckoutUiPatches = new Map<string, Partial<CheckoutUiState>>();
 let checkoutUiLoadGeneration = 0;
-let userSplitterIntent = false;
-let userSplitterKeyDown = false;
-let synchronizingSplitters = false;
 const activityExpiryTimers = new Map<string, number>();
 const lifecycleCheckout = computed<Checkout | null>(
   () =>
@@ -169,18 +167,6 @@ const lifecycleRepo = computed(
       repo.checkouts.some((checkout) => checkout.id === lifecycle.value?.checkoutId),
     ) ?? null,
 );
-const paletteCommands = computed(() => {
-  const checkout = activeCheckout.value;
-  const document = checkout ? documents.value[checkout.id] : undefined;
-  return getPaletteCommands({
-    hasCheckout: Boolean(checkout),
-    isMissing: checkout?.isMissing ?? false,
-    isGit: activeRepo.value?.kind === "git",
-    hasSelectedFile: Boolean(document),
-    zedAvailable: editorAvailability.value.zed,
-    neovimAvailable: editorAvailability.value.neovim,
-  });
-});
 const activeDocument = computed(() => {
   const checkout = activeCheckout.value;
   const document = checkout ? documents.value[checkout.id] : undefined;
@@ -190,6 +176,16 @@ const activeDocument = computed(() => {
 const documentPaneDocument = computed(() => activeDocument.value ?? emptyDocument);
 const activeMainView = computed(() => {
   return resolveMainView(mainViews.value, activeCheckout.value?.id ?? null, activeDocument.value);
+});
+/** What the titlebar names: the active session of the active checkout, or its last one. */
+const activeItem = computed(() => {
+  const checkout = activeCheckout.value;
+  if (!checkout) return null;
+  return (
+    checkout.sessions.find((session) => session.id === workspace.value.activeSessionId) ??
+    checkout.sessions.at(-1) ??
+    null
+  );
 });
 
 function openFileDocument(selection: { checkoutId: string; path: string }) {
@@ -329,90 +325,11 @@ async function flushUiStateWrites() {
   await uiStateWriteQueue;
 }
 
-function toggleFocusMode() {
-  appLayout.value = toggleFocusLayout(appLayout.value);
-  flushAfterLayoutInteraction();
-}
-
-function toggleLayoutVisibility(key: "sidebarVisible" | "inspectorVisible") {
-  appLayout.value = toggleLayoutVisibilityState(appLayout.value, key);
-  flushAfterLayoutInteraction();
-}
-
-function toggleTransparency() {
-  appLayout.value = { ...appLayout.value, reduceTransparency: !appLayout.value.reduceTransparency };
-  flushAfterLayoutInteraction();
-}
-
-function flushAfterLayoutInteraction() {
-  void nextTick(() => flushUiStateWrites());
-}
-
-function updateCollapsedRepos(repoIds: string[]) {
-  appLayout.value = { ...appLayout.value, collapsedRepoIds: repoIds };
-  flushAfterLayoutInteraction();
-}
-
-function onSplitterDragging(dragging: boolean) {
-  userSplitterIntent = dragging || userSplitterKeyDown;
-  if (!dragging && !userSplitterKeyDown) flushAfterLayoutInteraction();
-}
-
-function onSplitterKeydown(event: KeyboardEvent) {
-  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
-  userSplitterKeyDown = true;
-  userSplitterIntent = true;
-}
-
-function onSplitterKeyup(event: KeyboardEvent) {
-  if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "Home", "End"].includes(event.key)) return;
-  userSplitterKeyDown = false;
-  userSplitterIntent = false;
-  flushAfterLayoutInteraction();
-}
-
-function onPanelCollapse(panel: "sidebar" | "inspector") {
-  if (synchronizingSplitters || !userSplitterIntent) return;
-  const key = panel === "sidebar" ? "sidebarVisible" : "inspectorVisible";
-  if (!appLayout.value[key]) return;
-  appLayout.value = { ...appLayout.value, [key]: false };
-}
-
-function onPanelExpand(panel: "sidebar" | "inspector") {
-  if (synchronizingSplitters || !userSplitterIntent) return;
-  const key = panel === "sidebar" ? "sidebarVisible" : "inspectorVisible";
-  if (appLayout.value[key]) return;
-  appLayout.value = { ...appLayout.value, [key]: true };
-}
-
-function ensureInspectorVisible() {
-  if (appLayout.value.focusSnapshot) {
-    appLayout.value = {
-      ...appLayout.value,
-      ...appLayout.value.focusSnapshot,
-      focusSnapshot: null,
-      inspectorVisible: true,
-    };
-  } else if (!appLayout.value.inspectorVisible) {
-    appLayout.value = { ...appLayout.value, inspectorVisible: true };
-  }
-}
-
 function onSplitterLayout(sizes: number[]) {
-  if (synchronizingSplitters || !appLayoutReady.value || !userSplitterIntent || sizes.length < 3) return;
+  if (!appLayoutReady.value || sizes.length < 3) return;
   let next = appLayout.value;
   if (sizes[0] > 0) next = resizeLayoutPanel(next, "sidebar", sizes[0]);
   if (!isNarrow.value && sizes[2] > 0) next = resizeLayoutPanel(next, "inspector", sizes[2]);
-  if (next.focusSnapshot) {
-    next = {
-      ...next,
-      focusSnapshot: {
-        ...next.focusSnapshot,
-        sidebarWidth: next.sidebarWidth,
-        inspectorWidth: next.inspectorWidth,
-      },
-    };
-  }
   if (next.sidebarWidth !== appLayout.value.sidebarWidth || next.inspectorWidth !== appLayout.value.inspectorWidth) {
     appLayout.value = next;
   }
@@ -420,62 +337,24 @@ function onSplitterLayout(sizes: number[]) {
 
 function resetPanelWidth(panel: "sidebar" | "inspector") {
   const width = panel === "sidebar" ? DEFAULT_APP_LAYOUT.sidebarWidth : DEFAULT_APP_LAYOUT.inspectorWidth;
-  withSplitterSynchronization(() => (panel === "sidebar" ? sidebarPanel.value : inspectorPanel.value)?.resize(width));
+  (panel === "sidebar" ? sidebarPanel.value : inspectorPanel.value)?.resize(width);
   appLayout.value = resizeLayoutPanel(appLayout.value, panel, width);
-  if (appLayout.value.focusSnapshot) {
-    appLayout.value = {
-      ...appLayout.value,
-      focusSnapshot: { ...appLayout.value.focusSnapshot, [`${panel}Width`]: width },
-    };
-  }
-  flushAfterLayoutInteraction();
-}
-
-function resetLayout() {
-  appLayout.value = { ...DEFAULT_APP_LAYOUT };
-  synchronizeSplitterPanels();
-  flushAfterLayoutInteraction();
-}
-
-function withSplitterSynchronization(action: () => void) {
-  const wasSynchronizing = synchronizingSplitters;
-  synchronizingSplitters = true;
-  try {
-    action();
-  } finally {
-    synchronizingSplitters = wasSynchronizing;
-  }
-}
-
-function synchronizeSplitterPanels() {
-  withSplitterSynchronization(() => {
-    if (appLayout.value.sidebarVisible) {
-      sidebarPanel.value?.expand();
-      sidebarPanel.value?.resize(appLayout.value.sidebarWidth);
-    } else sidebarPanel.value?.collapse();
-    if (appLayout.value.inspectorVisible && !isNarrow.value) {
-      inspectorPanel.value?.expand();
-      inspectorPanel.value?.resize(appLayout.value.inspectorWidth);
-    } else inspectorPanel.value?.collapse();
-  });
-}
-
-function setMainView(view: "terminal" | "document") {
-  const checkoutId = activeCheckout.value?.id;
-  if (!checkoutId) return;
-  mainViews.value = { ...mainViews.value, [checkoutId]: view };
-  updateCheckoutUiState(checkoutId, { mainView: view });
-  if (view === "terminal") void nextTick(() => sessionPane.value?.focusActiveTerminal());
 }
 
 watch(appLayout, () => scheduleAppLayoutSave(), { deep: true });
 
+// A narrow window cannot hold the main panel and the inspector side by side, so the inspector
+// floats over it as a drawer. Its width is left alone, to be restored when space returns.
 watch(
-  [() => appLayout.value.sidebarVisible, () => appLayout.value.inspectorVisible, isNarrow, appLayoutReady],
+  [isNarrow, appLayoutReady],
   async () => {
     if (!appLayoutReady.value) return;
     await nextTick();
-    synchronizeSplitterPanels();
+    if (isNarrow.value) inspectorPanel.value?.collapse();
+    else {
+      inspectorPanel.value?.expand();
+      inspectorPanel.value?.resize(appLayout.value.inspectorWidth);
+    }
   },
   { immediate: true, flush: "post" },
 );
@@ -522,7 +401,6 @@ watch(
 
 onMounted(async () => {
   window.addEventListener("resize", onViewportResize);
-  window.addEventListener("keydown", onWindowKeydown);
   const currentWindow = getCurrentWindow();
   try {
     unlistenCloseRequested = await currentWindow.onCloseRequested(async (event) => {
@@ -576,7 +454,6 @@ onUnmounted(() => {
   activityListenerDisposed = true;
   unlistenCloseRequested?.();
   window.removeEventListener("resize", onViewportResize);
-  window.removeEventListener("keydown", onWindowKeydown);
   unlistenFileActivity?.();
   for (const timer of activityExpiryTimers.values()) window.clearTimeout(timer);
   activityExpiryTimers.clear();
@@ -611,32 +488,13 @@ function requestWindowClose(currentWindow: ReturnType<typeof getCurrentWindow>):
   return windowClosePromise;
 }
 
-function onWindowKeydown(event: KeyboardEvent) {
-  if (!(event.metaKey || event.ctrlKey)) return;
-  if (event.key.toLowerCase() === "q") {
-    event.preventDefault();
-    void requestWindowClose(getCurrentWindow());
-    return;
-  }
-  if (isLayoutShortcutTarget(event.target)) return;
-  if (event.key === "0" && !event.altKey && !event.shiftKey) {
-    event.preventDefault();
-    toggleLayoutVisibility("sidebarVisible");
-  } else if (event.key === "0" && event.altKey && !event.shiftKey) {
-    event.preventDefault();
-    toggleLayoutVisibility("inspectorVisible");
-  }
+/** Double-clicking the empty part of the title bar zooms the window, as the platform does. */
+function zoomFromTitlebar() {
+  void getCurrentWindow().toggleMaximize().catch(showWindowError);
 }
 
-function isLayoutShortcutTarget(target: EventTarget | null) {
-  if (!(target instanceof HTMLElement)) return false;
-  return (
-    target instanceof HTMLInputElement ||
-    target instanceof HTMLSelectElement ||
-    target instanceof HTMLTextAreaElement ||
-    target.isContentEditable ||
-    Boolean(target.closest(".xterm"))
-  );
+function blurSearchField() {
+  searchField.value?.blur();
 }
 
 function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
@@ -667,6 +525,27 @@ async function requestNvim(checkoutId: string, filePath?: string, position?: Edi
     workspace.value = await persistCheckoutSelection(checkoutId);
   } catch (cause) {
     if (nvimRequest.value?.token === request.token) nvimRequest.value = null;
+    error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+  }
+}
+
+/**
+ * Hands the active document to an external editor. A line is asked for only when there is a
+ * file to place the cursor in, so opening an editor without a document takes no input.
+ */
+async function requestEditor(editor: "zed" | "neovim") {
+  const checkout = activeCheckout.value;
+  if (!checkout || checkout.isMissing) return;
+  const file = activeDocument.value?.checkoutId === checkout.id ? activeDocument.value.path : undefined;
+  const position = file ? promptEditorPosition() : undefined;
+  if (file && !position) return;
+  if (editor === "neovim") {
+    await requestNvim(checkout.id, file, position ?? undefined);
+    return;
+  }
+  try {
+    await openInZed(checkout.id, file, position?.line, position?.column);
+  } catch (cause) {
     error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
   }
 }
@@ -728,10 +607,6 @@ function promptEditorPosition(): EditorPosition | null {
   return position;
 }
 
-function requestInspector(action: "open-file" | "open-changes") {
-  inspectorCommand.value = { action, token: ++inspectorCommandToken };
-}
-
 function updateSessionStatus(sessionId: string, status: TerminalSessionStatus | null) {
   if (status) sessionRuntimeStatuses.value[sessionId] = status;
   else delete sessionRuntimeStatuses.value[sessionId];
@@ -739,78 +614,6 @@ function updateSessionStatus(sessionId: string, status: TerminalSessionStatus | 
 
 async function closeTerminalSession(sessionId: string) {
   await sessionPane.value?.requestClose(sessionId);
-}
-
-async function runPaletteCommand(command: PaletteCommandId) {
-  const checkout = activeCheckout.value;
-  switch (command) {
-    case "open-directory":
-      await chooseFolder();
-      break;
-    case "toggle-focus":
-      toggleFocusMode();
-      break;
-    case "toggle-sidebar":
-      toggleLayoutVisibility("sidebarVisible");
-      break;
-    case "toggle-inspector":
-      toggleLayoutVisibility("inspectorVisible");
-      break;
-    case "toggle-transparency":
-      toggleTransparency();
-      break;
-    case "reset-layout":
-      resetLayout();
-      break;
-    case "new-worktree":
-      if (activeRepo.value?.kind === "git") {
-        const primary = activeRepo.value.checkouts.find((item) => item.isPrimary && !item.isMissing);
-        if (primary) openWorktreeDialog("create", primary.id);
-      }
-      break;
-    case "new-terminal":
-      if (checkout && !checkout.isMissing) await requestShell(checkout.id);
-      break;
-    case "open-file":
-      if (checkout && !checkout.isMissing) {
-        ensureInspectorVisible();
-        requestInspector("open-file");
-      }
-      break;
-    case "open-changes":
-      if (checkout && activeRepo.value?.kind === "git" && !checkout.isMissing) {
-        ensureInspectorVisible();
-        requestInspector("open-changes");
-      }
-      break;
-    case "open-preview":
-      if (activeDocument.value) {
-        const mode = isMarkdownPath(activeDocument.value.path) ? "view" : "code";
-        setDocumentMode(mode);
-        setMainView("document");
-      }
-      break;
-    case "open-zed":
-      if (checkout && !checkout.isMissing) {
-        const file = activeDocument.value?.checkoutId === checkout.id ? activeDocument.value.path : undefined;
-        const position = file ? promptEditorPosition() : undefined;
-        if (file && !position) break;
-        try {
-          await openInZed(checkout.id, file, position?.line, position?.column);
-        } catch (cause) {
-          error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
-        }
-      }
-      break;
-    case "open-neovim":
-      if (checkout && !checkout.isMissing) {
-        const file = activeDocument.value?.checkoutId === checkout.id ? activeDocument.value.path : undefined;
-        const position = file ? promptEditorPosition() : undefined;
-        if (file && !position) break;
-        await requestNvim(checkout.id, file, position ?? undefined);
-      }
-      break;
-  }
 }
 
 function applyWorkspace(next: WorkspaceState) {
@@ -860,95 +663,92 @@ async function closeCheckout(checkoutId: string) {
 <template>
   <div
     v-if="appLayoutReady"
-    class="app-shell relative flex h-full min-w-[900px] flex-col text-zinc-100"
-    :class="{ 'reduce-transparency': appLayout.reduceTransparency }"
+    class="app-shell relative flex h-full min-w-[900px] flex-col"
     :style="{ '--inspector-width': `${appLayout.inspectorWidth}px` }"
   >
-    <header class="window-header flex h-12 shrink-0 items-center border-b text-zinc-300">
-      <div class="flex h-full shrink-0 items-center pl-[82px] pr-3">
-        <button
-          type="button"
-          data-testid="command-field"
-          aria-label="Search files and commands"
-          class="window-search flex h-8 w-[min(300px,34vw)] items-center gap-2 rounded-md border px-2.5 text-left text-xs text-zinc-400 hover:text-zinc-200"
-          @click="paletteRequestToken += 1"
-        >
-          <span aria-hidden="true" class="text-sm">⌕</span>
-          <span class="min-w-0 flex-1 truncate">Search files and commands…</span>
-          <kbd class="shrink-0 rounded border border-white/10 px-1 py-0.5 font-sans text-[10px] text-zinc-500">⌘K</kbd>
-        </button>
-      </div>
-      <!-- Keep native dragging on this empty spacer only, clear of controls and visual effects. -->
-      <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-4 flex-1" />
+    <header class="window-header flex h-12 shrink-0 items-center gap-4 border-b pl-[78px] pr-4">
+      <!-- The native traffic lights own the first 78px; the inset leaves them room to breathe. -->
+      <input
+        ref="searchField"
+        type="search"
+        data-testid="search-field"
+        aria-label="Search files and commands"
+        placeholder="Search..."
+        class="window-search h-7 w-[min(300px,34vw)] shrink-0 appearance-none rounded border border-transparent px-2.5 text-xs placeholder:text-(--marvis-text-faint)"
+        @keydown.esc="blurSearchField"
+      />
+      <!-- Keep native dragging and double-click zoom on this empty spacer, clear of controls. -->
+      <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-4 flex-1" @dblclick="zoomFromTitlebar" />
       <nav
         aria-label="Repository location"
-        class="window-breadcrumb flex h-full min-w-0 max-w-[42%] shrink-0 items-center gap-2 pr-4 text-xs"
+        class="window-breadcrumb flex h-full min-w-0 shrink items-center gap-1.5 text-xs"
       >
-        <button
-          v-if="activeCheckout"
-          type="button"
-          title="Toggle navigation sidebar"
-          class="max-w-40 truncate text-zinc-300 hover:text-white"
-          @click="toggleLayoutVisibility('sidebarVisible')"
-        >
-          {{ activeRepo?.name ?? activeCheckout.path.split(/[\\/]/).at(-1) }}
-        </button>
-        <template v-if="activeCheckout && activeRepo?.kind === 'git'">
-          <span aria-hidden="true" class="text-zinc-600">/</span>
-          <span class="max-w-32 truncate text-zinc-500">{{ activeCheckout.branch || "Detached" }}</span>
-        </template>
         <template v-if="activeCheckout">
-          <span aria-hidden="true" class="text-zinc-600">/</span>
-          <template v-if="activeDocument">
-            <button
-              v-if="activeMainView === 'terminal'"
-              type="button"
-              data-testid="document-breadcrumb"
-              class="max-w-48 truncate text-zinc-500 hover:text-zinc-200"
-              :title="activeDocument.path"
-              @click="setMainView('document')"
-            >
-              {{ activeDocument.path.split(/[\\/]/).at(-1) }}
-            </button>
-            <span v-else class="max-w-48 truncate text-zinc-200" :title="activeDocument.path">
-              {{ activeDocument.path.split(/[\\/]/).at(-1) }}
+          <span data-testid="repo-crumb" class="max-w-40 truncate text-(--marvis-text)">
+            {{ activeRepo?.name ?? activeCheckout.path.split(/[\\/]/).at(-1) }}
+          </span>
+          <template v-if="activeRepo?.kind === 'git'">
+            <span aria-hidden="true" class="text-(--marvis-text-faint)">/</span>
+            <GitForkIcon class="icon-xs shrink-0" aria-hidden="true" />
+            <span class="max-w-32 truncate text-(--marvis-text-secondary)">
+              {{ activeCheckout.branch || "Detached" }}
             </span>
-            <span aria-hidden="true" class="text-zinc-600">/</span>
-            <button
-              v-if="activeMainView === 'document'"
-              type="button"
-              data-testid="terminal-breadcrumb"
-              class="text-zinc-500 hover:text-zinc-200"
-              @click="setMainView('terminal')"
-            >
-              Terminal
-            </button>
-            <span v-else class="text-zinc-200">Terminal</span>
           </template>
-          <span v-else class="text-zinc-200">Terminal</span>
+          <span aria-hidden="true" class="text-(--marvis-text-faint)">/</span>
+          <PopoverRoot>
+            <PopoverTrigger
+              data-testid="item-crumb"
+              class="flex min-w-0 items-center gap-1 text-(--marvis-text)"
+              :title="activeItem?.name"
+            >
+              <span class="truncate">{{ activeItem?.name ?? "Terminal" }}</span>
+              <ChevronDownIcon class="icon-xs shrink-0" aria-hidden="true" />
+            </PopoverTrigger>
+            <PopoverContent
+              side="bottom"
+              align="end"
+              :side-offset="4"
+              class="surface-popover flex min-w-40 flex-col rounded p-1 text-xs text-(--marvis-text)"
+            >
+              <button
+                v-for="session in activeCheckout.sessions"
+                :key="session.id"
+                type="button"
+                class="rounded px-2 py-1 text-left hover:bg-(--marvis-bg-2)"
+                @click="activateTerminalSession(session.id)"
+              >
+                {{ session.name }}
+              </button>
+              <span v-if="!activeCheckout.sessions.length" class="px-2 py-1 text-(--marvis-text-faint)">
+                No open terminals
+              </span>
+            </PopoverContent>
+          </PopoverRoot>
         </template>
       </nav>
+      <button
+        type="button"
+        aria-label="Settings"
+        data-testid="settings-button"
+        class="shrink-0 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+      >
+        <SettingsIcon class="icon-xs" aria-hidden="true" />
+      </button>
     </header>
     <SplitterGroup direction="horizontal" class="app-splitter flex min-h-0 flex-1" @layout="onSplitterLayout">
       <SplitterPanel
         id="navigation-panel"
         ref="sidebarPanel"
-        :default-size="appLayout.sidebarVisible ? appLayout.sidebarWidth : 0"
-        :min-size="220"
-        :max-size="380"
-        :collapsed-size="0"
-        collapsible
+        :default-size="appLayout.sidebarWidth"
+        :min-size="SIDEBAR_WIDTH_LIMITS.min"
+        :max-size="SIDEBAR_WIDTH_LIMITS.max"
         size-unit="px"
         class="min-h-0 shrink-0"
-        @collapse="onPanelCollapse('sidebar')"
-        @expand="onPanelExpand('sidebar')"
       >
         <Sidebar
-          v-show="appLayout.sidebarVisible"
           :repos="workspace.repos"
           :active-checkout-id="workspace.activeCheckoutId"
           :active-session-id="workspace.activeSessionId"
-          :collapsed-repo-ids="appLayout.collapsedRepoIds"
           :activity-by-checkout="activityByCheckout"
           :session-runtime-statuses="sessionRuntimeStatuses"
           :is-opening="isOpening"
@@ -961,18 +761,19 @@ async function closeCheckout(checkoutId: string) {
           @new-terminal="requestShell"
           @remove-worktree="openWorktreeDialog('remove', $event)"
           @close-session="closeTerminalSession"
-          @update-collapsed-repos="updateCollapsedRepos"
         />
       </SplitterPanel>
       <SplitterResizeHandle
         id="navigation-resize-handle"
         aria-label="Resize navigation sidebar"
         class="splitter-handle"
-        @dragging="onSplitterDragging"
-        @keydown.capture="onSplitterKeydown"
-        @keyup.capture="onSplitterKeyup"
         @dblclick.stop="resetPanelWidth('sidebar')"
-      />
+      >
+        <div
+          aria-hidden="true"
+          class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-(--marvis-text-faint)"
+        />
+      </SplitterResizeHandle>
       <SplitterPanel id="main-panel" :min-size="420" size-unit="px" class="main-column min-h-0 min-w-0 flex-1">
         <div class="relative min-h-0 flex-1" :aria-busy="!checkoutUiReady">
           <section
@@ -1020,7 +821,7 @@ async function closeCheckout(checkoutId: string) {
               @reading-position-changed="updateDocumentReadingPosition(documentPaneDocument.checkoutId, $event)"
               @diff-position-changed="updateDiffReadingPosition(documentPaneDocument.checkoutId, $event)"
               @open-markdown-link="openFileDocument({ checkoutId: documentPaneDocument.checkoutId, path: $event })"
-              @open-in-zed="runPaletteCommand('open-zed')"
+              @open-in-zed="requestEditor('zed')"
             />
           </section>
         </div>
@@ -1029,26 +830,25 @@ async function closeCheckout(checkoutId: string) {
         id="inspector-resize-handle"
         aria-label="Resize files and changes inspector"
         class="splitter-handle"
-        @dragging="onSplitterDragging"
-        @keydown.capture="onSplitterKeydown"
-        @keyup.capture="onSplitterKeyup"
         @dblclick.stop="resetPanelWidth('inspector')"
-      />
+      >
+        <div
+          aria-hidden="true"
+          class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-(--marvis-text-faint)"
+        />
+      </SplitterResizeHandle>
       <SplitterPanel
         id="inspector-panel"
         ref="inspectorPanel"
-        :default-size="appLayout.inspectorVisible && !isNarrow ? appLayout.inspectorWidth : 0"
-        :min-size="260"
-        :max-size="560"
+        :default-size="isNarrow ? 0 : appLayout.inspectorWidth"
+        :min-size="INSPECTOR_WIDTH_LIMITS.min"
+        :max-size="INSPECTOR_WIDTH_LIMITS.max"
         :collapsed-size="0"
         collapsible
         size-unit="px"
         class="inspector-splitter-panel relative min-h-0 shrink-0 overflow-visible"
-        @collapse="onPanelCollapse('inspector')"
-        @expand="onPanelExpand('inspector')"
       >
         <InspectorPane
-          v-show="appLayout.inspectorVisible"
           :class="{ 'right-inspector-drawer': isNarrow }"
           :checkout="checkoutUiReady ? activeCheckout : null"
           :repo="checkoutUiReady ? activeRepo : null"
@@ -1056,7 +856,6 @@ async function closeCheckout(checkoutId: string) {
           :review="review"
           :agent-sessions="agent.sessions"
           :agent-target-id="agent.targetId"
-          :command-request="inspectorCommand"
           :saved-state="activeCheckout ? checkoutUiStates[activeCheckout.id] : null"
           @open-file="openFileDocument"
           @open-change="openChangedDocument"
@@ -1076,14 +875,6 @@ async function closeCheckout(checkoutId: string) {
       @request-shell="requestShell"
       @warning="reportWarning"
     />
-    <CommandPalette :commands="paletteCommands" :open-request-token="paletteRequestToken" @select="runPaletteCommand" />
-    <div
-      v-if="error"
-      role="alert"
-      class="absolute bottom-12 left-1/2 z-50 max-w-[min(36rem,calc(100vw-2rem))] -translate-x-1/2 rounded-lg border border-red-400/20 bg-[#242126] px-4 py-3 text-sm text-red-200 shadow-xl"
-    >
-      {{ error }}
-    </div>
   </div>
   <div v-else class="h-full bg-transparent p-5 text-sm text-zinc-400" role="status">Restoring workspace layout…</div>
 </template>

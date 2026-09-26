@@ -5,6 +5,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, onMounted } from "vue";
 import { DEFAULT_APP_LAYOUT, DEFAULT_CHECKOUT_UI_STATE } from "./domain/ui-state";
+import type { AppLayoutState } from "./domain/ui-state";
 import type { ReviewNote } from "./domain/review";
 import type { Checkout, Repo, Session, WorkspaceState } from "./domain/workspace";
 
@@ -17,6 +18,7 @@ const mocks = vi.hoisted(() => ({
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
   getEditorAvailability: vi.fn(),
+  toggleMaximize: vi.fn(),
   onCloseRequested: null as ((event: { preventDefault(): void }) => Promise<void>) | null,
   currentWindow: null as {
     onCloseRequested: (handler: (event: { preventDefault(): void }) => Promise<void>) => Promise<() => void>;
@@ -64,20 +66,38 @@ vi.mock("reka-ui", async () => {
         expand: () => emit("expand"),
         resize: vi.fn((size: number) => mocks.onProgrammaticPanelResize?.(props.id ?? "", size)),
       });
-      return () => h("div", { id: props.id }, slots.default?.());
+      return () => h("div", { id: props.id, "data-collapsed": String(emit.length > 0) }, slots.default?.());
     },
   });
   const SplitterResizeHandle = defineComponent({
     name: "SplitterResizeHandle",
     emits: ["dragging"],
-    setup(_, { attrs }) {
-      return () => h("div", { ...attrs, tabindex: 0 });
+    setup(_, { attrs, slots }) {
+      return () => h("div", { ...attrs, tabindex: 0 }, slots.default?.());
     },
   });
-  return { SplitterGroup, SplitterPanel, SplitterResizeHandle };
+  // The titlebar's item crumb opens a popover; the stub always renders its content so the
+  // sibling items can be reached without driving the open state.
+  const passThrough = (name: string) =>
+    defineComponent({
+      name,
+      setup(_, { attrs, slots }) {
+        return () => h("div", attrs, slots.default?.());
+      },
+    });
+  return {
+    SplitterGroup,
+    SplitterPanel,
+    SplitterResizeHandle,
+    PopoverRoot: passThrough("PopoverRoot"),
+    PopoverTrigger: passThrough("PopoverTrigger"),
+    PopoverContent: passThrough("PopoverContent"),
+  };
 });
 
-vi.mock("@tauri-apps/api/window", () => ({ getCurrentWindow: () => mocks.currentWindow }));
+vi.mock("@tauri-apps/api/window", () => ({
+  getCurrentWindow: () => ({ ...mocks.currentWindow, toggleMaximize: mocks.toggleMaximize }),
+}));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./lib/ipc", () => ({
@@ -199,7 +219,7 @@ vi.mock("./presentation/agent-sessions", async () => {
   };
 });
 
-import { SplitterGroup, SplitterPanel, SplitterResizeHandle } from "reka-ui";
+import { SplitterGroup, SplitterResizeHandle } from "reka-ui";
 import App from "./App.vue";
 
 const SidebarStub = defineComponent({
@@ -283,12 +303,17 @@ const DocumentPaneStub = defineComponent({
 
 const EmptyStub = defineComponent({ setup: () => () => h("div") });
 
+function session(id: string, name: string, checkoutId = "checkout:one"): Session {
+  return { id, type: "shell", checkoutId, name, createdAt: "now", status: "active" };
+}
+
 function checkout(id: string, sessions: Session[] = []): Checkout {
   return {
     id,
     repoId: "repo:shared",
     path: `/${id}`,
     canonicalPath: `/${id}`,
+    branch: "main",
     isPrimary: id === "checkout:one",
     changedFiles: 0,
     isMissing: false,
@@ -310,10 +335,15 @@ function workspaceWith(...checkouts: Checkout[]): WorkspaceState {
   return { repos: [repo], activeCheckoutId: checkouts[0]?.id ?? null, activeSessionId: null };
 }
 
-async function mountApp(workspace: WorkspaceState, layout = { ...DEFAULT_APP_LAYOUT }) {
+async function mountApp(
+  workspace: WorkspaceState,
+  layout: AppLayoutState = { ...DEFAULT_APP_LAYOUT },
+  options: { attachTo?: HTMLElement } = {},
+) {
   mocks.initialWorkspace = workspace;
   mocks.loadAppLayout.mockResolvedValue(layout);
   const wrapper = mount(App, {
+    attachTo: options.attachTo,
     global: {
       stubs: {
         Sidebar: SidebarStub,
@@ -330,28 +360,6 @@ async function mountApp(workspace: WorkspaceState, layout = { ...DEFAULT_APP_LAY
   mocks.saveAppLayout.mockClear();
   mocks.saveCheckoutUiState.mockClear();
   return wrapper;
-}
-
-function dispatchShortcut(key: string, options: { altKey?: boolean; ctrlKey?: boolean } = {}) {
-  const event = new KeyboardEvent("keydown", {
-    key,
-    metaKey: !options.ctrlKey,
-    ctrlKey: options.ctrlKey ?? false,
-    altKey: options.altKey ?? false,
-    bubbles: true,
-    cancelable: true,
-  });
-  window.dispatchEvent(event);
-  return event;
-}
-
-async function runPaletteCommand(wrapper: ReturnType<typeof mount>, label: string) {
-  await wrapper.get('[data-testid="command-field"]').trigger("click");
-  await flushPromises();
-  const command = wrapper.findAll('button[role="option"]').find((button) => button.text().includes(label));
-  expect(command, `palette command ${label} should be available`).toBeDefined();
-  await command!.trigger("click");
-  await flushPromises();
 }
 
 describe("App UI integration", () => {
@@ -380,6 +388,7 @@ describe("App UI integration", () => {
     mocks.saveAppLayout.mockResolvedValue(undefined);
     mocks.saveCheckoutUiState.mockResolvedValue(undefined);
     mocks.getEditorAvailability.mockResolvedValue({ zed: false, neovim: false });
+    mocks.toggleMaximize.mockResolvedValue(undefined);
     mocks.currentWindow = {
       onCloseRequested: vi.fn(async (handler) => {
         mocks.onCloseRequested = handler;
@@ -424,6 +433,216 @@ describe("App UI integration", () => {
       updatedAt,
     };
   }
+
+  describe("titlebar", () => {
+    it("shows a real search field and no command palette hint", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      const search = wrapper.get('[data-testid="search-field"]');
+      expect(search.element.tagName).toBe("INPUT");
+      expect(search.attributes("aria-label")).toBe("Search files and commands");
+      expect(search.attributes("placeholder")).toBe("Search...");
+      expect(wrapper.find("kbd").exists()).toBe(false);
+      expect(wrapper.findComponent({ name: "CommandPalette" }).exists()).toBe(false);
+      wrapper.unmount();
+    });
+
+    it("takes focus and gives it back on Escape", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), undefined, {
+        attachTo: document.body,
+      });
+      const search = wrapper.get('[data-testid="search-field"]').element as HTMLInputElement;
+
+      search.focus();
+      expect(document.activeElement).toBe(search);
+      await search.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+
+      expect(document.activeElement).not.toBe(search);
+      wrapper.unmount();
+    });
+
+    it("leaves an empty spacer for the window drag and zooms it on double click", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      const spacer = wrapper.get("[data-tauri-drag-region]");
+      expect(spacer.text()).toBe("");
+      expect(spacer.attributes("aria-hidden")).toBe("true");
+      await spacer.trigger("dblclick");
+
+      expect(mocks.toggleMaximize).toHaveBeenCalledOnce();
+      wrapper.unmount();
+    });
+
+    it("derives the crumbs from the active checkout, branch and session", async () => {
+      const wrapper = await mountApp(
+        workspaceWith(
+          checkout("checkout:one", [session("session:one", "Terminal 1"), session("session:two", "Neovim")]),
+        ),
+      );
+
+      expect(wrapper.get('[data-testid="repo-crumb"]').text()).toBe("shared");
+      expect(wrapper.get("nav").text()).toContain("main");
+      // No session is selected yet, so the titlebar names the last one of the workdir.
+      expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("Neovim");
+      wrapper.unmount();
+    });
+
+    it("opens the sibling terminals of the workdir from the last crumb", async () => {
+      const wrapper = await mountApp(
+        workspaceWith(
+          checkout("checkout:one", [session("session:one", "Terminal 1"), session("session:two", "Neovim")]),
+          checkout("checkout:two", [session("session:three", "Other", "checkout:two")]),
+        ),
+      );
+
+      const siblings = wrapper.findAll(".surface-popover button");
+      expect(siblings.map((button) => button.text())).toEqual(["Terminal 1", "Neovim"]);
+
+      await siblings[0]!.trigger("click");
+      await flushPromises();
+
+      expect(mocks.workspaceRef?.value.activeSessionId).toBe("session:one");
+      expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("Terminal 1");
+      wrapper.unmount();
+    });
+
+    it("keeps the settings gear without an action behind it", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      const settings = wrapper.get('[data-testid="settings-button"]');
+      expect(settings.attributes("aria-label")).toBe("Settings");
+      expect(settings.find("svg").exists()).toBe(true);
+      wrapper.unmount();
+    });
+
+    it("renders no error banner", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+      wrapper.unmount();
+    });
+  });
+
+  describe("layout", () => {
+    it("starts the panels at the marvis default widths within their clamps", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      const panels = wrapper.findAll("#navigation-panel, #inspector-panel");
+
+      expect(panels[0]!.attributes()).toMatchObject({ "default-size": "240", "min-size": "240" });
+      expect(panels[1]!.attributes()).toMatchObject({
+        "default-size": "280",
+        "min-size": "200",
+        "max-size": "480",
+      });
+      expect(wrapper.get("#main-panel").attributes("min-size")).toBe("420");
+      wrapper.unmount();
+    });
+
+    it("persists the widths a drag reports, in pixels", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      wrapper.getComponent(SplitterGroup).vm.$emit("layout", [310, 750, 340]);
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+
+      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
+        version: 1,
+        sidebarWidth: 310,
+        inspectorWidth: 340,
+      });
+      wrapper.unmount();
+    });
+
+    it("clamps a drag that goes past the supported range", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      wrapper.getComponent(SplitterGroup).vm.$emit("layout", [900, 400, 12]);
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+
+      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
+        version: 1,
+        sidebarWidth: 500,
+        inspectorWidth: 200,
+      });
+      wrapper.unmount();
+    });
+
+    it("keeps the inspector width when the narrow drawer reports a collapsed panel", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
+        version: 1,
+        sidebarWidth: 345,
+        inspectorWidth: 450,
+      });
+      const group = wrapper.getComponent(SplitterGroup);
+      const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
+
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+      expect(inspectorPanel.emitted("collapse")).toBeTruthy();
+
+      group.vm.$emit("layout", [400, 500, 0]);
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+
+      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
+        version: 1,
+        sidebarWidth: 400,
+        inspectorWidth: 450,
+      });
+      wrapper.unmount();
+    });
+
+    it("lets double-click on a handle reset just that panel", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
+        version: 1,
+        sidebarWidth: 345,
+        inspectorWidth: 450,
+      });
+      const resizeCalls = vi.fn();
+      mocks.onProgrammaticPanelResize = resizeCalls;
+
+      const handles = wrapper.findAllComponents(SplitterResizeHandle);
+      expect(handles[0]!.find(".rounded-full").exists()).toBe(true);
+      await handles[0]!.trigger("dblclick");
+      await flushPromises();
+
+      expect(resizeCalls).toHaveBeenCalledWith("navigation-panel", DEFAULT_APP_LAYOUT.sidebarWidth);
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
+        version: 1,
+        sidebarWidth: DEFAULT_APP_LAYOUT.sidebarWidth,
+        inspectorWidth: 450,
+      });
+      wrapper.unmount();
+    });
+
+    it("gives the inspector its full width back when space returns", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
+        version: 1,
+        sidebarWidth: 300,
+        inspectorWidth: 300,
+      });
+      const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
+      const resizeCalls = vi.fn();
+      mocks.onProgrammaticPanelResize = resizeCalls;
+
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+      expect(inspectorPanel.emitted("collapse")).toBeTruthy();
+
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 1400 });
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+
+      expect(inspectorPanel.emitted("expand")).toBeTruthy();
+      expect(resizeCalls).toHaveBeenCalledWith("inspector-panel", 300);
+      wrapper.unmount();
+    });
+  });
 
   it("dispatches the review to the chosen agent session as one round", async () => {
     mocks.gitStatus = { branch: "feature", defaultBranch: "main" };
@@ -500,229 +719,15 @@ describe("App UI integration", () => {
     wrapper.unmount();
   });
 
-  it("toggles the sidebar and inspector with shortcuts and ignores typing targets", async () => {
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
-    expect(dispatchShortcut("0").defaultPrevented).toBe(true);
-    await vi.advanceTimersByTimeAsync(300);
-    await flushPromises();
-    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(expect.objectContaining({ sidebarVisible: false }));
+  it("switches the main view from the inspector and back from a crumb, without unmounting the terminal", async () => {
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
 
-    expect(dispatchShortcut("0", { altKey: true, ctrlKey: true }).defaultPrevented).toBe(true);
-    await vi.advanceTimersByTimeAsync(300);
-    await flushPromises();
-    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(expect.objectContaining({ inspectorVisible: false }));
-
-    mocks.saveAppLayout.mockClear();
-    const input = document.createElement("input");
-    const terminal = document.createElement("div");
-    const terminalInput = document.createElement("textarea");
-    terminal.className = "xterm";
-    terminal.append(terminalInput);
-    document.body.append(input, terminal);
-    const inputShortcut = new KeyboardEvent("keydown", { key: "0", metaKey: true, bubbles: true, cancelable: true });
-    const terminalShortcut = new KeyboardEvent("keydown", {
-      key: "0",
-      metaKey: true,
-      altKey: true,
-      bubbles: true,
-      cancelable: true,
-    });
-    input.dispatchEvent(inputShortcut);
-    terminalInput.dispatchEvent(terminalShortcut);
-    await vi.advanceTimersByTimeAsync(300);
-    await flushPromises();
-    expect(inputShortcut.defaultPrevented).toBe(false);
-    expect(terminalShortcut.defaultPrevented).toBe(false);
-    expect(mocks.saveAppLayout).not.toHaveBeenCalled();
-    input.remove();
-    terminal.remove();
-    wrapper.unmount();
-  });
-
-  it("does not persist synchronized splitter or viewport layouts over preferred widths", async () => {
-    const preferred = { ...DEFAULT_APP_LAYOUT, sidebarWidth: 345, inspectorWidth: 450 };
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), preferred);
-    const group = wrapper.getComponent(SplitterGroup);
-    group.vm.$emit("layout", [220, 680, 260]);
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: 950 });
-    window.dispatchEvent(new Event("resize"));
-    group.vm.$emit("layout", [0, 800, 0]);
-    await vi.advanceTimersByTimeAsync(300);
-    await flushPromises();
-    expect(mocks.saveAppLayout).not.toHaveBeenCalled();
-
-    dispatchShortcut("0", { altKey: true });
-    await flushPromises();
-    dispatchShortcut("0", { altKey: true });
-    await runPaletteCommand(wrapper, "Toggle Focus Mode");
-    await runPaletteCommand(wrapper, "Toggle Focus Mode");
-    await flushPromises();
-    await vi.advanceTimersByTimeAsync(300);
-    await flushPromises();
-    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        sidebarWidth: 345,
-        inspectorWidth: 450,
-        inspectorVisible: true,
-      }),
-    );
-    expect(mocks.sessionPaneMounts).toBe(1);
-    wrapper.unmount();
-  });
-
-  it("keeps both preferred widths while restoring a layout with both panels hidden", async () => {
-    const preferred = {
-      ...DEFAULT_APP_LAYOUT,
-      sidebarWidth: 350,
-      inspectorWidth: 500,
-      sidebarVisible: false,
-      inspectorVisible: false,
-    };
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), preferred);
-    wrapper.getComponent(SplitterGroup).vm.$emit("layout", [0, 900, 0]);
-    Object.defineProperty(window, "innerWidth", { configurable: true, value: 960 });
-    window.dispatchEvent(new Event("resize"));
-    await vi.advanceTimersByTimeAsync(300);
-    await flushPromises();
-    expect(mocks.saveAppLayout).not.toHaveBeenCalled();
-
-    dispatchShortcut("0");
-    dispatchShortcut("0", { altKey: true });
-    await flushPromises();
-    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        sidebarWidth: 350,
-        inspectorWidth: 500,
-        sidebarVisible: true,
-        inspectorVisible: true,
-      }),
-    );
-    wrapper.unmount();
-  });
-
-  it("persists user drag and collapse intent in pixel units and can reopen the panel once", async () => {
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-      ...DEFAULT_APP_LAYOUT,
-      sidebarWidth: 345,
-      inspectorWidth: 420,
-    });
-    const handles = wrapper.findAllComponents(SplitterResizeHandle);
-    const panels = wrapper.findAllComponents(SplitterPanel);
-    const group = wrapper.getComponent(SplitterGroup);
-    handles[0]!.vm.$emit("dragging", true);
-    group.vm.$emit("layout", [0, 600, 350]);
-    panels[0]!.vm.$emit("collapse");
-    handles[0]!.vm.$emit("dragging", false);
-    await flushPromises();
-    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        sidebarVisible: false,
-        sidebarWidth: 345,
-        inspectorWidth: 350,
-      }),
-    );
-
-    dispatchShortcut("0");
-    await flushPromises();
-    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        sidebarVisible: true,
-        sidebarWidth: 345,
-      }),
-    );
-    wrapper.unmount();
-  });
-
-  it("ignores layout events caused by panel synchronization during an active drag", async () => {
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-      ...DEFAULT_APP_LAYOUT,
-      sidebarWidth: 345,
-      inspectorWidth: 420,
-    });
-    const group = wrapper.getComponent(SplitterGroup);
-    const handles = wrapper.findAllComponents(SplitterResizeHandle);
-    const panels = wrapper.findAllComponents(SplitterPanel);
-    mocks.onProgrammaticPanelResize = () => group.vm.$emit("layout", [210, 830, 360]);
-
-    handles[0]!.vm.$emit("dragging", true);
-    panels[0]!.vm.$emit("collapse");
-    await flushPromises();
-    handles[0]!.vm.$emit("dragging", false);
-    await flushPromises();
-
-    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
-      expect.objectContaining({ sidebarVisible: false, sidebarWidth: 345, inspectorWidth: 420 }),
-    );
-    wrapper.unmount();
-  });
-
-  it("lets double-click reset widths persist even though its resize callback is programmatic", async () => {
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-      ...DEFAULT_APP_LAYOUT,
-      sidebarWidth: 345,
-      inspectorWidth: 450,
-    });
-    const handle = wrapper.findAllComponents(SplitterResizeHandle)[0]!;
-    await handle.trigger("dblclick");
-    await flushPromises();
-    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        sidebarWidth: DEFAULT_APP_LAYOUT.sidebarWidth,
-        inspectorWidth: 450,
-      }),
-    );
-    wrapper.unmount();
-  });
-
-  it("provides a global layout reset in the command palette", async () => {
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-      ...DEFAULT_APP_LAYOUT,
-      sidebarWidth: 345,
-      inspectorWidth: 450,
-    });
-    const resizeCalls = vi.fn();
-    mocks.onProgrammaticPanelResize = (panelId, size) => resizeCalls(panelId, size);
-    await runPaletteCommand(wrapper, "Reset Layout");
-    await flushPromises();
-    expect(resizeCalls).toHaveBeenCalledWith("navigation-panel", DEFAULT_APP_LAYOUT.sidebarWidth);
-    expect(resizeCalls).toHaveBeenCalledWith("inspector-panel", DEFAULT_APP_LAYOUT.inspectorWidth);
-    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        sidebarWidth: DEFAULT_APP_LAYOUT.sidebarWidth,
-        inspectorWidth: DEFAULT_APP_LAYOUT.inspectorWidth,
-        sidebarVisible: DEFAULT_APP_LAYOUT.sidebarVisible,
-        inspectorVisible: DEFAULT_APP_LAYOUT.inspectorVisible,
-      }),
-    );
-    wrapper.unmount();
-  });
-
-  it("persists keyboard splitter resizing using Reka's pixel layout values", async () => {
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
-    const handle = wrapper.findAllComponents(SplitterResizeHandle)[0]!;
-    await handle.trigger("keydown", { key: "ArrowRight" });
-    wrapper.getComponent(SplitterGroup).vm.$emit("layout", [310, 750, 340]);
-    await handle.trigger("keyup", { key: "ArrowRight" });
-    await flushPromises();
-    expect(mocks.saveAppLayout).toHaveBeenLastCalledWith(
-      expect.objectContaining({
-        sidebarWidth: 310,
-        inspectorWidth: 340,
-      }),
-    );
-    wrapper.unmount();
-  });
-
-  it("switches between plain view sections from the breadcrumb without unmounting the terminal", async () => {
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
     await wrapper.get('[data-testid="open-file"]').trigger("click");
     await flushPromises();
-    expect(wrapper.find('[role="tablist"]').exists()).toBe(false);
-    expect(wrapper.get("#main-view-terminal").attributes("role")).toBeUndefined();
-    expect(wrapper.get("#main-view-document").attributes("role")).toBeUndefined();
     expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).toBe("none");
     expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
-    expect(wrapper.get('[data-testid="terminal-breadcrumb"]').text()).toBe("Terminal");
+    // The document is not what the titlebar names: the crumb still points at the session.
+    expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("Terminal 1");
 
     await wrapper.get('[data-testid="diff-scroll"]').trigger("click");
     await wrapper.get('[data-testid="document-scroll"]').trigger("click");
@@ -739,27 +744,17 @@ describe("App UI integration", () => {
       }),
     );
 
-    await wrapper.get('[data-testid="terminal-breadcrumb"]').trigger("click");
+    const siblings = wrapper.findAll(".surface-popover button");
+    await siblings[0]!.trigger("click");
+    await flushPromises();
     expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).not.toBe("none");
     expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
-    await wrapper.get('[data-testid="document-breadcrumb"]').trigger("click");
-    expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).toBe("none");
-    expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
-    dispatchShortcut("0");
-    await runPaletteCommand(wrapper, "Toggle Focus Mode");
     expect(mocks.sessionPaneMounts).toBe(1);
     wrapper.unmount();
   });
 
   it("merges explicit terminal activation over deferred restore and ignores an older checkout load", async () => {
-    const session: Session = {
-      id: "session:two",
-      type: "shell",
-      checkoutId: "checkout:two",
-      name: "Terminal",
-      createdAt: "now",
-      status: "active",
-    };
+    const other = session("session:two", "Other", "checkout:two");
     let resolveOne!: (state: unknown) => void;
     let resolveTwo!: (state: unknown) => void;
     mocks.loadCheckoutUiState.mockImplementation(
@@ -769,7 +764,7 @@ describe("App UI integration", () => {
           else resolveTwo = resolve;
         }),
     );
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two", [session])));
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two", [other])));
     await wrapper.get('[data-testid="select-checkout-two"]').trigger("click");
     await flushPromises();
     await wrapper.get('[data-testid="select-session-two"]').trigger("click");
@@ -782,7 +777,7 @@ describe("App UI integration", () => {
       mainView: "document",
     });
     await flushPromises();
-    expect(wrapper.get('[data-testid="document-breadcrumb"]').text()).toBe("two.md");
+    expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("Other");
     expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
     expect(wrapper.get('[data-testid="document-pane"]').text()).toBe("two.md");
 
@@ -801,7 +796,8 @@ describe("App UI integration", () => {
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
     let resolveWrite!: () => void;
     mocks.saveAppLayout.mockImplementation(() => new Promise<void>((resolve) => (resolveWrite = resolve)));
-    dispatchShortcut("0");
+    wrapper.getComponent(SplitterGroup).vm.$emit("layout", [320, 700, 300]);
+    await vi.advanceTimersByTimeAsync(300);
     await flushPromises();
     expect(mocks.saveAppLayout).toHaveBeenCalled();
 
@@ -814,23 +810,6 @@ describe("App UI integration", () => {
     expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
     resolveWrite();
     await Promise.all([closing, duplicateClose]);
-    expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
-    wrapper.unmount();
-  });
-
-  it("routes Command-Q through the same persistence flush", async () => {
-    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
-    let resolveWrite!: () => void;
-    mocks.saveAppLayout.mockImplementation(() => new Promise<void>((resolve) => (resolveWrite = resolve)));
-    dispatchShortcut("0");
-    await flushPromises();
-    const event = new KeyboardEvent("keydown", { key: "q", metaKey: true, cancelable: true });
-    window.dispatchEvent(event);
-    await flushPromises();
-    expect(event.defaultPrevented).toBe(true);
-    expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
-    resolveWrite();
-    await flushPromises();
     expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
     wrapper.unmount();
   });
