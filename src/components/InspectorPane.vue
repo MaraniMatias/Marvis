@@ -68,7 +68,7 @@ let refreshMicrotaskQueued = false;
 let refreshInFlight = false;
 let pendingRefreshCheckoutId: string | null = null;
 
-const TREE_ROW_HEIGHT = 32;
+const TREE_ROW_HEIGHT = 28;
 const TREE_WINDOW_SIZE = 80;
 const TREE_OVERSCAN = 12;
 
@@ -481,11 +481,11 @@ function onTreeScroll(event: Event) {
 </script>
 
 <template>
-  <aside class="app-inspector flex h-full w-full min-w-0 flex-col border-l border-white/8">
+  <aside class="app-inspector flex h-full w-full min-w-0 flex-col border-l">
     <div
       role="tablist"
       aria-label="Inspector sections"
-      class="flex h-10 shrink-0 items-center gap-1 border-b border-white/8 px-2"
+      class="inspector-tablist flex h-10 shrink-0 items-center gap-0.5 border-b px-2"
       @keydown="onInspectorTabKeydown"
     >
       <button
@@ -496,8 +496,7 @@ function onTreeScroll(event: Event) {
         :aria-selected="activeTab === 'files'"
         aria-controls="inspector-panel-files"
         :tabindex="activeTab === 'files' ? 0 : -1"
-        class="rounded px-2 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em]"
-        :class="activeTab === 'files' ? 'bg-white/8 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'"
+        class="inspector-tab rounded-sm px-2.5 py-1 text-[11px] font-medium tracking-wide"
         @click="activeTab = 'files'"
       >
         Files
@@ -510,8 +509,7 @@ function onTreeScroll(event: Event) {
         :aria-selected="activeTab === 'changes'"
         aria-controls="inspector-panel-changes"
         :tabindex="activeTab === 'changes' ? 0 : -1"
-        class="rounded px-2 py-1.5 text-[11px] font-semibold uppercase tracking-[0.12em]"
-        :class="activeTab === 'changes' ? 'bg-white/8 text-zinc-200' : 'text-zinc-500 hover:text-zinc-300'"
+        class="inspector-tab rounded-sm px-2.5 py-1 text-[11px] font-medium tracking-wide"
         @click="activeTab = 'changes'"
       >
         Changes
@@ -525,14 +523,14 @@ function onTreeScroll(event: Event) {
       :tabindex="checkout ? 0 : undefined"
       class="flex min-h-0 flex-1 flex-col"
     >
-      <div v-if="rootState === 'ready'" class="shrink-0 border-b border-white/8 p-1">
+      <div v-if="checkout && !checkout.isMissing" class="shrink-0 border-b p-1.5">
         <input
           ref="searchInput"
           v-model="searchQuery"
           type="search"
           aria-label="Search files"
           placeholder="Search files…"
-          class="h-8 w-full rounded border border-white/8 bg-black/10 px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-400/50"
+          class="inspector-filter h-7 w-full rounded-sm px-2 text-xs outline-none placeholder:text-zinc-600"
         />
       </div>
       <section
@@ -541,16 +539,16 @@ function onTreeScroll(event: Event) {
         aria-label="Checkout files"
         @scroll="onTreeScroll"
       >
-        <p v-if="rootState === 'idle'" class="px-3 py-4 text-sm text-zinc-500">Open a checkout to browse files.</p>
-        <p v-else-if="rootState === 'loading'" role="status" class="px-3 py-4 text-sm text-zinc-400">Loading files…</p>
-        <p v-else-if="rootState === 'missing'" role="status" class="px-3 py-4 text-sm text-amber-300">
+        <p v-if="rootState === 'idle'" class="pane-state text-sm">Open a checkout to browse files.</p>
+        <p v-else-if="rootState === 'loading'" role="status" class="pane-state text-sm">Loading files…</p>
+        <p v-else-if="rootState === 'missing'" role="status" class="pane-state text-sm text-amber-300">
           Checkout is missing.
         </p>
-        <p v-else-if="rootState === 'error'" role="alert" class="px-3 py-4 text-sm text-red-300">{{ rootError }}</p>
+        <p v-else-if="rootState === 'error'" role="alert" class="pane-state text-sm text-red-300">{{ rootError }}</p>
         <p
           v-else-if="directories['.']?.length === 0 && directoryStates['.'] !== 'truncated'"
           role="status"
-          class="px-3 py-4 text-sm text-zinc-500"
+          class="pane-state text-sm"
         >
           This checkout is empty.
         </p>
@@ -597,13 +595,13 @@ function onTreeScroll(event: Event) {
               v-for="(item, index) in visibleTreeWindow.rows"
               :key="item.entry?.path ?? `${item.depth}-${index}-${item.message}`"
               :style="{ paddingLeft: `${4 + item.depth * 12}px` }"
-              class="flex h-8 items-center overflow-hidden"
+              class="flex h-7 items-center overflow-hidden"
             >
               <span v-if="!item.entry" class="truncate py-1 text-xs text-zinc-500">{{ item.message }}</span>
               <button
                 v-else-if="item.entry.kind === 'directory'"
                 type="button"
-                class="flex h-8 w-full min-w-0 items-center truncate rounded px-1 text-left text-xs text-zinc-300 hover:bg-white/6"
+                class="inspector-tree-row flex h-7 w-full min-w-0 items-center truncate rounded-sm px-1 text-left text-xs text-zinc-300"
                 :aria-expanded="expanded.includes(item.entry.path)"
                 @click="toggleDirectory(item.entry)"
               >
@@ -618,7 +616,7 @@ function onTreeScroll(event: Event) {
               <button
                 v-else
                 type="button"
-                class="flex h-8 w-full min-w-0 items-center truncate rounded px-1 text-left text-xs hover:bg-white/6"
+                class="inspector-tree-row flex h-7 w-full min-w-0 items-center truncate rounded-sm px-1 text-left text-xs"
                 :class="selectedPath === item.entry.path ? 'bg-white/8 text-zinc-100' : 'text-zinc-400'"
                 @click="selectFile(item.entry)"
               >

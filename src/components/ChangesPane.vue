@@ -34,6 +34,22 @@ const filteredFiles = computed(() => {
     normalized ? `${file.path} ${file.oldPath ?? ""}`.toLocaleLowerCase().includes(normalized) : true,
   );
 });
+
+function statusClass(status: string): string {
+  switch (status) {
+    case "A":
+      return "changes-status-added";
+    case "M":
+      return "changes-status-modified";
+    case "D":
+      return "changes-status-removed";
+    case "R":
+    case "C":
+      return "changes-status-renamed";
+    default:
+      return "changes-status-default";
+  }
+}
 const visibleFileWindow = computed(() => {
   const rowHeight = 28;
   const windowSize = 80;
@@ -73,7 +89,16 @@ function openChange(path: string) {
 
 <template>
   <div class="flex min-h-0 flex-1 flex-col">
-    <div class="shrink-0 border-b border-white/8 px-2 py-2">
+    <div class="shrink-0 border-b p-1.5">
+      <input
+        v-model="query"
+        type="search"
+        aria-label="Filter changed files"
+        placeholder="Filter changed files…"
+        class="inspector-filter h-7 w-full rounded-sm px-2 text-xs outline-none placeholder:text-zinc-600"
+      />
+    </div>
+    <div class="changes-summary shrink-0 border-b px-2 py-2">
       <p class="truncate text-xs font-medium text-zinc-200">
         {{ status?.branch || (status?.head ? `HEAD ${status.head}` : "Git changes") }}
       </p>
@@ -92,24 +117,13 @@ function openChange(path: string) {
         Live updates unavailable: {{ watchError }}
       </p>
     </div>
-    <div class="shrink-0 border-b border-white/8 p-1">
-      <input
-        v-model="query"
-        type="search"
-        aria-label="Filter changed files"
-        placeholder="Filter changed files…"
-        class="h-8 w-full rounded border border-white/8 bg-black/10 px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-400/50"
-      />
-    </div>
     <div ref="listViewport" class="min-h-0 flex-1 overflow-auto p-1" aria-label="Changed files" @scroll="onScroll">
-      <p v-if="statusState === 'loading'" role="status" class="px-2 py-3 text-xs text-zinc-500">Loading Git status…</p>
-      <p v-else-if="statusState === 'error'" role="alert" class="px-2 py-3 text-xs text-red-300">
+      <p v-if="statusState === 'loading'" role="status" class="pane-state text-xs">Loading Git status…</p>
+      <p v-else-if="statusState === 'error'" role="alert" class="pane-state text-xs text-red-300">
         {{ statusError || gitSnapshot.statusError }}
       </p>
-      <p v-else-if="status?.files.length === 0" role="status" class="px-2 py-3 text-xs text-zinc-500">
-        No changed files.
-      </p>
-      <p v-else-if="filteredFiles.length === 0" role="status" class="px-2 py-3 text-xs text-zinc-500">
+      <p v-else-if="status?.files.length === 0" role="status" class="pane-state text-xs">No changed files.</p>
+      <p v-else-if="filteredFiles.length === 0" role="status" class="pane-state text-xs">
         No changed files match this filter.
       </p>
       <div
@@ -123,11 +137,17 @@ function openChange(path: string) {
           v-for="file in visibleFileWindow.files"
           :key="file.path"
           type="button"
-          class="flex h-7 w-full items-center gap-2 rounded px-2 text-left text-[12px] hover:bg-white/6"
+          class="changes-file-row flex h-7 w-full items-center gap-2 rounded-sm px-2 text-left text-[12px]"
           :class="selectedPath === file.path ? 'bg-white/8 text-zinc-100' : 'text-zinc-400'"
           @click="openChange(file.path)"
         >
-          <span class="w-6 shrink-0 text-[10px] font-semibold text-zinc-500">{{ file.status }}</span>
+          <span
+            class="grid size-4 shrink-0 place-items-center rounded-sm text-[10px] font-semibold"
+            :class="statusClass(file.status)"
+            :title="`Change status: ${file.status}`"
+          >
+            {{ file.status }}
+          </span>
           <span class="truncate font-mono" :title="file.oldPath ? `${file.oldPath} → ${file.path}` : file.path">
             <template v-if="file.oldPath"
               ><span class="text-zinc-600">{{ file.oldPath }} → </span></template

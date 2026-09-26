@@ -39,7 +39,7 @@ const terminal = new Terminal({
   lineHeight: 1.2,
   scrollback: 10000,
   theme: {
-    background: "#10151d",
+    background: "#0b0f15",
     foreground: "#d9e2f0",
     cursor: "#7dd3fc",
     selectionBackground: "#334155",
@@ -214,8 +214,8 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="flex h-full min-h-0 flex-col overflow-hidden rounded-lg border border-white/8 bg-[#10151d]">
-    <div ref="terminalElement" class="min-h-0 flex-1 p-px" aria-label="Shell terminal" />
+  <section class="terminal-surface flex h-full min-h-0 flex-col overflow-hidden">
+    <div ref="terminalElement" class="terminal-host min-h-0 flex-1" aria-label="Shell terminal" />
     <p v-if="error" role="alert" class="m-0 border-t border-red-400/20 px-3 py-2 text-xs text-red-200">
       {{ error }}
     </p>

@@ -203,7 +203,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <section class="flex min-h-0 flex-1 flex-col overflow-hidden p-1" aria-label="File diff">
+  <section class="flex min-h-0 flex-1 flex-col overflow-hidden" aria-label="File diff">
     <p v-if="diffState === 'loading' && !diff" role="status" class="text-xs text-zinc-500">Loading diff…</p>
     <p v-else-if="diffState === 'error'" role="alert" class="text-xs text-red-300">{{ diffError }}</p>
     <p v-else-if="diff?.isBinary" role="status" class="text-xs text-amber-300">
@@ -226,7 +226,7 @@ onUnmounted(() => {
       <p v-if="diffPageError" role="alert" class="mb-2 shrink-0 text-xs text-red-300">{{ diffPageError }}</p>
       <div
         ref="diffViewport"
-        class="diff-viewport min-h-0 flex-1 overflow-auto rounded border border-white/8 font-mono text-[12px]"
+        class="diff-viewport min-h-0 flex-1 overflow-auto border-t border-white/8 font-mono text-[12px]"
         aria-label="Diff contents"
         @scroll="onDiffScroll"
       >
@@ -290,7 +290,7 @@ onUnmounted(() => {
           <section v-for="(hunk, index) in diffHunks" :key="`${path}-${index}`" class="min-w-0">
             <button
               type="button"
-              class="mb-1 w-full truncate rounded bg-white/4 px-2 py-1 text-left font-mono text-[10px] text-zinc-400 hover:bg-white/8"
+              class="mb-1 w-full truncate border-b border-white/6 bg-white/4 px-2 py-1 text-left font-mono text-[10px] text-zinc-400 hover:bg-white/8"
               :aria-expanded="!collapsedHunks.includes(index)"
               @click="toggleHunk(index)"
             >

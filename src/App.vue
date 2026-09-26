@@ -786,13 +786,13 @@ async function closeCheckout(checkoutId: string) {
     :class="{ 'reduce-transparency': appLayout.reduceTransparency }"
     :style="{ '--inspector-width': `${appLayout.inspectorWidth}px` }"
   >
-    <header class="window-header flex h-12 shrink-0 items-center border-b border-white/8 text-zinc-300">
+    <header class="window-header flex h-12 shrink-0 items-center border-b text-zinc-300">
       <div class="flex h-full shrink-0 items-center pl-[82px] pr-3">
         <button
           type="button"
           data-testid="command-field"
           aria-label="Search files and commands"
-          class="flex h-8 w-[min(300px,34vw)] items-center gap-2 rounded-md border border-white/8 bg-black/15 px-2.5 text-left text-xs text-zinc-400 hover:bg-white/6 hover:text-zinc-200"
+          class="window-search flex h-8 w-[min(300px,34vw)] items-center gap-2 rounded-md border px-2.5 text-left text-xs text-zinc-400 hover:text-zinc-200"
           @click="paletteRequestToken += 1"
         >
           <span aria-hidden="true" class="text-sm">⌕</span>
@@ -804,7 +804,7 @@ async function closeCheckout(checkoutId: string) {
       <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-4 flex-1" />
       <nav
         aria-label="Repository location"
-        class="flex h-full min-w-0 max-w-[42%] shrink-0 items-center gap-2 pr-4 text-xs"
+        class="window-breadcrumb flex h-full min-w-0 max-w-[42%] shrink-0 items-center gap-2 pr-4 text-xs"
       >
         <button
           v-if="activeCheckout"

@@ -370,17 +370,17 @@ function onMarkdownLink(event: MouseEvent) {
 
 <template>
   <main class="document-pane flex min-h-0 flex-1 flex-col">
-    <header class="flex h-10 shrink-0 items-center justify-between gap-3 border-b border-white/8 px-2">
+    <header class="document-toolbar flex h-10 shrink-0 items-center justify-between gap-3 border-b px-3">
       <span class="min-w-0 truncate font-mono text-[11px] text-zinc-400" :title="document.path">{{
         document.path
       }}</span>
-      <div role="group" aria-label="Document mode" class="flex shrink-0 items-center gap-1">
+      <div role="group" aria-label="Document mode" class="document-mode-control flex shrink-0 items-center gap-0.5">
         <button
           type="button"
           :disabled="!zedAvailable"
           title="Open in Zed"
           aria-label="Open file in Zed"
-          class="rounded px-2 py-1 text-[11px] text-zinc-500 hover:bg-white/8 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-zinc-500 hover:bg-white/8 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
           @click="$emit('openInZed')"
         >
           ↗ Zed
@@ -395,7 +395,7 @@ function onMarkdownLink(event: MouseEvent) {
               ? 'Wrapping is unavailable for files with more than 5,000 lines'
               : 'Toggle source line wrapping'
           "
-          class="rounded px-2 py-1 text-[11px] text-zinc-500 hover:bg-white/8 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
+          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-zinc-500 hover:bg-white/8 hover:text-zinc-200 disabled:cursor-not-allowed disabled:opacity-40"
           @click="wrapCode = !wrapCode"
         >
           Wrap
@@ -404,7 +404,7 @@ function onMarkdownLink(event: MouseEvent) {
           <button
             type="button"
             :aria-pressed="document.mode === 'diff'"
-            class="rounded px-2.5 py-1 text-[11px]"
+            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
             :class="document.mode === 'diff' ? 'bg-white/10 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
             @click="$emit('updateMode', 'diff')"
           >
@@ -415,7 +415,7 @@ function onMarkdownLink(event: MouseEvent) {
             type="button"
             :aria-pressed="document.mode !== 'diff'"
             :disabled="available === false"
-            class="rounded px-2.5 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-40"
+            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px] disabled:cursor-not-allowed disabled:opacity-40"
             :class="document.mode !== 'diff' ? 'bg-white/10 text-zinc-100' : 'text-zinc-500 hover:text-zinc-300'"
             @click="setFileMode"
           >
@@ -427,7 +427,7 @@ function onMarkdownLink(event: MouseEvent) {
             type="button"
             :aria-pressed="document.mode === 'view'"
             :disabled="document.source === 'change' && available === false"
-            class="rounded px-2.5 py-1 text-[11px]"
+            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
             :class="
               document.mode === 'view'
                 ? 'bg-white/10 text-zinc-100'
@@ -441,7 +441,7 @@ function onMarkdownLink(event: MouseEvent) {
             type="button"
             :aria-pressed="document.mode === 'code'"
             :disabled="document.source === 'change' && available === false"
-            class="rounded px-2.5 py-1 text-[11px]"
+            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
             :class="
               document.mode === 'code'
                 ? 'bg-white/10 text-zinc-100'
@@ -452,7 +452,10 @@ function onMarkdownLink(event: MouseEvent) {
             Code
           </button>
         </template>
-        <span v-else-if="document.mode !== 'diff'" class="rounded bg-white/6 px-2.5 py-1 text-[11px] text-zinc-500">
+        <span
+          v-else-if="document.mode !== 'diff'"
+          class="document-mode-button rounded-sm bg-white/6 px-2.5 py-1 text-[11px] text-zinc-500"
+        >
           Code
         </span>
       </div>
@@ -486,7 +489,7 @@ function onMarkdownLink(event: MouseEvent) {
       aria-label="File contents"
       @scroll="onFileScroll"
     >
-      <p v-if="available === false" role="status" class="p-3 text-sm text-amber-300">
+      <p v-if="available === false" role="status" class="pane-state text-sm text-amber-300">
         {{
           deleted
             ? "This file was deleted; its previous contents are available in the diff."
@@ -496,7 +499,7 @@ function onMarkdownLink(event: MouseEvent) {
       <p
         v-else-if="contentState === 'loading' && !staleContent && contentIdentity !== identity"
         role="status"
-        class="p-3 text-sm text-zinc-400"
+        class="pane-state text-sm"
       >
         Loading file…
       </p>
@@ -511,13 +514,15 @@ function onMarkdownLink(event: MouseEvent) {
         <pre v-else-if="content" class="whitespace-pre-wrap p-3 font-mono text-[13px] leading-5 text-zinc-300">{{
           content
         }}</pre>
-        <p v-else class="p-3 text-sm text-zinc-500">Updating document…</p>
+        <p v-else class="pane-state text-sm">Updating document…</p>
       </template>
-      <p v-else-if="contentState === 'error'" role="alert" class="p-3 text-sm text-amber-300">{{ contentError }}</p>
-      <p v-else-if="contentState === 'ready' && content.length === 0" role="status" class="p-3 text-sm text-zinc-500">
+      <p v-else-if="contentState === 'error'" role="alert" class="pane-state text-sm text-amber-300">
+        {{ contentError }}
+      </p>
+      <p v-else-if="contentState === 'ready' && content.length === 0" role="status" class="pane-state text-sm">
         This file is empty.
       </p>
-      <p v-else-if="highlighting" role="status" class="p-3 text-sm text-zinc-500">Highlighting source…</p>
+      <p v-else-if="highlighting" role="status" class="pane-state text-sm">Highlighting source…</p>
       <template v-else-if="contentState === 'ready' || (contentState === 'loading' && contentIdentity === identity)">
         <template v-if="document.mode === 'view' && isMarkdown">
           <p v-if="markdownPreviewState === 'loading'" role="status" class="px-3 pt-3 text-xs text-zinc-500">
@@ -580,16 +585,27 @@ function onMarkdownLink(event: MouseEvent) {
 </template>
 
 <style scoped>
+.markdown-preview {
+  max-width: 78ch;
+  margin: 0 auto;
+  padding: 2rem 1.5rem 3rem;
+  color: #d4d4d8;
+  font-size: 0.875rem;
+  line-height: 1.75;
+}
+
 .markdown-preview :deep(h1),
 .markdown-preview :deep(h2),
 .markdown-preview :deep(h3) {
-  margin: 1.25rem 0 0.6rem;
+  margin: 2rem 0 0.65rem;
   color: #e4e4e7;
   font-weight: 650;
+  line-height: 1.3;
 }
 
 .markdown-preview :deep(h1) {
-  font-size: 1.35rem;
+  margin-top: 0;
+  font-size: 1.5rem;
 }
 
 .markdown-preview :deep(h2) {
@@ -600,7 +616,7 @@ function onMarkdownLink(event: MouseEvent) {
 .markdown-preview :deep(ul),
 .markdown-preview :deep(ol),
 .markdown-preview :deep(blockquote) {
-  margin: 0.65rem 0;
+  margin: 0.9rem 0;
   color: #d4d4d8;
 }
 
@@ -621,29 +637,33 @@ function onMarkdownLink(event: MouseEvent) {
 }
 
 .markdown-preview :deep(table) {
-  width: 100%;
+  width: max-content;
+  max-width: 100%;
   border-collapse: collapse;
-  margin: 0.9rem 0;
+  margin: 1.25rem 0;
 }
 
 .markdown-preview :deep(th),
 .markdown-preview :deep(td) {
-  border: 1px solid #3f3f46;
-  padding: 0.35rem 0.5rem;
+  border: 1px solid #353b46;
+  padding: 0.45rem 0.65rem;
   text-align: left;
 }
 
 .markdown-preview :deep(pre) {
   overflow: auto;
-  margin: 0.75rem 0;
-  border-radius: 0.375rem;
-  padding: 0.75rem;
+  margin: 1.1rem 0;
+  border: 1px solid #252c36;
+  border-radius: 0.25rem;
+  background: #11161d;
+  padding: 0.85rem 1rem;
   font-size: 0.75rem;
+  line-height: 1.65;
 }
 
 .markdown-preview :deep(code:not(pre code)) {
-  border-radius: 0.2rem;
-  background: #27272a;
+  border-radius: 0.15rem;
+  background: #242a33;
   padding: 0.1rem 0.25rem;
   font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
   font-size: 0.85em;
@@ -662,6 +682,7 @@ function onMarkdownLink(event: MouseEvent) {
   flex-shrink: 0;
   user-select: none;
   background: var(--surface-document);
+  border-right: 1px solid var(--border-hairline);
   padding-right: 0.75rem;
   color: #52525b;
   text-align: right;

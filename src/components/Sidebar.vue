@@ -59,32 +59,32 @@ function checkoutLabel(checkout: Checkout) {
 </script>
 
 <template>
-  <aside class="app-sidebar flex h-full min-h-0 flex-col border-r border-white/8">
-    <div class="flex h-10 shrink-0 items-center gap-1 border-b border-white/8 px-1">
+  <aside class="app-sidebar flex h-full min-h-0 flex-col border-r">
+    <div class="sidebar-toolbar flex h-10 shrink-0 items-center gap-1 border-b px-2">
       <input
         v-model="repoQuery"
         type="search"
         aria-label="Search repositories"
         placeholder="Filter repositories…"
-        class="h-7 min-w-0 flex-1 rounded bg-black/10 px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:bg-white/5 focus:ring-1 focus:ring-sky-400/40"
+        class="sidebar-filter h-7 min-w-0 flex-1 rounded px-2 text-xs outline-none placeholder:text-zinc-600"
       />
       <button
         type="button"
         aria-label="Open directory"
         title="Open directory"
-        class="grid size-7 shrink-0 place-items-center rounded text-base leading-none text-zinc-400 hover:bg-white/8 hover:text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
+        class="grid size-7 shrink-0 place-items-center rounded-sm text-base leading-none text-zinc-400 hover:bg-white/8 hover:text-white focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
         :disabled="isOpening"
         @click="emit('openFolder')"
       >
         +
       </button>
     </div>
-    <div v-if="filteredRepos.length" class="min-h-0 flex-1 overflow-y-auto px-1 py-1">
+    <div v-if="filteredRepos.length" class="min-h-0 flex-1 overflow-y-auto px-1.5 py-1">
       <div v-for="repo in filteredRepos" :key="repo.id" class="mb-1">
-        <div class="group/repo flex h-7 items-center rounded hover:bg-white/5">
+        <div class="group/repo flex h-7 items-center rounded-sm hover:bg-white/5">
           <button
             type="button"
-            class="flex h-full min-w-0 flex-1 items-center gap-1 rounded px-1.5 text-left text-[13px] text-zinc-300 focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
+            class="flex h-full min-w-0 flex-1 items-center gap-1 rounded-sm px-1.5 text-left text-[13px] text-zinc-300 focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
             :aria-expanded="!collapsedRepoIds.includes(repo.id)"
             :title="repo.name"
             @click="toggleRepo(repo.id)"
@@ -100,7 +100,7 @@ function checkoutLabel(checkout: Checkout) {
             type="button"
             :aria-label="`Create worktree for ${repo.name}`"
             title="Create worktree from main"
-            class="grid size-6 shrink-0 place-items-center rounded text-sm text-zinc-500 hover:bg-white/8 hover:text-zinc-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
+            class="grid size-6 shrink-0 place-items-center rounded-sm text-sm text-zinc-500 hover:bg-white/8 hover:text-zinc-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
             @click.stop="emit('createWorktree', repo.checkouts.find((checkout) => checkout.isPrimary)!.id)"
           >
             <svg aria-hidden="true" viewBox="0 0 16 16" class="size-3.5 fill-none stroke-current" stroke-width="1.3">
@@ -112,16 +112,16 @@ function checkoutLabel(checkout: Checkout) {
         <div v-if="!collapsedRepoIds.includes(repo.id)" class="ml-2 border-l border-white/6 pl-1.5">
           <div v-for="checkout in repo.checkouts" :key="checkout.id" class="mb-0.5">
             <div
-              class="group/checkout flex h-7 items-center gap-0.5 rounded"
+              class="group/checkout flex h-7 items-center gap-0.5 rounded-sm border-l-2 border-transparent"
               :class="
                 checkout.id === activeCheckoutId
-                  ? 'bg-sky-400/10 text-zinc-100 hover:bg-sky-400/15'
+                  ? 'sidebar-checkout-active border-sky-300/65 bg-sky-400/10 text-zinc-100 hover:bg-sky-400/15'
                   : 'text-zinc-400 hover:bg-white/6'
               "
             >
               <button
                 type="button"
-                class="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 text-left text-[13px] focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
+                class="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm px-1.5 text-left text-[13px] focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
                 :aria-current="checkout.id === activeCheckoutId ? 'page' : undefined"
                 :title="checkout.path"
                 @click="emit('selectCheckout', checkout.id)"
@@ -148,7 +148,7 @@ function checkoutLabel(checkout: Checkout) {
                 type="button"
                 :aria-label="`Locate ${checkout.path}`"
                 title="Locate this missing directory"
-                class="flex h-6 shrink-0 items-center gap-1 rounded px-1 text-[10px] text-amber-200 hover:bg-amber-400/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-amber-300"
+                class="flex h-6 shrink-0 items-center gap-1 rounded-sm px-1 text-[10px] text-amber-200 hover:bg-amber-400/10 focus-visible:outline focus-visible:outline-1 focus-visible:outline-amber-300"
                 :disabled="isOpening"
                 @click.stop="emit('locateMissing', checkout.id)"
               >
@@ -163,7 +163,7 @@ function checkoutLabel(checkout: Checkout) {
                 type="button"
                 :aria-label="`Close ${checkout.path}`"
                 title="Close this missing location in Marvis"
-                class="grid size-6 shrink-0 place-items-center rounded text-sm text-zinc-500 hover:bg-white/8 hover:text-zinc-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
+                class="grid size-6 shrink-0 place-items-center rounded-sm text-sm text-zinc-500 hover:bg-white/8 hover:text-zinc-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
                 :disabled="isOpening"
                 @click.stop="emit('closeMissing', checkout.id)"
               >
@@ -176,7 +176,7 @@ function checkoutLabel(checkout: Checkout) {
                   type="button"
                   :aria-label="`New terminal for ${checkoutLabel(checkout)}`"
                   title="New terminal"
-                  class="grid size-6 shrink-0 place-items-center rounded text-zinc-500 opacity-0 transition-opacity group-hover/checkout:opacity-100 group-focus-within/checkout:opacity-100 hover:bg-white/8 hover:text-zinc-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
+                  class="grid size-6 shrink-0 place-items-center rounded-sm text-zinc-500 opacity-0 transition-opacity group-hover/checkout:opacity-100 group-focus-within/checkout:opacity-100 hover:bg-white/8 hover:text-zinc-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
                   @click.stop="emit('newTerminal', checkout.id)"
                 >
                   <svg
@@ -194,7 +194,7 @@ function checkoutLabel(checkout: Checkout) {
                   type="button"
                   :aria-label="`Remove worktree ${checkout.branch || checkout.path}`"
                   title="Remove worktree"
-                  class="grid size-6 shrink-0 place-items-center rounded text-zinc-500 opacity-0 transition-opacity group-hover/checkout:opacity-100 group-focus-within/checkout:opacity-100 hover:bg-red-400/10 hover:text-red-200 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-red-300"
+                  class="grid size-6 shrink-0 place-items-center rounded-sm text-zinc-500 opacity-0 transition-opacity group-hover/checkout:opacity-100 group-focus-within/checkout:opacity-100 hover:bg-red-400/10 hover:text-red-200 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-red-300"
                   @click.stop="emit('removeWorktree', checkout.id)"
                 >
                   <svg aria-hidden="true" viewBox="0 0 16 16" class="size-3.5 stroke-current" stroke-width="1.4">
@@ -206,12 +206,12 @@ function checkoutLabel(checkout: Checkout) {
             <div
               v-for="session in checkout.sessions"
               :key="session.id"
-              class="group/session ml-3 flex h-7 items-center rounded"
+              class="group/session ml-3 flex h-7 items-center rounded-sm"
               :class="session.id === activeSessionId ? 'bg-sky-400/10 hover:bg-sky-400/15' : 'hover:bg-white/6'"
             >
               <button
                 type="button"
-                class="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded px-1.5 text-left text-[13px] focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
+                class="flex h-full min-w-0 flex-1 items-center gap-1.5 rounded-sm px-1.5 text-left text-[13px] focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
                 :class="session.id === activeSessionId ? 'text-sky-100' : 'text-zinc-500 hover:text-zinc-300'"
                 :aria-label="`Terminal session: ${session.name}`"
                 :aria-current="session.id === activeSessionId ? 'page' : undefined"
@@ -233,7 +233,7 @@ function checkoutLabel(checkout: Checkout) {
                 type="button"
                 :aria-label="`Close terminal session: ${session.name}`"
                 title="Close terminal session"
-                class="grid size-6 shrink-0 place-items-center rounded text-zinc-500 opacity-0 transition-opacity group-hover/session:opacity-100 group-focus-within/session:opacity-100 hover:bg-white/8 hover:text-zinc-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
+                class="grid size-6 shrink-0 place-items-center rounded-sm text-zinc-500 opacity-0 transition-opacity group-hover/session:opacity-100 group-focus-within/session:opacity-100 hover:bg-white/8 hover:text-zinc-100 focus-visible:opacity-100 focus-visible:outline focus-visible:outline-1 focus-visible:outline-sky-400"
                 @click.stop="emit('closeSession', session.id)"
               >
                 <svg aria-hidden="true" viewBox="0 0 16 16" class="size-3.5 stroke-current" stroke-width="1.4">

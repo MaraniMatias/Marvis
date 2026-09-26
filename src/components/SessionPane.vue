@@ -313,7 +313,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
         v-for="view in views"
         v-show="view.checkoutId === checkout?.id && view.key === activeView?.key"
         :key="view.key"
-        class="absolute inset-px"
+        class="absolute inset-0"
       >
         <TerminalSession
           :ref="(instance) => setTerminalRef(view.key, instance)"
@@ -331,42 +331,35 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
         />
       </div>
 
-      <div
-        v-if="!activeView"
-        class="grid h-full place-items-center rounded-lg border border-white/8 bg-[var(--surface-panel)] p-6 text-center"
-      >
-        <div class="max-w-sm">
-          <h1 class="text-base font-medium text-zinc-100">
+      <div v-if="!activeView" class="session-empty grid h-full place-items-center p-6 text-center">
+        <div class="max-w-md">
+          <p class="text-sm text-zinc-400">
             {{
               checkout?.isMissing
-                ? "Directory missing"
+                ? `Directory missing: ${checkout.path}`
                 : checkout
                   ? isStarting
                     ? "Starting terminal…"
-                    : "No terminal"
-                  : "A workspace for focused work"
+                    : "No terminal session."
+                  : "Open a folder to start a terminal."
             }}
-          </h1>
-          <p v-if="checkout" class="mt-2 break-all text-sm leading-6 text-zinc-500">{{ checkout.path }}</p>
-          <p v-else class="mt-2 text-sm leading-6 text-zinc-500">
-            Open a folder to get started. Marvis starts a terminal for the selected checkout.
           </p>
           <Button
             v-if="checkout && !checkout.isMissing && !isStarting"
-            class="mt-5"
+            class="mt-4"
             @click="createTerminalSession('shell')"
           >
             New terminal
           </Button>
-          <Button v-else-if="!checkout" class="mt-5" :disabled="isOpening" @click="$emit('openFolder')">
+          <Button v-else-if="!checkout" class="mt-4" :disabled="isOpening" @click="$emit('openFolder')">
             {{ isOpening ? "Opening…" : "Open directory" }}
           </Button>
-          <span v-else-if="isStarting" class="mt-5 block text-xs text-zinc-500" role="status">Starting session…</span>
+          <span v-else-if="isStarting" class="mt-3 block text-xs text-zinc-500" role="status">Starting session…</span>
         </div>
       </div>
     </section>
 
-    <p v-if="terminalError" role="alert" class="m-0 border-t border-red-400/20 px-2 py-2 text-sm text-red-200">
+    <p v-if="terminalError" role="alert" class="m-0 border-t border-red-400/20 px-3 py-2 text-sm text-red-200">
       {{ terminalError }}
     </p>
   </main>
