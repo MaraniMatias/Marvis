@@ -147,63 +147,76 @@ function messageOf(cause: unknown): string {
 </script>
 
 <template>
-  <div v-if="open" class="fixed inset-0 z-50 grid place-items-center bg-black/65 p-4" @click.self="$emit('close')">
+  <div
+    v-if="open"
+    class="fixed inset-0 z-50 grid place-items-center bg-(--marvis-bg-0)/80 p-4"
+    @click.self="$emit('close')"
+  >
     <section
       role="dialog"
       aria-modal="true"
       :aria-labelledby="mode === 'create' ? 'worktree-create-title' : 'worktree-remove-title'"
-      class="surface-popover w-full max-w-xl rounded-xl border border-white/10 p-5 shadow-2xl"
+      class="surface-popover w-full max-w-xl rounded-[var(--marvis-radius)] p-5 shadow-2xl"
     >
       <header class="mb-4 flex items-start justify-between gap-4">
         <div>
           <h2
             :id="mode === 'create' ? 'worktree-create-title' : 'worktree-remove-title'"
-            class="text-base font-semibold text-zinc-100"
+            class="text-base font-semibold text-(--marvis-text)"
           >
             {{ mode === "create" ? "Create worktree from main" : "Remove worktree" }}
           </h2>
-          <p class="mt-1 truncate text-xs text-zinc-500">{{ checkout?.branch || checkout?.path }} · {{ repo?.name }}</p>
+          <p class="mt-1 truncate text-xs text-(--marvis-text-faint)">
+            {{ checkout?.branch || checkout?.path }} · {{ repo?.name }}
+          </p>
         </div>
-        <button aria-label="Close" class="rounded px-2 py-1 text-zinc-500 hover:bg-white/8" @click="$emit('close')">
+        <button
+          aria-label="Close"
+          class="rounded px-2 py-1 text-(--marvis-text-secondary) hover:bg-(--marvis-border)"
+          @click="$emit('close')"
+        >
           ×
         </button>
       </header>
 
-      <div v-if="loading && !removal" class="py-6 text-sm text-zinc-500" role="status">Checking Git worktree…</div>
+      <div v-if="loading && !removal" class="py-6 text-sm text-(--marvis-text-secondary)" role="status">
+        Checking Git worktree…
+      </div>
 
       <form v-else-if="mode === 'create'" class="space-y-4" @submit.prevent="submitCreate">
-        <label class="block text-xs text-zinc-400">
+        <label class="block text-xs text-(--marvis-text-secondary)">
           Task name
           <input
             :value="taskName"
             autofocus
             required
             maxlength="120"
-            class="mt-1.5 w-full rounded-md border border-white/10 bg-[#101217] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-indigo-300/50"
+            class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text) outline-none focus:border-(--marvis-accent)"
             @input="updateTaskName(($event.target as HTMLInputElement).value)"
           />
-          <span class="mt-1 block text-[11px] text-zinc-600"
+          <span class="mt-1 block text-[11px] text-(--marvis-text-faint)"
             >Used as a directory name; unsafe characters are cleaned by Git service validation.</span
           >
         </label>
-        <label class="block text-xs text-zinc-400">
+        <label class="block text-xs text-(--marvis-text-secondary)">
           New branch
           <input
             v-model="branch"
             required
-            class="mt-1.5 w-full rounded-md border border-white/10 bg-[#101217] px-3 py-2 text-sm text-zinc-100 outline-none focus:border-indigo-300/50"
+            class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text) outline-none focus:border-(--marvis-accent)"
             @input="branchEdited = true"
           />
         </label>
-        <p v-if="defaultBranch" class="text-xs text-zinc-500">
-          Starting point: <code>{{ defaultBranch }}</code> · Worktrees are created under <code>{{ location }}</code
+        <p v-if="defaultBranch" class="text-xs text-(--marvis-text-faint)">
+          Starting point: <code class="text-(--marvis-text-secondary)">{{ defaultBranch }}</code> · Worktrees are
+          created under <code class="text-(--marvis-text-secondary)">{{ location }}</code
           >.
         </p>
-        <p v-if="error" role="alert" class="text-sm text-red-200">{{ error }}</p>
+        <p v-if="error" role="alert" class="text-sm text-(--marvis-red)">{{ error }}</p>
         <footer class="flex justify-end gap-2 pt-1">
           <button
             type="button"
-            class="rounded-md px-3 py-2 text-xs text-zinc-400 hover:bg-white/6"
+            class="rounded px-3 py-2 text-xs text-(--marvis-text-secondary) hover:bg-(--marvis-border)"
             @click="$emit('close')"
           >
             Cancel
@@ -211,7 +224,7 @@ function messageOf(cause: unknown): string {
           <button
             type="submit"
             :disabled="isBusy || !defaultBranch"
-            class="rounded-md bg-indigo-300 px-3 py-2 text-xs font-semibold text-[#111318] disabled:opacity-50"
+            class="rounded bg-(--marvis-accent) px-3 py-2 text-xs font-semibold text-(--marvis-bg-0) disabled:opacity-50"
           >
             {{ isBusy ? "Creating…" : "Create and open shell" }}
           </button>
@@ -219,10 +232,10 @@ function messageOf(cause: unknown): string {
       </form>
 
       <div v-else-if="mode === 'remove' && error && !removal" class="space-y-4">
-        <p role="alert" class="text-sm text-red-200">{{ error }}</p>
+        <p role="alert" class="text-sm text-(--marvis-red)">{{ error }}</p>
         <button
           type="button"
-          class="rounded-md px-3 py-2 text-xs text-zinc-400 hover:bg-white/6"
+          class="rounded px-3 py-2 text-xs text-(--marvis-text-secondary) hover:bg-(--marvis-border)"
           @click="$emit('close')"
         >
           Close
@@ -232,57 +245,60 @@ function messageOf(cause: unknown): string {
       <div v-else-if="removal" class="space-y-4">
         <p
           v-if="removal.isMissing"
-          class="rounded-md border border-amber-300/20 bg-amber-300/5 p-3 text-sm text-amber-100"
+          class="rounded border border-(--marvis-border) bg-(--marvis-bg-0) p-3 text-sm text-(--marvis-text-secondary)"
         >
           This checkout is missing. Git will prune its stale worktree metadata and remove it from Marvis.
         </p>
-        <div v-if="removal.dirtyFiles.length" class="rounded-md border border-amber-300/20 bg-amber-300/5 p-3">
-          <p class="text-sm text-amber-100">
+        <div v-if="removal.dirtyFiles.length" class="rounded border border-(--marvis-border) bg-(--marvis-bg-0) p-3">
+          <p class="text-sm text-(--marvis-text)">
             {{ removal.dirtyFiles.length }} uncommitted change{{ removal.dirtyFiles.length === 1 ? "" : "s" }} will be
             discarded if you continue.
           </p>
-          <ul class="mt-2 max-h-24 overflow-y-auto pl-4 text-xs text-amber-100/70">
+          <ul class="mt-2 max-h-24 overflow-y-auto pl-4 text-xs text-(--marvis-text-faint)">
             <li v-for="file in removal.dirtyFiles.slice(0, 8)" :key="file" class="truncate">{{ file }}</li>
             <li v-if="removal.dirtyFiles.length > 8">and {{ removal.dirtyFiles.length - 8 }} more…</li>
           </ul>
-          <button type="button" class="mt-2 text-xs text-indigo-200 underline" @click="openShell">
+          <button type="button" class="mt-2 text-xs text-(--marvis-accent) underline" @click="openShell">
             Open a shell to commit or stash first
           </button>
-          <label class="mt-3 flex items-start gap-2 text-xs text-amber-100/80">
-            <input v-model="dirtyConfirmed" type="checkbox" class="mt-0.5 accent-amber-300" />
+          <label class="mt-3 flex items-start gap-2 text-xs text-(--marvis-text-faint)">
+            <input v-model="dirtyConfirmed" type="checkbox" class="mt-0.5 accent-(--marvis-accent)" />
             I understand uncommitted files may be lost; remove anyway.
           </label>
         </div>
         <p
           v-if="removal.unmergedCommits"
-          class="rounded-md border border-amber-300/20 bg-amber-300/5 p-3 text-sm text-amber-100"
+          class="rounded border border-(--marvis-border) bg-(--marvis-bg-0) p-3 text-sm text-(--marvis-text)"
         >
           This branch has {{ removal.unmergedCommits }} commit{{ removal.unmergedCommits === 1 ? "" : "s" }} not merged
           into the default branch. Keeping the branch preserves them.
         </p>
-        <div v-if="removal.activeSessions.length" class="rounded-md border border-white/10 bg-black/10 p-3">
-          <p class="text-sm text-zinc-200">These active sessions will be stopped:</p>
-          <ul class="mt-2 space-y-1 text-xs text-zinc-400">
+        <div
+          v-if="removal.activeSessions.length"
+          class="rounded border border-(--marvis-border) bg-(--marvis-bg-0) p-3"
+        >
+          <p class="text-sm text-(--marvis-text)">These active sessions will be stopped:</p>
+          <ul class="mt-2 space-y-1 text-xs text-(--marvis-text-faint)">
             <li v-for="session in removal.activeSessions" :key="session.id">{{ session.name }} · {{ session.type }}</li>
           </ul>
-          <label class="mt-3 flex items-start gap-2 text-xs text-zinc-400">
-            <input v-model="sessionsConfirmed" type="checkbox" class="mt-0.5 accent-indigo-300" />
+          <label class="mt-3 flex items-start gap-2 text-xs text-(--marvis-text-faint)">
+            <input v-model="sessionsConfirmed" type="checkbox" class="mt-0.5 accent-(--marvis-accent)" />
             Stop the listed sessions and remove this checkout.
           </label>
         </div>
         <p
           v-if="removal.activeAgentSessions.length"
           role="alert"
-          class="rounded-md bg-red-400/10 p-3 text-sm text-red-200"
+          class="rounded bg-(--marvis-bg-0) p-3 text-sm text-(--marvis-red)"
         >
           An active agent is using this checkout. Stop the agent before removing it:
           {{ removal.activeAgentSessions.map((session) => session.name).join(", ") }}.
         </p>
-        <label v-if="removal.branch" class="block text-xs text-zinc-400">
+        <label v-if="removal.branch" class="block text-xs text-(--marvis-text-secondary)">
           Local branch
           <select
             v-model="branchAction"
-            class="mt-1.5 w-full rounded-md border border-white/10 bg-[#101217] px-3 py-2 text-sm text-zinc-100"
+            class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text)"
           >
             <option value="keep">Keep branch (recommended)</option>
             <option value="delete">
@@ -290,11 +306,11 @@ function messageOf(cause: unknown): string {
             </option>
           </select>
         </label>
-        <p v-if="error" role="alert" class="text-sm text-red-200">{{ error }}</p>
+        <p v-if="error" role="alert" class="text-sm text-(--marvis-red)">{{ error }}</p>
         <footer class="flex justify-end gap-2 pt-1">
           <button
             type="button"
-            class="rounded-md px-3 py-2 text-xs text-zinc-400 hover:bg-white/6"
+            class="rounded px-3 py-2 text-xs text-(--marvis-text-secondary) hover:bg-(--marvis-border)"
             @click="$emit('close')"
           >
             Cancel
@@ -302,7 +318,7 @@ function messageOf(cause: unknown): string {
           <button
             type="button"
             :disabled="isBusy || !canRemove"
-            class="rounded-md bg-red-400/90 px-3 py-2 text-xs font-semibold text-[#1a1010] disabled:opacity-50"
+            class="rounded bg-(--marvis-red) px-3 py-2 text-xs font-semibold text-(--marvis-bg-0) disabled:opacity-50"
             @click="submitRemove"
           >
             {{ isBusy ? "Removing…" : "Remove worktree" }}
