@@ -6,7 +6,13 @@ import { addSessionToLayout, createTerminalLayout } from "../domain/terminal-lay
 import { loadTerminalLayout, saveTerminalLayout } from "../lib/ipc";
 import SessionPane from "./SessionPane.vue";
 
-const terminalMock = vi.hoisted(() => ({ mounts: 0, autoCreate: false, closeRequests: 0 }));
+const terminalMock = vi.hoisted(() => ({
+  mounts: 0,
+  autoCreate: false,
+  closeRequests: 0,
+  createdCount: 0,
+  closedIds: [] as string[],
+}));
 
 vi.mock("../lib/ipc", () => ({
   loadTerminalLayout: vi.fn(),
@@ -27,9 +33,11 @@ vi.mock("./TerminalSession.vue", async () => {
       },
       emits: ["created", "closed", "statusChanged", "failed"],
       setup(props, { emit, expose }) {
+        let sessionId: string | null = null;
         expose({
           requestClose: async () => {
             terminalMock.closeRequests++;
+            if (sessionId) terminalMock.closedIds.push(sessionId);
             emit("closed", {
               repos: [],
               activeCheckoutId: props.checkoutId,
@@ -42,8 +50,9 @@ vi.mock("./TerminalSession.vue", async () => {
           terminalMock.mounts++;
           if (!terminalMock.autoCreate) return;
           const sessionType = props.sessionType as "shell" | "nvim";
+          sessionId = terminalMock.createdCount++ === 0 ? "session:live" : `session:live-${terminalMock.createdCount}`;
           const session: Session = {
-            id: sessionType === "nvim" ? "session:nvim" : "session:live",
+            id: sessionType === "nvim" ? "session:nvim" : sessionId,
             type: sessionType,
             checkoutId: props.checkoutId,
             name: sessionType === "nvim" ? "nvim" : "zsh",
@@ -88,6 +97,8 @@ beforeEach(() => {
   terminalMock.mounts = 0;
   terminalMock.autoCreate = false;
   terminalMock.closeRequests = 0;
+  terminalMock.createdCount = 0;
+  terminalMock.closedIds = [];
   vi.mocked(loadTerminalLayout).mockResolvedValue(null);
   vi.mocked(saveTerminalLayout).mockResolvedValue(undefined);
 });
@@ -204,6 +215,26 @@ describe("SessionPane terminal UI", () => {
     await flushPromises();
 
     expect(terminalMock.mounts).toBe(1);
+    expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("creates additional shells on request and closes only the requested session", async () => {
+    terminalMock.autoCreate = true;
+    const wrapper = mount(SessionPane, {
+      props: { checkout, activeSessionId: null, isOpening: true, shellRequest: null },
+    });
+
+    await wrapper.setProps({ isOpening: false });
+    await flushPromises();
+    await wrapper.setProps({ shellRequest: { checkoutId: checkout.id, token: 2 } });
+    await flushPromises();
+
+    expect(terminalMock.mounts).toBe(2);
+    expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(2);
+    await wrapper.vm.requestClose("session:live-2");
+
+    expect(terminalMock.closedIds).toEqual(["session:live-2"]);
     expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(1);
     wrapper.unmount();
   });

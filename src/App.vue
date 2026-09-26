@@ -657,6 +657,10 @@ function updateSessionStatus(sessionId: string, status: TerminalSessionStatus | 
   else delete sessionRuntimeStatuses.value[sessionId];
 }
 
+async function closeTerminalSession(sessionId: string) {
+  await sessionPane.value?.requestClose(sessionId);
+}
+
 async function runPaletteCommand(command: PaletteCommandId) {
   const checkout = activeCheckout.value;
   switch (command) {
@@ -874,7 +878,9 @@ async function closeCheckout(checkoutId: string) {
           @locate-missing="locateCheckout"
           @close-missing="closeCheckout"
           @create-worktree="openWorktreeDialog('create', $event)"
+          @new-terminal="requestShell"
           @remove-worktree="openWorktreeDialog('remove', $event)"
+          @close-session="closeTerminalSession"
           @update-collapsed-repos="updateCollapsedRepos"
         />
       </SplitterPanel>

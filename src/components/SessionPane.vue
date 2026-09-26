@@ -1,7 +1,12 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import type { Checkout, Session, TerminalLaunchType, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
-import { createTerminalLayout, normalizeTerminalLayout } from "../domain/terminal-layout";
+import {
+  addSessionToLayout,
+  createTerminalLayout,
+  normalizeTerminalLayout,
+  removeSessionFromLayout,
+} from "../domain/terminal-layout";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { TerminalLaunchTarget } from "../lib/ipc";
 import { loadTerminalLayout, saveTerminalLayout } from "../lib/ipc";
@@ -49,6 +54,7 @@ const loadedCheckoutIds = new Set<string>();
 const layoutLoads = new Map<string, Promise<void>>();
 const layoutSaveQueues = new Map<string, Promise<void>>();
 const views = ref<TerminalView[]>([]);
+const pendingViewKey = ref<string | null>(null);
 const startingCheckoutIds = ref(new Set<string>());
 const nvimLaunchingCheckoutIds = ref(new Set<string>());
 const handledNvimRequestTokens = new Set<number>();
@@ -56,7 +62,14 @@ const terminalRefs = new Map<string, TerminalSessionHandle>();
 const nextViewId = ref(1);
 const terminalError = ref<string | null>(null);
 const checkout = computed(() => props.checkout);
-const activeView = computed(() => views.value.find((view) => view.checkoutId === checkout.value?.id));
+const activeView = computed(() => {
+  const checkoutViews = views.value.filter((view) => view.checkoutId === checkout.value?.id);
+  return (
+    checkoutViews.find((view) => view.key === pendingViewKey.value) ??
+    checkoutViews.find((view) => view.session?.id === props.activeSessionId) ??
+    checkoutViews.at(-1)
+  );
+});
 const isStarting = computed(
   () =>
     Boolean(checkout.value && startingCheckoutIds.value.has(checkout.value.id)) ||
@@ -101,9 +114,13 @@ function initializeLayout(target: Checkout) {
   return pending;
 }
 
-async function createTerminalSession(sessionType: TerminalLaunchType = "shell", launchTarget?: TerminalLaunchTarget) {
+async function createTerminalSession(
+  sessionType: TerminalLaunchType = "shell",
+  launchTarget?: TerminalLaunchTarget,
+  additional = false,
+) {
   const target = props.checkout;
-  if (!target || target.isMissing || views.value.some((view) => view.checkoutId === target.id)) return;
+  if (!target || target.isMissing || (!additional && views.value.some((view) => view.checkoutId === target.id))) return;
   if (startingCheckoutIds.value.has(target.id)) return;
   startingCheckoutIds.value = new Set(startingCheckoutIds.value).add(target.id);
   try {
@@ -111,6 +128,7 @@ async function createTerminalSession(sessionType: TerminalLaunchType = "shell", 
     if (props.checkout?.id !== target.id || target.isMissing) return;
     terminalError.value = null;
     const key = `pending-${nextViewId.value++}`;
+    pendingViewKey.value = key;
     views.value.push({ key, checkoutId: target.id, session: null, sessionType, launchTarget });
   } finally {
     const pending = new Set(startingCheckoutIds.value);
@@ -129,7 +147,13 @@ function focusActiveTerminal() {
   if (view) terminalRefs.get(view.key)?.focus();
 }
 
-defineExpose({ focusActiveTerminal });
+async function requestClose(sessionId: string) {
+  const view = views.value.find((item) => item.session?.id === sessionId);
+  if (!view) return false;
+  return (await terminalRefs.get(view.key)?.requestClose()) ?? false;
+}
+
+defineExpose({ focusActiveTerminal, requestClose });
 
 async function launchNeovim(target?: TerminalLaunchTarget) {
   const selectedCheckout = props.checkout;
@@ -137,7 +161,7 @@ async function launchNeovim(target?: TerminalLaunchTarget) {
     return;
   nvimLaunchingCheckoutIds.value = new Set(nvimLaunchingCheckoutIds.value).add(selectedCheckout.id);
   try {
-    const currentView = views.value.find((view) => view.checkoutId === selectedCheckout.id);
+    const currentView = activeView.value;
     if (!currentView) {
       await createTerminalSession("nvim", target);
       return;
@@ -153,7 +177,7 @@ async function launchNeovim(target?: TerminalLaunchTarget) {
       return;
     }
     if ((await terminal.requestClose()) && props.checkout?.id === selectedCheckout.id) {
-      await createTerminalSession("nvim", target);
+      await createTerminalSession("nvim", target, true);
     }
   } finally {
     const pending = new Set(nvimLaunchingCheckoutIds.value);
@@ -176,7 +200,8 @@ function onCreated(key: string, result: { session: Session; workspace: Workspace
   const view = views.value.find((item) => item.key === key);
   if (!view || view.session) return;
   view.session = result.session;
-  void saveLayout(view.checkoutId, createTerminalLayout([result.session]));
+  const layout = layouts.value[view.checkoutId] ?? createTerminalLayout([]);
+  void saveLayout(view.checkoutId, addSessionToLayout(layout, result.session));
   emit("workspaceUpdated", result.workspace);
 }
 
@@ -189,7 +214,11 @@ function onClosed(key: string, workspace: WorkspaceState) {
   if (view?.session) {
     terminalRefs.delete(key);
     emit("sessionStatusChanged", view.session.id, null);
-    void saveLayout(view.checkoutId, createTerminalLayout([]));
+    if (pendingViewKey.value === key) pendingViewKey.value = null;
+    void saveLayout(
+      view.checkoutId,
+      removeSessionFromLayout(layouts.value[view.checkoutId] ?? createTerminalLayout([]), view.session.id),
+    );
   }
   views.value = views.value.filter((item) => item.key !== key);
   emit("workspaceUpdated", workspace);
@@ -198,11 +227,24 @@ function onClosed(key: string, workspace: WorkspaceState) {
 function onFailed(key: string, message: string) {
   const view = views.value.find((item) => item.key === key);
   terminalRefs.delete(key);
-  if (view?.session) emit("sessionStatusChanged", view.session.id, null);
+  if (view?.session) {
+    emit("sessionStatusChanged", view.session.id, null);
+    void saveLayout(
+      view.checkoutId,
+      removeSessionFromLayout(layouts.value[view.checkoutId] ?? createTerminalLayout([]), view.session.id),
+    );
+  }
+  if (pendingViewKey.value === key) pendingViewKey.value = null;
   views.value = views.value.filter((item) => item.key !== key);
-  if (view) void saveLayout(view.checkoutId, createTerminalLayout([]));
   terminalError.value = message;
 }
+
+watch(
+  () => props.activeSessionId,
+  (sessionId) => {
+    if (sessionId && views.value.some((view) => view.session?.id === sessionId)) pendingViewKey.value = null;
+  },
+);
 
 function isEditableTarget(target: EventTarget | null) {
   return target instanceof HTMLInputElement || target instanceof HTMLSelectElement;
@@ -230,7 +272,8 @@ watch(
 watch(
   () => props.shellRequest?.token,
   (token) => {
-    if (token && props.shellRequest?.checkoutId === props.checkout?.id) void createTerminalSession("shell");
+    if (token && props.shellRequest?.checkoutId === props.checkout?.id)
+      void createTerminalSession("shell", undefined, true);
   },
 );
 
@@ -263,14 +306,19 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
 <template>
   <main class="session-pane flex min-w-0 flex-1 flex-col">
     <section class="relative min-h-0 flex-1 p-3" aria-label="Terminal session view">
-      <div v-for="view in views" v-show="view.checkoutId === checkout?.id" :key="view.key" class="absolute inset-3">
+      <div
+        v-for="view in views"
+        v-show="view.checkoutId === checkout?.id && view.key === activeView?.key"
+        :key="view.key"
+        class="absolute inset-3"
+      >
         <TerminalSession
           :ref="(instance) => setTerminalRef(view.key, instance)"
           :key="view.key"
           :checkout-id="view.checkoutId"
           :session-type="view.sessionType"
           :launch-target="view.launchTarget"
-          :active="view.checkoutId === checkout?.id"
+          :active="view.checkoutId === checkout?.id && view.key === activeView?.key"
           :visible="isVisible"
           :focused="isVisible && view.session?.id === activeSessionId"
           @created="onCreated(view.key, $event)"

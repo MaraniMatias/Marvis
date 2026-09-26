@@ -478,9 +478,8 @@ function onTreeScroll(event: Event) {
       :tabindex="checkout ? 0 : undefined"
       class="flex min-h-0 flex-1 flex-col"
     >
-      <div class="shrink-0 border-b border-white/8 p-2">
+      <div v-if="rootState === 'ready'" class="shrink-0 border-b border-white/8 p-2">
         <input
-          v-if="rootState === 'ready'"
           ref="searchInput"
           v-model="searchQuery"
           type="search"
@@ -488,7 +487,6 @@ function onTreeScroll(event: Event) {
           placeholder="Search files…"
           class="h-8 w-full rounded border border-white/8 bg-black/10 px-2 text-xs text-zinc-200 outline-none placeholder:text-zinc-600 focus:border-sky-400/50"
         />
-        <p v-else class="px-1 py-1 text-xs text-zinc-500">Checkout files</p>
       </div>
       <section
         ref="treeViewport"

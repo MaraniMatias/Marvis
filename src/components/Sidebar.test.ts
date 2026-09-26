@@ -35,6 +35,10 @@ describe("Sidebar actions and checkout states", () => {
       },
     });
 
+    expect(wrapper.find("h2").exists()).toBe(false);
+    expect(wrapper.get('input[aria-label="Search repositories"]').element.getAttribute("placeholder")).toBe(
+      "Filter repositories…",
+    );
     expect(wrapper.get('button[aria-label="Open directory"]')).toBeDefined();
     expect(wrapper.get('button[aria-label="Open directory"]').attributes("title")).toBe("Open directory");
     expect(wrapper.text()).toContain("Missing");
@@ -94,15 +98,19 @@ describe("Sidebar actions and checkout states", () => {
     expect(wrapper.find('button[aria-label="Create worktree from trunk"]').exists()).toBe(false);
     expect(wrapper.find('button[aria-label="Create worktree from feature"]').exists()).toBe(false);
     expect(wrapper.find('button[aria-label="Remove worktree main"]').exists()).toBe(false);
+    expect(wrapper.find('button[aria-label="New terminal for Primary · main"]').exists()).toBe(true);
+    expect(wrapper.find('button[aria-label="Remove worktree feature"]').exists()).toBe(true);
     expect(wrapper.text()).not.toContain("Marvis");
+    await wrapper.get('button[aria-label="New terminal for Primary · main"]').trigger("click");
     await wrapper.get('button[aria-label="Create worktree for test"]').trigger("click");
     await wrapper.get('button[aria-label="Remove worktree feature"]').trigger("click");
 
+    expect(wrapper.emitted("newTerminal")).toEqual([["checkout:primary"]]);
     expect(wrapper.emitted("createWorktree")).toEqual([["checkout:primary"]]);
     expect(wrapper.emitted("removeWorktree")).toEqual([["checkout:feature"]]);
   });
 
-  it("shows one selected terminal child with runtime status under its checkout", async () => {
+  it("lists every terminal child with runtime status and close actions", async () => {
     const repo: Repo = {
       id: "repo:activity",
       kind: "plain",
@@ -160,17 +168,23 @@ describe("Sidebar actions and checkout states", () => {
     });
 
     const sessions = wrapper.findAll('button[aria-label^="Terminal session:"]');
-    expect(sessions).toHaveLength(1);
-    expect(sessions[0].attributes("aria-label")).toBe("Terminal session: Exited");
-    expect(sessions[0].classes()).toContain("text-zinc-200");
-    expect(sessions[0].attributes("aria-current")).toBe("page");
-    expect(sessions[0].get('[role="img"]').attributes("aria-label")).toBe("Session exited");
+    expect(sessions).toHaveLength(3);
+    expect(sessions.map((session) => session.attributes("aria-label"))).toEqual([
+      "Terminal session: Running",
+      "Terminal session: Exited",
+      "Terminal session: Unknown",
+    ]);
+    expect(sessions[1].attributes("aria-current")).toBe("page");
+    expect(sessions[1].get('[role="img"]').attributes("aria-label")).toBe("Session exited");
+    expect(wrapper.find('button[aria-label="Close terminal session: Exited"]').exists()).toBe(true);
     await wrapper.setProps({ activeCheckoutId: null, activeSessionId: null });
     await wrapper.get('button[aria-label="Terminal session: Unknown"]').trigger("click");
+    await wrapper.get('button[aria-label="Close terminal session: Exited"]').trigger("click");
     expect(wrapper.emitted("selectSession")).toEqual([["session:unknown"]]);
+    expect(wrapper.emitted("closeSession")).toEqual([["session:exited"]]);
     expect(wrapper.get('[aria-label="Concurrent activity: Terminal · Running, Recent file writes"]').text()).toBe(
       "Concurrent",
     );
-    expect(wrapper.text()).not.toContain("Running");
+    expect(wrapper.text()).toContain("Running");
   });
 });
