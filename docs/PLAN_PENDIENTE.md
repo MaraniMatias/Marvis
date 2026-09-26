@@ -113,4 +113,4 @@ Partir de casos reales de D2; no adelantar el reanclaje sin diffs de agentes. Ma
 | Lanzamiento             | WebKit/GUI, métricas, firma y notarización                                                     | v0.4 §5.6, §9, §10                      |
 | Fases posteriores       | OpenCode, agentes y review; después Depth                                                      | D2-01…15, D3-01…10                      |
 
-**Fuentes de verdad:** `MARVIS_DELIVERY_PLAN_v0.4.md` para alcance; `MVP_VALIDATION.md` para evidencia y estado de D1; este archivo para secuencia y trabajo pendiente. La retirada de documentos históricos no cambia el estado del código ni convierte una prueba pendiente en pasada.
+**Fuentes de verdad:** `MARVIS_DELIVERY_PLAN_v0.4.md` para alcance; `MVP_VALIDATION.md` para evidencia y estado de D1; este archivo para secuencia y trabajo pendiente; [DEUDA.md](DEUDA.md) para el inventario consolidado de lo que falta, con sus cuentas al día. La retirada de documentos históricos no cambia el estado del código ni convierte una prueba pendiente en pasada.
