@@ -1,6 +1,6 @@
 # Marvis — plan de trabajo pendiente
 
-**Estado:** plan vigente de pendientes. **Plataforma inicial:** macOS. Sustituye a [MVP_plan.md](MVP_plan.md) como guía de ejecución; no sustituye el alcance ni los criterios de [MARVIS_DELIVERY_PLAN_v0.4.md](MARVIS_DELIVERY_PLAN_v0.4.md) y los requisitos v0.2. La evidencia ya recogida y los estados de cada criterio están en [MVP_VALIDATION.md](MVP_VALIDATION.md). Ante diferencias de alcance, prevalece v0.4; actualizar la auditoría conforme se cierren tareas.
+**Estado:** plan vigente de pendientes. **Plataforma inicial:** macOS. Es la guía de ejecución (sustituyó al plan base `MVP_plan.md`, retirado); no sustituye el alcance ni los criterios de [MARVIS_DELIVERY_PLAN_v0.4.md](MARVIS_DELIVERY_PLAN_v0.4.md) ni los [requisitos v0.2](MARVIS_REQUIREMENTS.md). La evidencia ya recogida y los estados de cada criterio están en [MVP_VALIDATION.md](MVP_VALIDATION.md). Ante diferencias de alcance, prevalece v0.4; actualizar la auditoría conforme se cierren tareas.
 
 ## 1. Punto de partida y regla de cierre
 
@@ -113,4 +113,4 @@ Partir de casos reales de D2; no adelantar el reanclaje sin diffs de agentes. Ma
 | Lanzamiento             | WebKit/GUI, métricas, firma y notarización                                                     | v0.4 §5.6, §9, §10                      |
 | Fases posteriores       | OpenCode, agentes y review; después Depth                                                      | D2-01…15, D3-01…10                      |
 
-**Fuentes de verdad:** `MARVIS_DELIVERY_PLAN_v0.4.md` para alcance; `MVP_VALIDATION.md` para evidencia y estado de D1; este archivo para secuencia y trabajo pendiente. El antiguo `MVP_plan.md` es histórico. El traslado de documentos existentes no cambia el estado del código ni convierte una prueba pendiente en pasada.
+**Fuentes de verdad:** `MARVIS_DELIVERY_PLAN_v0.4.md` para alcance; `MVP_VALIDATION.md` para evidencia y estado de D1; este archivo para secuencia y trabajo pendiente. La retirada de documentos históricos no cambia el estado del código ni convierte una prueba pendiente en pasada.
