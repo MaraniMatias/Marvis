@@ -11,7 +11,27 @@ export type IpcErrorCode =
   | "binary_file"
   | "git_failed"
   | "process_terminated"
+  | "agent_unavailable"
+  | "agent_ownership_mismatch"
   | "operation_failed";
+
+const CODES: IpcErrorCode[] = [
+  "folder_missing",
+  "invalid_path",
+  "path_outside_checkout",
+  "not_repository",
+  "default_branch_unknown",
+  "invalid_checkout",
+  "checkout_ownership_mismatch",
+  "permission_denied",
+  "file_too_large",
+  "binary_file",
+  "git_failed",
+  "process_terminated",
+  "agent_unavailable",
+  "agent_ownership_mismatch",
+  "operation_failed",
+];
 
 export interface IpcError {
   code: IpcErrorCode;
@@ -25,20 +45,6 @@ export function isIpcError(value: unknown): value is IpcError {
   return (
     typeof candidate.code === "string" &&
     typeof candidate.message === "string" &&
-    [
-      "folder_missing",
-      "invalid_path",
-      "path_outside_checkout",
-      "not_repository",
-      "default_branch_unknown",
-      "invalid_checkout",
-      "checkout_ownership_mismatch",
-      "permission_denied",
-      "file_too_large",
-      "binary_file",
-      "git_failed",
-      "process_terminated",
-      "operation_failed",
-    ].includes(candidate.code)
+    (CODES as string[]).includes(candidate.code)
   );
 }

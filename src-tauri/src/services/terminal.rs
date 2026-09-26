@@ -30,6 +30,7 @@ pub struct TerminalOptions {
     pub rows: u16,
     pub session_type: TerminalLaunchType,
     pub target: Option<EditorTarget>,
+    pub prompt: Option<String>,
 }
 
 pub fn create(
@@ -50,6 +51,7 @@ pub fn create(
             rows,
             session_type,
             target: None,
+            prompt: None,
         },
         output,
     )
@@ -67,6 +69,7 @@ pub fn create_with_options(
         rows,
         session_type,
         target,
+        prompt,
     } = options;
     let cwd = database.terminal_checkout_path(checkout_id)?;
     let (program, args, name, stored_type) = match session_type {
@@ -74,6 +77,7 @@ pub fn create_with_options(
             if target.is_some() {
                 return Err("a file location can only be opened by a Neovim session".into());
             }
+            reject_prompt(prompt.as_deref())?;
             let program = inherited_shell();
             let name = program
                 .file_name()
@@ -82,6 +86,7 @@ pub fn create_with_options(
             (program, vec!["-l".into()], name, SessionType::Shell)
         }
         TerminalLaunchType::Nvim => {
+            reject_prompt(prompt.as_deref())?;
             let (program, args) =
                 editor::nvim_launch_spec(target.as_ref()).map_err(|error| error.message)?;
             (program, args, "nvim".into(), SessionType::Nvim)
@@ -144,6 +149,14 @@ fn inherited_shell() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/bin/sh"))
 }
 
+/// Terminals take no prompt any more: the review goes to the agent bridge, not a PTY.
+fn reject_prompt(prompt: Option<&str>) -> Result<(), String> {
+    match prompt {
+        None => Ok(()),
+        Some(_) => Err("a terminal session cannot carry a prompt".into()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -156,7 +169,7 @@ mod tests {
         terminal::{OutputSink, TerminalBackend},
     };
 
-    use super::{create, TerminalLaunchType};
+    use super::{create, create_with_options, TerminalLaunchType, TerminalOptions};
 
     fn plain_repo(path: &Path) -> Repo {
         Repo::plain(path, "now").unwrap()
@@ -284,5 +297,33 @@ mod tests {
         );
         assert!(serde_json::from_str::<TerminalLaunchType>("\"server\"").is_err());
         assert!(serde_json::from_str::<TerminalLaunchType>("\"custom\"").is_err());
+    }
+
+    #[test]
+    fn terminals_reject_a_prompt_because_the_review_goes_to_the_agent_bridge() {
+        let directory = tempdir().unwrap();
+        let checkout = directory.path().join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        let database = Database::open(directory.path().join("workspace.sqlite3")).unwrap();
+        let repo = plain_repo(&checkout);
+        database.register_plain_repo(repo.clone()).unwrap();
+        let backend = TerminalBackend::default();
+
+        for session_type in [TerminalLaunchType::Shell, TerminalLaunchType::Nvim] {
+            assert!(create_with_options(
+                &database,
+                &backend,
+                &repo.checkouts[0].id,
+                TerminalOptions {
+                    cols: 80,
+                    rows: 24,
+                    session_type,
+                    target: None,
+                    prompt: Some("injected".into()),
+                },
+                Box::new(|_| Ok(())),
+            )
+            .is_err());
+        }
     }
 }

@@ -3,17 +3,24 @@ import { computed, defineAsyncComponent, nextTick, ref, watch } from "vue";
 import type { MainDocument, MainDocumentMode } from "../domain/main-document";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
+import type { ActiveReviewNotes } from "../presentation/review-notes";
 import { useMarkdownPreview } from "../presentation/markdown-preview";
 import { isIpcError } from "../domain/ipc";
 import { readCheckoutFile } from "../lib/ipc";
 
 const FileDiff = defineAsyncComponent(() => import("./FileDiff.vue"));
 
+type ReviewApi = Pick<
+  ActiveReviewNotes,
+  "notes" | "addNote" | "updateNote" | "deleteNote" | "verifyAnchors" | "clearOutdated" | "resolveNote"
+>;
+
 const props = withDefaults(
   defineProps<{
     checkout: Checkout | null;
     document: MainDocument;
     gitSnapshot: ActiveGitSnapshot;
+    review: ReviewApi;
     active?: boolean;
     refreshRevision?: number;
     readingPosition?: { top: number; left: number };
@@ -465,6 +472,7 @@ function onMarkdownLink(event: MouseEvent) {
         class="h-full"
         :checkout="checkout"
         :git-snapshot="gitSnapshot"
+        :review="review"
         :path="document.path"
         :active="active"
         :scroll-top="diffScrollTop"

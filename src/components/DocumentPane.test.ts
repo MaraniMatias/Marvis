@@ -2,8 +2,10 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, reactive, ref } from "vue";
+import type { VNodeChild } from "vue";
 import type { GitStatus } from "../domain/git";
 import type { MainDocument } from "../domain/main-document";
+import type { ReviewNote } from "../domain/review";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import DocumentPane from "./DocumentPane.vue";
@@ -28,15 +30,40 @@ vi.mock("../lib/ipc", () => ({
   getGitDiffPage: mocks.getGitDiffPage,
 }));
 
-vi.mock("@git-diff-view/vue", () => ({
-  DiffFile: class {
-    initTheme() {}
-    init() {}
-    buildUnifiedDiffLines() {}
-  },
-  DiffModeEnum: { Unified: 4 },
-  DiffView: { template: "<div>Rendered diff</div>" },
-}));
+vi.mock("@git-diff-view/vue", async () => {
+  const { defineComponent: component, h: createElement } = await import("vue");
+  return {
+    DiffFile: class {
+      initTheme() {}
+      init() {}
+      buildUnifiedDiffLines() {}
+    },
+    DiffModeEnum: { Unified: 4 },
+    // Renders the review slots the way the real diff view does for the active line.
+    DiffView: component({
+      name: "DiffView",
+      props: {
+        diffViewAddWidget: { type: Boolean, default: false },
+        extendData: { type: Object, default: () => ({}) },
+      },
+      setup:
+        (
+          props: {
+            diffViewAddWidget: boolean;
+            extendData: { newFile?: Record<string, { data: ReviewNote[] }> };
+          },
+          { slots }: { slots: Record<string, ((payload: never) => VNodeChild) | undefined> },
+        ) =>
+        () =>
+          createElement("div", { "data-testid": "diff-view" }, [
+            String(props.diffViewAddWidget),
+            Object.keys(props.extendData?.newFile ?? {}).join(","),
+            slots.extend?.({ data: props.extendData?.newFile?.["1"]?.data ?? [] } as never),
+            slots.widget?.({ lineNumber: 1, side: 2, onClose: () => undefined } as never),
+          ]),
+    }),
+  };
+});
 
 function checkout(id: string): Checkout {
   return {
@@ -70,6 +97,38 @@ function snapshot(checkoutId: string, files: GitStatus["files"] = []): ActiveGit
   });
 }
 
+function reviewNote(overrides: Partial<ReviewNote> = {}): ReviewNote {
+  return {
+    id: "note:1",
+    checkoutId: "checkout:repo",
+    path: "src/app.ts",
+    side: "new",
+    lineStart: 1,
+    lineEnd: null,
+    content: "revisit this calculation",
+    code: "+new",
+    codeHash: "0000000000000001",
+    outdated: false,
+    roundId: null,
+    status: "draft",
+    createdAt: "1",
+    updatedAt: "1",
+    ...overrides,
+  };
+}
+
+function reviewApi() {
+  return reactive({
+    notes: [] as ReviewNote[],
+    addNote: vi.fn(async () => true),
+    updateNote: vi.fn(async () => true),
+    deleteNote: vi.fn(async () => true),
+    verifyAnchors: vi.fn(async () => true),
+    clearOutdated: vi.fn(async () => true),
+    resolveNote: vi.fn(async () => true),
+  });
+}
+
 const repo: Repo = {
   id: "repo:repo",
   kind: "git",
@@ -86,7 +145,7 @@ function documentPaneProps(
   currentCheckout = checkout(document.checkoutId),
   gitSnapshot = snapshot(document.checkoutId),
 ) {
-  return { checkout: currentCheckout, document, gitSnapshot, active: true };
+  return { checkout: currentCheckout, document, gitSnapshot, review: reviewApi(), active: true };
 }
 
 describe("DocumentPane", () => {
@@ -135,12 +194,12 @@ describe("DocumentPane", () => {
         function openChange(file: { checkoutId: string; path: string }) {
           selected.value = { ...file, source: "change", mode: "diff" };
         }
-        return { selected, currentCheckout, gitSnapshot, openFile, openChange };
+        return { selected, currentCheckout, gitSnapshot, review: reviewApi(), openFile, openChange };
       },
       data: () => ({ repo }),
       template: `<div>
         <InspectorPane :checkout="currentCheckout" :repo="repo" :git-snapshot="gitSnapshot" @open-file="openFile" @open-change="openChange" />
-        <DocumentPane v-if="selected" :checkout="currentCheckout" :document="selected" :git-snapshot="gitSnapshot" @update-mode="selected.mode = $event" />
+        <DocumentPane v-if="selected" :checkout="currentCheckout" :document="selected" :git-snapshot="gitSnapshot" :review="review" @update-mode="selected.mode = $event" />
       </div>`,
     });
     const wrapper = mount(harness);
@@ -165,7 +224,7 @@ describe("DocumentPane", () => {
     await flushPromises();
     expect(mocks.getGitDiff).toHaveBeenCalledWith(currentCheckout.id, "src/app.ts");
     expect(wrapper.get('[aria-label="Document mode"]').text()).toContain("Diff");
-    expect(wrapper.text()).toContain("Rendered diff");
+    expect(wrapper.find('[data-testid="diff-view"]').exists()).toBe(true);
     expect(wrapper.findComponent({ name: "FileDiff" }).props("active")).toBe(true);
     await vi.waitFor(() => expect(gitSnapshot.markViewed).toHaveBeenCalledWith(currentCheckout.id, "src/app.ts"));
     wrapper.unmount();
@@ -318,7 +377,7 @@ describe("DocumentPane", () => {
       hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
     });
     await flushPromises();
-    expect(wrapper.text()).toContain("Rendered diff");
+    expect(wrapper.find('[data-testid="diff-view"]').exists()).toBe(true);
     expect(wrapper.text()).not.toContain("const fileA = true;");
     wrapper.unmount();
   });
@@ -444,7 +503,14 @@ describe("DocumentPane", () => {
       ],
     });
     const wrapper = mount(FileDiff, {
-      props: { checkout: checkout(checkoutId), gitSnapshot, path: "large.txt", active: false, scrollTop: 0 },
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot,
+        review: reviewApi(),
+        path: "large.txt",
+        active: false,
+        scrollTop: 0,
+      },
     });
     await vi.waitFor(() => expect(wrapper.text()).toContain("+new line"));
     expect(mocks.getGitDiffPage).toHaveBeenCalledWith(checkoutId, "large.txt", 0, 32);
@@ -455,11 +521,308 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("feeds saved notes to the hunk renderer so they appear under their line", async () => {
+    const checkoutId = "checkout:hunk-notes";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]);
+    const note = reviewNote({ id: "note:1", lineStart: 1 });
+    const review = reviewApi();
+    review.notes = [note, reviewNote({ id: "note:2", path: "src/other.ts", lineStart: 5 })];
+    const wrapper = mount(FileDiff, {
+      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "src/app.ts", active: true, scrollTop: 0 },
+    });
+    await flushPromises();
+
+    const view = wrapper.get('[data-testid="diff-view"]');
+    expect(view.text()).toContain("true");
+    expect(view.text()).toContain("1");
+    expect(wrapper.find('[data-testid="diff-view"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("saves a note from the hunk widget with the code of the commented line", async () => {
+    const checkoutId = "checkout:hunk-widget";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]);
+    const review = reviewApi();
+    const wrapper = mount(FileDiff, {
+      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "src/app.ts", active: true, scrollTop: 0 },
+    });
+    await flushPromises();
+
+    const form = wrapper.get('form[aria-label="New review note"]');
+    await form.get('textarea[aria-label="Review note"]').setValue("guard the user");
+    await form.trigger("submit");
+    await flushPromises();
+
+    expect(review.addNote).toHaveBeenCalledWith({
+      path: "src/app.ts",
+      side: "new",
+      lineStart: 1,
+      content: "guard the user",
+      code: "new",
+    });
+    wrapper.unmount();
+  });
+
+  it("adds an inline review note to a virtualized diff row with the captured code", async () => {
+    const checkoutId = "checkout:large-note";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "large.txt", status: "M" }]);
+    mocks.getGitDiff.mockResolvedValue({
+      path: "large.txt",
+      patch: "@@ -0,0 +1,2 @@\n+first line\n+second line\n",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -0,0 +1,2 @@" }],
+    });
+    mocks.getGitDiffPage.mockResolvedValue({
+      path: "large.txt",
+      startLine: 0,
+      totalLines: 3,
+      lines: [
+        { index: 0, kind: "hunk", text: "@@ -0,0 +1,2 @@", oldLineNumber: null, newLineNumber: null },
+        { index: 1, kind: "added", text: "+first line", oldLineNumber: null, newLineNumber: 1 },
+        { index: 2, kind: "added", text: "+second line", oldLineNumber: null, newLineNumber: 2 },
+      ],
+    });
+    const review = reviewApi();
+    const wrapper = mount(FileDiff, {
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot,
+        review,
+        path: "large.txt",
+        active: true,
+        scrollTop: 0,
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+first line"));
+
+    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
+    const textarea = wrapper.get('textarea[aria-label="Review note"]');
+    await textarea.setValue("revisit this calculation");
+    await wrapper.get('form[aria-label="New review note"]').trigger("submit");
+    await flushPromises();
+
+    expect(review.addNote).toHaveBeenCalledWith({
+      path: "large.txt",
+      side: "new",
+      lineStart: 1,
+      content: "revisit this calculation",
+      code: "first line",
+    });
+    wrapper.unmount();
+  });
+
+  it("extends an open draft into a range and captures every line inside it", async () => {
+    const checkoutId = "checkout:range-note";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "large.txt", status: "M" }]);
+    mocks.getGitDiff.mockResolvedValue({
+      path: "large.txt",
+      patch: "@@ -0,0 +1,3 @@\n+first line\n+second line\n+third line\n",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: 4,
+      hunks: [{ startLine: 0, endLine: 4, title: "@@ -0,0 +1,3 @@" }],
+    });
+    mocks.getGitDiffPage.mockResolvedValue({
+      path: "large.txt",
+      startLine: 0,
+      totalLines: 4,
+      lines: [
+        { index: 0, kind: "hunk", text: "@@ -0,0 +1,3 @@", oldLineNumber: null, newLineNumber: null },
+        { index: 1, kind: "added", text: "+first line", oldLineNumber: null, newLineNumber: 1 },
+        { index: 2, kind: "added", text: "+second line", oldLineNumber: null, newLineNumber: 2 },
+        { index: 3, kind: "added", text: "+third line", oldLineNumber: null, newLineNumber: 3 },
+      ],
+    });
+    const review = reviewApi();
+    const wrapper = mount(FileDiff, {
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot,
+        review,
+        path: "large.txt",
+        active: true,
+        scrollTop: 0,
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+first line"));
+
+    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
+    // A second click on the same side widens the range instead of starting a new note.
+    await wrapper.get('[aria-label="Add review note on line 3"]').trigger("click");
+    expect(wrapper.get("form[aria-label='New review note']").text()).toContain("new lines 1-3");
+
+    await wrapper.get('textarea[aria-label="Review note"]').setValue("these three lines belong together");
+    await wrapper.get('form[aria-label="New review note"]').trigger("submit");
+    await flushPromises();
+
+    expect(review.addNote).toHaveBeenCalledWith({
+      path: "large.txt",
+      side: "new",
+      lineStart: 1,
+      lineEnd: 3,
+      content: "these three lines belong together",
+      code: "first line\nsecond line\nthird line",
+    });
+    wrapper.unmount();
+  });
+
+  it("reports the anchor text of visible notes and holds drifted ones back", async () => {
+    const checkoutId = "checkout:anchor-verify";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "large.txt", status: "M" }]);
+    mocks.getGitDiff.mockResolvedValue({
+      path: "large.txt",
+      patch: "@@ -0,0 +1,2 @@\n+first line\n+second line\n",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -0,0 +1,2 @@" }],
+    });
+    mocks.getGitDiffPage.mockResolvedValue({
+      path: "large.txt",
+      startLine: 0,
+      totalLines: 3,
+      lines: [
+        { index: 0, kind: "hunk", text: "@@ -0,0 +1,2 @@", oldLineNumber: null, newLineNumber: null },
+        { index: 1, kind: "added", text: "+first line", oldLineNumber: null, newLineNumber: 1 },
+        { index: 2, kind: "added", text: "+second line", oldLineNumber: null, newLineNumber: 2 },
+      ],
+    });
+    const review = reviewApi();
+    review.notes = [
+      reviewNote({ id: "note:1", path: "large.txt", lineStart: 1, code: "first line" }),
+      reviewNote({ id: "note:2", path: "large.txt", lineStart: 2, code: "an older line", outdated: true }),
+    ];
+    const wrapper = mount(FileDiff, {
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot,
+        review,
+        path: "large.txt",
+        active: true,
+        scrollTop: 0,
+      },
+    });
+    await vi.waitFor(() =>
+      expect(review.verifyAnchors).toHaveBeenCalledWith("large.txt", [
+        { id: "note:1", currentCode: "first line" },
+        { id: "note:2", currentCode: "second line" },
+      ]),
+    );
+
+    // A drifted note says so, and accepting it is the only way out.
+    expect(wrapper.text()).toContain("outdated");
+    await wrapper.get('[aria-label="Accept note on line 2 even though the line changed"]').trigger("click");
+    expect(review.clearOutdated).toHaveBeenCalledWith("note:2");
+    wrapper.unmount();
+  });
+
+  it("judges each note from the diff and only offers resolve when it can back it", async () => {
+    const checkoutId = "checkout:verdict";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]);
+    // Hunk mode: the whole patch is in memory, so an absent anchor really is a deleted line.
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "@@ -1,2 +1,2 @@\n const a = 1;\n+const b = 2;\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -1,2 +1,2 @@" }],
+    });
+    const review = reviewApi();
+    review.notes = [
+      reviewNote({ id: "note:kept", lineStart: 1, status: "sent" }),
+      reviewNote({ id: "note:gone", lineStart: 40, status: "sent" }),
+    ];
+    const wrapper = mount(FileDiff, {
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot,
+        review,
+        path: "src/app.ts",
+        active: true,
+        scrollTop: 0,
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("revisit this calculation"));
+
+    // Unchanged and deleted can both be resolved, and they are reported apart.
+    expect(wrapper.text()).toContain("The line this note points at is unchanged.");
+    expect(wrapper.text()).toContain("The line this note points at no longer exists.");
+    const resolvable = wrapper.findAll('[aria-label^="Mark note on line"]');
+    expect(resolvable.map((button) => button.attributes("aria-label"))).toEqual([
+      "Mark note on line 1 as resolved",
+      "Mark note on line 40 as resolved",
+    ]);
+    wrapper.unmount();
+  });
+
+  it("offers to resolve an attended note and not a drifted one", async () => {
+    const checkoutId = "checkout:resolve-note";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "large.txt", status: "M" }]);
+    mocks.getGitDiff.mockResolvedValue({
+      path: "large.txt",
+      patch: "@@ -0,0 +1,2 @@\n+first line\n+second line\n",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -0,0 +1,2 @@" }],
+    });
+    mocks.getGitDiffPage.mockResolvedValue({
+      path: "large.txt",
+      startLine: 0,
+      totalLines: 3,
+      lines: [
+        { index: 0, kind: "hunk", text: "@@ -0,0 +1,2 @@", oldLineNumber: null, newLineNumber: null },
+        { index: 1, kind: "added", text: "+first line", oldLineNumber: null, newLineNumber: 1 },
+        { index: 2, kind: "added", text: "+second line", oldLineNumber: null, newLineNumber: 2 },
+      ],
+    });
+    const review = reviewApi();
+    review.notes = [
+      reviewNote({ id: "note:1", path: "large.txt", lineStart: 1, status: "sent" }),
+      // A draft was never delivered, so there is nothing to resolve.
+      reviewNote({ id: "note:2", path: "large.txt", lineStart: 2, status: "draft" }),
+      reviewNote({ id: "note:3", path: "large.txt", lineStart: 2, status: "sent", outdated: true }),
+    ];
+    const wrapper = mount(FileDiff, {
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot,
+        review,
+        path: "large.txt",
+        active: true,
+        scrollTop: 0,
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+first line"));
+
+    // Only the delivered, non-drifted note can be resolved, and only by the user.
+    const resolveButtons = wrapper.findAll('[aria-label="Mark note on line 1 as resolved"]');
+    expect(resolveButtons).toHaveLength(1);
+    await resolveButtons[0].trigger("click");
+    expect(review.resolveNote).toHaveBeenCalledWith("note:1");
+    wrapper.unmount();
+  });
+
   it("retains the selected diff on status refresh and handles binary and over-limit changes", async () => {
     const checkoutId = "checkout:diff-status";
     const gitSnapshot = snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]);
     const wrapper = mount(FileDiff, {
-      props: { checkout: checkout(checkoutId), gitSnapshot, path: "src/app.ts", active: true, scrollTop: 0 },
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot,
+        review: reviewApi(),
+        path: "src/app.ts",
+        active: true,
+        scrollTop: 0,
+      },
     });
     await flushPromises();
     expect(mocks.getGitDiff).toHaveBeenCalledTimes(1);
@@ -486,6 +849,7 @@ describe("DocumentPane", () => {
         props: {
           checkout: checkout(checkoutId),
           gitSnapshot: isolatedSnapshot,
+          review: reviewApi(),
           path: "src/app.ts",
           active: true,
           scrollTop: 0,

@@ -217,7 +217,7 @@ fn unavailable(name: &str) -> IpcError {
     )
 }
 
-fn find_executable(name: &str) -> Option<PathBuf> {
+pub fn find_executable(name: &str) -> Option<PathBuf> {
     let mut candidates = env::var_os("PATH")
         .map(|paths| {
             env::split_paths(&paths)
@@ -230,13 +230,20 @@ fn find_executable(name: &str) -> Option<PathBuf> {
             .into_iter()
             .map(|directory| Path::new(directory).join(name)),
     );
+    if let Some(home) = env::var_os("HOME") {
+        candidates.extend(
+            [".opencode/bin", ".local/bin"]
+                .into_iter()
+                .map(|directory| Path::new(&home).join(directory).join(name)),
+        );
+    }
     if name == "zed" {
         candidates.push(PathBuf::from("/Applications/Zed.app/Contents/MacOS/zed"));
     }
     candidates.into_iter().find(|path| is_executable(path))
 }
 
-fn is_executable(path: &Path) -> bool {
+pub fn is_executable(path: &Path) -> bool {
     let Ok(metadata) = fs::metadata(path) else {
         return false;
     };

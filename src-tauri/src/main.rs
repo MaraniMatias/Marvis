@@ -1,5 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+use tauri::Emitter;
+
 mod commands;
 pub mod domain;
 pub mod git;
@@ -7,8 +9,21 @@ mod persistence;
 pub mod services;
 mod terminal;
 
+/// Registers the local MCP automation bridge. It only exists in debug builds
+/// compiled with `--features dev-bridge`, so release builds never include it.
+fn with_dev_plugins(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    #[cfg(all(debug_assertions, feature = "dev-bridge"))]
+    {
+        builder.plugin(tauri_plugin_mcp_bridge::init())
+    }
+    #[cfg(not(all(debug_assertions, feature = "dev-bridge")))]
+    {
+        builder
+    }
+}
+
 fn main() {
-    tauri::Builder::default()
+    with_dev_plugins(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
         .setup(|app| {
             use tauri::Manager;
@@ -71,9 +86,24 @@ fn main() {
             app.manage(std::sync::Arc::new(
                 services::git::GitWatcherManager::default(),
             ));
+            // One OpenCode server per checkout, owned for the app's lifetime so the
+            // child process is stopped on exit rather than leaked.
+            let agents = std::sync::Arc::new(services::agent::AgentService::new());
+            let emitter = app.handle().clone();
+            agents.set_event_sink(std::sync::Arc::new(
+                move |event: services::agent::AgentEvent| {
+                    // A dead window must not take the reader thread down with it.
+                    let _ = emitter.emit("marvis://agent-event", event);
+                },
+            ));
+            app.manage(agents);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::agent::agent_sessions,
+            commands::agent::agent_session_create,
+            commands::agent::agent_prompt,
+            commands::agent::agent_stop,
             commands::editor::editor_availability,
             commands::editor::editor_open_zed,
             commands::folder::open_folder,
@@ -95,6 +125,19 @@ fn main() {
             commands::git::git_mark_viewed,
             commands::git::git_watch_checkout,
             commands::git::git_unwatch_checkout,
+            commands::review::review_notes,
+            commands::review::review_note_create,
+            commands::review::review_note_update,
+            commands::review::review_note_delete,
+            commands::review::review_notes_mark_sent,
+            commands::review::review_note_anchors_verify,
+            commands::review::review_note_outdated_clear,
+            commands::review::review_note_resolve,
+            commands::review::review_rounds,
+            commands::review::review_round_dispatch,
+            commands::review::review_rounds_requeue,
+            commands::review::review_round_reconcile,
+            commands::review::review_round_ack,
             commands::worktree::worktree_defaults,
             commands::worktree::worktree_create,
             commands::worktree::worktree_removal_info,

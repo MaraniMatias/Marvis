@@ -3,10 +3,12 @@ import type { Channel } from "@tauri-apps/api/core";
 import type { OpenedFolder } from "../domain/folder";
 import type { CheckoutImage, FileContent, FileSearchResult, FileTree } from "../domain/files";
 import type { GitDiffPage, GitFileDiff, GitStatus } from "../domain/git";
+import type { ReviewNote, ReviewRound, ReviewSide } from "../domain/review";
 import type { Session, TerminalLaunchType, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalInfo } from "../domain/worktree";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { AppLayoutState, CheckoutUiState } from "../domain/ui-state";
+import type { AgentSession } from "../domain/agent";
 
 export interface CreatedTerminal {
   session: Session;
@@ -79,6 +81,111 @@ export function markGitFileViewed(checkoutId: string, path: string): Promise<voi
 
 export function watchGitCheckout(checkoutId: string): Promise<void> {
   return invoke<void>("git_watch_checkout", { checkoutId });
+}
+
+export function listReviewNotes(checkoutId: string): Promise<ReviewNote[]> {
+  return invoke<ReviewNote[]>("review_notes", { checkoutId });
+}
+
+export interface ReviewNoteCreate {
+  checkoutId: string;
+  path: string;
+  side: ReviewSide;
+  lineStart: number;
+  lineEnd?: number;
+  content: string;
+  code: string;
+}
+
+export function createReviewNote(request: ReviewNoteCreate): Promise<ReviewNote> {
+  return invoke<ReviewNote>("review_note_create", {
+    request: {
+      checkoutId: request.checkoutId,
+      path: request.path,
+      side: request.side,
+      lineStart: request.lineStart,
+      lineEnd: request.lineEnd ?? null,
+      content: request.content,
+      code: request.code,
+    },
+  });
+}
+
+export function updateReviewNote(checkoutId: string, id: string, content: string): Promise<ReviewNote> {
+  return invoke<ReviewNote>("review_note_update", { checkoutId, id, content });
+}
+
+export function deleteReviewNote(checkoutId: string, id: string): Promise<void> {
+  return invoke<void>("review_note_delete", { checkoutId, id });
+}
+
+export function markReviewNotesSent(checkoutId: string, ids: string[]): Promise<void> {
+  return invoke<void>("review_notes_mark_sent", { checkoutId, ids });
+}
+
+export interface ReviewAnchorCheck {
+  id: string;
+  currentCode: string;
+}
+
+export function verifyReviewNoteAnchors(
+  checkoutId: string,
+  path: string,
+  checks: ReviewAnchorCheck[],
+): Promise<ReviewNote[]> {
+  return invoke<ReviewNote[]>("review_note_anchors_verify", { request: { checkoutId, path, checks } });
+}
+
+export function clearReviewNoteOutdated(checkoutId: string, id: string): Promise<ReviewNote> {
+  return invoke<ReviewNote>("review_note_outdated_clear", { checkoutId, id });
+}
+
+export function resolveReviewNote(checkoutId: string, id: string): Promise<ReviewNote> {
+  return invoke<ReviewNote>("review_note_resolve", { checkoutId, id });
+}
+
+export function listReviewRounds(checkoutId: string): Promise<ReviewRound[]> {
+  return invoke<ReviewRound[]>("review_rounds", { checkoutId });
+}
+
+/** Records the round, then delivers it as one message. Never both or neither. */
+export function dispatchReviewRound(request: {
+  checkoutId: string;
+  sessionId: string;
+  ids: string[];
+  markdown: string;
+}): Promise<ReviewRound> {
+  return invoke<ReviewRound>("review_round_dispatch", { request });
+}
+
+export function requeueReviewRounds(checkoutId: string): Promise<number> {
+  return invoke<number>("review_rounds_requeue", { checkoutId });
+}
+
+/** Asks the session whether a round's message arrived, and settles the round accordingly. */
+export function reconcileReviewRound(checkoutId: string, roundId: string): Promise<ReviewRound> {
+  return invoke<ReviewRound>("review_round_reconcile", { checkoutId, roundId });
+}
+
+export function ackReviewRound(checkoutId: string, roundId: string): Promise<ReviewRound> {
+  return invoke<ReviewRound>("review_round_ack", { checkoutId, roundId });
+}
+
+export function listAgentSessions(checkoutId: string): Promise<AgentSession[]> {
+  return invoke<AgentSession[]>("agent_sessions", { checkoutId });
+}
+
+export function createAgentSession(checkoutId: string, title: string): Promise<AgentSession> {
+  return invoke<AgentSession>("agent_session_create", { checkoutId, title });
+}
+
+/** Sends one review round as a single message to a session of this checkout. */
+export function sendAgentPrompt(checkoutId: string, sessionId: string, text: string): Promise<AgentSession> {
+  return invoke<AgentSession>("agent_prompt", { checkoutId, sessionId, text });
+}
+
+export function stopAgent(checkoutId: string): Promise<void> {
+  return invoke<void>("agent_stop", { checkoutId });
 }
 
 export function unwatchGitCheckout(checkoutId: string): Promise<void> {

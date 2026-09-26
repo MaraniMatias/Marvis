@@ -6,6 +6,8 @@ import type { FileEntry, FileSearchResult } from "../domain/files";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { CheckoutUiState } from "../domain/ui-state";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
+import type { AgentSession } from "../domain/agent";
+import type { ActiveReviewNotes } from "../presentation/review-notes";
 import { listCheckoutFiles, searchCheckoutFiles } from "../lib/ipc";
 import ChangesPane from "./ChangesPane.vue";
 
@@ -13,12 +15,17 @@ const props = defineProps<{
   checkout: Checkout | null;
   repo?: Repo | null;
   gitSnapshot: ActiveGitSnapshot;
+  review?: Pick<ActiveReviewNotes, "notes" | "rounds" | "markSent">;
+  agentSessions?: AgentSession[];
+  agentTargetId?: string | null;
   commandRequest?: { action: "open-file" | "open-changes"; token: number } | null;
   savedState?: CheckoutUiState | null;
 }>();
 const emit = defineEmits<{
   openFile: [value: { checkoutId: string; path: string }];
   openChange: [value: { checkoutId: string; path: string }];
+  sendReview: [ids: string[]];
+  selectAgentTarget: [sessionId: string];
   updateUiState: [
     value: Pick<
       CheckoutUiState,
@@ -650,10 +657,15 @@ function onTreeScroll(event: Event) {
         :key="checkout.id"
         :checkout="checkout"
         :git-snapshot="gitSnapshot"
+        :review="review"
+        :agent-sessions="agentSessions"
+        :agent-target-id="agentTargetId"
         :selected-path="selectedChangedPath"
         :scroll-top="changesScrollTop"
         @open-change="selectChange"
         @scroll-position-changed="onChangesScroll"
+        @send-review="$emit('sendReview', $event)"
+        @select-agent-target="$emit('selectAgentTarget', $event)"
       />
     </div>
   </aside>

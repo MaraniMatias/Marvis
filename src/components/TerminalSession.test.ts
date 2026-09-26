@@ -155,6 +155,20 @@ describe("TerminalSession UI", () => {
     wrapper.unmount();
   });
 
+  it("launches a terminal without any prompt, because reviews go to the agent bridge", async () => {
+    const wrapper = mount(TerminalSession, {
+      props: {
+        checkoutId: "checkout:repo",
+        active: true,
+        sessionType: "shell",
+      },
+    });
+    await flushPromises();
+
+    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "shell", expect.anything(), undefined);
+    wrapper.unmount();
+  });
+
   it("does not steal focus when a hidden terminal finishes starting", async () => {
     let resolveCreate!: (value: typeof created) => void;
     vi.mocked(createTerminal).mockReturnValue(

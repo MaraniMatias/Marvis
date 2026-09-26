@@ -7,12 +7,14 @@ use std::{
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 
+use crate::domain::review::{review_anchor_hash, ReviewNote, ReviewRound};
 use crate::domain::terminal_layout::CheckoutTerminalLayout;
 use crate::domain::workspace::{
     Checkout, Repo, RepoKind, Session, SessionStatus, SessionType, WorkspaceState,
 };
 
-const SCHEMA_VERSION: i64 = 6;
+const SCHEMA_VERSION: i64 = 9;
+const REVIEW_NOTE_COLUMNS: &str = "id, checkout_id, path, side, line_start, line_end, content, code, status, code_hash, outdated, round_id, created_at, updated_at";
 const ACTIVE_CHECKOUT: &str = "active_checkout_id";
 const ACTIVE_SESSION: &str = "active_session_id";
 const WORKTREE_LOCATION: &str = "worktree_location";
@@ -1130,6 +1132,378 @@ impl Database {
             .map_err(db_error)?;
         Ok(())
     }
+
+    pub fn review_notes(&self, checkout_id: &str) -> Result<Vec<ReviewNote>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(&format!(
+                "SELECT {REVIEW_NOTE_COLUMNS} FROM review_notes
+                 WHERE checkout_id = ?1 ORDER BY path, line_start, created_at"
+            ))
+            .map_err(db_error)?;
+        let notes = statement
+            .query_map([checkout_id], read_review_note)
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        Ok(notes)
+    }
+
+    pub fn add_review_note(&self, note: &ReviewNote) -> Result<ReviewNote, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "INSERT INTO review_notes (id, checkout_id, path, side, line_start, line_end, content, code, status, code_hash, outdated, round_id, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14)",
+                params![
+                    note.id,
+                    note.checkout_id,
+                    note.path,
+                    note.side,
+                    note.line_start,
+                    note.line_end,
+                    note.content,
+                    note.code,
+                    note.status,
+                    note.code_hash,
+                    note.outdated,
+                    note.round_id,
+                    note.created_at,
+                    note.updated_at,
+                ],
+            )
+            .map_err(db_error)?;
+        Ok(note.clone())
+    }
+
+    /// Updates a note only when it belongs to `checkout_id`; a foreign ID is rejected.
+    pub fn update_review_note(
+        &self,
+        id: &str,
+        checkout_id: &str,
+        content: &str,
+    ) -> Result<ReviewNote, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let updated_at = timestamp();
+        let changed = connection
+            .execute(
+                "UPDATE review_notes SET content = ?1, status = 'draft', updated_at = ?2
+                 WHERE id = ?3 AND checkout_id = ?4",
+                params![content, updated_at, id, checkout_id],
+            )
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("review note does not belong to the requested checkout".into());
+        }
+        self.read_review_note_by_id(&connection, id)
+    }
+
+    pub fn delete_review_note(&self, id: &str, checkout_id: &str) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let deleted = connection
+            .execute(
+                "DELETE FROM review_notes WHERE id = ?1 AND checkout_id = ?2",
+                params![id, checkout_id],
+            )
+            .map_err(db_error)?;
+        if deleted == 0 {
+            return Err("review note does not belong to the requested checkout".into());
+        }
+        Ok(())
+    }
+
+    pub fn mark_review_notes_sent(
+        &self,
+        checkout_id: &str,
+        ids: &[String],
+    ) -> Result<usize, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        let updated_at = timestamp();
+        let mut marked = 0;
+        for id in ids {
+            marked += transaction
+                .execute(
+                    "UPDATE review_notes SET status = 'sent', updated_at = ?1
+                     WHERE id = ?2 AND checkout_id = ?3",
+                    params![updated_at, id, checkout_id],
+                )
+                .map_err(db_error)?;
+        }
+        if marked != ids.len() {
+            let _ = transaction.rollback();
+            return Err("review note does not belong to the requested checkout".into());
+        }
+        transaction.commit().map_err(db_error)?;
+        Ok(marked)
+    }
+
+    /// Stamps a single note as outdated. Never clears the mark: only the user may do that.
+    pub fn mark_review_note_outdated(
+        &self,
+        id: &str,
+        checkout_id: &str,
+    ) -> Result<ReviewNote, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let changed = connection
+            .execute(
+                "UPDATE review_notes SET outdated = 1, updated_at = ?1
+                 WHERE id = ?2 AND checkout_id = ?3",
+                params![timestamp(), id, checkout_id],
+            )
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("review note does not belong to the requested checkout".into());
+        }
+        self.read_review_note_by_id(&connection, id)
+    }
+
+    /// Clears the outdated mark, but only for a note that is actually marked.
+    pub fn clear_review_note_outdated(
+        &self,
+        id: &str,
+        checkout_id: &str,
+    ) -> Result<ReviewNote, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let changed = connection
+            .execute(
+                "UPDATE review_notes SET outdated = 0, updated_at = ?1
+                 WHERE id = ?2 AND checkout_id = ?3 AND outdated = 1",
+                params![timestamp(), id, checkout_id],
+            )
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("review note does not belong to the requested checkout".into());
+        }
+        self.read_review_note_by_id(&connection, id)
+    }
+
+    /// Marks a note resolved, and only for a note still in flight.
+    pub fn resolve_review_note(&self, id: &str, checkout_id: &str) -> Result<ReviewNote, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let changed = connection
+            .execute(
+                "UPDATE review_notes SET status = 'resolved', updated_at = ?1
+                 WHERE id = ?2 AND checkout_id = ?3 AND status = 'sent'",
+                params![timestamp(), id, checkout_id],
+            )
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("review note is not an outstanding note of this checkout".into());
+        }
+        self.read_review_note_by_id(&connection, id)
+    }
+
+    /// Records a round, and links its notes to it, in one transaction.
+    ///
+    /// `round.status` is written before the agent is called, so a crash between here and
+    /// the send leaves a `dispatching` round that reconciliation can resolve.
+    pub fn add_review_round(
+        &self,
+        round: &ReviewRound,
+        note_ids: &[String],
+    ) -> Result<ReviewRound, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        let encoded = serde_json::to_string(note_ids)
+            .map_err(|error| format!("could not encode notes: {error}"))?;
+        transaction
+            .execute(
+                "INSERT INTO review_rounds (id, checkout_id, session_id, status, marker, note_ids, created_at, updated_at)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                params![
+                    round.id,
+                    round.checkout_id,
+                    round.session_id,
+                    round.status,
+                    round.marker,
+                    encoded,
+                    round.created_at,
+                    round.updated_at,
+                ],
+            )
+            .map_err(db_error)?;
+        for id in note_ids {
+            let linked = transaction
+                .execute(
+                    "UPDATE review_notes
+                     SET status = 'sent', round_id = ?1, updated_at = ?2
+                     WHERE id = ?3 AND checkout_id = ?4",
+                    params![round.id, round.updated_at, id, round.checkout_id],
+                )
+                .map_err(db_error)?;
+            if linked == 0 {
+                let _ = transaction.rollback();
+                return Err("review note does not belong to the requested checkout".into());
+            }
+        }
+        transaction.commit().map_err(db_error)?;
+        Ok(round.clone())
+    }
+
+    pub fn review_rounds(&self, checkout_id: &str) -> Result<Vec<ReviewRound>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let rounds = {
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, checkout_id, session_id, status, marker, note_ids, created_at, updated_at
+                     FROM review_rounds WHERE checkout_id = ?1 ORDER BY created_at DESC, rowid DESC",
+                )
+                .map_err(db_error)?;
+            let collected = statement
+                .query_map([checkout_id], read_review_round)
+                .map_err(db_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(db_error)?;
+            collected
+        };
+        Ok(rounds)
+    }
+
+    /// Advances a round's status, rejecting a move out of the state it is actually in.
+    pub fn set_review_round_status(
+        &self,
+        id: &str,
+        checkout_id: &str,
+        from: &str,
+        to: &str,
+    ) -> Result<ReviewRound, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let changed = connection
+            .execute(
+                "UPDATE review_rounds SET status = ?1, updated_at = ?2
+                 WHERE id = ?3 AND checkout_id = ?4 AND status = ?5",
+                params![to, timestamp(), id, checkout_id, from],
+            )
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("review round is not in the expected state".into());
+        }
+        connection
+            .query_row(
+                "SELECT id, checkout_id, session_id, status, marker, note_ids, created_at, updated_at
+                 FROM review_rounds WHERE id = ?1",
+                [id],
+                read_review_round,
+            )
+            .map_err(db_error)
+    }
+
+    pub fn set_review_round_session(
+        &self,
+        id: &str,
+        checkout_id: &str,
+        session_id: &str,
+    ) -> Result<ReviewRound, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let changed = connection
+            .execute(
+                "UPDATE review_rounds SET session_id = ?1, updated_at = ?2
+                 WHERE id = ?3 AND checkout_id = ?4",
+                params![session_id, timestamp(), id, checkout_id],
+            )
+            .map_err(db_error)?;
+        if changed == 0 {
+            return Err("review round does not belong to the requested checkout".into());
+        }
+        connection
+            .query_row(
+                "SELECT id, checkout_id, session_id, status, marker, note_ids, created_at, updated_at
+                 FROM review_rounds WHERE id = ?1",
+                [id],
+                read_review_round,
+            )
+            .map_err(db_error)
+    }
+
+    /// Puts every still-pending round of the checkout back to `queued`.
+    pub fn requeue_review_rounds(&self, checkout_id: &str) -> Result<usize, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        connection
+            .execute(
+                "UPDATE review_rounds SET status = 'queued', updated_at = ?1
+                 WHERE checkout_id = ?2 AND status = 'dispatching'",
+                params![timestamp(), checkout_id],
+            )
+            .map_err(db_error)
+    }
+
+    fn read_review_note_by_id(
+        &self,
+        connection: &Connection,
+        id: &str,
+    ) -> Result<ReviewNote, String> {
+        connection
+            .query_row(
+                &format!("SELECT {REVIEW_NOTE_COLUMNS} FROM review_notes WHERE id = ?1"),
+                [id],
+                read_review_note,
+            )
+            .map_err(db_error)
+    }
+
+    /// Anchor hashes of the requested notes, so the caller can compare and stamp drift.
+    pub fn review_note_hashes(
+        &self,
+        checkout_id: &str,
+        path: &str,
+        ids: &[String],
+    ) -> Result<Vec<(String, String)>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, code_hash FROM review_notes
+                 WHERE checkout_id = ?1 AND path = ?2 AND id = ?3",
+            )
+            .map_err(db_error)?;
+        let mut found = Vec::with_capacity(ids.len());
+        for id in ids {
+            let row = statement
+                .query_row(params![checkout_id, path, id], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .optional()
+                .map_err(db_error)?;
+            match row {
+                Some((id, code_hash)) => found.push((id, code_hash)),
+                None => return Err("review note does not belong to the requested checkout".into()),
+            }
+        }
+        Ok(found)
+    }
+}
+
+fn read_review_note(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewNote> {
+    Ok(ReviewNote {
+        id: row.get(0)?,
+        checkout_id: row.get(1)?,
+        path: row.get(2)?,
+        side: row.get(3)?,
+        line_start: row.get(4)?,
+        line_end: row.get(5)?,
+        content: row.get(6)?,
+        code: row.get(7)?,
+        status: row.get(8)?,
+        code_hash: row.get(9)?,
+        outdated: row.get(10)?,
+        round_id: row.get(11)?,
+        created_at: row.get(12)?,
+        updated_at: row.get(13)?,
+    })
+}
+
+fn read_review_round(row: &rusqlite::Row<'_>) -> rusqlite::Result<ReviewRound> {
+    let note_ids: String = row.get(5)?;
+    Ok(ReviewRound {
+        id: row.get(0)?,
+        checkout_id: row.get(1)?,
+        session_id: row.get(2)?,
+        status: row.get(3)?,
+        marker: row.get(4)?,
+        note_ids: serde_json::from_str(&note_ids).unwrap_or_default(),
+        created_at: row.get(6)?,
+        updated_at: row.get(7)?,
+    })
 }
 
 fn terminal_layout_session_ids(
@@ -1177,6 +1551,12 @@ fn transfer_checkout_metadata(
     transaction
         .execute(
             "UPDATE viewed_files SET checkout_id = ?1 WHERE checkout_id = ?2",
+            params![next_checkout_id, previous_checkout_id],
+        )
+        .map_err(db_error)?;
+    transaction
+        .execute(
+            "UPDATE review_notes SET checkout_id = ?1 WHERE checkout_id = ?2",
             params![next_checkout_id, previous_checkout_id],
         )
         .map_err(db_error)?;
@@ -1416,6 +1796,112 @@ fn migrate(connection: &Connection) -> Result<(), String> {
             .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
     }
+    if version < 7 {
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        transaction
+            .execute_batch(
+                "CREATE TABLE review_notes (
+                    id TEXT PRIMARY KEY NOT NULL,
+                    checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                    path TEXT NOT NULL,
+                    side TEXT NOT NULL CHECK (side IN ('old', 'new')),
+                    line_start INTEGER NOT NULL,
+                    line_end INTEGER,
+                    content TEXT NOT NULL,
+                    code TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('draft', 'sent')),
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+                CREATE INDEX review_notes_checkout_path ON review_notes (checkout_id, path);
+                PRAGMA user_version = 7;",
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+    }
+    if version < 8 {
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        transaction
+            .execute_batch(
+                "ALTER TABLE review_notes ADD COLUMN code_hash TEXT NOT NULL DEFAULT '';
+                 ALTER TABLE review_notes ADD COLUMN outdated INTEGER NOT NULL DEFAULT 0
+                     CHECK (outdated IN (0, 1));
+                 PRAGMA user_version = 8;",
+            )
+            .map_err(db_error)?;
+        // Notes that already existed have no fingerprint. Derive it from the code they
+        // captured, otherwise every one of them would look drifted on the first check.
+        let unfingerprinted = {
+            let mut statement = transaction
+                .prepare("SELECT id, code FROM review_notes WHERE code_hash = ''")
+                .map_err(db_error)?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+                })
+                .map_err(db_error)?
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(db_error)?;
+            rows
+        };
+        for (id, code) in unfingerprinted {
+            transaction
+                .execute(
+                    "UPDATE review_notes SET code_hash = ?1 WHERE id = ?2",
+                    params![review_anchor_hash(&code), id],
+                )
+                .map_err(db_error)?;
+        }
+        transaction.commit().map_err(db_error)?;
+    }
+    if version < 9 {
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        // The status CHECK cannot be altered in place, so the table is rebuilt. This is also
+        // where a note learns which round carried it.
+        transaction
+            .execute_batch(
+                "CREATE TABLE review_notes_v9 (
+                     id TEXT PRIMARY KEY NOT NULL,
+                     checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                     path TEXT NOT NULL,
+                     side TEXT NOT NULL CHECK (side IN ('old', 'new')),
+                     line_start INTEGER NOT NULL,
+                     line_end INTEGER,
+                     content TEXT NOT NULL,
+                     code TEXT NOT NULL,
+                     status TEXT NOT NULL CHECK (status IN ('draft', 'sent', 'resolved')),
+                     code_hash TEXT NOT NULL,
+                     outdated INTEGER NOT NULL DEFAULT 0 CHECK (outdated IN (0, 1)),
+                     round_id TEXT,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+                 INSERT INTO review_notes_v9
+                     SELECT id, checkout_id, path, side, line_start, line_end, content, code,
+                            status, code_hash, outdated, NULL, created_at, updated_at
+                     FROM review_notes;
+                 DROP TABLE review_notes;
+                 ALTER TABLE review_notes_v9 RENAME TO review_notes;
+                 CREATE INDEX review_notes_checkout_path ON review_notes (checkout_id, path);
+                 CREATE INDEX review_notes_round ON review_notes (round_id);
+                 CREATE TABLE review_rounds (
+                     id TEXT PRIMARY KEY NOT NULL,
+                     checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                     session_id TEXT,
+                     status TEXT NOT NULL CHECK (
+                         status IN ('queued', 'dispatching', 'dispatched', 'acked')
+                     ),
+                     marker TEXT NOT NULL,
+                     note_ids TEXT NOT NULL,
+                     created_at TEXT NOT NULL,
+                     updated_at TEXT NOT NULL
+                 );
+                 CREATE INDEX review_rounds_checkout ON review_rounds (checkout_id, created_at);
+                 PRAGMA user_version = 9;",
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+    }
     Ok(())
 }
 
@@ -1642,8 +2128,8 @@ mod tests {
     };
 
     use super::{
-        AppLayoutState, CheckoutUiState, Database, LayoutSnapshot, PersistedDocument,
-        SCHEMA_VERSION,
+        review_anchor_hash, AppLayoutState, CheckoutUiState, Database, LayoutSnapshot,
+        PersistedDocument, ReviewNote, SCHEMA_VERSION,
     };
 
     fn plain_repo(path: &Path, now: &str) -> Repo {
@@ -1697,6 +2183,151 @@ mod tests {
             )
             .unwrap();
         assert!(has_checkout_ui_states);
+    }
+
+    #[test]
+    fn migrating_to_v8_backfills_anchor_hashes_for_existing_notes() {
+        let temp = tempdir().unwrap();
+        let folder = temp.path().join("checkout");
+        fs::create_dir(&folder).unwrap();
+        let repo = plain_repo(&folder, "now");
+        let checkout_id = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("v8.sqlite3")).unwrap();
+        database.register_plain_repo(repo).unwrap();
+
+        let now = "2026-09-26T00:00:00Z";
+        let note = ReviewNote {
+            id: "note:legacy".into(),
+            checkout_id,
+            path: "src/main.rs".into(),
+            side: "new".into(),
+            line_start: 4,
+            line_end: Some(6),
+            content: "legacy note".into(),
+            code: "let first = 1;\nlet second = 2;".into(),
+            status: "draft".into(),
+            code_hash: review_anchor_hash("let first = 1;\nlet second = 2;"),
+            outdated: false,
+            round_id: None,
+            created_at: now.into(),
+            updated_at: now.into(),
+        };
+        database.add_review_note(&note).unwrap();
+
+        // Pretend the database predates anchor hashes: rebuild the table in its v7 shape.
+        {
+            let connection = database.connection.lock().unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE review_notes_v7 (
+                         id TEXT PRIMARY KEY NOT NULL,
+                         checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                         path TEXT NOT NULL,
+                         side TEXT NOT NULL CHECK (side IN ('old', 'new')),
+                         line_start INTEGER NOT NULL,
+                         line_end INTEGER,
+                         content TEXT NOT NULL,
+                         code TEXT NOT NULL,
+                         status TEXT NOT NULL CHECK (status IN ('draft', 'sent')),
+                         created_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL
+                     );
+                     INSERT INTO review_notes_v7
+                         SELECT id, checkout_id, path, side, line_start, line_end,
+                                content, code, status, created_at, updated_at
+                         FROM review_notes;
+                     DROP TABLE review_notes;
+                     DROP TABLE review_rounds;
+                     ALTER TABLE review_notes_v7 RENAME TO review_notes;
+                     CREATE INDEX review_notes_checkout_path ON review_notes (checkout_id, path);
+                     PRAGMA user_version = 7;",
+                )
+                .unwrap();
+            super::migrate(&connection).unwrap();
+        }
+
+        let migrated = database.review_notes(&note.checkout_id).unwrap();
+        assert_eq!(migrated[0].code_hash, note.code_hash);
+        assert!(!migrated[0].outdated);
+    }
+
+    #[test]
+    fn migrating_to_v9_keeps_existing_notes_and_adds_the_resolved_state() {
+        let temp = tempdir().unwrap();
+        let folder = temp.path().join("checkout");
+        fs::create_dir(&folder).unwrap();
+        let repo = plain_repo(&folder, "now");
+        let checkout_id = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("v9.sqlite3")).unwrap();
+        database.register_plain_repo(repo).unwrap();
+
+        let now = "2026-09-26T00:00:00Z";
+        let note = ReviewNote {
+            id: "note:v8".into(),
+            checkout_id: checkout_id.clone(),
+            path: "src/main.rs".into(),
+            side: "new".into(),
+            line_start: 4,
+            line_end: None,
+            content: "from v8".into(),
+            code: "let first = 1;".into(),
+            status: "sent".into(),
+            code_hash: review_anchor_hash("let first = 1;"),
+            outdated: true,
+            round_id: None,
+            created_at: now.into(),
+            updated_at: now.into(),
+        };
+        database.add_review_note(&note).unwrap();
+
+        // Put the database back on the v8 shape and migrate again.
+        {
+            let connection = database.connection.lock().unwrap();
+            connection
+                .execute_batch(
+                    "CREATE TABLE review_notes_v8 (
+                         id TEXT PRIMARY KEY NOT NULL,
+                         checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                         path TEXT NOT NULL,
+                         side TEXT NOT NULL CHECK (side IN ('old', 'new')),
+                         line_start INTEGER NOT NULL,
+                         line_end INTEGER,
+                         content TEXT NOT NULL,
+                         code TEXT NOT NULL,
+                         status TEXT NOT NULL CHECK (status IN ('draft', 'sent')),
+                         code_hash TEXT NOT NULL,
+                         outdated INTEGER NOT NULL DEFAULT 0 CHECK (outdated IN (0, 1)),
+                         created_at TEXT NOT NULL,
+                         updated_at TEXT NOT NULL
+                     );
+                     INSERT INTO review_notes_v8
+                         SELECT id, checkout_id, path, side, line_start, line_end, content, code,
+                                status, code_hash, outdated, created_at, updated_at
+                         FROM review_notes;
+                     DROP TABLE review_notes;
+                     DROP TABLE review_rounds;
+                     ALTER TABLE review_notes_v8 RENAME TO review_notes;
+                     CREATE INDEX review_notes_checkout_path ON review_notes (checkout_id, path);
+                     PRAGMA user_version = 8;",
+                )
+                .unwrap();
+            super::migrate(&connection).unwrap();
+        }
+
+        let migrated = database.review_notes(&checkout_id).unwrap();
+        assert_eq!(migrated.len(), 1);
+        assert_eq!(migrated[0].content, "from v8");
+        assert_eq!(migrated[0].status, "sent");
+        assert_eq!(migrated[0].code_hash, note.code_hash);
+        assert!(migrated[0].outdated);
+        assert_eq!(migrated[0].round_id, None);
+        assert!(database.review_rounds(&checkout_id).unwrap().is_empty());
+
+        // The rebuilt table must accept the new state, not just the old ones.
+        let resolved = database
+            .resolve_review_note("note:v8", &checkout_id)
+            .unwrap();
+        assert_eq!(resolved.status, "resolved");
     }
 
     #[test]
@@ -1799,14 +2430,19 @@ mod tests {
         {
             let connection = old_version.connection.lock().unwrap();
             connection
-                .execute_batch("DROP TABLE checkout_ui_states; PRAGMA user_version = 5;")
+                .execute_batch(
+                    "DROP TABLE checkout_ui_states;
+                     DROP TABLE review_notes;
+                     DROP TABLE review_rounds;
+                     PRAGMA user_version = 5;",
+                )
                 .unwrap();
             super::migrate(&connection).unwrap();
             assert_eq!(
                 connection
                     .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
                     .unwrap(),
-                6
+                SCHEMA_VERSION
             );
         }
     }

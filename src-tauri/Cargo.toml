@@ -15,8 +15,18 @@ tauri = { version = "2", features = ["macos-private-api"] }
 tauri-plugin-dialog = "2"
 rusqlite = { version = "0.37", features = ["bundled"] }
 portable-pty = "0.9"
+# Blocking HTTP client for the per-checkout OpenCode server on 127.0.0.1. TLS is
+# deliberately off: the server is a child process we start ourselves on loopback.
+ureq = { version = "3", default-features = false, features = ["json"] }
 notify = "8"
 libc = "0.2"
+# Local MCP automation bridge. Optional and only compiled with the `dev-bridge`
+# feature, so release builds never include it.
+tauri-plugin-mcp-bridge = { version = "0.13", optional = true }
+
+[features]
+default = []
+dev-bridge = ["dep:tauri-plugin-mcp-bridge"]
 
 [dev-dependencies]
 tempfile = "3"

@@ -53,6 +53,7 @@ pub struct TerminalCreateRequest {
     cols: u16,
     rows: u16,
     session_type: TerminalLaunchType,
+    prompt: Option<String>,
     file_path: Option<String>,
     line: Option<u32>,
     column: Option<u32>,
@@ -100,6 +101,7 @@ pub async fn terminal_create(
                 rows: request.rows,
                 session_type: request.session_type,
                 target,
+                prompt: request.prompt,
             },
             output,
         )

@@ -10,6 +10,7 @@
     "build:app": "tauri build",
     "preview": "vite preview",
     "tauri": "tauri",
+    "dev:app": "tauri dev --features dev-bridge",
     "fmt": "prettier --write \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml",
     "fmt:check": "prettier --check \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "lint": "eslint src vite.config.ts",

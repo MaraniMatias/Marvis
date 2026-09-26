@@ -5,6 +5,7 @@ import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, onMounted } from "vue";
 import { DEFAULT_APP_LAYOUT, DEFAULT_CHECKOUT_UI_STATE } from "./domain/ui-state";
+import type { ReviewNote } from "./domain/review";
 import type { Checkout, Repo, Session, WorkspaceState } from "./domain/workspace";
 
 const mocks = vi.hoisted(() => ({
@@ -22,6 +23,22 @@ const mocks = vi.hoisted(() => ({
     close: () => Promise<void>;
   } | null,
   onProgrammaticPanelResize: null as ((panelId: string, size: number) => void) | null,
+  gitStatus: null as { branch: string; defaultBranch: string } | null,
+  reviewNotes: [] as ReviewNote[],
+  agentSessions: [] as Array<{
+    id: string;
+    checkoutId: string;
+    title: string;
+    busy: boolean;
+    blockedOnPermission: boolean;
+    createdAt: number;
+    updatedAt: number;
+  }>,
+  agentTargetId: null as string | null,
+  createAgentSession: vi.fn(),
+  sendAgentPrompt: vi.fn(),
+  dispatchReviewRound: vi.fn(),
+  reconcileRounds: vi.fn(),
 }));
 
 vi.mock("reka-ui", async () => {
@@ -68,7 +85,13 @@ vi.mock("./lib/ipc", () => ({
   openInZed: vi.fn(),
   saveAppLayout: mocks.saveAppLayout,
   saveCheckoutUiState: mocks.saveCheckoutUiState,
-  selectCheckout: vi.fn(),
+  // The real command returns the refreshed workspace; App assigns it straight back,
+  // so returning undefined here crashed the next render.
+  selectCheckout: async (checkoutId: string | null) => {
+    const workspace = mocks.workspaceRef;
+    if (workspace) workspace.value = { ...workspace.value, activeCheckoutId: checkoutId };
+    return workspace?.value;
+  },
 }));
 vi.mock("./presentation/workspace", async () => {
   const { computed, ref } = await import("vue");
@@ -93,7 +116,10 @@ vi.mock("./presentation/workspace", async () => {
         isOpening,
         error,
         chooseFolder: vi.fn(),
-        selectCheckout: async (checkoutId: string | null) => setActiveCheckout(checkoutId),
+        selectCheckout: async (checkoutId: string | null) => {
+          setActiveCheckout(checkoutId);
+          return workspace.value;
+        },
         selectSession: async (sessionId: string) => {
           const checkout = workspace.value.repos
             .flatMap((repo) => repo.checkouts)
@@ -109,7 +135,7 @@ vi.mock("./presentation/workspace", async () => {
 vi.mock("./presentation/active-git-snapshot", () => ({
   useActiveGitSnapshot: () => ({
     checkoutId: null,
-    status: null,
+    status: mocks.gitStatus ? { aheadCount: 1, files: [], ...mocks.gitStatus } : null,
     viewedPaths: [],
     loading: false,
     statusState: "idle",
@@ -122,6 +148,39 @@ vi.mock("./presentation/active-git-snapshot", () => ({
     statusEventRevision: 0,
     statusEventCheckoutId: null,
     markViewed: vi.fn(),
+  }),
+}));
+vi.mock("./presentation/review-notes", () => ({
+  useReviewNotes: () => ({
+    checkoutId: "checkout:one",
+    notes: mocks.reviewNotes,
+    state: "ready",
+    error: "",
+    addNote: vi.fn(),
+    updateNote: vi.fn(),
+    deleteNote: vi.fn(),
+    markSent: vi.fn(),
+    verifyAnchors: vi.fn(),
+    clearOutdated: vi.fn(),
+    resolveNote: vi.fn(),
+    dispatchRound: mocks.dispatchReviewRound,
+    reconcileRounds: mocks.reconcileRounds,
+  }),
+}));
+vi.mock("./presentation/agent-sessions", () => ({
+  AGENT_EVENT: "marvis://agent-event",
+  useAgentSessions: () => ({
+    checkoutId: "checkout:one",
+    sessions: mocks.agentSessions,
+    targetId: mocks.agentTargetId,
+    state: "ready",
+    error: "",
+    events: [],
+    reload: vi.fn(),
+    createSession: mocks.createAgentSession,
+    sendReview: mocks.sendAgentPrompt,
+    selectTarget: vi.fn(),
+    stop: vi.fn(),
   }),
 }));
 
@@ -155,10 +214,18 @@ const SessionPaneStub = defineComponent({
 const InspectorPaneStub = defineComponent({
   name: "InspectorPane",
   props: { checkout: Object },
-  emits: ["openFile", "updateUiState"],
+  emits: ["openFile", "updateUiState", "sendReview"],
   setup(props, { emit }) {
     return () =>
       h("div", [
+        h("button", {
+          "data-testid": "send-review",
+          onClick: () =>
+            emit(
+              "sendReview",
+              (mocks.reviewNotes as ReviewNote[]).map((note) => note.id),
+            ),
+        }),
         h("button", {
           "data-testid": "open-file",
           disabled: !props.checkout,
@@ -282,6 +349,14 @@ describe("App UI integration", () => {
     mocks.sessionPaneMounts = 0;
     mocks.onCloseRequested = null;
     mocks.onProgrammaticPanelResize = null;
+    mocks.gitStatus = null;
+    mocks.reviewNotes = [];
+    mocks.agentSessions = [];
+    mocks.agentTargetId = null;
+    mocks.createAgentSession.mockReset();
+    mocks.sendAgentPrompt.mockReset();
+    mocks.dispatchReviewRound.mockReset();
+    mocks.reconcileRounds.mockReset();
     mocks.loadAppLayout.mockResolvedValue({ ...DEFAULT_APP_LAYOUT });
     mocks.loadCheckoutUiState.mockResolvedValue({ ...DEFAULT_CHECKOUT_UI_STATE });
     mocks.saveAppLayout.mockResolvedValue(undefined);
@@ -298,6 +373,96 @@ describe("App UI integration", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+  });
+
+  function reviewNoteFixture(): ReviewNote {
+    return {
+      id: "note:1",
+      checkoutId: "checkout:one",
+      path: "src/foo.js",
+      side: "new",
+      lineStart: 10,
+      lineEnd: null,
+      content: "revisit this calculation",
+      code: "const result = a + b;",
+      codeHash: "0000000000000001",
+      outdated: false,
+      roundId: null,
+      status: "draft",
+      createdAt: "1",
+      updatedAt: "1",
+    };
+  }
+
+  function agentSessionFixture(id: string, updatedAt: number) {
+    return {
+      id,
+      checkoutId: "checkout:one",
+      title: "review",
+      busy: false,
+      idleAt: 1,
+      blockedOnPermission: false,
+      createdAt: 1,
+      updatedAt,
+    };
+  }
+
+  it("dispatches the review to the chosen agent session as one round", async () => {
+    mocks.gitStatus = { branch: "feature", defaultBranch: "main" };
+    mocks.reviewNotes = [reviewNoteFixture()];
+    mocks.agentSessions = [agentSessionFixture("ses_one", 10)];
+    mocks.agentTargetId = "ses_one";
+    mocks.dispatchReviewRound.mockResolvedValue({
+      id: "round:1",
+      checkoutId: "checkout:one",
+      sessionId: "ses_one",
+      status: "dispatched",
+      marker: "marvis-review:round:1",
+      noteIds: ["note:1"],
+      createdAt: "1",
+      updatedAt: "2",
+    });
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+    await wrapper.get('[data-testid="send-review"]').trigger("click");
+    await flushPromises();
+
+    expect(mocks.createAgentSession).not.toHaveBeenCalled();
+    expect(mocks.dispatchReviewRound).toHaveBeenCalledTimes(1);
+    const [target, ids, markdown] = mocks.dispatchReviewRound.mock.calls[0];
+    expect(target).toBe("ses_one");
+    expect(ids).toEqual(["note:1"]);
+    expect(markdown).toContain("# Code Review ");
+    expect(markdown).toContain("> `main..feature` — 1 file, 1 note");
+    expect(markdown).toContain("```js{10}");
+    expect(markdown).toContain("> revisit this calculation");
+    wrapper.unmount();
+  });
+
+  it("starts a session when the checkout has none, rather than dropping the review", async () => {
+    mocks.gitStatus = { branch: "feature", defaultBranch: "main" };
+    mocks.reviewNotes = [reviewNoteFixture()];
+    mocks.agentSessions = [];
+    mocks.agentTargetId = null;
+    mocks.createAgentSession.mockResolvedValue(agentSessionFixture("ses_new", 10));
+    mocks.dispatchReviewRound.mockResolvedValue({
+      id: "round:1",
+      checkoutId: "checkout:one",
+      sessionId: "ses_new",
+      status: "dispatched",
+      marker: "marvis-review:round:1",
+      noteIds: ["note:1"],
+      createdAt: "1",
+      updatedAt: "2",
+    });
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+    await wrapper.get('[data-testid="send-review"]').trigger("click");
+    await flushPromises();
+
+    expect(mocks.createAgentSession).toHaveBeenCalledTimes(1);
+    expect(mocks.dispatchReviewRound.mock.calls[0][0]).toBe("ses_new");
+    wrapper.unmount();
   });
 
   it("toggles the sidebar and inspector with shortcuts and ignores typing targets", async () => {

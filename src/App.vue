@@ -29,6 +29,10 @@ import {
 import type { EditorAvailability } from "./lib/ipc";
 import { useWorkspaceState } from "./presentation/workspace";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
+import { useReviewNotes } from "./presentation/review-notes";
+import { useAgentSessions } from "./presentation/agent-sessions";
+import { defaultAgentSession } from "./domain/agent";
+import { buildReviewMarkdown } from "./domain/review";
 import { isMarkdownPath } from "./presentation/markdown-preview";
 import {
   DEFAULT_APP_LAYOUT,
@@ -70,6 +74,8 @@ const activeRepo = computed(
     null,
 );
 const gitSnapshot = useActiveGitSnapshot(activeCheckout, activeRepo, () => void promptForDefaultBranchIfNeeded(true));
+const review = useReviewNotes(activeCheckout, activeRepo);
+const agent = useAgentSessions(activeCheckout, activeRepo);
 const allCheckouts = computed(() => workspace.value.repos.flatMap((repo) => repo.checkouts));
 const registeredSessionIds = computed(() =>
   workspace.value.repos.flatMap((repo) =>
@@ -77,6 +83,23 @@ const registeredSessionIds = computed(() =>
   ),
 );
 const lifecycle = ref<{ mode: "create" | "remove"; checkoutId: string } | null>(null);
+
+// A session that reappears after a crash may carry messages this client never saw, so any
+// round left unconfirmed is settled as soon as the checkout's sessions can be read.
+watch(
+  () => agent.sessions.map((session) => `${session.id}:${session.updatedAt}`).join(","),
+  (sessionsKey) => {
+    if (sessionsKey) void review.reconcileRounds();
+  },
+);
+
+// v2.0.18 has no turn-completed event, so a finished turn is observed rather than announced.
+// When one is seen the round closes, which is what clears the "rounds not finished" count.
+// What the turn did to each line is judged separately, by the diff.
+watch(
+  () => agent.turnsCompleted,
+  () => void review.ackFinishedTurn(),
+);
 const shellRequest = ref<{ checkoutId: string; token: number } | null>(null);
 const nvimRequest = ref<{
   checkoutId: string;
@@ -85,6 +108,8 @@ const nvimRequest = ref<{
   column?: number;
   token: number;
 } | null>(null);
+const agentRequest = ref<{ checkoutId: string; prompt: string; token: number } | null>(null);
+const sendingReview = ref(false);
 const documents = ref<Record<string, MainDocument>>({});
 const emptyDocument: MainDocument = { checkoutId: "", path: "", source: "file", mode: "code" };
 const mainViews = ref<Record<string, "terminal" | "document">>({});
@@ -641,6 +666,50 @@ async function requestNvim(checkoutId: string, filePath?: string, position?: Edi
   }
 }
 
+/**
+ * Ships the notes the caller chose to one agent session as a single message.
+ *
+ * The round is recorded before the agent is called, so an interrupted send is recognizable
+ * afterwards instead of being repeated. The target comes from the bridge, so a review can
+ * never land in a session belonging to another checkout.
+ */
+async function sendReviewToAgent(ids: string[]) {
+  const checkout = activeCheckout.value;
+  // Read from the payload rather than the list: the sender decides what is included.
+  const chosen = new Set(ids);
+  const notes = review.notes.filter((note) => chosen.has(note.id));
+  if (!checkout || checkout.isMissing || activeRepo.value?.kind !== "git" || notes.length === 0) return;
+  if (sendingReview.value) return;
+  const status = gitSnapshot.status;
+  const markdown = buildReviewMarkdown(notes, {
+    branch: status?.branch,
+    defaultBranch: status?.defaultBranch,
+  });
+  sendingReview.value = true;
+  try {
+    const target = await resolveAgentTarget();
+    if (!target) return;
+    await review.dispatchRound(
+      target,
+      notes.map((note) => note.id),
+      markdown,
+    );
+  } catch (cause) {
+    error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+  } finally {
+    sendingReview.value = false;
+  }
+}
+
+/** The session a review goes to: the selected one, otherwise the newest live session. */
+async function resolveAgentTarget(): Promise<string | null> {
+  const target = agent.targetId ?? defaultAgentSession(agent.sessions)?.id ?? null;
+  if (target) return target;
+  // No session yet: start one so the review is not silently dropped.
+  const created = await agent.createSession(`Review ${new Date().toISOString().slice(0, 10)}`);
+  return created?.id ?? null;
+}
+
 function promptEditorPosition(): EditorPosition | null {
   const value = window.prompt("Open selected file at line[:column]:", "1");
   if (value === null) return null;
@@ -912,6 +981,7 @@ async function closeCheckout(checkoutId: string) {
               :visible="checkoutUiReady && activeMainView === 'terminal'"
               :shell-request="shellRequest"
               :nvim-request="nvimRequest"
+              :agent-request="agentRequest"
               :registered-session-ids="registeredSessionIds"
               @open-folder="chooseFolder"
               @workspace-updated="updateWorkspace"
@@ -928,6 +998,7 @@ async function closeCheckout(checkoutId: string) {
               :checkout="activeCheckout"
               :document="documentPaneDocument"
               :git-snapshot="gitSnapshot"
+              :review="review"
               :active="activeMainView === 'document'"
               :refresh-revision="documentRefreshRevisions[documentPaneDocument.checkoutId] ?? 0"
               :zed-available="editorAvailability.zed"
@@ -973,10 +1044,15 @@ async function closeCheckout(checkoutId: string) {
           :checkout="checkoutUiReady ? activeCheckout : null"
           :repo="checkoutUiReady ? activeRepo : null"
           :git-snapshot="gitSnapshot"
+          :review="review"
+          :agent-sessions="agent.sessions"
+          :agent-target-id="agent.targetId"
           :command-request="inspectorCommand"
           :saved-state="activeCheckout ? checkoutUiStates[activeCheckout.id] : null"
           @open-file="openFileDocument"
           @open-change="openChangedDocument"
+          @select-agent-target="agent.selectTarget"
+          @send-review="sendReviewToAgent"
           @update-ui-state="activeCheckout && updateInspectorUiState(activeCheckout.id, $event)"
         />
       </SplitterPanel>

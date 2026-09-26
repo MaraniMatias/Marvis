@@ -53,6 +53,59 @@ Audit scope: `MVP_plan.md` section 8, Delivery 1 cases D1-01–D1-20, and v0.4 s
 | Decisions are recorded before dependent features, especially Q1 before worktree creation.      | PASS automated | Q1's `.worktrees` default and `main` requirement are resolved in `docs/MVP_DECISIONS_0.3.md`. Q11's ask-once fallback has implementation/tests but still needs native end-to-end confirmation.                                                                                                                                                                            |
 | Deferred features remain assigned to the delivery stated by v0.4.                              | PARTIAL        | D2/D3 work is outside this audit and is not implemented here. Generic `server`/`custom` executable launches remain unavailable in the UI; shell and in-terminal Neovim are the supported terminal launch paths.                                                                                                                                                           |
 
+## Spike 2 — OpenCode server integration (P1.1 gate for the review loop)
+
+Evidence run on 2026-09-26 against the installed `opencode` **v2.0.18** (`~/.opencode/bin/opencode`), from a throwaway `git init` repository with a checkout-scoped `opencode.json`. Every result below is an observation from a running `opencode serve`, not a reading of the documentation.
+
+Reproduction: `opencode serve --port <port> --hostname 127.0.0.1` in the checkout directory, then read the two lines the process prints on startup (`server listening on http://127.0.0.1:<port>` and `server password <pw>`), and call `/api/*` with HTTP Basic as user `opencode` and that password.
+
+| Spike 2 step (v0.4 §6.4) | Status        | Observed evidence                                                                                                                                                                                                                                                                     |
+| ------------------------ | ------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Start the server         | PASS observed | Starts and prints the port plus a 43-character password. `GET /api/agent` → `200 {"location":{"directory":"<repo>"},"data":[]}`.                                                                                                                                                      |
+| Connect                  | PASS observed | Every `/api/*` route answers `401` without credentials. `OPENCODE_SERVER_PASSWORD` did **not** satisfy auth; the password must be parsed from the child's stdout. The CLI reads it from `OPENCODE_PASSWORD`.                                                                          |
+| Create session           | PASS observed | `POST /api/session` with `{"title":"…"}` → `200 {"data":{"id":"ses_…",…}}`. All responses are wrapped in `data`.                                                                                                                                                                      |
+| Subscribe to events      | PASS observed | `GET /api/event` streams SSE. First frame `server.connected`, then `: heartbeat` comments, then `{"id","created","type","location","data","durable"}` envelopes. A fresh stream replays only `server.connected`; there is no resume token.                                            |
+| Read status              | PARTIAL       | `GET /api/session/status` → `400 InvalidRequestError "Expected a string starting with \"ses\" at [\"sessionID\"]"`; `?directory=` does not help, and `/api/session/{id}/status` → `404`.                                                                                              |
+| Detect active file       | NOT VERIFIED  | `GET /api/file/status` → `404` in 2.0.18. No file-activity event was observed.                                                                                                                                                                                                        |
+| Detect tool execution    | PASS observed | `session.tool.input.started` → `session.tool.input.ended` → `session.tool.called`, the last carrying `name`, `input` and `executed`. Observed `name: "shell"`.                                                                                                                        |
+| Send message             | PASS observed | `POST /api/session/{id}/prompt` with `{"text":"…"}` → `200` and a user message. The body wants `text`, not the `parts` array the SDK uses. `prompt_async` → `404`.                                                                                                                    |
+| Cancel                   | **FAIL**      | `POST /api/session/{id}/abort` → `404`, as do `/cancel`, `/stop`, `/interrupt`, `/kill` and `DELETE …/abort`. v2.0.18 exposes no way to stop a running turn over HTTP.                                                                                                                |
+| Permission requests      | **PARTIAL**   | `permission.asked` carries `{id, sessionID, action, resources, save, source}`, enough to render a prompt. But **no reply route exists**: `POST /api/session/{id}/permissions/{id}`, `POST /api/permission/{id}/reply` and `POST /api/session/{id}/permission/{id}/reply` all → `404`. |
+| Reconnect                | PARTIAL       | A new stream connects, but replays no history, so a client that missed events can only recover by re-reading session messages and the diff.                                                                                                                                           |
+
+Observed turn lifecycle for one real message, in order: `session.inbox.enqueued` → `session.execution.started` → `session.instructions.updated` → `session.inbox.delivered` → `session.step.started` (carries `agent` and `model`) → `session.text.started` / `session.text.delta` / `session.text.ended` → `session.tool.input.started` / `session.tool.input.ended` → `session.tool.called` → `session.step.streamed` → `permission.asked`. Failures surface as `session.step.failed` and `session.execution.failed` with `error: {type, message, status}`. There is no `session.idle` event; idleness is `time.idle` on the session object. There is also no `session.execution.completed` in 2.0.18, only the `*.failed` variants.
+
+The permission request is fully described: `{"id":"per_…","sessionID":"ses_…","action":"shell","resources":[…],"save":[…],"source":{"type":"tool","messageID":"msg_…","id":"call_function_…"}}`, enough to render "allow once / always / deny". With every reply route answering `404`, the session was still blocked 180 s later: no terminal event, `outcome` unset and `time.idle` never written. An unanswerable permission does not time out, it hangs the turn indefinitely, so a client that cannot reply must not be the one that asks.
+
+Two response shapes were found and both matter to a client: `location` sits at the envelope level on `GET /api/agent`, but **inside** the session object on session routes, and `GET /api/session` lists sessions from every directory. A client must check scope in both places and filter a list rather than trust the id.
+
+### What the spike changes
+
+The documentation at `opencode.ai/docs/server/` describes a different server than the one shipped as 2.0.18. Routes the docs and the published `@opencode-ai/sdk` describe as existing (`/session/status` for all sessions, `prompt_async`, `session/{id}/abort`, `session/{id}/permissions/{id}`) are absent or differently shaped here, and no OpenAPI document is served. Anything built against the documented surface has to be validated against the binary.
+
+Two acceptance cases are blocked on the installed version, not on Marvis:
+
+- **D2-07** (a permission appears in Marvis and is answered from Marvis) can render the request but cannot answer it, and an unanswered request leaves `session.execution.started` open indefinitely.
+- **D2-08** (cancel stops the agent) has no HTTP route at all.
+
+v0.4 §6.4 anticipates exactly this: if the spike cannot demonstrate cancel and permissions cleanly, ship best-effort with the limitation documented. The mitigation that keeps the review loop usable is for Marvis to own the agent's permission policy for the review turn — a checkout-scoped `opencode.json` that allows `bash`/`edit` inside the checkout — because a turn that blocks on an unanswerable permission is worse than one allowed to act.
+
+Everything else the review loop needs is available: Marvis can create a session, send a review as one message, watch the turn start and finish, and read the resulting diff, which is what the resolved/outdated signal depends on.
+
+### Reconnect deduplication, verified against a real server
+
+A round is recorded as `dispatching` with its marker **before** the agent is called, and the marker is embedded in the prompt. After an interrupted send, Marvis reads the session's messages and looks for that exact string: present means the message landed, absent means it never arrived and the round can be requeued without duplicating a delivered review.
+
+`a_round_marker_reaches_the_real_session` (gated by `MARVIS_AGENT_BRIDGE=1`, outside CI) proves both halves against a running server: the marker is **absent** from a fresh session's transcript, and **present** after the round prompt is sent. Checking the negative case matters as much as the positive one — a transcript read that silently matched everything would turn the dedup into a silent review loss.
+
+The transcript is fetched as JSON and re-serialized rather than modelled, because the message shape differs between OpenCode versions and the only question asked of it is "is this marker present?".
+
+### Turn completion, verified against a real server
+
+`a_turn_is_observable_through_the_idle_time` pins the one ambiguity that matters for the resolved signal. A session that has **never run** answers with `time: {created, updated}` — no `idle` — and a session that has just run answers with `time: {…, idle: <ts>}` plus `outcome: "succeeded"`. So **`idle` being absent covers both "never ran" and "working right now"**, and a server-side `busy = idle.is_none()` would report every fresh session as busy and never settle anything.
+
+Marvis therefore reports the fact, not the verdict: the wire field is `idle_at`, and the client derives `busy` from `idle_at === null` _combined with a turn start it actually observed on the event stream_. Polling only runs while such a turn is outstanding, so an idle app is not polled, and the count of finished turns comes from the `idle_at` transition rather than from silence.
+
 ## Explicitly unverified, deferred, and known gaps
 
 - **Native WebView PTY:** real `yes` for 30 seconds, `nvim` interaction, redraw after resize, byte-loss/latency, UI responsiveness, and idle CPU (including five sessions) were **not verified**. The production path exists, and unit tests cover byte/chunk handling and IPC dimensions, but these do not establish the spike/acceptance guarantees.

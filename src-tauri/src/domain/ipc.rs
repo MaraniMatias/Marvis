@@ -16,7 +16,7 @@ impl IpcError {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum IpcErrorCode {
     FolderMissing,
@@ -31,5 +31,9 @@ pub enum IpcErrorCode {
     BinaryFile,
     GitFailed,
     ProcessTerminated,
+    /// The agent server for this checkout is not running and could not be started.
+    AgentUnavailable,
+    /// A session id does not belong to the checkout it was used against.
+    AgentOwnershipMismatch,
     OperationFailed,
 }

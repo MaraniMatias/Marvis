@@ -3,8 +3,25 @@ import { invoke } from "@tauri-apps/api/core";
 import type { OpenedFolder } from "../domain/folder";
 import { isIpcError } from "../domain/ipc";
 import {
+  ackReviewRound,
+  clearReviewNoteOutdated,
   closeTerminal,
+  createAgentSession,
+  createReviewNote,
   createTerminal,
+  deleteReviewNote,
+  dispatchReviewRound,
+  listAgentSessions,
+  listReviewNotes,
+  listReviewRounds,
+  markReviewNotesSent,
+  reconcileReviewRound,
+  requeueReviewRounds,
+  resolveReviewNote,
+  sendAgentPrompt,
+  stopAgent,
+  updateReviewNote,
+  verifyReviewNoteAnchors,
   getEditorAvailability,
   getGitDiffPage,
   getGitViewedFiles,
@@ -160,6 +177,135 @@ describe("Git review IPC client", () => {
     expect(invoke).toHaveBeenNthCalledWith(3, "git_mark_viewed", {
       checkoutId: "checkout:one",
       path: "src/file.ts",
+    });
+  });
+});
+
+describe("Review note IPC client", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("sends checkout-scoped review note commands", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await listReviewNotes("checkout:one");
+    await createReviewNote({
+      checkoutId: "checkout:one",
+      path: "src/foo.js",
+      side: "new",
+      lineStart: 10,
+      lineEnd: 12,
+      content: "revisit this calculation",
+      code: "const result = a + b;",
+    });
+    await updateReviewNote("checkout:one", "note:1", "edited");
+    await deleteReviewNote("checkout:one", "note:1");
+    await markReviewNotesSent("checkout:one", ["note:1"]);
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "review_notes", { checkoutId: "checkout:one" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "review_note_create", {
+      request: {
+        checkoutId: "checkout:one",
+        path: "src/foo.js",
+        side: "new",
+        lineStart: 10,
+        lineEnd: 12,
+        content: "revisit this calculation",
+        code: "const result = a + b;",
+      },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "review_note_update", {
+      checkoutId: "checkout:one",
+      id: "note:1",
+      content: "edited",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "review_note_delete", {
+      checkoutId: "checkout:one",
+      id: "note:1",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(5, "review_notes_mark_sent", {
+      checkoutId: "checkout:one",
+      ids: ["note:1"],
+    });
+  });
+
+  it("sends checkout-scoped agent commands", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await listAgentSessions("checkout:one");
+    await createAgentSession("checkout:one", "Review 2026-09-26");
+    await sendAgentPrompt("checkout:one", "ses_one", "fix the review");
+    await stopAgent("checkout:one");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "agent_sessions", { checkoutId: "checkout:one" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "agent_session_create", {
+      checkoutId: "checkout:one",
+      title: "Review 2026-09-26",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "agent_prompt", {
+      checkoutId: "checkout:one",
+      sessionId: "ses_one",
+      text: "fix the review",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(4, "agent_stop", { checkoutId: "checkout:one" });
+  });
+
+  it("sends review round commands, which record before they send", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await listReviewRounds("checkout:one");
+    await dispatchReviewRound({
+      checkoutId: "checkout:one",
+      sessionId: "ses_one",
+      ids: ["note:1"],
+      markdown: "# Code Review",
+    });
+    await requeueReviewRounds("checkout:one");
+    await reconcileReviewRound("checkout:one", "round:1");
+    await ackReviewRound("checkout:one", "round:1");
+    await resolveReviewNote("checkout:one", "note:1");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "review_rounds", { checkoutId: "checkout:one" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "review_round_dispatch", {
+      request: {
+        checkoutId: "checkout:one",
+        sessionId: "ses_one",
+        ids: ["note:1"],
+        markdown: "# Code Review",
+      },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "review_rounds_requeue", { checkoutId: "checkout:one" });
+    expect(invoke).toHaveBeenNthCalledWith(4, "review_round_reconcile", {
+      checkoutId: "checkout:one",
+      roundId: "round:1",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(5, "review_round_ack", {
+      checkoutId: "checkout:one",
+      roundId: "round:1",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(6, "review_note_resolve", {
+      checkoutId: "checkout:one",
+      id: "note:1",
+    });
+  });
+
+  it("sends anchor checks and clears the outdated mark", async () => {
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await verifyReviewNoteAnchors("checkout:one", "src/foo.js", [
+      { id: "note:1", currentCode: "const result = a - b;" },
+    ]);
+    await clearReviewNoteOutdated("checkout:one", "note:1");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "review_note_anchors_verify", {
+      request: {
+        checkoutId: "checkout:one",
+        path: "src/foo.js",
+        checks: [{ id: "note:1", currentCode: "const result = a - b;" }],
+      },
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "review_note_outdated_clear", {
+      checkoutId: "checkout:one",
+      id: "note:1",
     });
   });
 });

@@ -2,17 +2,26 @@
 /* eslint-disable vue/html-self-closing, vue/html-indent, vue/html-closing-bracket-newline */
 import { computed, nextTick, ref, watch } from "vue";
 import type { Checkout } from "../domain/workspace";
+import { agentAttention } from "../domain/agent";
+import type { AgentSession } from "../domain/agent";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
+import type { ActiveReviewNotes } from "../presentation/review-notes";
 
 const props = defineProps<{
   checkout: Checkout;
   gitSnapshot: ActiveGitSnapshot;
+  review?: Pick<ActiveReviewNotes, "notes" | "rounds" | "markSent">;
+  /** Live agent sessions of this checkout, so the round can pick a target. */
+  agentSessions?: AgentSession[];
+  agentTargetId?: string | null;
   selectedPath: string | null;
   scrollTop: number;
 }>();
 const emit = defineEmits<{
   openChange: [value: { checkoutId: string; path: string }];
   scrollPositionChanged: [top: number];
+  sendReview: [ids: string[]];
+  selectAgentTarget: [sessionId: string];
 }>();
 
 const query = ref("");
@@ -85,6 +94,43 @@ watch(
 function openChange(path: string) {
   emit("openChange", { checkoutId: props.checkout.id, path });
 }
+
+const noteCount = computed(() => props.review?.notes.length ?? 0);
+const draftCount = computed(() => props.review?.notes.filter((note) => note.status === "draft").length ?? 0);
+const outdatedCount = computed(() => props.review?.notes.filter((note) => note.outdated).length ?? 0);
+const sendingReview = ref(false);
+/** Only shown when the choice is real: one live agent is not a choice. */
+const multipleAgents = computed(() => (props.agentSessions ?? []).length > 1);
+const pendingRoundCount = computed(
+  () => (props.review?.rounds ?? []).filter((round) => round.status !== "acked").length,
+);
+const blockedAgent = computed(() =>
+  (props.agentSessions ?? []).some((session) => agentAttention(session) === "blocked"),
+);
+function agentLabel(session: AgentSession): string {
+  const attention = agentAttention(session);
+  if (attention === "blocked") return `${session.title} (needs permission)`;
+  if (attention === "busy") return `${session.title} (working)`;
+  return session.title;
+}
+/** Outdated notes are held back unless the user opts in, so nothing stale reaches the agent. */
+const includeOutdated = ref(false);
+const sendableNotes = computed(() =>
+  (props.review?.notes ?? []).filter((note) => includeOutdated.value || !note.outdated),
+);
+
+async function sendReviewToAgent() {
+  const notes = sendableNotes.value;
+  if (sendingReview.value || notes.length === 0) return;
+  sendingReview.value = true;
+  try {
+    const ids = notes.map((note) => note.id);
+    await props.review?.markSent(ids);
+    emit("sendReview", ids);
+  } finally {
+    sendingReview.value = false;
+  }
+}
 </script>
 
 <template>
@@ -115,6 +161,45 @@ function openChange(path: string) {
       <p v-if="viewedError" role="alert" class="mt-1 text-[10px] text-amber-300">Viewed progress: {{ viewedError }}</p>
       <p v-if="watchError" role="alert" class="mt-1 text-[11px] text-amber-300">
         Live updates unavailable: {{ watchError }}
+      </p>
+      <div v-if="noteCount > 0" class="mt-2 flex items-center gap-2">
+        <button
+          type="button"
+          class="rounded-sm border border-sky-500/40 bg-sky-500/10 px-2 py-0.5 text-[11px] text-sky-200 disabled:opacity-50"
+          :disabled="sendingReview || sendableNotes.length === 0"
+          data-testid="send-review"
+          @click="sendReviewToAgent"
+        >
+          {{ sendingReview ? "Sending…" : "Send to agent" }}
+        </button>
+        <span class="text-[10px] text-zinc-500" data-testid="review-note-count">
+          {{ noteCount }} {{ noteCount === 1 ? "note" : "notes"
+          }}<template v-if="draftCount > 0"> · {{ draftCount }} draft</template>
+        </span>
+      </div>
+      <label v-if="outdatedCount > 0" class="mt-1 flex items-center gap-1.5 text-[10px] text-amber-400">
+        <input v-model="includeOutdated" type="checkbox" data-testid="include-outdated" />
+        {{ outdatedCount }} outdated {{ outdatedCount === 1 ? "note" : "notes" }} left out
+      </label>
+      <div v-if="multipleAgents" class="mt-1 flex items-center gap-1.5 text-[10px] text-zinc-500">
+        <label for="review-agent-target">Send to</label>
+        <select
+          id="review-agent-target"
+          :value="agentTargetId ?? undefined"
+          data-testid="review-agent-target"
+          class="min-w-0 flex-1 rounded-sm border border-white/10 bg-black/30 px-1 py-0.5 text-[10px] text-zinc-200 outline-none"
+          @change="emit('selectAgentTarget', ($event.target as HTMLSelectElement).value)"
+        >
+          <option v-for="session in agentSessions" :key="session.id" :value="session.id">
+            {{ agentLabel(session) }}
+          </option>
+        </select>
+      </div>
+      <p v-if="blockedAgent" role="alert" class="mt-1 text-[10px] text-amber-300">
+        An agent asked for a permission this OpenCode version cannot answer, so its turn is waiting.
+      </p>
+      <p v-if="pendingRoundCount > 0" class="mt-1 text-[10px] text-zinc-500" data-testid="pending-rounds">
+        {{ pendingRoundCount }} {{ pendingRoundCount === 1 ? "round" : "rounds" }} not finished
       </p>
     </div>
     <div ref="listViewport" class="min-h-0 flex-1 overflow-auto p-1" aria-label="Changed files" @scroll="onScroll">

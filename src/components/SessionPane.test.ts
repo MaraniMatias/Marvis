@@ -30,6 +30,7 @@ vi.mock("./TerminalSession.vue", async () => {
         visible: { type: Boolean, default: true },
         sessionType: { type: String, default: "shell" },
         launchTarget: { type: Object, default: undefined },
+        launchPrompt: { type: String, default: undefined },
       },
       emits: ["created", "closed", "statusChanged", "failed"],
       setup(props, { emit, expose }) {
