@@ -1,0 +1,71 @@
+/* Marvis design tokens. Custom properties resolve globally, so they cannot live
+   in a scoped component block. Imported before style.css so the unlayered rules
+   below win over tailwind's `utilities` layer. */
+:root {
+  --marvis-bg-0: #17191f;
+  --marvis-bg-1: #1c1f27;
+  --marvis-bg-2: #22252e;
+  --marvis-border: #2c2f3a;
+  --marvis-text: #d6d9e0;
+  --marvis-text-secondary: #979a9f;
+  --marvis-text-dim: #8b8fa3;
+  --marvis-text-faint: #5c6072;
+  --marvis-accent: #7c9eff;
+  --marvis-green: #7fd88f;
+  --marvis-red: #e08585;
+  --marvis-radius: 6px;
+  --marvis-font: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+
+/* Focus: keyboard only, so a click leaves no ring behind. Global because the
+   focused controls live inside child components, which a scoped rule cannot
+   reach. The mockup scopes these to its `.marvis-shell`; the app's shell root
+   is `.app-shell`. */
+.app-shell :focus:not(:focus-visible) {
+  outline: none;
+}
+
+.app-shell :focus-visible {
+  outline: 2px solid var(--marvis-accent);
+  outline-offset: -2px;
+}
+
+/* Resize handle: repaints the shadcn `bg-border` divider and grip with the
+   marvis palette. The grip is rendered inside ResizableHandle's own template. */
+.app-shell [data-slot="resizable-handle"] {
+  background: var(--marvis-border);
+}
+
+.app-shell [data-slot="resizable-handle"] > div {
+  background: var(--marvis-text-faint);
+}
+
+/* Icon sizing, used by every panel */
+.icon-sm {
+  width: 15px;
+  height: 15px;
+}
+.icon-xs {
+  width: 12px;
+  height: 12px;
+}
+.icon-xxs {
+  width: 10px;
+  height: 10px;
+}
+
+/* Group listing header, shared by both sidebars */
+.group-header {
+  padding: 6px 10px;
+  color: var(--marvis-text-faint);
+  font-size: 11px;
+  letter-spacing: 0.02em;
+}
+
+/* Diff stats, shared by both sidebars */
+.diff-add {
+  color: var(--marvis-green);
+}
+.diff-del {
+  color: var(--marvis-red);
+}
