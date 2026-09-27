@@ -131,7 +131,9 @@ function sessionState(session: Session) {
 
 <template>
   <aside class="app-sidebar flex h-full min-h-0 flex-col border-r text-sm">
-    <div class="min-h-0 flex-1 overflow-y-auto">
+    <!-- The right padding is the scrollbar's: macOS draws its own overlay scrollbar over the
+         content, so a row whose title and counts end at the edge are read through it. -->
+    <div class="min-h-0 flex-1 overflow-y-auto pr-2">
       <div v-for="group in groups" :key="group.label" class="workdir-group">
         <div class="group-header">{{ group.label }}</div>
 

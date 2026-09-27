@@ -738,7 +738,7 @@ const matchedSearchEntries = searchEntries.value
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 10px 4px 0;
+  padding: 4px 8px 4px 0;
 }
 
 /*
