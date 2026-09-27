@@ -35,6 +35,7 @@ const emit = defineEmits<{
   createWorktree: [checkoutId: string];
   newTerminal: [checkoutId: string];
   removeWorktree: [checkoutId: string];
+  closeMissing: [checkoutId: string];
   closeSession: [sessionId: string];
 }>();
 
@@ -68,6 +69,11 @@ interface Workdir {
   gitdir: boolean;
   /** Worktrees can be removed; repo roots cannot. */
   worktree: boolean;
+  /**
+   * The directory is gone, so the row keeps only its reason for existing and its one way out
+   * (closing it). Nothing behind it can be selected, run or created.
+   */
+  missing: boolean;
   active: boolean;
   items: WorkdirItem[];
 }
@@ -100,6 +106,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     kind: !isGit ? "folder" : checkout.isPrimary ? "git" : "worktree",
     gitdir: isGit && checkout.isPrimary,
     worktree: isGit && !checkout.isPrimary,
+    missing: checkout.isMissing,
     active: checkout.id === props.activeCheckoutId,
     items: checkout.sessions.map((session) => ({
       session,
@@ -130,8 +137,9 @@ function sessionState(session: Session) {
                 type="button"
                 class="workdir-select"
                 :aria-current="workdir.active ? 'page' : undefined"
+                :aria-disabled="workdir.missing || undefined"
                 :title="workdir.checkout.path"
-                @click="emit('selectCheckout', workdir.checkout.id)"
+                @click="!workdir.missing && emit('selectCheckout', workdir.checkout.id)"
               >
                 <component :is="icons[workdir.kind]" class="workdir-status-icon" aria-hidden="true" />
                 <div class="workdir-main">
@@ -157,8 +165,20 @@ function sessionState(session: Session) {
               </button>
 
               <div class="workdir-actions">
+                <!-- A missing directory has nothing to remove from disk, so the row offers
+                     the one thing left to do with it: take it off the list. -->
                 <button
-                  v-if="workdir.worktree"
+                  v-if="workdir.missing"
+                  type="button"
+                  class="workdir-action"
+                  :aria-label="`Close missing checkout: ${workdir.title}`"
+                  title="Remove from list"
+                  @click="emit('closeMissing', workdir.checkout.id)"
+                >
+                  <XIcon class="icon-xs" aria-hidden="true" />
+                </button>
+                <button
+                  v-if="workdir.worktree && !workdir.missing"
                   type="button"
                   class="workdir-action workdir-action-danger"
                   :aria-label="`Remove worktree ${workdir.title}`"
@@ -168,7 +188,7 @@ function sessionState(session: Session) {
                   <TrashIcon class="icon-xs" aria-hidden="true" />
                 </button>
                 <button
-                  v-if="workdir.gitdir"
+                  v-if="workdir.gitdir && !workdir.missing"
                   type="button"
                   class="workdir-action"
                   :aria-label="`Add worktree from ${workdir.branch || workdir.checkout.path}`"
@@ -181,8 +201,9 @@ function sessionState(session: Session) {
             </div>
           </div>
 
-          <!-- Child items: the same row as the workdir, minus the diff, plus a close -->
-          <div class="workdir-items">
+          <!-- Child items: the same row as the workdir, minus the diff, plus a close. A
+               directory that is gone has no live sessions and nothing to run one in. -->
+          <div v-if="!workdir.missing" class="workdir-items">
             <div
               v-for="item in workdir.items"
               :key="item.session.id"
@@ -350,6 +371,14 @@ function sessionState(session: Session) {
   text-align: left;
   cursor: pointer;
   font-family: inherit;
+}
+
+/* A row whose directory is gone stays listed to say so and to be closed. Its label reads as
+   unavailable: nothing behind it can be selected, and the single action beside it is the only
+   thing the row still does. */
+.workdir-select[aria-disabled="true"] {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .workdir-select.new-item .workdir-name {

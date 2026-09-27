@@ -23,7 +23,13 @@ import Sidebar from "./components/Sidebar.vue";
 import ToastStack from "./components/ToastStack.vue";
 import WorktreeDialog from "./components/WorktreeDialog.vue";
 import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
-import { getEditorAvailability, openInZed, selectCheckout as persistCheckoutSelection } from "./lib/ipc";
+import {
+  getEditorAvailability,
+  openInZed,
+  closeMissingCheckout as persistMissingCheckoutClose,
+  selectCheckout as persistCheckoutSelection,
+} from "./lib/ipc";
+
 import type { EditorAvailability } from "./lib/ipc";
 import { useWorkspaceState } from "./presentation/workspace";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
@@ -460,6 +466,26 @@ function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
   lifecycle.value = { mode, checkoutId };
 }
 
+/**
+ * Takes a checkout whose directory is gone off the list, and nothing else.
+ *
+ * A repo root — the primary checkout of a Git repository, and the only checkout of a plain
+ * folder — is registered as the head of a list, so closing one takes that list with it; a
+ * worktree is an entry of its own. Marvis deletes no files either way, so the confirmation
+ * only has to name the scope.
+ */
+async function closeMissingCheckout(checkoutId: string) {
+  const checkout = allCheckouts.value.find((item) => item.id === checkoutId);
+  if (!checkout) return;
+  const scope = checkout.isPrimary ? " and its checkout list" : "";
+  if (!window.confirm(`Close “${checkout.path}”${scope} in Marvis? No files will be deleted.`)) return;
+  try {
+    applyWorkspace(await persistMissingCheckoutClose(checkoutId));
+  } catch (cause) {
+    reportCause(cause);
+  }
+}
+
 async function requestShell(checkoutId: string) {
   showView(checkoutId, { kind: "terminal", sessionId: null });
   try {
@@ -706,6 +732,7 @@ function reportWarning(message: string) {
           @create-worktree="openWorktreeDialog('create', $event)"
           @new-terminal="requestShell"
           @remove-worktree="openWorktreeDialog('remove', $event)"
+          @close-missing="closeMissingCheckout"
           @close-session="closeTerminalSession"
         />
       </SplitterPanel>

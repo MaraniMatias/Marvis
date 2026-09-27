@@ -265,6 +265,11 @@ pub fn restore(database: &Database) -> Result<crate::domain::workspace::Workspac
             }
         }
     }
+    // Reconciliation re-inserts the checkouts Git still lists, including the ones whose
+    // directory is gone, so the prune runs last: what comes back is what is on disk.
+    database
+        .prune_missing_checkouts()
+        .map_err(operation_error)?;
     database
         .load_workspace()
         .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
@@ -559,7 +564,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_reconciles_worktrees_and_keeps_removed_checkout_visible_as_missing() {
+    fn restore_prunes_a_worktree_removed_while_the_app_was_closed() {
         let temp = tempdir().unwrap();
         let primary = temp.path().join("repo");
         let linked = temp.path().join("gone");
@@ -577,16 +582,48 @@ mod tests {
         let linked_canonical = linked.canonicalize().unwrap().display().to_string();
         let db = database(temp.path());
         register_folder(&db, &primary).unwrap();
+        let focused = register_folder(&db, &linked).unwrap();
+        let removed_id = focused
+            .active_checkout_id
+            .clone()
+            .expect("opening the worktree selects it");
         fs::remove_dir_all(&linked).unwrap();
 
         let state = restore(&db).unwrap();
 
-        let missing = state.repos[0]
+        // Git still lists the deleted worktree, so reconciliation re-inserts it first. The
+        // prune is what runs last, and the worktree is gone from the reopened list.
+        assert!(state.repos[0]
             .checkouts
             .iter()
-            .find(|checkout| checkout.canonical_path == linked_canonical)
-            .unwrap_or_else(|| panic!("missing worktree stays visible: {:#?}", state.repos[0]));
-        assert!(missing.is_missing);
+            .all(|checkout| checkout.canonical_path != linked_canonical));
+        assert_eq!(state.repos[0].checkouts.len(), 1);
+        // The selection that pointed at the removed worktree falls back to the repo's
+        // primary instead of naming a row that no longer exists.
+        assert_eq!(
+            state.active_checkout_id.as_deref(),
+            Some(state.repos[0].checkouts[0].id.as_str())
+        );
+        assert!(state.repos[0].checkouts[0].is_primary);
+        assert_ne!(
+            state.active_checkout_id.as_deref(),
+            Some(removed_id.as_str())
+        );
+    }
+
+    #[test]
+    fn restore_removes_a_repository_whose_root_is_gone() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        init_repo(&primary);
+        let db = database(temp.path());
+        register_folder(&db, &primary).unwrap();
+        fs::remove_dir_all(&primary).unwrap();
+
+        let state = restore(&db).unwrap();
+
+        assert!(state.repos.is_empty());
+        assert_eq!(state.active_checkout_id, None);
     }
 
     #[test]
@@ -846,6 +883,89 @@ mod tests {
         )
         .unwrap();
         assert!(closed.repos.is_empty());
+    }
+
+    #[test]
+    fn closing_a_missing_git_worktree_drops_its_entry_and_leaves_the_disk_alone() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let linked = temp.path().join("gone");
+        init_repo(&primary);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "temporary",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let database = database(temp.path());
+        let registered = register_folder(&database, &primary).unwrap();
+        let primary_id = registered.repos[0].checkouts[0].id.clone();
+        let linked_id = register_folder(&database, &linked)
+            .unwrap()
+            .active_checkout_id
+            .expect("opening the worktree selects it");
+        database
+            .add_active_session(&Session {
+                id: "session:gone".into(),
+                session_type: SessionType::Shell,
+                checkout_id: linked_id.clone(),
+                name: "shell".into(),
+                created_at: "now".into(),
+                status: SessionStatus::Active,
+            })
+            .unwrap();
+        fs::remove_dir_all(&linked).unwrap();
+        let backend = crate::terminal::TerminalBackend::default();
+
+        // A live session still blocks the close, exactly as it does for a worktree on disk.
+        let refused = close_missing_checkout(&database, &backend, &linked_id).unwrap_err();
+        assert!(refused.message.contains("active terminal sessions"));
+        assert_eq!(
+            database.load_workspace().unwrap().repos[0].checkouts.len(),
+            2
+        );
+
+        database.remove_terminal_session("session:gone").unwrap();
+        let closed = close_missing_checkout(&database, &backend, &linked_id).unwrap();
+
+        // Only the entry leaves the list: the repository, its file and its branch stay.
+        assert_eq!(closed.repos[0].checkouts.len(), 1);
+        assert_eq!(closed.repos[0].checkouts[0].id, primary_id);
+        assert_eq!(
+            closed.active_checkout_id.as_deref(),
+            Some(closed.repos[0].checkouts[0].id.as_str())
+        );
+        assert!(primary.join("tracked.txt").exists());
+        git(
+            &primary,
+            &["show-ref", "--verify", "--quiet", "refs/heads/temporary"],
+        );
+    }
+
+    #[test]
+    fn closing_a_location_that_still_exists_is_refused() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("plain");
+        fs::create_dir(&path).unwrap();
+        let database = database(temp.path());
+        let state = register_folder(&database, &path).unwrap();
+        let checkout_id = state.repos[0].checkouts[0].id.clone();
+
+        let error = close_missing_checkout(
+            &database,
+            &crate::terminal::TerminalBackend::default(),
+            &checkout_id,
+        )
+        .unwrap_err();
+
+        assert!(error
+            .message
+            .contains("only a missing checkout can be closed"));
+        assert_eq!(database.load_workspace().unwrap().repos.len(), 1);
     }
 
     #[test]

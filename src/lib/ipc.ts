@@ -214,6 +214,11 @@ export function setDefaultBranch(repoId: string, branch: string): Promise<Worksp
   return invoke<WorkspaceState>("set_default_branch", { repoId, branch });
 }
 
+/** Removes a checkout whose directory is gone from Marvis alone: nothing on disk is deleted. */
+export function closeMissingCheckout(checkoutId: string): Promise<WorkspaceState> {
+  return invoke<WorkspaceState>("close_missing_checkout", { checkoutId });
+}
+
 export function selectCheckout(checkoutId: string | null): Promise<WorkspaceState> {
   return invoke<WorkspaceState>("select_checkout", { checkoutId });
 }

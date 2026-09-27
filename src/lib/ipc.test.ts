@@ -5,6 +5,7 @@ import { isIpcError } from "../domain/ipc";
 import {
   ackReviewRound,
   clearReviewNoteOutdated,
+  closeMissingCheckout,
   closeTerminal,
   createAgentSession,
   createReviewNote,
@@ -67,6 +68,16 @@ describe("editor IPC client", () => {
       line: 23,
       column: 8,
     });
+  });
+});
+
+describe("workspace IPC client", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("closes a missing checkout through the command that takes only its id", async () => {
+    await closeMissingCheckout("checkout:/work/gone");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "close_missing_checkout", { checkoutId: "checkout:/work/gone" });
   });
 });
 

@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Checkout, Repo } from "../domain/workspace";
+import type { Checkout, Repo, Session } from "../domain/workspace";
 
 const mocks = vi.hoisted(() => ({
   getGitCheckoutDiffStats: vi.fn(),
@@ -42,6 +42,10 @@ function checkout(overrides: Partial<Checkout> = {}): Checkout {
     sessions: [],
     ...overrides,
   };
+}
+
+function session(id: string, name: string, checkoutId = "checkout:primary"): Session {
+  return { id, type: "shell", checkoutId, name, createdAt: "now", status: "inactive" };
 }
 
 describe("Sidebar workdir rows", () => {
@@ -378,6 +382,73 @@ describe("Sidebar workdir rows", () => {
     expect(gone.text()).toBe("Directory missing");
     expect(gone.classes()).toContain("workdir-meta-error");
     expect(gone.find(".diff-add").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("disables a missing directory and leaves closing it as its only action", async () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              {
+                ...checkout({
+                  id: "checkout:feature",
+                  path: "/test-feature",
+                  canonicalPath: "/test-feature",
+                  isPrimary: false,
+                  branch: "feature",
+                }),
+                sessions: [session("session:live", "Live", "checkout:feature")],
+              },
+              {
+                ...checkout({
+                  id: "checkout:gone",
+                  path: "/test-gone",
+                  canonicalPath: "/test-gone",
+                  isPrimary: false,
+                  branch: "temporary",
+                  isMissing: true,
+                }),
+                sessions: [session("session:stale", "Stale", "checkout:gone")],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:feature",
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+
+    // The rows themselves, not the session children hanging under them.
+    const [live, gone] = wrapper.findAll(".workdir-group > .workdir-item > .workdir-row > .workdir-select");
+
+    expect(live!.attributes("aria-disabled")).toBeUndefined();
+    expect(gone!.attributes("aria-disabled")).toBe("true");
+    // The reason the row is disabled stays in the row: it is the whole message now.
+    expect(gone!.text()).toContain("Directory missing");
+    // Nothing behind a directory that is gone is offered: none of its sessions, no shell.
+    expect(
+      wrapper.findAll('button[aria-label^="Terminal session:"]').map((row) => row.attributes("aria-label")),
+    ).toEqual(["Terminal session: Live"]);
+    expect(
+      wrapper.findAll('button[aria-label^="New terminal for"]').map((row) => row.attributes("aria-label")),
+    ).toEqual(["New terminal for feature"]);
+    // A live worktree keeps the action that deletes it from disk, and no closing one.
+    expect(wrapper.find('button[aria-label="Remove worktree feature"]').exists()).toBe(true);
+    expect(wrapper.find('button[aria-label="Remove worktree temporary"]').exists()).toBe(false);
+    // One action per workdir row: the trash of the live worktree, and the missing one's close.
+    expect(wrapper.findAll(".workdir-group > .workdir-item .workdir-actions button")).toHaveLength(2);
+    const close = wrapper.get('button[aria-label="Close missing checkout: temporary"]');
+    expect(close.attributes("title")).toBe("Remove from list");
+
+    await gone!.trigger("click");
+    await live!.trigger("click");
+    await close.trigger("click");
+
+    expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature"]]);
+    expect(wrapper.emitted("closeMissing")).toEqual([["checkout:gone"]]);
     wrapper.unmount();
   });
 });

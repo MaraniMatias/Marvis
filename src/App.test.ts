@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
   getEditorAvailability: vi.fn(),
+  closeMissingCheckout: vi.fn(),
   toggleMaximize: vi.fn(),
   onCloseRequested: null as ((event: { preventDefault(): void }) => Promise<void>) | null,
   currentWindow: null as {
@@ -103,6 +104,7 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.f
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./lib/ipc", () => ({
   getEditorAvailability: mocks.getEditorAvailability,
+  closeMissingCheckout: mocks.closeMissingCheckout,
   loadAppLayout: mocks.loadAppLayout,
   loadCheckoutUiState: mocks.loadCheckoutUiState,
   openInZed: vi.fn(),
@@ -220,13 +222,15 @@ import App from "./App.vue";
 
 const SidebarStub = defineComponent({
   name: "SidebarStub",
-  emits: ["selectCheckout", "selectSession"],
+  emits: ["selectCheckout", "selectSession", "closeMissing"],
   setup(_, { emit }) {
     return () =>
       h("div", [
         h("button", { "data-testid": "select-checkout-two", onClick: () => emit("selectCheckout", "checkout:two") }),
         h("button", { "data-testid": "select-session-one", onClick: () => emit("selectSession", "session:one") }),
         h("button", { "data-testid": "select-session-two", onClick: () => emit("selectSession", "session:two") }),
+        h("button", { "data-testid": "close-missing-base", onClick: () => emit("closeMissing", "checkout:one") }),
+        h("button", { "data-testid": "close-missing-worktree", onClick: () => emit("closeMissing", "checkout:two") }),
       ]);
   },
 });
@@ -536,6 +540,70 @@ describe("App UI integration", () => {
 
       expect(wrapper.find('[role="alert"]').exists()).toBe(false);
       wrapper.unmount();
+    });
+  });
+
+  describe("a checkout whose directory is gone", () => {
+    it("confirms the scope each close reaches, and closes only what was confirmed", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two")));
+
+      // The repo root is the head of a list, so closing it reaches the worktrees with it.
+      await wrapper.get('[data-testid="close-missing-base"]').trigger("click");
+      expect(confirm).toHaveBeenLastCalledWith(
+        "Close “/checkout:one” and its checkout list in Marvis? No files will be deleted.",
+      );
+      // A worktree is one entry, and nothing is closed while the question is unanswered.
+      await wrapper.get('[data-testid="close-missing-worktree"]').trigger("click");
+      expect(confirm).toHaveBeenLastCalledWith("Close “/checkout:two” in Marvis? No files will be deleted.");
+      expect(mocks.closeMissingCheckout).not.toHaveBeenCalled();
+
+      confirm.mockReturnValue(true);
+      mocks.closeMissingCheckout.mockResolvedValue({ repos: [], activeCheckoutId: null, activeSessionId: null });
+      await wrapper.get('[data-testid="close-missing-worktree"]').trigger("click");
+      await flushPromises();
+
+      expect(mocks.closeMissingCheckout).toHaveBeenCalledWith("checkout:two");
+      expect(mocks.workspaceRef?.value.repos).toEqual([]);
+      wrapper.unmount();
+      confirm.mockRestore();
+    });
+
+    it("names a plain folder as losing its checkout list as well", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      const plain: WorkspaceState = {
+        repos: [
+          {
+            id: "repo:notes",
+            kind: "plain",
+            name: "notes",
+            root: "/notes",
+            checkouts: [
+              {
+                // A plain folder is one primary checkout, so the stub's base entry is it.
+                ...checkout("checkout:one"),
+                repoId: "repo:notes",
+                path: "/notes",
+                canonicalPath: "/notes",
+                branch: undefined,
+              },
+            ],
+            createdAt: "now",
+            lastOpenedAt: "now",
+          },
+        ],
+        activeCheckoutId: "checkout:one",
+        activeSessionId: null,
+      };
+      mocks.closeMissingCheckout.mockResolvedValue({ repos: [], activeCheckoutId: null, activeSessionId: null });
+      const wrapper = await mountApp(plain);
+
+      await wrapper.get('[data-testid="close-missing-base"]').trigger("click");
+
+      expect(confirm).toHaveBeenCalledWith("Close “/notes” and its checkout list in Marvis? No files will be deleted.");
+      expect(mocks.closeMissingCheckout).toHaveBeenCalledWith("checkout:one");
+      wrapper.unmount();
+      confirm.mockRestore();
     });
   });
 

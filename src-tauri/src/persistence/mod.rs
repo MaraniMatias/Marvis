@@ -791,9 +791,6 @@ impl Database {
         if !is_missing {
             return Err("only a missing checkout can be closed".into());
         }
-        if kind == "git" && !is_primary {
-            return Err("missing Git worktrees must be closed through Git reconciliation".into());
-        }
         let affected_id = if is_primary || kind == "plain" {
             &repo_id
         } else {
@@ -856,6 +853,72 @@ impl Database {
         transaction.commit().map_err(db_error)?;
         drop(connection);
         self.load_workspace()
+    }
+
+    /// Drops every checkout whose directory no longer exists, and then every repository left
+    /// without checkouts, so a reopened app lists only locations that are really on disk.
+    ///
+    /// `!Path::new(path).is_dir()` is the same test `close_missing_checkout` applies, so both
+    /// agree on what "missing" means. A path on a volume that is not mounted fails it too:
+    /// reopening Marvis with an external volume unplugged therefore discards the worktrees
+    /// registered on it. To keep those registrations, drop the `prune_missing_checkouts` call
+    /// from `services::workspace::restore`; a checkout whose directory is still gone then stays
+    /// listed as `is_missing` and can be closed from the sidebar.
+    pub fn prune_missing_checkouts(&self) -> Result<(), String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        let mut statement = transaction
+            .prepare("SELECT id, repo_id, canonical_path FROM checkouts")
+            .map_err(db_error)?;
+        let checkouts: Vec<(String, String, String)> = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                ))
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        drop(statement);
+        let active_id = get_preference(&transaction, ACTIVE_CHECKOUT)?;
+        let mut active_repo_id = None;
+        for (checkout_id, repo_id, path) in &checkouts {
+            if Path::new(path).is_dir() {
+                continue;
+            }
+            if active_id.as_deref() == Some(checkout_id.as_str()) {
+                active_repo_id = Some(repo_id.as_str());
+            }
+            transaction
+                .execute("DELETE FROM checkouts WHERE id = ?1", [checkout_id])
+                .map_err(db_error)?;
+        }
+        // A repository whose checkouts are all gone has nothing left to represent.
+        transaction
+            .execute(
+                "DELETE FROM repos WHERE NOT EXISTS (SELECT 1 FROM checkouts WHERE repo_id = repos.id)",
+                [],
+            )
+            .map_err(db_error)?;
+        if let Some(repo_id) = active_repo_id {
+            // The selection that was dropped hands over to the repository's surviving primary
+            // checkout, the same choice `close_missing_checkout` makes; nothing left means
+            // nothing stays selected.
+            let primary_id: Option<String> = transaction
+                .query_row(
+                    "SELECT id FROM checkouts WHERE repo_id = ?1 AND is_primary = 1",
+                    [repo_id],
+                    |row| row.get(0),
+                )
+                .optional()
+                .map_err(db_error)?;
+            set_preference(&transaction, ACTIVE_CHECKOUT, primary_id.as_deref())?;
+            set_preference(&transaction, ACTIVE_SESSION, None)?;
+        }
+        transaction.commit().map_err(db_error)?;
+        Ok(())
     }
 
     pub fn terminal_session_checkout(&self, session_id: &str) -> Result<Option<String>, String> {
@@ -2148,7 +2211,10 @@ mod tests {
 
     use crate::domain::{
         terminal_layout::{CheckoutTerminalLayout, TerminalLayoutNode, TerminalLayoutTab},
-        workspace::{Repo, Session, SessionStatus, SessionType},
+        workspace::{
+            checkout_id_for_path, repo_id_for_path, Checkout, Repo, RepoKind, Session,
+            SessionStatus, SessionType,
+        },
     };
 
     use super::{
@@ -3124,6 +3190,8 @@ mod tests {
             .expect("register repo");
         fs::remove_dir(&folder).unwrap();
 
+        // Reading the organization never prunes: the row stays, and reports itself missing.
+        // Only the startup prune, in `services::workspace::restore`, drops it.
         let state = Database::open(&db_path)
             .expect("restart database")
             .load_workspace()
@@ -3131,5 +3199,115 @@ mod tests {
         assert_eq!(state.repos.len(), 1);
         assert_eq!(state.repos[0].id, repo.id);
         assert!(state.repos[0].checkouts[0].is_missing);
+    }
+
+    /// A Git repository whose primary is on disk and whose worktree is not, without running
+    /// Git: the persistence layer only stores paths.
+    fn git_repo_with_worktree(root: &Path, worktree: &Path) -> (Repo, String) {
+        let root = fs::canonicalize(root).expect("root");
+        let root = fs::canonicalize(root).expect("root");
+        let root_path = root.display().to_string();
+        let repo_id = repo_id_for_path(&root_path);
+        let worktree_id = checkout_id_for_path(
+            &fs::canonicalize(worktree)
+                .expect("worktree")
+                .display()
+                .to_string(),
+        );
+        let repo = Repo {
+            id: repo_id.clone(),
+            kind: RepoKind::Git,
+            name: "repo".into(),
+            root: root_path,
+            default_branch: None,
+            checkouts: vec![
+                Checkout::new(repo_id.clone(), &root, true).expect("primary"),
+                Checkout::new(repo_id, worktree, false).expect("worktree"),
+            ],
+            created_at: "1".into(),
+            last_opened_at: "1".into(),
+        };
+        (repo, worktree_id)
+    }
+
+    #[test]
+    fn closing_a_missing_git_worktree_removes_only_its_registration() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(root.join("tracked.txt"), "kept\n").unwrap();
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        let registered = database.register_git_repo(repo, &worktree_id).unwrap();
+        assert_eq!(
+            registered.active_checkout_id.as_deref(),
+            Some(worktree_id.as_str())
+        );
+        // The worktree is deleted outside Marvis, so the stored row is only marked by its path.
+        fs::remove_dir(&worktree).unwrap();
+
+        let closed = database.close_missing_checkout(&worktree_id).unwrap();
+
+        // The entry goes and the selection falls back to the surviving primary; the
+        // repository and its files stay exactly where they were.
+        assert_eq!(closed.repos.len(), 1);
+        assert_eq!(closed.repos[0].checkouts.len(), 1);
+        let primary = &closed.repos[0].checkouts[0];
+        assert!(primary.is_primary);
+        assert_eq!(
+            closed.active_checkout_id.as_deref(),
+            Some(primary.id.as_str())
+        );
+        assert_eq!(closed.active_session_id, None);
+        assert!(root.join("tracked.txt").exists());
+    }
+
+    #[test]
+    fn closing_a_checkout_that_still_exists_is_refused() {
+        let temp = tempdir().expect("temporary directory");
+        let folder = temp.path().join("plain");
+        fs::create_dir(&folder).unwrap();
+        let repo = plain_repo(&folder, "1");
+        let checkout_id = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_plain_repo(repo).unwrap();
+
+        let error = database.close_missing_checkout(&checkout_id).unwrap_err();
+
+        assert!(error.contains("only a missing checkout can be closed"));
+        assert_eq!(database.load_workspace().unwrap().repos.len(), 1);
+    }
+
+    #[test]
+    fn pruning_drops_a_checkout_whose_path_cannot_be_resolved() {
+        let temp = tempdir().expect("temporary directory");
+        let volume = temp.path().join("volume");
+        let folder = volume.join("work");
+        let live = temp.path().join("live");
+        fs::create_dir_all(&folder).unwrap();
+        fs::create_dir(&live).unwrap();
+        let on_volume = plain_repo(&folder, "1");
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_plain_repo(on_volume).unwrap();
+        let kept = plain_repo(&live, "1");
+        database.register_plain_repo(kept.clone()).unwrap();
+        // The volume is not mounted: the path is still registered and still resolves to
+        // nothing, which is exactly what the prune reads as missing. Its registrations are
+        // the accepted cost of the startup prune; `services::workspace::restore` is where
+        // dropping that call brings them back.
+        fs::remove_dir_all(&volume).unwrap();
+
+        database.prune_missing_checkouts().unwrap();
+
+        let state = database.load_workspace().unwrap();
+        assert_eq!(state.repos.len(), 1);
+        assert_eq!(state.repos[0].id, kept.id);
+        // A selection in another checkout survives the prune of an unrelated one.
+        assert_eq!(
+            state.active_checkout_id.as_deref(),
+            Some(kept.checkouts[0].id.as_str())
+        );
     }
 }
