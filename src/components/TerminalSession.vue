@@ -1,11 +1,11 @@
 <script setup lang="ts">
 import { Channel } from "@tauri-apps/api/core";
 import { FitAddon } from "@xterm/addon-fit";
-import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type { TerminalSessionStatus } from "../domain/workspace";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
+import { attachTerminalRenderer, createMarvisTerminal, enableTerminalLigatures } from "../lib/marvis-terminal";
 import { renderPtyOutput } from "../lib/terminal-renderer";
 
 const props = withDefaults(
@@ -28,22 +28,7 @@ const terminalElement = ref<HTMLElement | null>(null);
 const state = ref<TerminalSessionStatus>({ state: "running", foregroundProcess: false });
 const error = ref<string | null>(null);
 const closing = ref(false);
-const terminal = new Terminal({
-  allowProposedApi: false,
-  cursorBlink: true,
-  fontFamily: '"FiraCode Nerd Font Mono", monospace',
-  fontSize: 16,
-  lineHeight: 1.2,
-  scrollback: 10000,
-  // Only the colors come from the design tokens (B.1): the face, size and ligatures are the
-  // ones the app has always had.
-  theme: {
-    background: "#17191f", // --marvis-bg-0
-    foreground: "#d6d9e0", // --marvis-text
-    cursor: "#7c9eff", // --marvis-accent
-    selectionBackground: "#22252e", // --marvis-bg-2
-  },
-});
+const terminal = createMarvisTerminal();
 const fit = new FitAddon();
 terminal.loadAddon(fit);
 
@@ -190,6 +175,10 @@ watch(
 onMounted(() => {
   if (!terminalElement.value) return;
   terminal.open(terminalElement.value);
+  // Both of these need the terminal on the page, and the fit that follows has to measure the
+  // renderer that will actually draw.
+  enableTerminalLigatures(terminal);
+  attachTerminalRenderer(terminal);
   fitActiveView();
   resizeObserver = new ResizeObserver(() => fitActiveView());
   resizeObserver.observe(terminalElement.value);

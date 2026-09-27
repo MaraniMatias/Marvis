@@ -20,6 +20,9 @@ pub struct FileEntry {
     pub name: String,
     pub path: String,
     pub kind: FileEntryKind,
+    /// A Git checkout ignores this file. It is still listed, so the tree can show it a step
+    /// quieter; only `.git` itself is ever withheld.
+    pub ignored: bool,
 }
 
 #[derive(Debug, Clone, Copy, Serialize)]

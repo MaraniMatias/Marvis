@@ -20,6 +20,9 @@ use crate::{
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 2000;
+/// Git's own bookkeeping, never shown in the tree. `check-ignore` reports it ignored on every
+/// repository, which would otherwise put it in the list the moment ignores became visible.
+const GIT_DIRECTORY: &str = ".git";
 const MAX_SEARCH_ENTRIES: usize = 50_000;
 
 pub fn list(
@@ -81,6 +84,7 @@ pub fn list(
             name,
             path: path.replace(std::path::MAIN_SEPARATOR, "/"),
             kind,
+            ignored: false,
         });
         if collected.len() > MAX_DIRECTORY_ENTRIES {
             truncated = true;
@@ -90,8 +94,16 @@ pub fn list(
     }
 
     if repo.kind == RepoKind::Git {
+        // Gitignored files are listed and marked, not dropped: the tree shows them a step
+        // quieter, the way Zed does, so a build directory reads as present but uninteresting. `.git` is
+        // the exception — `check-ignore` always reports it ignored because it is Git's own
+        // bookkeeping, not something the project ignores, so it stays out of the tree
+        // entirely, matched by name.
         let ignored = ignored_paths(root, &collected)?;
-        collected.retain(|entry| !ignored.contains(entry.path.as_str()));
+        for entry in &mut collected {
+            entry.ignored = ignored.contains(entry.path.as_str());
+        }
+        collected.retain(|entry| entry.name != GIT_DIRECTORY);
     }
     collected.sort_by(|left, right| {
         left.name
@@ -193,6 +205,7 @@ fn search_git_files(root: &Path) -> Result<(Vec<FileEntry>, bool), IpcError> {
                 .to_owned(),
             path: path.replace(std::path::MAIN_SEPARATOR, "/"),
             kind,
+            ignored: false,
         });
     }
     if truncated {
@@ -260,6 +273,7 @@ fn search_plain_files(root: &Path) -> Result<(Vec<FileEntry>, bool), IpcError> {
                 name,
                 path: path.replace(std::path::MAIN_SEPARATOR, "/"),
                 kind,
+                ignored: false,
             });
             if entries.len() > MAX_SEARCH_ENTRIES {
                 entries.pop();
@@ -639,7 +653,11 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use crate::{domain::ipc::IpcErrorCode, persistence::Database, services::workspace};
+    use crate::{
+        domain::{files::FileEntry, ipc::IpcErrorCode},
+        persistence::Database,
+        services::workspace,
+    };
 
     use super::{list, read, read_markdown_image, search};
 
@@ -725,7 +743,7 @@ mod tests {
     }
 
     #[test]
-    fn gitignore_rules_are_applied_only_for_git_checkouts() {
+    fn gitignored_files_are_listed_and_marked_in_git_checkouts_only() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("repo");
         fs::create_dir_all(&root).unwrap();
@@ -741,15 +759,45 @@ mod tests {
         let entries = list(&database, &state.repos[0].checkouts[0].id, ".")
             .unwrap()
             .entries;
-        let names = entries
-            .iter()
-            .map(|entry| entry.name.as_str())
-            .collect::<Vec<_>>();
+        let ignored = |name: &str| {
+            entries
+                .iter()
+                .find(|entry| entry.name == name)
+                .map(|entry| entry.ignored)
+        };
 
-        assert!(names.contains(&"visible.txt"));
-        assert!(!names.contains(&"ignored.txt"));
-        assert!(!names.contains(&"ignored-dir"));
-        assert!(!names.contains(&".git"));
+        // Ignored files stay in the tree so it can show them a step quieter, and the flag says
+        // which ones those are. `.git` is the one thing never listed.
+        assert!(names(&entries).contains(&"visible.txt"));
+        assert!(!names(&entries).contains(&".git"));
+        assert_eq!(ignored("visible.txt"), Some(false));
+        assert_eq!(ignored("ignored.txt"), Some(true));
+        assert_eq!(ignored("ignored-dir"), Some(true));
+    }
+
+    #[test]
+    fn a_plain_folder_marks_nothing_as_ignored() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("plain");
+        fs::create_dir_all(&root).unwrap();
+        // A .gitignore in a folder that is not a checkout is just a file: nothing honors it.
+        fs::write(root.join(".gitignore"), "*.log\n").unwrap();
+        fs::write(root.join("keep.log"), "kept").unwrap();
+        let database = db(temp.path());
+
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let entries = list(&database, &state.repos[0].checkouts[0].id, ".")
+            .unwrap()
+            .entries;
+
+        assert!(entries.iter().all(|entry| !entry.ignored));
+        assert!(names(&entries).contains(&"keep.log"));
+        // And `.git` is a plain directory here, with nothing to hide it.
+        assert!(!names(&entries).contains(&".git"));
+    }
+
+    fn names(entries: &[FileEntry]) -> Vec<&str> {
+        entries.iter().map(|entry| entry.name.as_str()).collect()
     }
 
     #[test]

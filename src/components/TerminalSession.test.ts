@@ -4,35 +4,24 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
 import TerminalSession from "./TerminalSession.vue";
 
-const terminalMock = vi.hoisted(() => ({
-  channel: null as { onmessage: (buffer: ArrayBuffer) => void } | null,
-  input: null as ((value: string) => void) | null,
-  resizes: [] as Array<(size: { cols: number; rows: number }) => void>,
-  output: [] as number[][],
-  options: null as Record<string, unknown> | null,
-  focusCalls: 0,
-}));
-
-vi.mock("@tauri-apps/api/core", () => ({
-  Channel: class MockChannel {
-    onmessage: (buffer: ArrayBuffer) => void = () => {};
-
-    constructor() {
-      terminalMock.channel = this;
-    }
-  },
-}));
-
-vi.mock("@xterm/xterm", () => ({
-  Terminal: class MockTerminal {
+const { MockTerminal, terminalMock } = vi.hoisted(() => {
+  const terminalMock = {
+    channel: null as { onmessage: (buffer: ArrayBuffer) => void } | null,
+    input: null as ((value: string) => void) | null,
+    resizes: [] as Array<(size: { cols: number; rows: number }) => void>,
+    output: [] as number[][],
+    openCalls: 0,
+    focusCalls: 0,
+  };
+  class MockTerminal {
     cols = 80;
     rows = 24;
     options = {};
-    constructor(options: Record<string, unknown>) {
-      terminalMock.options = options;
-    }
+    constructor() {}
     loadAddon() {}
-    open() {}
+    open() {
+      terminalMock.openCalls += 1;
+    }
     onData(callback: (value: string) => void) {
       terminalMock.input = callback;
     }
@@ -46,7 +35,31 @@ vi.mock("@xterm/xterm", () => ({
       terminalMock.focusCalls += 1;
     }
     dispose() {}
+  }
+  return { MockTerminal, terminalMock };
+});
+
+vi.mock("@tauri-apps/api/core", () => ({
+  Channel: class MockChannel {
+    onmessage: (buffer: ArrayBuffer) => void = () => {};
+
+    constructor() {
+      terminalMock.channel = this;
+    }
   },
+}));
+
+// The terminal's face, palette, addons, ligatures and renderer are the lib's business and are
+// asserted there. What this file owns is the wiring: a terminal on the page, with both.
+const terminalLib = vi.hoisted(() => ({
+  attachTerminalRenderer: vi.fn(),
+  enableTerminalLigatures: vi.fn(),
+}));
+
+vi.mock("../lib/marvis-terminal", () => ({
+  createMarvisTerminal: () => new MockTerminal(),
+  enableTerminalLigatures: terminalLib.enableTerminalLigatures,
+  attachTerminalRenderer: terminalLib.attachTerminalRenderer,
 }));
 
 vi.mock("@xterm/addon-fit", () => ({
@@ -83,7 +96,7 @@ describe("TerminalSession UI", () => {
     terminalMock.input = null;
     terminalMock.resizes = [];
     terminalMock.output = [];
-    terminalMock.options = null;
+    terminalMock.openCalls = 0;
     terminalMock.focusCalls = 0;
     vi.mocked(createTerminal).mockResolvedValue(created);
     vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running" });
@@ -102,19 +115,10 @@ describe("TerminalSession UI", () => {
 
     expect(terminalMock.output).toEqual([Array.from(output)]);
     expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, expect.anything());
-    // B.1: the face, size and ligatures are fixed. Only the colors come from the tokens.
-    expect(terminalMock.options).toMatchObject({
-      fontFamily: '"FiraCode Nerd Font Mono", monospace',
-      fontSize: 16,
-      lineHeight: 1.2,
-      scrollback: 10000,
-      theme: {
-        background: "#17191f", // --marvis-bg-0
-        foreground: "#d6d9e0", // --marvis-text
-        cursor: "#7c9eff", // --marvis-accent
-        selectionBackground: "#22252e", // --marvis-bg-2
-      },
-    });
+    // Both are refused by xterm.js until the terminal is on the page.
+    expect(terminalMock.openCalls).toBe(1);
+    expect(terminalLib.enableTerminalLigatures).toHaveBeenCalledTimes(1);
+    expect(terminalLib.attachTerminalRenderer).toHaveBeenCalledTimes(1);
     expect(writeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", new TextEncoder().encode("λ pasted"));
     expect(resizeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", 97, 31);
     wrapper.unmount();

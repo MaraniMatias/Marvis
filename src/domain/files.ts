@@ -4,6 +4,11 @@ export interface FileEntry {
   name: string;
   path: string;
   kind: FileEntryKind;
+  /**
+   * A Git checkout ignores this file. It is still listed, and the tree shows it a step quieter
+   * so a build directory reads as present but uninteresting. Only `.git` is ever withheld.
+   */
+  ignored?: boolean;
 }
 
 export interface FileTree {

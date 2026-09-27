@@ -1,11 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from "vue";
-import {
-  ChevronRight as ChevronRightIcon,
-  File as FileIcon,
-  Folder as FolderIcon,
-  SquareArrowOutUpRight as SquareArrowOutUpRightIcon,
-} from "@lucide/vue";
+import { ChevronRight as ChevronRightIcon, SquareArrowOutUpRight as SquareArrowOutUpRightIcon } from "@lucide/vue";
 import { isIpcError } from "../domain/ipc";
 import type { FileEntry } from "../domain/files";
 import type { Checkout, Repo } from "../domain/workspace";
@@ -13,6 +8,7 @@ import type { CheckoutUiState } from "../domain/ui-state";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { useDiffStats } from "../presentation/diff-stats";
 import { listCheckoutFiles } from "../lib/ipc";
+import FileIcon from "./FileIcon.vue";
 
 const props = defineProps<{
   checkout: Checkout | null;
@@ -404,6 +400,16 @@ const gitStatuses = computed(() => {
   return statuses;
 });
 
+/**
+ * How loud a row is drawn. A dotfile steps down once and a file the checkout ignores steps down
+ * again, so a build directory reads as present but uninteresting. The flag comes from the
+ * backend; the dot comes from the name, since nothing in Git treats it specially.
+ */
+function prominenceOf(entry: FileEntry): "normal" | "hidden" | "ignored" {
+  if (entry.ignored) return "ignored";
+  return entry.name.startsWith(".") ? "hidden" : "normal";
+}
+
 function rowStatus(path: string): string | undefined {
   return gitStatuses.value.get(path);
 }
@@ -580,8 +586,15 @@ const matchedSearchEntries = searchEntries.value
                   :class="{ expanded: expanded.includes(item.entry.path) }"
                   aria-hidden="true"
                 />
-                <FolderIcon class="icon-xs file-icon" aria-hidden="true" />
-                <span class="file-name">{{ item.entry.name }}</span>
+                <FileIcon
+                  class="file-icon"
+                  :name="item.entry.name"
+                  kind="directory"
+                  :prominence="prominenceOf(item.entry)"
+                />
+                <span class="file-name" :class="`file-name-${prominenceOf(item.entry)}`">
+                  {{ item.entry.name }}
+                </span>
               </button>
               <button
                 v-else
@@ -594,8 +607,15 @@ const matchedSearchEntries = searchEntries.value
                 @click="selectFile(item.entry)"
               >
                 <span class="chevron-spacer" aria-hidden="true" />
-                <FileIcon class="icon-xs file-icon" aria-hidden="true" />
-                <span class="file-name">{{ item.entry.name }}</span>
+                <FileIcon
+                  class="file-icon"
+                  :name="item.entry.name"
+                  kind="file"
+                  :prominence="prominenceOf(item.entry)"
+                />
+                <span class="file-name" :class="`file-name-${prominenceOf(item.entry)}`">
+                  {{ item.entry.name }}
+                </span>
                 <span v-if="rowStatus(item.entry.path)" class="file-status" :data-status="rowStatus(item.entry.path)">
                   {{ rowStatus(item.entry.path) }}
                 </span>
@@ -765,6 +785,17 @@ const matchedSearchEntries = searchEntries.value
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+/* The name steps with the icon, mixed toward the panel so a dotfile and an ignored file both
+   stay readable rather than fading out. These two numbers are the name half of the ramp that
+   FileIcon's opacity rules make up the icon half. */
+.file-name-hidden {
+  color: color-mix(in srgb, var(--marvis-text-secondary) 72%, var(--marvis-bg-1));
+}
+
+.file-name-ignored {
+  color: color-mix(in srgb, var(--marvis-text-secondary) 48%, var(--marvis-bg-1));
 }
 
 .file-icon,
