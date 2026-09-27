@@ -12,15 +12,27 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     output: [] as number[][],
     openCalls: 0,
     focusCalls: 0,
+    screenWidth: 0,
+    terminal: null as MockTerminal | null,
   };
   class MockTerminal {
     cols = 80;
     rows = 24;
     options = {};
-    constructor() {}
+    element?: HTMLElement;
+    constructor() {
+      terminalMock.terminal = this;
+    }
     loadAddon() {}
-    open() {
+    open(element: HTMLElement) {
+      this.element = element;
+      if (terminalMock.screenWidth) element.appendChild(document.createElement("div")).className = "xterm-screen";
       terminalMock.openCalls += 1;
+    }
+    resize(cols: number, rows: number) {
+      this.cols = cols;
+      this.rows = rows;
+      terminalMock.resizes.forEach((callback) => callback({ cols, rows }));
     }
     onData(callback: (value: string) => void) {
       terminalMock.input = callback;
@@ -81,6 +93,7 @@ vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class MockFitAddon {
     fit() {
       terminalLib.fitCalls += 1;
+      if (terminalMock.screenWidth) terminalMock.terminal!.cols = 77;
     }
   },
 }));
@@ -115,6 +128,8 @@ describe("TerminalSession UI", () => {
     terminalMock.output = [];
     terminalMock.openCalls = 0;
     terminalMock.focusCalls = 0;
+    terminalMock.screenWidth = 0;
+    terminalMock.terminal = null;
     terminalLib.fitCalls = 0;
     vi.mocked(createTerminal).mockResolvedValue(created);
     vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running" });
@@ -152,6 +167,23 @@ describe("TerminalSession UI", () => {
     // flush at the top-left corner, which is the one shape a padding bug cannot explain.
     expect(terminalLib.fitCalls).toBeGreaterThanOrEqual(2);
     wrapper.unmount();
+  });
+
+  it("recovers the column FitAddon reserves for a hidden scrollbar without clipping the grid", async () => {
+    terminalMock.screenWidth = 732; // 77 columns of 9.5px, rounded by xterm
+    const bounds = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockImplementation(function (
+      this: HTMLElement,
+    ) {
+      const width = this.classList.contains("xterm-screen") ? terminalMock.screenWidth : 747.7;
+      return { width } as DOMRect;
+    });
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    expect(terminalMock.terminal?.cols).toBe(78); // 78 * 9.5 = 741px fits; 79 would be clipped
+    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 78, 24, expect.anything());
+    wrapper.unmount();
+    bounds.mockRestore();
   });
 
   it("requires confirmation before closing a running shell", async () => {

@@ -69,6 +69,14 @@ function fitActiveView() {
   if (!props.active || !props.visible || !terminalElement.value) return;
   if (terminalElement.value.clientWidth === 0 || terminalElement.value.clientHeight === 0) return;
   fit.fit();
+  // FitAddon reserves 14px for an overview ruler whenever scrollback is enabled, even though
+  // this terminal hides the ruler and scrollbar. Recover those columns without clipping TUIs.
+  const screen = terminal.element?.querySelector(".xterm-screen");
+  if (!screen) return;
+  const cellWidth = screen.getBoundingClientRect().width / terminal.cols;
+  if (!cellWidth) return;
+  const cols = Math.floor(terminalElement.value.getBoundingClientRect().width / cellWidth);
+  if (cols > terminal.cols) terminal.resize(cols, terminal.rows);
 }
 
 function queueResize(cols: number, rows: number) {
