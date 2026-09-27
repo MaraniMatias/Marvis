@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import { computed, toRef } from "vue";
+/* The rename field is a void element with enough attributes that it cannot fit on one line, and
+   prettier and this rule disagree about how a void element closes: the rule would have it end in
+   `>`, the formatter rewrites that to `/>`. The formatter owns it, as in the other panes that
+   hold a field. */
+/* eslint-disable vue/html-self-closing */
+import { computed, nextTick, ref, shallowRef, toRef } from "vue";
 import {
   Folder as FolderIcon,
   FolderGit2 as FolderGit2Icon,
@@ -11,6 +16,7 @@ import {
 } from "@lucide/vue";
 import type { Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
 import { workdirTitle } from "../domain/workspace";
+import type { AgentHeadline } from "../presentation/agent-sessions";
 import { useDiffStats } from "../presentation/diff-stats";
 
 defineOptions({ name: "FolderSidebar" });
@@ -22,9 +28,18 @@ const props = withDefaults(
     activeSessionId: string | null;
     isOpening: boolean;
     sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
+    /**
+     * The agent of the active checkout, which is the only one with a server behind it.
+     *
+     * It is a property of the checkout, not of any one terminal, so the rows under the active
+     * workdir all repeat it; the `title` on the chip says so rather than implying a link that
+     * OpenCode does not offer.
+     */
+    agent?: AgentHeadline | null;
   }>(),
   {
     sessionRuntimeStatuses: () => ({}),
+    agent: null,
   },
 );
 
@@ -37,7 +52,46 @@ const emit = defineEmits<{
   removeWorktree: [checkoutId: string];
   closeMissing: [checkoutId: string];
   closeSession: [sessionId: string];
+  renameSession: [sessionId: string, name: string];
 }>();
+
+/** The one session whose name is being typed, and the text as typed so far. */
+const editingId = ref<string | null>(null);
+const draftName = ref("");
+const renameField = shallowRef<HTMLInputElement | null>(null);
+
+/**
+ * A function ref, because the field sits inside a `v-for`: a plain `ref` there would collect
+ * every row's element into an array, and there would be nothing to focus.
+ */
+function captureRenameField(element: unknown) {
+  renameField.value = (element as HTMLInputElement | null) ?? null;
+}
+
+function startRename(session: Session) {
+  editingId.value = session.id;
+  draftName.value = session.name;
+  // The text the user is replacing is preselected, so typing overwrites the name rather than
+  // appending to it, which is what a rename is for.
+  void nextTick(() => {
+    renameField.value?.focus();
+    renameField.value?.select();
+  });
+}
+
+/** Nothing typed is not a rename: the row keeps the name it had. */
+function commitRename(session: Session) {
+  const name = draftName.value.trim();
+  editingId.value = null;
+  if (name && name !== session.name) emit("renameSession", session.id, name);
+}
+
+function cancelRename() {
+  editingId.value = null;
+}
+
+/** The one program in front of a shell that is also an agent, and so owns the row's agent line. */
+const AGENT_APP = "opencode";
 
 /** The icon roles a workdir row can ask for, resolved to a real lucide component. */
 const icons = {
@@ -53,6 +107,12 @@ interface WorkdirItem {
   session: Session;
   active: boolean;
   exited: boolean;
+  /** The program in front of the shell, when one is: `opencode`, `nvim`. */
+  app?: string;
+  /** What the row is called on screen: the program in front, or the shell it was opened as. */
+  title: string;
+  /** The agent this terminal runs, and only when it is the one running it. */
+  agent: AgentHeadline | null;
 }
 
 interface Workdir {
@@ -141,17 +201,44 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     worktree: isGit && !checkout.isPrimary,
     missing: checkout.isMissing,
     active: checkout.id === props.activeCheckoutId,
-    items: checkout.sessions.map((session) => ({
-      session,
-      active: session.id === props.activeSessionId,
-      exited: sessionState(session) === "exited",
-    })),
+    items: checkout.sessions.map((session) => {
+      const status = props.sessionRuntimeStatuses[session.id];
+      const app = status?.foregroundApp;
+      return {
+        session,
+        active: session.id === props.activeSessionId,
+        exited: sessionState(session) === "exited",
+        app,
+        /**
+         * What the row is called while it is on screen: the program in front of the shell, so a
+         * terminal running Neovim or the agent reads as that, and an idle one reads as the shell it
+         * was opened as. `session.name` is the persisted one and does not change — a row is named
+         * after what is running in it, not after what it is asked to run.
+         */
+        title: app ?? session.name,
+        /**
+         * The agent this terminal is running, and only that: the checkout's agent belongs to a
+         * row whose foreground process is the agent, and to no other row in the workdir.
+         */
+        agent: app === AGENT_APP && checkout.id === props.activeCheckoutId ? (props.agent ?? null) : null,
+      };
+    }),
   };
 }
 
 function sessionState(session: Session) {
   return props.sessionRuntimeStatuses[session.id]?.state ?? (session.status === "active" ? "running" : "exited");
 }
+
+/** A session that is working, stuck or failed stays on screen through a hover. */
+function rowPinnedForAttention(item: { agent: AgentHeadline | null }): boolean {
+  return item.agent !== null && item.agent.attention !== "none" && item.agent.attention !== undefined;
+}
+
+/** Says whose agent it is, which the row cannot know on its own: it is the checkout's. */
+const agentTitle = computed(() =>
+  props.agent ? `OpenCode agent: ${props.agent.label}` : "No OpenCode agent in this workdir",
+);
 </script>
 
 <template>
@@ -251,19 +338,66 @@ function sessionState(session: Session) {
               :class="{ active: item.active }"
             >
               <div class="workdir-row">
+                <!-- Editing swaps the button for the field, rather than nesting an input inside
+                     one: a control inside a control cannot be focused or read on its own. The
+                     row keeps its shape because both are laid out the same way. -->
+                <div v-if="editingId === item.session.id" class="workdir-select">
+                  <component :is="icons.terminal" class="workdir-status-icon" aria-hidden="true" />
+                  <div class="workdir-main">
+                    <input
+                      :ref="captureRenameField"
+                      v-model="draftName"
+                      class="workdir-rename"
+                      type="text"
+                      maxlength="60"
+                      aria-label="Terminal session name"
+                      @keydown.enter.prevent="commitRename(item.session)"
+                      @keydown.esc.prevent="cancelRename"
+                      @blur="commitRename(item.session)"
+                    />
+                  </div>
+                </div>
                 <button
+                  v-else
                   type="button"
                   class="workdir-select"
                   :aria-current="item.active ? 'page' : undefined"
                   :aria-label="`Terminal session: ${item.session.name}`"
                   :title="item.session.name"
                   @click="emit('selectSession', item.session.id)"
+                  @dblclick="startRename(item.session)"
+                  @keydown.f2.prevent="startRename(item.session)"
                 >
                   <component :is="icons.terminal" class="workdir-status-icon" aria-hidden="true" />
                   <div class="workdir-main">
                     <div class="workdir-title">
-                      <span class="workdir-name">{{ item.session.name }}</span>
+                      <span class="workdir-name">{{ item.title }}</span>
                     </div>
+                  </div>
+                  <!-- The one slot for the row's right-hand text. What is there is context for
+                       the row's name and never the thing it is for, so it steps aside for the
+                       actions like the counts do — except a session that wants attention, which
+                       stays put because that is the news. The agent belongs to the terminal only
+                       while OpenCode is the one running in it: a terminal in Neovim is not an
+                       agent's terminal, and saying so next to `nvim` would be a claim about a
+                       process that is not in front. -->
+                  <div
+                    v-if="item.agent"
+                    class="workdir-meta"
+                    :class="{
+                      'workdir-meta-error': rowPinnedForAttention(item),
+                      'workdir-meta-pinned': rowPinnedForAttention(item),
+                    }"
+                  >
+                    <span class="agent-chip" :title="agentTitle">
+                      <span
+                        class="agent-dot"
+                        :style="{ background: item.agent.color ?? 'var(--marvis-accent)' }"
+                        aria-hidden="true"
+                      />
+                      <span>{{ item.agent.label }}</span>
+                      <span v-if="item.agent.attention === 'busy'" class="agent-spinner" aria-hidden="true" />
+                    </span>
                   </div>
                 </button>
 
@@ -271,8 +405,8 @@ function sessionState(session: Session) {
                   <button
                     type="button"
                     class="workdir-action"
-                    :aria-label="`Close terminal session: ${item.session.name}`"
-                    :title="`Close ${item.session.name}`"
+                    :aria-label="`Close terminal session: ${item.title}`"
+                    :title="`Close ${item.title}`"
                     @click="emit('closeSession', item.session.id)"
                   >
                     <XIcon class="icon-xs" aria-hidden="true" />
@@ -543,13 +677,76 @@ function sessionState(session: Session) {
   font-size: 11px;
 }
 
-/* Hover drops the counts to clear the row actions. An error stays: the hover gutter already
-   reserves the room, and a row that is being hovered at is exactly the row being read. */
-.workdir-item:hover .workdir-meta:not(.workdir-meta-error) {
+/* Hover drops the counts to clear the row actions. An error and a session asking for
+   attention stay: the hover gutter already reserves the room, and a row that is being
+   hovered at is exactly the row being read. */
+.workdir-item:hover .workdir-meta:not(.workdir-meta-error):not(.workdir-meta-pinned) {
   display: none;
 }
 
 .workdir-meta-error {
   color: var(--marvis-red);
+}
+
+/* A program running in a terminal, in the same right-hand slot and dimmed like the counts:
+   it is context for the row's name, not the thing the row is for. */
+/* The rename field takes the row's own type so the text does not jump when it appears. */
+.workdir-rename {
+  min-width: 0;
+  flex: 1;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--marvis-text);
+  font: inherit;
+}
+
+.agent-chip {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+/* The agent, in the color OpenCode paints it with. A quiet agent is dimmed like the counts;
+   one that is working is not, because that is the reason the reader is looking. */
+.agent-chip {
+  max-width: 12ch;
+  overflow: hidden;
+}
+
+.agent-dot {
+  width: 6px;
+  height: 6px;
+  flex-shrink: 0;
+  border-radius: 999px;
+}
+
+.workdir-meta-pinned .agent-chip {
+  color: var(--marvis-text-secondary);
+}
+
+/* A spinner for "working": the turn reports no percentage, so this says only that one is
+   open, and the agent's own color is what tells the two apart. */
+.agent-spinner {
+  width: 7px;
+  height: 7px;
+  flex-shrink: 0;
+  border-radius: 999px;
+  border: 1.5px solid currentColor;
+  border-top-color: transparent;
+  animation: agent-turn 0.7s linear infinite;
+}
+
+@keyframes agent-turn {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .agent-spinner {
+    animation: none;
+  }
 }
 </style>

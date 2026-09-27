@@ -19,6 +19,7 @@ import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
 import { workdirTitle } from "./domain/workspace";
 import {
   closeMissingCheckout as persistMissingCheckoutClose,
+  renameTerminal,
   selectCheckout as persistCheckoutSelection,
 } from "./lib/ipc";
 
@@ -748,6 +749,23 @@ async function closeTerminalSession(sessionId: string) {
   await mainPane.value?.requestClose(sessionId);
 }
 
+/**
+ * Names a terminal session.
+ *
+ * The database decides the name, not this call: it trims, refuses an empty or over-long one
+ * and only then writes, so a rejected rename leaves the row showing the name it already had
+ * rather than one the backend would not keep.
+ */
+async function renameTerminalSession(sessionId: string, name: string) {
+  const checkoutId = workspace.value.activeCheckoutId;
+  if (!checkoutId) return;
+  try {
+    applyWorkspace(await renameTerminal(checkoutId, sessionId, name));
+  } catch (cause) {
+    reportCause(cause);
+  }
+}
+
 function applyWorkspace(next: WorkspaceState) {
   updateWorkspace(next);
 }
@@ -891,6 +909,7 @@ function reportWarning(message: string) {
           :active-checkout-id="workspace.activeCheckoutId"
           :active-session-id="workspace.activeSessionId"
           :session-runtime-statuses="sessionRuntimeStatuses"
+          :agent="agent.headline"
           :is-opening="isOpening"
           @open-folder="chooseFolder"
           @select-checkout="activateCheckoutTerminal"
@@ -900,6 +919,7 @@ function reportWarning(message: string) {
           @remove-worktree="openWorktreeDialog('remove', $event)"
           @close-missing="closeMissingCheckout"
           @close-session="closeTerminalSession"
+          @rename-session="renameTerminalSession"
         />
       </SplitterPanel>
       <SplitterResizeHandle

@@ -8,6 +8,7 @@ import { DEFAULT_APP_LAYOUT, DEFAULT_CHECKOUT_UI_STATE } from "./domain/ui-state
 import type { AppLayoutState } from "./domain/ui-state";
 import type { ReviewNote } from "./domain/review";
 import { REVIEW_SENDER } from "./presentation/review-notes";
+import { useToasts } from "./presentation/toasts";
 import type { ReviewSender } from "./presentation/review-notes";
 import type { Checkout, Repo, Session, WorkspaceState } from "./domain/workspace";
 
@@ -20,6 +21,7 @@ const mocks = vi.hoisted(() => ({
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
   closeMissingCheckout: vi.fn(),
+  renameTerminal: vi.fn(),
   listRecentPaths: vi.fn(),
   openPath: vi.fn(),
   selectCheckout: vi.fn(),
@@ -146,6 +148,7 @@ vi.mock("./lib/ipc", () => ({
   listRecentPaths: mocks.listRecentPaths,
   loadAppLayout: mocks.loadAppLayout,
   loadCheckoutUiState: mocks.loadCheckoutUiState,
+  renameTerminal: mocks.renameTerminal,
   saveAppLayout: mocks.saveAppLayout,
   saveCheckoutUiState: mocks.saveCheckoutUiState,
   // The real command returns the refreshed workspace; App assigns it straight back,
@@ -258,7 +261,7 @@ import App from "./App.vue";
 
 const SidebarStub = defineComponent({
   name: "SidebarStub",
-  emits: ["selectCheckout", "selectSession", "closeMissing"],
+  emits: ["selectCheckout", "selectSession", "closeMissing", "renameSession"],
   setup(_, { emit }) {
     return () =>
       h("div", [
@@ -267,6 +270,10 @@ const SidebarStub = defineComponent({
         h("button", { "data-testid": "select-session-two", onClick: () => emit("selectSession", "session:two") }),
         h("button", { "data-testid": "close-missing-base", onClick: () => emit("closeMissing", "checkout:one") }),
         h("button", { "data-testid": "close-missing-worktree", onClick: () => emit("closeMissing", "checkout:two") }),
+        h("button", {
+          "data-testid": "rename-session-one",
+          onClick: () => emit("renameSession", "session:one", "build logs"),
+        }),
       ]);
   },
 });
@@ -481,6 +488,10 @@ describe("App UI integration", () => {
   });
 
   afterEach(() => {
+    // The toast stack is a module singleton on purpose (A.6), so a message one test raises is
+    // still up for the next one. Each test starts with an empty stack.
+    const { toasts } = useToasts();
+    toasts.value = [];
     vi.useRealTimers();
   });
 
@@ -700,6 +711,38 @@ describe("App UI integration", () => {
       expect(crumb.attributes("title")).toBe("src/lib/one.ts");
       expect(crumb.findAll("span[aria-hidden='true']").map((el) => el.text())).toEqual(["/", "/"]);
       expect(crumb.classes()).not.toContain("text-menu-control");
+      wrapper.unmount();
+    });
+
+    it("writes a renamed session to the database and repaints from its answer", async () => {
+      mocks.renameTerminal.mockResolvedValue(
+        workspaceWith(checkout("checkout:one", [{ ...session("session:one", "build logs"), name: "build logs" }])),
+      );
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+
+      await wrapper.get('[data-testid="rename-session-one"]').trigger("click");
+      await flushPromises();
+
+      // The row is renamed against the checkout it is listed under, never against a name the
+      // caller made up: the id and the name are the two things the command needs.
+      expect(mocks.renameTerminal).toHaveBeenCalledWith("checkout:one", "session:one", "build logs");
+      // The workspace comes back from the rename, so the sidebar paints the name the database
+      // now holds rather than the one that was asked for.
+      expect(mocks.workspaceRef?.value.activeCheckoutId).toBe("checkout:one");
+      expect(mocks.workspaceRef?.value.repos[0]!.checkouts[0]!.sessions[0]!.name).toBe("build logs");
+      wrapper.unmount();
+    });
+
+    it("reports a rename the backend refuses instead of painting it anyway", async () => {
+      mocks.renameTerminal.mockRejectedValue(new Error("a session needs a name"));
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+
+      await wrapper.get('[data-testid="rename-session-one"]').trigger("click");
+      await flushPromises();
+
+      // The row keeps the name it had, and the refusal is said out loud rather than swallowed.
+      const { toasts } = useToasts();
+      expect(toasts.value.at(-1)?.message).toContain("a session needs a name");
       wrapper.unmount();
     });
 

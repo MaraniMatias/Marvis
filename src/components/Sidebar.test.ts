@@ -364,6 +364,255 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.emitted("closeSession")).toEqual([["session:exited"]]);
   });
 
+  it("names the program in front of the shell, and nothing when the shell is in front", () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:apps",
+            kind: "plain",
+            name: "apps",
+            root: "/apps",
+            checkouts: [
+              {
+                id: "checkout:apps",
+                repoId: "repo:apps",
+                path: "/apps",
+                canonicalPath: "/apps",
+                isPrimary: true,
+                changedFiles: 0,
+                isMissing: false,
+                sessions: [
+                  session("session:agent", "zsh", "checkout:apps"),
+                  session("session:editing", "zsh", "checkout:apps"),
+                  session("session:idle", "zsh", "checkout:apps"),
+                ],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:apps",
+        activeSessionId: null,
+        isOpening: false,
+        sessionRuntimeStatuses: {
+          "session:agent": { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
+          "session:editing": { state: "running", foregroundProcess: true, foregroundApp: "nvim" },
+          // Running with nothing in front: the resting state, which has no name to show.
+          "session:idle": { state: "running", foregroundProcess: false },
+        },
+      },
+    });
+
+    // A row is named after what is running in it, and there is no second chip saying the same:
+    // the idle terminal is back to the shell it was opened as, because nothing is in front of it.
+    const names = wrapper.findAll(".workdir-child .workdir-name").map((row) => row.text());
+    expect(names.slice(0, 3)).toEqual(["opencode", "nvim", "zsh"]);
+    expect(wrapper.find(".app-chip").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("paints the active workdir's agent in OpenCode's own color, and spins only while it works", () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:agent",
+            kind: "plain",
+            name: "agent",
+            root: "/agent",
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:agent" }),
+                sessions: [session("session:one", "zsh", "checkout:agent")],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:agent",
+        activeSessionId: null,
+        isOpening: false,
+        agent: { label: "plan", color: "#FF966C", attention: "busy" },
+        sessionRuntimeStatuses: {
+          "session:one": { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
+        },
+      },
+    });
+
+    const chip = wrapper.get(".agent-chip");
+    expect(chip.text()).toBe("plan");
+    // The color is the server's, so it is checked before it becomes a background.
+    expect(chip.get(".agent-dot").attributes("style")).toContain("#FF966C");
+    // Working is the only state with a spinner, and it survives a hover like an error does.
+    expect(wrapper.find(".agent-spinner").exists()).toBe(true);
+    expect(wrapper.get(".workdir-child .workdir-meta").classes()).toContain("workdir-meta-pinned");
+    expect(chip.attributes("title")).toBe("OpenCode agent: plan");
+    wrapper.unmount();
+  });
+
+  it("claims the agent only for the terminal OpenCode is the one running in it", () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:agent" }),
+                sessions: [
+                  session("session:agent", "zsh", "checkout:agent"),
+                  session("session:editing", "zsh", "checkout:agent"),
+                  session("session:idle", "zsh", "checkout:agent"),
+                ],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:agent",
+        activeSessionId: null,
+        isOpening: false,
+        agent: { label: "coder", color: null, attention: "none" },
+        sessionRuntimeStatuses: {
+          "session:agent": { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
+          "session:editing": { state: "running", foregroundProcess: true, foregroundApp: "nvim" },
+          "session:idle": { state: "running", foregroundProcess: false },
+        },
+      },
+    });
+
+    // The workdir has an agent behind it and exactly one of its three terminals is running it. A
+    // Neovim row and an idle row naming one would be a claim about a process that is not in front.
+    const chips = wrapper.findAll(".workdir-child .agent-chip");
+    expect(chips).toHaveLength(1);
+    expect(chips[0]!.text()).toBe("coder");
+    wrapper.unmount();
+  });
+
+  it("leaves a quiet agent unpinned, and names no agent on a workdir with no server", async () => {
+    const quiet = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [{ ...checkout({ id: "checkout:agent" }), sessions: [session("s", "zsh", "checkout:agent")] }],
+          }),
+        ],
+        activeCheckoutId: "checkout:agent",
+        activeSessionId: null,
+        isOpening: false,
+        agent: { label: "coder", color: null, attention: "none" },
+        sessionRuntimeStatuses: {
+          s: { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
+        },
+      },
+    });
+
+    // A quiet agent is still named, in the accent it has no color of its own for.
+    const chip = quiet.get(".agent-chip");
+    expect(chip.text()).toBe("coder");
+    expect(chip.get(".agent-dot").attributes("style")).toContain("--marvis-accent");
+    expect(quiet.find(".agent-spinner").exists()).toBe(false);
+    expect(quiet.get(".workdir-child .workdir-meta").classes()).not.toContain("workdir-meta-pinned");
+    quiet.unmount();
+
+    // The agent belongs to a checkout, so a row under a workdir that is not the active one
+    // has nothing to say: only the active checkout has a server behind it.
+    const elsewhere = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              { ...checkout({ id: "checkout:one" }), sessions: [session("a", "zsh", "checkout:one")] },
+              {
+                ...checkout({
+                  id: "checkout:two",
+                  path: "/two",
+                  canonicalPath: "/two",
+                  isPrimary: false,
+                  branch: "two",
+                }),
+                sessions: [session("b", "zsh", "checkout:two")],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:two",
+        activeSessionId: null,
+        isOpening: false,
+        agent: { label: "plan", color: "#FF966C", attention: "busy" },
+        sessionRuntimeStatuses: {
+          a: { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
+          b: { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
+        },
+      },
+    });
+    await flushPromises();
+    // One chip, and it hangs off the active workdir: the other checkout has no server behind it.
+    expect(elsewhere.findAll(".agent-chip")).toHaveLength(1);
+    const [firstItems, activeItems] = elsewhere.findAll(".workdir-items");
+    expect(firstItems!.find(".agent-chip").exists()).toBe(false);
+    expect(activeItems!.find(".agent-chip").exists()).toBe(true);
+    elsewhere.unmount();
+  });
+
+  it("renames a session in place, and only when the name actually changed", async () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:rename",
+            kind: "plain",
+            name: "rename",
+            root: "/rename",
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:rename" }),
+                sessions: [session("session:one", "zsh", "checkout:rename")],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:rename",
+        activeSessionId: null,
+        isOpening: false,
+      },
+      // In the document, because the field takes the focus and that is half of what a rename
+      // has to do.
+      attachTo: document.body,
+    });
+
+    const row = () => wrapper.get('button[aria-label="Terminal session: zsh"]');
+    await row().trigger("dblclick");
+    // The field appears and takes the focus on the tick after the click, not the same one.
+    await flushPromises();
+
+    // The button is replaced by the field, not wrapped in it: a control inside a control
+    // cannot be focused or announced on its own.
+    expect(wrapper.find(".workdir-rename").exists()).toBe(true);
+    const field = wrapper.get<HTMLInputElement>(".workdir-rename");
+    expect(field.element.value).toBe("zsh");
+    expect(document.activeElement).toBe(field.element);
+
+    // Enter keeps what was typed. The spaces around it are not part of a name, and the backend
+    // trims them again on its own side: the database decides, not this row.
+    await field.setValue("  build logs  ");
+    await field.trigger("keydown.enter");
+    expect(wrapper.emitted("renameSession")).toEqual([["session:one", "build logs"]]);
+    expect(wrapper.find(".workdir-rename").exists()).toBe(false);
+
+    // Escape is not a rename: the field closes and nothing is emitted.
+    await row().trigger("dblclick");
+    await flushPromises();
+    await wrapper.get(".workdir-rename").setValue("discarded");
+    await wrapper.get(".workdir-rename").trigger("keydown.esc");
+    expect(wrapper.find(".workdir-rename").exists()).toBe(false);
+    expect(wrapper.emitted("renameSession")).toHaveLength(1);
+
+    // Nor is retyping the name it already had.
+    await row().trigger("dblclick");
+    await flushPromises();
+    await wrapper.get(".workdir-rename").trigger("keydown.enter");
+    expect(wrapper.emitted("renameSession")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
   it("keeps a long workdir title ellipsizable under the hover gutter", () => {
     const wrapper = mount(Sidebar, {
       props: {
