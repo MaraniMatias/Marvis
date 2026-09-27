@@ -58,6 +58,8 @@ interface WorkdirItem {
 interface Workdir {
   checkout: Checkout;
   title: string;
+  /** The name cut for drawing: see `branchLabel`. Empty `head` means the name is drawn whole. */
+  label: { head: string; tail: string };
   /** The checkout's own line counts, absent when Git has none to show. */
   additions?: number;
   deletions?: number;
@@ -97,15 +99,38 @@ function hasChanges(workdir: Workdir): boolean {
   return Boolean(workdir.additions || workdir.deletions);
 }
 
+/**
+ * A checkout's name in two halves, so that the half which names the branch survives the row's
+ * width. The tail is what tells two branches of the same repo apart; the head is the ticket
+ * prefix every one of them carries, and the first thing a cut name would otherwise throw away.
+ *
+ * The head ends at the first `-` that follows a run of digits in the segment after the last `/` —
+ * the boundary a ticket-based branch name puts there. A name with no ticket in it, like `main`
+ * or `release/1.2.0`, has no head to keep and is drawn whole, which is all the room it needs.
+ */
+function branchLabel(title: string): { head: string; tail: string } {
+  const segment = title.slice(title.lastIndexOf("/") + 1);
+  const ticket = /^(.*?\d)-(.*)$/.exec(segment);
+  if (!ticket) return { head: "", tail: title };
+  return { head: title.slice(0, title.length - segment.length) + ticket[1] + "-", tail: ticket[2] };
+}
+
+/** The row's name at full length, which the row cannot fit, and where the checkout lives. */
+function workdirTooltip(checkout: Checkout): string {
+  return checkout.branch ? `${checkout.branch} — ${checkout.path}` : checkout.path;
+}
+
 function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
   const isGit = repo.kind === "git";
   const counts = isGit ? diffStats.checkoutTotals[checkout.id] : undefined;
+  const title = workdirTitle(checkout);
   return {
     checkout,
     // A git repo root is named by the branch it is on, the same as a worktree. The only
     // checkouts with no branch to show — a plain folder, or a repo on a detached HEAD — keep
     // the plain "Base".
-    title: workdirTitle(checkout),
+    title,
+    label: branchLabel(title),
     additions: counts?.additions || undefined,
     deletions: counts?.deletions || undefined,
     // The one failure that belongs to a single workdir (E.4): it names the checkout whose
@@ -148,13 +173,20 @@ function sessionState(session: Session) {
                 class="workdir-select"
                 :aria-current="workdir.active ? 'page' : undefined"
                 :aria-disabled="workdir.missing || undefined"
-                :title="workdir.checkout.path"
+                :title="workdirTooltip(workdir.checkout)"
                 @click="!workdir.missing && emit('selectCheckout', workdir.checkout.id, hasChanges(workdir))"
               >
                 <component :is="icons[workdir.kind]" class="workdir-status-icon" aria-hidden="true" />
                 <div class="workdir-main">
                   <div class="workdir-title">
-                    <span class="workdir-name">{{ workdir.title }}</span>
+                    <!-- The name in two halves, so the ellipsis falls on the tail. The split is a
+                         drawing decision and not a change to the name: the two halves sit next to
+                         each other with nothing between them, which is what a screen reader, a
+                         copy and a test all read. -->
+                    <span class="workdir-name">
+                      <span v-if="workdir.label.head" class="workdir-name-head">{{ workdir.label.head }}</span>
+                      <span class="workdir-name-tail">{{ workdir.label.tail }}</span>
+                    </span>
                   </div>
                   <!-- One slot for the row's right-hand text. The error takes it whole: a missing
                        directory has no counts, and a line that mixed a failure with figures
@@ -472,10 +504,31 @@ function sessionState(session: Session) {
   min-width: 0;
 }
 
-/* The flex box only clips, so the ellipsis lives on the name itself */
+/* The flex box only clips, so the ellipsis lives on the name itself — and on the name's tail
+   rather than on the name, because the tail is the half that says which branch this is. */
 .workdir-name {
+  display: flex;
   min-width: 0;
   overflow: hidden;
+}
+
+/* The head never gives way: it is the same width on every branch of a repo, so shrinking it only
+   throws away room the tail could have used. The cap is in characters rather than in percent of
+   the row, because it is a budget for a prefix: it clears the ticket prefixes in use, and a
+   prefix long enough to miss it is cut with an ellipsis instead of taking the row. */
+.workdir-name-head {
+  flex: 0 0 auto;
+  max-width: 18ch;
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+}
+
+.workdir-name-tail {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
   text-overflow: ellipsis;
 }
 

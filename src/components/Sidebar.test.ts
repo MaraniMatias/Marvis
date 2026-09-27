@@ -119,7 +119,8 @@ describe("Sidebar workdir rows", () => {
     // never repeated beside it.
     expect(wrapper.get(".workdir-item .workdir-name").text()).toBe("main");
     expect(wrapper.find(".workdir-branch").exists()).toBe(false);
-    expect(wrapper.get(".workdir-item.active .workdir-select").attributes("title")).toBe("/test-feature");
+    // Hover says the whole name, which the row cannot fit, and where the checkout lives.
+    expect(wrapper.get(".workdir-item.active .workdir-select").attributes("title")).toBe("feature — /test-feature");
 
     expect(wrapper.find('button[aria-label="Add worktree from main"]').exists()).toBe(true);
     expect(wrapper.find('button[aria-label="Remove worktree main"]').exists()).toBe(false);
@@ -395,6 +396,57 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.get(".workdir-title").element.className).toBe("workdir-title");
     expect(wrapper.get(".workdir-item .workdir-select").element.className).toBe("workdir-select");
     expect(wrapper.find(".workdir-meta").exists()).toBe(true);
+  });
+
+  it("cuts a branch name at the ticket, so the part that tells branches apart survives", () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              checkout({
+                id: "checkout:feature",
+                path: "/test-feature",
+                isPrimary: false,
+                branch: "feat/12529440962-titan-hero-homepage-banner-imagen",
+              }),
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+
+    // The ticket prefix is the half every branch of the repo shares, so it is the half the
+    // ellipsis is allowed to reach.
+    expect(wrapper.get(".workdir-name-head").text()).toBe("feat/12529440962-");
+    expect(wrapper.get(".workdir-name-tail").text()).toBe("titan-hero-homepage-banner-imagen");
+    // The name is still one name: the halves are a way to draw it, and nothing sits between them.
+    expect(wrapper.get(".workdir-name").text()).toBe("feat/12529440962-titan-hero-homepage-banner-imagen");
+  });
+
+  it("draws a name with no ticket in it whole, and says the same on hover", () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [checkout({ id: "checkout:detached", isPrimary: false, branch: undefined })],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+
+    // No ticket means no head to keep, so the name is one piece rather than an empty one beside
+    // itself.
+    expect(wrapper.find(".workdir-name-head").exists()).toBe(false);
+    expect(wrapper.get(".workdir-name-tail").text()).toBe("/test");
+    // A checkout with no branch to name it has only its path to say, hover included.
+    expect(wrapper.get(".workdir-select").attributes("title")).toBe("/test");
   });
 
   it("shows every checkout's own line counts, not only the active one's", async () => {
