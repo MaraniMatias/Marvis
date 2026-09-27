@@ -1,13 +1,13 @@
 <script setup lang="ts">
 import { computed } from "vue";
 import {
-  ZED_DIRECTORY_ICON,
-  ZED_ICON_MARKUP,
-  ZED_ICON_VIEWBOX,
-  ZED_ICON_VIEWBOX_OVERRIDE,
-  ZED_NAMED_DIRECTORY,
-  zedIconFor,
-} from "../lib/zed-icons";
+  CATPPUCCIN_DIRECTORY_ICON,
+  CATPPUCCIN_ICON_MARKUP,
+  CATPPUCCIN_ICON_VIEWBOX,
+  CATPPUCCIN_ICON_VIEWBOX_OVERRIDE,
+  CATPPUCCIN_NAMED_DIRECTORY,
+  catppuccinIconFor,
+} from "../lib/catppuccin-icons";
 import type { FileEntryKind } from "../domain/files";
 
 const props = withDefaults(
@@ -22,11 +22,11 @@ const props = withDefaults(
 
 const icon = computed(() =>
   props.kind === "directory"
-    ? (ZED_NAMED_DIRECTORY[props.name] ?? ZED_DIRECTORY_ICON.collapsed)
-    : zedIconFor(props.name),
+    ? (CATPPUCCIN_NAMED_DIRECTORY[props.name] ?? CATPPUCCIN_DIRECTORY_ICON.collapsed)
+    : catppuccinIconFor(props.name),
 );
 
-const viewBox = computed(() => ZED_ICON_VIEWBOX_OVERRIDE[icon.value] ?? ZED_ICON_VIEWBOX);
+const viewBox = computed(() => CATPPUCCIN_ICON_VIEWBOX_OVERRIDE[icon.value] ?? CATPPUCCIN_ICON_VIEWBOX);
 </script>
 
 <template>
@@ -40,7 +40,7 @@ const viewBox = computed(() => ZED_ICON_VIEWBOX_OVERRIDE[icon.value] ?? ZED_ICON
     width="14"
     height="14"
     aria-hidden="true"
-    v-html="ZED_ICON_MARKUP[icon]"
+    v-html="CATPPUCCIN_ICON_MARKUP[icon]"
   />
 </template>
 
