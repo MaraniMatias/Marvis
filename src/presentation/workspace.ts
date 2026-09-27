@@ -90,6 +90,18 @@ export function useWorkspaceState() {
     isOpening,
     error,
     chooseFolder,
+    /** Opens a folder this machine had before, the way the workdir menu lists it. */
+    openPath: async (path: string) => {
+      isOpening.value = true;
+      try {
+        workspace.value = await registerFolder(path);
+        await promptForDefaultBranchIfNeeded();
+      } catch (cause) {
+        reportError(cause);
+      } finally {
+        isOpening.value = false;
+      }
+    },
     promptForDefaultBranchIfNeeded,
     selectCheckout: async (checkoutId: string | null) => {
       try {

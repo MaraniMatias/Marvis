@@ -5,7 +5,7 @@ use tauri::State;
 use crate::{
     domain::{
         ipc::{IpcError, IpcErrorCode},
-        workspace::WorkspaceState,
+        workspace::{RecentPath, WorkspaceState},
     },
     persistence::Database,
     services,
@@ -30,6 +30,14 @@ pub async fn register_folder(
     })
     .await
     .map_err(operation_error)?
+}
+
+#[tauri::command]
+pub async fn list_recent_paths(database: State<'_, Database>) -> Result<Vec<RecentPath>, IpcError> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || services::workspace::list_recent_paths(&database))
+        .await
+        .map_err(operation_error)?
 }
 
 #[tauri::command]

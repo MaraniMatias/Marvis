@@ -10,6 +10,7 @@ import {
   X as XIcon,
 } from "@lucide/vue";
 import type { Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
+import { workdirTitle } from "../domain/workspace";
 import { useDiffStats } from "../presentation/diff-stats";
 
 defineOptions({ name: "FolderSidebar" });
@@ -104,7 +105,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     // A git repo root is named by the branch it is on, the same as a worktree. The only
     // checkouts with no branch to show — a plain folder, or a repo on a detached HEAD — keep
     // the plain "Base".
-    title: checkout.isPrimary ? checkout.branch || "Base" : checkout.branch || checkout.path,
+    title: workdirTitle(checkout),
     additions: counts?.additions || undefined,
     deletions: counts?.deletions || undefined,
     // The one failure that belongs to a single workdir (E.4): it names the checkout whose

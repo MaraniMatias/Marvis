@@ -3,7 +3,7 @@ use std::{ffi::OsString, fs, path::Path, process::Command};
 use crate::{
     domain::{
         ipc::{IpcError, IpcErrorCode},
-        workspace::{Repo, RepoKind},
+        workspace::{RecentPath, Repo, RepoKind},
     },
     git,
     persistence::{timestamp, Database},
@@ -28,6 +28,10 @@ pub fn register_folder(
             .register_plain_repo(repo)
             .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
     }
+}
+
+pub fn list_recent_paths(database: &Database) -> Result<Vec<RecentPath>, IpcError> {
+    database.list_recent_paths().map_err(operation_error)
 }
 
 pub fn locate_missing_checkout(

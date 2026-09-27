@@ -4,7 +4,7 @@ import type { OpenedFolder } from "../domain/folder";
 import type { CheckoutImage, FileContent, FileSearchResult, FileTree } from "../domain/files";
 import type { GitCheckoutDiffStats, GitDiffPage, GitFileDiff, GitFileDiffStats, GitStatus } from "../domain/git";
 import type { ReviewNote, ReviewRound, ReviewSide } from "../domain/review";
-import type { Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
+import type { RecentPath, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalInfo } from "../domain/worktree";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { AppLayoutState, CheckoutUiState } from "../domain/ui-state";
@@ -184,6 +184,11 @@ export function restoreWorkspace(): Promise<WorkspaceState> {
 
 export function registerFolder(path: string): Promise<WorkspaceState> {
   return invoke<WorkspaceState>("register_folder", { path });
+}
+
+/** The folders Marvis has had open before, newest first. The backend keeps the ten newest. */
+export function listRecentPaths(): Promise<RecentPath[]> {
+  return invoke<RecentPath[]>("list_recent_paths");
 }
 
 export function setDefaultBranch(repoId: string, branch: string): Promise<WorkspaceState> {

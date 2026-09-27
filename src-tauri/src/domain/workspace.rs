@@ -98,6 +98,15 @@ pub struct WorkspaceState {
     pub active_session_id: Option<String>,
 }
 
+/// A folder that has been opened before, as the workdir menu lists it. The rows are raised on
+/// every folder that is registered, so reading them back is the whole of "recently opened".
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct RecentPath {
+    pub canonical_path: String,
+    pub last_opened_at: String,
+}
+
 impl Repo {
     pub fn plain(path: &Path, now: impl Into<String>) -> Result<Self, String> {
         let canonical_path = canonical_directory(path)?;

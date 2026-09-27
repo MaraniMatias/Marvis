@@ -1,37 +1,29 @@
 <script setup lang="ts">
-/* eslint-disable vue/html-self-closing */
+/* eslint-disable vue/html-self-closing, vue/html-closing-bracket-newline, vue/html-indent */
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from "vue";
-import {
-  PopoverContent,
-  PopoverRoot,
-  PopoverTrigger,
-  SplitterGroup,
-  SplitterPanel,
-  SplitterResizeHandle,
-} from "reka-ui";
-import {
-  ChevronDown as ChevronDownIcon,
-  GitFork as GitForkIcon,
-  Search as SearchIcon,
-  Settings as SettingsIcon,
-} from "@lucide/vue";
+import { SplitterGroup, SplitterPanel, SplitterResizeHandle } from "reka-ui";
+import { GitFork as GitForkIcon, Search as SearchIcon, Settings as SettingsIcon } from "@lucide/vue";
 import type { Checkout } from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
+import type { TitlebarMenuItem, TitlebarMenuSection } from "./domain/titlebar-menu";
 import InspectorPane from "./components/InspectorPane.vue";
 import MainPane from "./components/MainPane.vue";
 import Sidebar from "./components/Sidebar.vue";
+import TitlebarMenu from "./components/TitlebarMenu.vue";
 import ToastStack from "./components/ToastStack.vue";
 import WorktreeDialog from "./components/WorktreeDialog.vue";
 import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
+import { workdirTitle } from "./domain/workspace";
 import {
   closeMissingCheckout as persistMissingCheckoutClose,
   selectCheckout as persistCheckoutSelection,
 } from "./lib/ipc";
 
 import { useWorkspaceState } from "./presentation/workspace";
+import { useRecentPaths } from "./presentation/recent-paths";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
 import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
 import type { ReviewSender } from "./presentation/review-notes";
@@ -58,11 +50,15 @@ const {
   activeCheckout,
   isOpening,
   chooseFolder,
+  openPath,
   selectCheckout,
   selectSession: selectWorkspaceSession,
   updateWorkspace,
   promptForDefaultBranchIfNeeded,
 } = useWorkspaceState();
+const { recentPaths, refresh: refreshRecentPaths } = useRecentPaths();
+/** The one crumb menu that is open: opening any of them closes the other two. */
+const openCrumb = ref<string | null>(null);
 const { push: pushToast, pushCause: reportCause } = useToasts();
 const appLayout = ref<AppLayoutState>({ ...DEFAULT_APP_LAYOUT });
 const appLayoutReady = ref(false);
@@ -112,6 +108,12 @@ watch(
   },
 );
 const shellRequest = ref<{ checkoutId: string; token: number } | null>(null);
+
+// The recents are read when the workdir menu is about to be read, so a folder opened a moment
+// ago is already in the list. A failure is a toast, and the menu opens without the group.
+watch(openCrumb, (name) => {
+  if (name === "workdir") void refreshRecentPaths();
+});
 const sendingReview = ref(false);
 const mainViews = ref<Record<string, MainView>>({});
 const sessionRuntimeStatuses = ref<Record<string, TerminalSessionStatus>>({});
@@ -153,6 +155,188 @@ const activeSession = computed(() => {
 });
 /** What the last crumb names. A file or a change set is not a session, so it is named as itself. */
 const activeViewLabel = computed(() => mainViewLabel(activeMainView.value, activeSession.value?.name ?? null));
+/**
+ * Whether there is a last crumb at all.
+ *
+ * It names what the panel is showing, so a workdir with no terminal has nothing to name there:
+ * the crumb would read "Terminal" over a panel that says it has none. The file and change set
+ * views always have a name, so only the empty terminal leaves the line without its last step.
+ */
+const hasItemCrumb = computed(() => activeMainView.value.kind !== "terminal" || activeSession.value !== null);
+/**
+ * The last crumb of a file, in the steps it is made of.
+ *
+ * A path is already a line of crumbs, so it is drawn as one: the directories and the file name
+ * with the same separator the rest of the line uses, instead of one run of text with slashes
+ * buried in it. A label that is not a path — a session, the whole change set — is one step.
+ */
+const pathSteps = computed(() => activeViewLabel.value.split("/").filter(Boolean));
+
+const lineEl = ref<HTMLElement | null>(null);
+const pathCrumbEl = ref<HTMLElement | null>(null);
+const pathProbeEl = ref<HTMLElement | null>(null);
+const pathElided = ref(false);
+/**
+ * The path as the crumb draws it: every step, or the two ends with a rule where the rest was.
+ *
+ * One list either way, so the separators, their colour and their space are the same code for
+ * the whole shape — the elided crumb is not a different crumb, it is the same crumb with less
+ * in it, and the two ends are what the reader came for.
+ */
+const drawnSteps = computed(() => {
+  if (!pathElided.value) return pathSteps.value;
+  const first = pathSteps.value[0]!;
+  const last = pathSteps.value.at(-1)!;
+  return first === last ? [first] : [first, "…", last];
+});
+
+/**
+ * Whether the whole path fits in the room the line still has for it.
+ *
+ * The line is bounded by a share of the window, so the room is that share minus everything the
+ * path does not get to keep: the workdir, the branch, the fork and the separators. The probe is
+ * the path at its natural width and it is always mounted, so this weighs two numbers that do not
+ * move when the shape on screen does — otherwise an elided path would measure itself as the one
+ * that fitted and the line could never come back.
+ *
+ * Only a path with something in the middle can lose it, and the two ends are what stay: the
+ * first directory says where you are, the file name is what you came to see.
+ */
+function measurePath() {
+  const line = lineEl.value;
+  const crumb = pathCrumbEl.value;
+  const probe = pathProbeEl.value;
+  if (!line || !crumb || !probe) return;
+  const style = window.getComputedStyle(line);
+  const header = line.parentElement?.clientWidth ?? 0;
+  const share = style.maxWidth.endsWith("%")
+    ? (parseFloat(style.maxWidth) / 100) * header
+    : parseFloat(style.maxWidth) || header;
+  const others = [...line.children].reduce(
+    (width, child) => (child === crumb || child === probe ? width : width + child.getBoundingClientRect().width),
+    0,
+  );
+  const gaps = (line.childElementCount - 1) * (parseFloat(style.columnGap) || 0);
+  pathElided.value = pathSteps.value.length > 2 && probe.scrollWidth > share - others - gaps;
+}
+
+// The path is weighed after the DOM settles, and again whenever the window changes, because the
+// room it has is what the window and the rest of the line leave it.
+watch(
+  () => [activeViewLabel.value, activeCheckout.value?.id],
+  () => void nextTick(measurePath),
+);
+
+/**
+ * The three crumb menus: the workdir line of the titlebar is the sidebar read sideways.
+ *
+ * Each crumb names one level of it — the workdir, its branch or worktree, and the item open
+ * inside it — and each opens the list of the level it names, the way Zed's project pill opens
+ * the projects. What is not in this window is a matter of record, not of guessing, so a
+ * workdir whose directory is gone is listed dimmed and cannot be picked.
+ */
+const workdirMenu = computed<TitlebarMenuSection[]>(() => {
+  const open = allCheckouts.value;
+  const openPaths = new Set(open.map((checkout) => checkout.canonicalPath));
+  // A folder already open in this window belongs to This Window, not to the recents that
+  // remember it: the same workdir listed twice would be two ways into one place.
+  const recents: TitlebarMenuItem[] = recentPaths.value
+    .filter((recent) => !openPaths.has(recent.canonicalPath))
+    .map((recent) => ({
+      id: `recent:${recent.canonicalPath}`,
+      label: recent.canonicalPath.split(/[\\/]/).at(-1) || recent.canonicalPath,
+      hint: recent.canonicalPath,
+      title: recent.canonicalPath,
+      run: () => void openPath(recent.canonicalPath),
+    }));
+  return [
+    {
+      kind: "group",
+      label: "This Window",
+      items: open.map((checkout) => workdirItem(checkout, `workdir:${checkout.id}`, repoName(checkout))),
+    },
+    ...(recents.length ? [{ kind: "group" as const, label: "Recent Projects", items: recents }] : []),
+    { kind: "separator" },
+    { kind: "list", items: [{ id: "open-directory", label: "Open directory", pinned: true, run: chooseFolder }] },
+  ];
+});
+
+/** The worktrees of the repo the active workdir belongs to, and the one that makes another. */
+const worktreeMenu = computed<TitlebarMenuSection[]>(() => {
+  const repo = activeRepo.value;
+  if (repo?.kind !== "git") return [];
+  // The worktree is added to the repo's root, wherever the active workdir is, so the action
+  // names the root and the dialog resolves its defaults from it.
+  const root = repo.checkouts.find((checkout) => checkout.isPrimary);
+  return [
+    {
+      kind: "group",
+      label: "Worktrees",
+      // A branch names one worktree, so nothing has to tell two rows apart here: the path is
+      // in the row's tooltip, where it does not cost the name its width.
+      items: repo.checkouts.map((checkout) => workdirItem(checkout, `worktree:${checkout.id}`)),
+    },
+    { kind: "separator" },
+    {
+      kind: "list",
+      items: root
+        ? [
+            {
+              id: "new-worktree",
+              label: "New worktree",
+              pinned: true,
+              run: () => openWorktreeDialog("create", root.id),
+            },
+          ]
+        : [],
+    },
+  ];
+});
+
+/** The subitems of the active workdir: the terminals it has open, and how to start another. */
+const terminalMenu = computed<TitlebarMenuSection[]>(() => {
+  const checkout = activeCheckout.value;
+  if (!checkout) return [];
+  const sessions: TitlebarMenuItem[] = checkout.sessions.map((session) => ({
+    id: session.id,
+    label: session.name,
+    title: session.name,
+    checked: session.id === workspace.value.activeSessionId,
+    run: () => void activateTerminalSession(session.id),
+  }));
+  return [
+    { kind: "group", label: "Terminals", items: sessions },
+    { kind: "separator" },
+    {
+      kind: "list",
+      items: [{ id: "new-terminal", label: "New terminal", pinned: true, run: () => requestShell(checkout.id) }],
+    },
+  ];
+});
+
+/** What the workdir crumb says: the repo, or the folder when there is no repo to name. */
+const workdirLabel = computed(() => activeRepo.value?.name ?? activeCheckout.value?.path.split(/[\\/]/).at(-1) ?? "");
+
+function repoName(checkout: Checkout): string {
+  return workspace.value.repos.find((repo) => repo.id === checkout.repoId)?.name ?? checkout.path;
+}
+
+/** One crumb menu at a time: the name it reports becomes the one that is open. */
+function setCrumbOpen(name: string, open: boolean) {
+  openCrumb.value = open ? name : null;
+}
+
+function workdirItem(checkout: Checkout, id: string, hint?: string): TitlebarMenuItem {
+  return {
+    id,
+    label: workdirTitle(checkout),
+    ...(hint !== undefined && { hint }),
+    title: checkout.path,
+    checked: checkout.id === workspace.value.activeCheckoutId,
+    disabled: checkout.isMissing,
+    run: () => void activateCheckoutTerminal(checkout.id),
+  };
+}
 const activeCheckoutUiState = computed(() => {
   const checkoutId = activeCheckout.value?.id;
   return checkoutId ? checkoutUiStates.value[checkoutId] : undefined;
@@ -417,6 +601,7 @@ onUnmounted(() => {
 
 function onViewportResize() {
   viewportWidth.value = window.innerWidth;
+  measurePath();
 }
 
 function showWindowError(cause: unknown) {
@@ -604,59 +789,79 @@ function reportWarning(message: string) {
            the gear at the far end. Dragging lives on that empty space, so the crumbs keep their
            place instead of being pushed to the opposite edge. The nav grows into the room the
            mockup gives it and only truncates when it runs out, rather than capping each crumb. -->
+      <!-- The crumb line is chrome that names where you are, not text to copy: a drag across it
+           was painting a selection over the whole header. The search field sits outside the nav,
+           so its own text is still selectable. -->
       <nav
+        ref="lineEl"
         aria-label="Repository location"
-        class="window-breadcrumb flex h-full min-w-0 max-w-[70%] shrink items-center gap-1.5"
+        class="window-breadcrumb flex h-full min-w-0 max-w-[70%] shrink select-none items-center gap-1.5"
       >
         <template v-if="activeCheckout">
-          <span data-testid="repo-crumb" class="max-w-48 shrink truncate text-(--marvis-text)">
-            {{ activeRepo?.name ?? activeCheckout.path.split(/[\\/]/).at(-1) }}
-          </span>
+          <!-- Each crumb is text that opens the list of the level it names, and nothing looks
+               like a button until it is pointed at: the workdir, its branch or worktree, and
+               the item open inside it. They share one open name, so opening one closes the
+               others instead of stacking them. -->
+          <TitlebarMenu
+            testid="repo-crumb"
+            crumb="workdir"
+            :label="workdirLabel"
+            :sections="workdirMenu"
+            :open="openCrumb === 'workdir'"
+            search-placeholder="Search workdirs…"
+            @update:open="setCrumbOpen('workdir', $event)"
+          />
           <template v-if="activeRepo?.kind === 'git'">
             <span aria-hidden="true" class="text-(--marvis-text-faint)">/</span>
             <GitForkIcon class="icon-xs shrink-0" aria-hidden="true" />
-            <!-- A branch is the longest crumb by far, so it gets the room: only the icon and the
-                 separators are fixed, and this is what the flexbox truncates when it has to. -->
-            <span class="min-w-0 shrink truncate text-(--marvis-text-secondary)">
-              {{ activeCheckout.branch || "Detached" }}
-            </span>
+            <TitlebarMenu
+              testid="worktree-crumb"
+              crumb="branch"
+              :label="activeCheckout.branch || 'Detached'"
+              :sections="worktreeMenu"
+              :open="openCrumb === 'worktree'"
+              search-placeholder="Search worktrees…"
+              @update:open="setCrumbOpen('worktree', $event)"
+            />
           </template>
-          <span aria-hidden="true" class="text-(--marvis-text-faint)">/</span>
-          <!-- The last crumb names the view that is open. A file or a change set is picked from
-               the details panel, so it is plain text there: a session dropdown over a diff
-               would name something that is not on screen. -->
-          <PopoverRoot v-if="activeMainView.kind === 'terminal'">
-            <PopoverTrigger
+          <!-- The last crumb names the view that is open, and a workdir with no terminal has
+               none to name. A file or a change set is picked from the details panel, so it is
+               plain text there: a session menu over a diff would name what is not on screen. -->
+          <template v-if="hasItemCrumb">
+            <span aria-hidden="true" class="text-(--marvis-text-faint)">/</span>
+            <TitlebarMenu
+              v-if="activeMainView.kind === 'terminal'"
+              testid="item-crumb"
+              crumb="item"
+              align="end"
+              :label="activeViewLabel"
+              :sections="terminalMenu"
+              :open="openCrumb === 'terminal'"
+              @update:open="setCrumbOpen('terminal', $event)"
+            />
+            <span
+              v-else
+              ref="pathCrumbEl"
               data-testid="item-crumb"
-              class="marvis-control min-w-0 text-(--marvis-text) hover:text-(--marvis-text)"
+              class="crumb-item min-w-0 truncate"
               :title="activeViewLabel"
             >
-              <span class="truncate">{{ activeViewLabel }}</span>
-              <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
-            </PopoverTrigger>
-            <PopoverContent
-              side="bottom"
-              align="end"
-              :side-offset="4"
-              class="surface-popover flex min-w-40 flex-col rounded p-1 text-xs text-(--marvis-text)"
+              <template v-for="(step, index) in drawnSteps" :key="`${index}-${step}`">
+                <span v-if="index > 0" aria-hidden="true" class="crumb-sep">/</span>{{ step }}
+              </template>
+            </span>
+            <!-- The path at the width it wants. It sits beside the crumb rather than inside it
+                 so it never joins the text the crumb reads as, and it is always mounted so the
+                 crumb can be weighed against the room the line has left. -->
+            <span
+              v-if="activeMainView.kind !== 'terminal' && pathSteps.length > 2"
+              ref="pathProbeEl"
+              data-testid="path-probe"
+              aria-hidden="true"
+              class="path-probe"
+              >{{ activeViewLabel }}</span
             >
-              <button
-                v-for="session in activeCheckout.sessions"
-                :key="session.id"
-                type="button"
-                class="rounded px-2 py-1 text-left hover:bg-(--marvis-bg-2)"
-                @click="activateTerminalSession(session.id)"
-              >
-                {{ session.name }}
-              </button>
-              <span v-if="!activeCheckout.sessions.length" class="px-2 py-1 text-(--marvis-text-faint)">
-                No open terminals
-              </span>
-            </PopoverContent>
-          </PopoverRoot>
-          <span v-else data-testid="item-crumb" class="min-w-0 truncate text-(--marvis-text)" :title="activeViewLabel">
-            {{ activeViewLabel }}
-          </span>
+          </template>
         </template>
       </nav>
       <!-- Native dragging and double-click zoom live on the empty space the mockup leaves at
@@ -666,7 +871,7 @@ function reportWarning(message: string) {
         type="button"
         aria-label="Settings"
         data-testid="settings-button"
-        class="marvis-control shrink-0 p-1.5 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+        class="icon-button shrink-0 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
       >
         <SettingsIcon class="icon-xs" aria-hidden="true" />
       </button>

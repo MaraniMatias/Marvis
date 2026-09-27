@@ -107,6 +107,7 @@ fn main() {
             commands::folder::open_folder,
             commands::workspace::restore_workspace,
             commands::workspace::register_folder,
+            commands::workspace::list_recent_paths,
             commands::workspace::locate_missing_checkout,
             commands::workspace::close_missing_checkout,
             commands::workspace::set_default_branch,

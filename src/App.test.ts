@@ -20,6 +20,9 @@ const mocks = vi.hoisted(() => ({
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
   closeMissingCheckout: vi.fn(),
+  listRecentPaths: vi.fn(),
+  openPath: vi.fn(),
+  selectCheckout: vi.fn(),
   toggleMaximize: vi.fn(),
   onCloseRequested: null as ((event: { preventDefault(): void }) => Promise<void>) | null,
   currentWindow: null as {
@@ -77,8 +80,9 @@ vi.mock("reka-ui", async () => {
       return () => h("div", { ...attrs, tabindex: 0 }, slots.default?.());
     },
   });
-  // The titlebar's item crumb opens a popover; the stub always renders its content so the
-  // sibling items can be reached without driving the open state.
+  // The titlebar's crumbs open menus; the stub always renders their content so the rows can be
+  // reached without driving the open state. A row stands in for a menu item: it takes the attrs
+  // it is given and reports a selection, which is what a click on it does.
   const passThrough = (name: string) =>
     defineComponent({
       name,
@@ -86,13 +90,49 @@ vi.mock("reka-ui", async () => {
         return () => h("div", attrs, slots.default?.());
       },
     });
+  const menuRow = defineComponent({
+    name: "DropdownMenuItem",
+    inheritAttrs: false,
+    props: { disabled: Boolean },
+    setup(_, { attrs, emit, slots }) {
+      return () => h("button", { ...attrs, onClick: () => emit("select") }, slots.default?.());
+    },
+  });
+  // The root takes the open name as a prop, the way reka's does, so "only one menu at a time"
+  // can be asserted on what the shell decided rather than on what a click did.
+  const menuRoot = defineComponent({
+    name: "DropdownMenuRoot",
+    props: { open: Boolean },
+    emits: ["update:open"],
+    setup(props, { slots }) {
+      return () => h("div", { "data-open": String(props.open) }, slots.default?.());
+    },
+  });
+  const menuFilter = defineComponent({
+    name: "DropdownMenuFilter",
+    props: { modelValue: String, placeholder: String },
+    emits: ["update:modelValue"],
+    setup(props, { emit }) {
+      return () =>
+        h("input", {
+          "data-testid": "menu-search",
+          placeholder: props.placeholder,
+          value: props.modelValue,
+          onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),
+        });
+    },
+  });
   return {
     SplitterGroup,
     SplitterPanel,
     SplitterResizeHandle,
-    PopoverRoot: passThrough("PopoverRoot"),
-    PopoverTrigger: passThrough("PopoverTrigger"),
-    PopoverContent: passThrough("PopoverContent"),
+    DropdownMenuRoot: menuRoot,
+    DropdownMenuTrigger: passThrough("DropdownMenuTrigger"),
+    DropdownMenuContent: passThrough("DropdownMenuContent"),
+    DropdownMenuPortal: passThrough("DropdownMenuPortal"),
+    DropdownMenuSeparator: passThrough("DropdownMenuSeparator"),
+    DropdownMenuFilter: menuFilter,
+    DropdownMenuItem: menuRow,
   };
 });
 
@@ -103,17 +143,15 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.f
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./lib/ipc", () => ({
   closeMissingCheckout: mocks.closeMissingCheckout,
+  listRecentPaths: mocks.listRecentPaths,
   loadAppLayout: mocks.loadAppLayout,
   loadCheckoutUiState: mocks.loadCheckoutUiState,
   saveAppLayout: mocks.saveAppLayout,
   saveCheckoutUiState: mocks.saveCheckoutUiState,
   // The real command returns the refreshed workspace; App assigns it straight back,
-  // so returning undefined here crashed the next render.
-  selectCheckout: async (checkoutId: string | null) => {
-    const workspace = mocks.workspaceRef;
-    if (workspace) workspace.value = { ...workspace.value, activeCheckoutId: checkoutId };
-    return workspace?.value;
-  },
+  // so returning undefined here crashed the next render. Only the shell and Neovim requests
+  // reach it from the titlebar, so it also reports that a terminal was asked for.
+  selectCheckout: mocks.selectCheckout,
 }));
 vi.mock("./presentation/workspace", async () => {
   const { computed, ref } = await import("vue");
@@ -138,6 +176,7 @@ vi.mock("./presentation/workspace", async () => {
         isOpening,
         error,
         chooseFolder: vi.fn(),
+        openPath: mocks.openPath,
         selectCheckout: async (checkoutId: string | null) => {
           setActiveCheckout(checkoutId);
           return workspace.value;
@@ -258,6 +297,12 @@ const InspectorPaneStub = defineComponent({
             props.checkout && emit("openFile", { checkoutId: (props.checkout as Checkout).id, path: "README.md" }),
         }),
         h("button", {
+          "data-testid": "open-nested-file",
+          disabled: !props.checkout,
+          onClick: () =>
+            props.checkout && emit("openFile", { checkoutId: (props.checkout as Checkout).id, path: "src/lib/one.ts" }),
+        }),
+        h("button", {
           "data-testid": "open-all-changes",
           disabled: !props.checkout,
           onClick: () => props.checkout && emit("openAllChanges", { checkoutId: (props.checkout as Checkout).id }),
@@ -319,7 +364,21 @@ const FileDiffStub = defineComponent({
   },
 });
 
-const EmptyStub = defineComponent({ setup: () => () => h("div") });
+// The dialog itself is not what the titlebar is judged on; what matters there is which
+// lifecycle it was asked for and against which checkout, so the stub reports both.
+const WorktreeDialogStub = defineComponent({
+  name: "WorktreeDialog",
+  props: { open: Boolean, mode: String, checkout: Object },
+  setup(props) {
+    return () =>
+      h("div", {
+        "data-testid": "worktree-dialog",
+        "data-open": String(props.open),
+        "data-mode": props.mode,
+        "data-checkout": (props.checkout as Checkout | null)?.id ?? "",
+      });
+  },
+});
 
 function session(id: string, name: string, checkoutId = "checkout:one"): Session {
   return { id, type: "shell", checkoutId, name, createdAt: "now", status: "active" };
@@ -369,7 +428,7 @@ async function mountApp(
         InspectorPane: InspectorPaneStub,
         DocumentPane: DocumentPaneStub,
         FileDiff: FileDiffStub,
-        WorktreeDialog: EmptyStub,
+        WorktreeDialog: WorktreeDialogStub,
       },
     },
   });
@@ -402,6 +461,12 @@ describe("App UI integration", () => {
     mocks.ackFinishedTurn.mockReset();
     if (mocks.turns) mocks.turns.value = 0;
     mocks.loadAppLayout.mockResolvedValue({ ...DEFAULT_APP_LAYOUT });
+    mocks.listRecentPaths.mockResolvedValue([]);
+    mocks.selectCheckout.mockImplementation(async (checkoutId: string | null) => {
+      const workspace = mocks.workspaceRef;
+      if (workspace) workspace.value = { ...workspace.value, activeCheckoutId: checkoutId };
+      return workspace?.value;
+    });
     mocks.loadCheckoutUiState.mockResolvedValue({ ...DEFAULT_CHECKOUT_UI_STATE });
     mocks.saveAppLayout.mockResolvedValue(undefined);
     mocks.saveCheckoutUiState.mockResolvedValue(undefined);
@@ -503,7 +568,100 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
-    it("opens the sibling terminals of the workdir from the last crumb", async () => {
+    it("opens every open workdir from the first crumb, and takes the one that is picked", async () => {
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")]), {
+          ...checkout("checkout:two"),
+          branch: "feature",
+        }),
+      );
+
+      const rows = wrapper.findAll('[data-testid^="menu-item-workdir:"]');
+      // Both checkouts of the repo, named the way the sidebar names them.
+      expect(rows.map((row) => row.text())).toEqual(["mainshared", "featureshared"]);
+
+      await wrapper.get('[data-testid="menu-item-workdir:checkout:two"]').trigger("click");
+      await flushPromises();
+
+      expect(mocks.workspaceRef?.value.activeCheckoutId).toBe("checkout:two");
+      wrapper.unmount();
+    });
+
+    it("lists a folder opened before under the workdirs, and opens it again", async () => {
+      mocks.listRecentPaths.mockResolvedValue([
+        { canonicalPath: "/Trabajo/skills", lastOpenedAt: "1" },
+        // Already open in this window, so it belongs to This Window and not here.
+        { canonicalPath: "/checkout:one", lastOpenedAt: "2" },
+      ]);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      await flushPromises();
+
+      expect(wrapper.text()).toContain("Recent Projects");
+      const recent = wrapper.get('[data-testid="menu-item-recent:/Trabajo/skills"]');
+      expect(recent.text()).toContain("skills");
+
+      await recent.trigger("click");
+      await flushPromises();
+
+      expect(mocks.openPath).toHaveBeenCalledWith("/Trabajo/skills");
+      wrapper.unmount();
+    });
+
+    it("offers no recents group when nothing has been opened before", async () => {
+      mocks.listRecentPaths.mockResolvedValue([]);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      await flushPromises();
+
+      expect(wrapper.text()).not.toContain("Recent Projects");
+      wrapper.unmount();
+    });
+
+    it("opens the worktrees of the repo from the branch crumb, and creates one from the root", async () => {
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one"), { ...checkout("checkout:two"), branch: "feature" }),
+      );
+
+      const rows = wrapper.findAll('[data-testid^="menu-item-worktree:"]');
+      // A branch names one worktree, so the rows are the branches and nothing else: the path is
+      // in each row's tooltip.
+      expect(rows.map((row) => row.text())).toEqual(["main", "feature"]);
+
+      await wrapper.get('[data-testid="menu-item-new-worktree"]').trigger("click");
+      await flushPromises();
+
+      const dialog = wrapper.get('[data-testid="worktree-dialog"]');
+      expect(dialog.attributes()).toMatchObject({ "data-open": "true", "data-mode": "create" });
+      // The worktree is added to the repo's root, which is not the worktree that was picked.
+      expect(dialog.attributes("data-checkout")).toBe("checkout:one");
+      wrapper.unmount();
+    });
+
+    it("has no branch crumb to open when the workdir is a plain folder", async () => {
+      const plain: WorkspaceState = {
+        repos: [
+          {
+            id: "repo:notes",
+            kind: "plain",
+            name: "notes",
+            root: "/notes",
+            checkouts: [{ ...checkout("checkout:one"), repoId: "repo:notes", path: "/notes", canonicalPath: "/notes" }],
+            createdAt: "now",
+            lastOpenedAt: "now",
+          },
+        ],
+        activeCheckoutId: "checkout:one",
+        activeSessionId: null,
+      };
+      const wrapper = await mountApp(plain);
+
+      // The workdir crumb is still there to open, and the line has nothing to say a branch.
+      expect(wrapper.find('[data-testid="repo-crumb"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="worktree-crumb"]').exists()).toBe(false);
+      expect(wrapper.findAll('[data-testid^="menu-item-worktree:"]')).toHaveLength(0);
+      wrapper.unmount();
+    });
+
+    it("opens the terminals of the workdir from the last crumb, and starts a new one", async () => {
       const wrapper = await mountApp(
         workspaceWith(
           checkout("checkout:one", [session("session:one", "Terminal 1"), session("session:two", "Neovim")]),
@@ -511,14 +669,143 @@ describe("App UI integration", () => {
         ),
       );
 
-      const siblings = wrapper.findAll(".surface-popover button");
-      expect(siblings.map((button) => button.text())).toEqual(["Terminal 1", "Neovim"]);
+      // Only the workdir's own terminals, not the ones of the checkout next to it.
+      const rows = wrapper.findAll('[data-testid^="menu-item-session:"]');
+      expect(rows.map((row) => row.text())).toEqual(["Terminal 1", "Neovim"]);
 
-      await siblings[0]!.trigger("click");
+      await rows[0]!.trigger("click");
       await flushPromises();
 
       expect(mocks.workspaceRef?.value.activeSessionId).toBe("session:one");
       expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("Terminal 1");
+
+      // The action at the foot asks the backend for a shell in this same workdir. The crumb
+      // keeps naming the session that is selected, which is the one the new shell joins.
+      await wrapper.get('[data-testid="menu-item-new-terminal"]').trigger("click");
+      await flushPromises();
+      expect(mocks.selectCheckout).toHaveBeenCalledWith("checkout:one");
+      wrapper.unmount();
+    });
+
+    it("draws a file path as the steps it is made of", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+
+      await wrapper.get('[data-testid="open-nested-file"]').trigger("click");
+      await flushPromises();
+
+      // A path is a line of crumbs already, so it reads as one: the steps with the separator
+      // the rest of the line uses, and still nothing to click.
+      const crumb = wrapper.get('[data-testid="item-crumb"]');
+      expect(crumb.text()).toBe("src/lib/one.ts");
+      expect(crumb.attributes("title")).toBe("src/lib/one.ts");
+      expect(crumb.findAll("span[aria-hidden='true']").map((el) => el.text())).toEqual(["/", "/"]);
+      expect(crumb.classes()).not.toContain("crumb-control");
+      wrapper.unmount();
+    });
+
+    it("drops the middle of the path when the line has no room for it", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+
+      await wrapper.get('[data-testid="open-nested-file"]').trigger("click");
+      await flushPromises();
+      const crumb = () => wrapper.get('[data-testid="item-crumb"]');
+      expect(crumb().text()).toBe("src/lib/one.ts");
+
+      // The path at the width it wants, wider than any room the line could give it. The probe
+      // is what is weighed, so this is the whole decision in one number.
+      const probe = wrapper.get('[data-testid="path-probe"]').element;
+      Object.defineProperty(probe, "scrollWidth", { configurable: true, value: 400 });
+      window.dispatchEvent(new Event("resize"));
+      await wrapper.vm.$nextTick();
+
+      // What goes is the middle: the first directory says where you are, the file name is what
+      // you came to see, and the tooltip still has all of it.
+      expect(crumb().text()).toBe("src/…/one.ts");
+      expect(
+        crumb()
+          .findAll("span[aria-hidden='true']")
+          .map((el) => el.text()),
+      ).toEqual(["/", "/"]);
+      expect(crumb().attributes("title")).toBe("src/lib/one.ts");
+      wrapper.unmount();
+    });
+
+    it("never elides a path with nothing in the middle to drop", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+      await flushPromises();
+      // One step has no middle, so there is nothing to shorten it by.
+      expect(wrapper.find('[data-testid="path-probe"]').exists()).toBe(false);
+      expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("README.md");
+      wrapper.unmount();
+    });
+
+    it("leaves the last crumb out when there is no terminal to name", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      // A crumb that reads "Terminal" over a panel that says it has none is naming nothing, and
+      // neither is the separator that would come before it.
+      const separators = () => wrapper.findAll("nav > span[aria-hidden='true']");
+      expect(wrapper.find('[data-testid="item-crumb"]').exists()).toBe(false);
+      expect(separators()).toHaveLength(1);
+
+      // A workdir that has one names it, and the sessions are what the menu then lists.
+      const withSession = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+      expect(withSession.get('[data-testid="item-crumb"]').text()).toBe("zsh");
+      expect(withSession.findAll("nav > span[aria-hidden='true']")).toHaveLength(2);
+      expect(withSession.find('[data-testid="menu-item-session:one"]').exists()).toBe(true);
+      wrapper.unmount();
+      withSession.unmount();
+    });
+
+    it("keeps one crumb menu open at a time", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+
+      const roots = () => wrapper.findAllComponents({ name: "DropdownMenuRoot" });
+      const openNames = () => roots().map((root) => root.attributes("data-open"));
+
+      // Nothing opens on its own. Each root reports that it opened and the shell names the one
+      // that is, so the three menus can never be stacked on the same header.
+      expect(openNames()).toEqual(["false", "false", "false"]);
+      await roots()[0]!.vm.$emit("update:open", true);
+      await flushPromises();
+      expect(openNames()).toEqual(["true", "false", "false"]);
+
+      await roots()[1]!.vm.$emit("update:open", true);
+      await flushPromises();
+      expect(openNames()).toEqual(["false", "true", "false"]);
+      wrapper.unmount();
+    });
+
+    it("offers a new terminal from the menu of a workdir that has one open", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+
+      expect(wrapper.find('[data-testid="menu-item-session:one"]').exists()).toBe(true);
+      expect(wrapper.find('[data-testid="menu-item-new-terminal"]').exists()).toBe(true);
+      wrapper.unmount();
+    });
+
+    it("leaves the crumbs as text: no chip, no chevron", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
+
+      for (const testid of ["repo-crumb", "worktree-crumb", "item-crumb"]) {
+        const crumb = wrapper.get(`[data-testid="${testid}"]`);
+        expect(crumb.classes()).toContain("crumb-control");
+        expect(crumb.classes()).not.toContain("marvis-control");
+      }
+      // The workdir is the one that says where you are, so it is the only crumb set forward, and
+      // each crumb carries its own place in the line, which is what says what it gives up.
+      expect(wrapper.get('[data-testid="repo-crumb"]').classes()).toContain("crumb-workdir");
+      expect(wrapper.get('[data-testid="worktree-crumb"]').classes()).toContain("crumb-branch");
+      expect(wrapper.get('[data-testid="item-crumb"]').classes()).toContain("crumb-item");
+
+      // The fork is the one icon the line keeps, and it stands between the separators rather
+      // than inside a crumb.
+      for (const testid of ["repo-crumb", "worktree-crumb", "item-crumb"]) {
+        expect(wrapper.get(`[data-testid="${testid}"]`).find("svg").exists()).toBe(false);
+      }
+      expect(wrapper.get("nav").find("svg").exists()).toBe(true);
       wrapper.unmount();
     });
 
@@ -845,9 +1132,10 @@ describe("App UI integration", () => {
       }),
     );
 
-    // Back to the terminal from the sidebar: the crumb's session dropdown only exists while a
-    // terminal is what the panel is showing.
-    expect(wrapper.find(".surface-popover").exists()).toBe(false);
+    // Back to the terminal from the sidebar: the last crumb's menu only exists while a terminal
+    // is what the panel is showing, so a file leaves it as plain text with nothing to open.
+    expect(wrapper.get('[data-testid="item-crumb"]').classes()).not.toContain("crumb-control");
+    expect(wrapper.findAll('[data-testid^="menu-item-session:"]')).toHaveLength(0);
     await wrapper.get('[data-testid="select-session-one"]').trigger("click");
     await flushPromises();
     expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).not.toBe("none");

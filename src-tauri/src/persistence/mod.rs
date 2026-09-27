@@ -10,7 +10,7 @@ use serde::{Deserialize, Serialize};
 use crate::domain::review::{ReviewNote, ReviewRound};
 use crate::domain::terminal_layout::CheckoutTerminalLayout;
 use crate::domain::workspace::{
-    Checkout, Repo, RepoKind, Session, SessionStatus, SessionType, WorkspaceState,
+    Checkout, RecentPath, Repo, RepoKind, Session, SessionStatus, SessionType, WorkspaceState,
 };
 
 const SCHEMA_VERSION: i64 = 10;
@@ -1122,6 +1122,29 @@ impl Database {
     pub fn load_workspace(&self) -> Result<WorkspaceState, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         load_workspace(&connection)
+    }
+
+    /// The folders opened before, newest first, inside the ten the writes keep. The stamps are
+    /// ISO-8601, so ordering them as text is ordering them in time.
+    pub fn list_recent_paths(&self) -> Result<Vec<RecentPath>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT canonical_path, last_opened_at FROM recent_paths
+                 ORDER BY last_opened_at DESC LIMIT 10",
+            )
+            .map_err(db_error)?;
+        let paths = statement
+            .query_map([], |row| {
+                Ok(RecentPath {
+                    canonical_path: row.get(0)?,
+                    last_opened_at: row.get(1)?,
+                })
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        Ok(paths)
     }
 
     pub fn load_terminal_layout(
@@ -2566,6 +2589,42 @@ mod tests {
         let reopened = Database::open(&db_path).expect("reopened database");
         assert_eq!(reopened.viewed_files(&first_id).unwrap(), ["src/main.rs"]);
         assert!(reopened.viewed_files(&second_id).unwrap().is_empty());
+    }
+
+    /// The workdir menu lists what this machine has had open, so the read has to come back in
+    /// the order the menu shows — newest first — and inside the ten rows the writes keep.
+    #[test]
+    fn recent_paths_come_back_newest_first_and_capped_at_ten() {
+        let database = Database::open_in_memory().expect("database");
+        let mut newest_first = Vec::new();
+        for index in 1..=12 {
+            let temp = tempdir().expect("temporary directory");
+            let folder = temp.path().join(format!("folder {index}"));
+            fs::create_dir(&folder).unwrap();
+            // The stamps are ISO-8601, so their text order is their time order.
+            database
+                .register_plain_repo(plain_repo(
+                    &folder,
+                    &format!("2026-01-{index:02}T00:00:00Z"),
+                ))
+                .expect("register folder");
+        }
+        for (index, recent) in database
+            .list_recent_paths()
+            .expect("recent paths")
+            .iter()
+            .enumerate()
+        {
+            let expected = 12 - index;
+            assert!(
+                recent
+                    .canonical_path
+                    .ends_with(&format!("folder {expected}")),
+                "{recent:?}"
+            );
+            newest_first.push(recent.canonical_path.clone());
+        }
+        assert_eq!(newest_first.len(), 10);
     }
 
     #[test]
