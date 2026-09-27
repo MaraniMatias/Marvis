@@ -28,6 +28,7 @@ import {
   openFolder,
   resizeTerminal,
   saveTerminalLayout,
+  writeCheckoutFile,
   writeTerminal,
 } from "./ipc";
 
@@ -57,6 +58,17 @@ describe("workspace IPC client", () => {
     await closeMissingCheckout("checkout:/work/gone");
 
     expect(invoke).toHaveBeenNthCalledWith(1, "close_missing_checkout", { checkoutId: "checkout:/work/gone" });
+  });
+
+  it("sends the expected content with a checkout-scoped file write", async () => {
+    await writeCheckoutFile("checkout:one", "src/app.ts", "new", "old");
+
+    expect(invoke).toHaveBeenCalledWith("file_write", {
+      checkoutId: "checkout:one",
+      path: "src/app.ts",
+      content: "new",
+      expectedContent: "old",
+    });
   });
 });
 

@@ -13,6 +13,7 @@ export type IpcErrorCode =
   | "process_terminated"
   | "agent_unavailable"
   | "agent_ownership_mismatch"
+  | "file_changed"
   | "operation_failed";
 
 const CODES: IpcErrorCode[] = [
@@ -30,6 +31,7 @@ const CODES: IpcErrorCode[] = [
   "process_terminated",
   "agent_unavailable",
   "agent_ownership_mismatch",
+  "file_changed",
   "operation_failed",
 ];
 

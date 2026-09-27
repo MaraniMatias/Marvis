@@ -35,5 +35,6 @@ pub enum IpcErrorCode {
     AgentUnavailable,
     /// A session id does not belong to the checkout it was used against.
     AgentOwnershipMismatch,
+    FileChanged,
     OperationFailed,
 }

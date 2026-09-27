@@ -51,6 +51,22 @@ pub async fn file_read(
 }
 
 #[tauri::command]
+pub async fn file_write(
+    checkout_id: String,
+    path: PathBuf,
+    content: String,
+    expected_content: String,
+    database: State<'_, Database>,
+) -> Result<(), IpcError> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        services::files::write(&database, &checkout_id, &path, &content, &expected_content)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+#[tauri::command]
 pub async fn file_read_markdown_image(
     checkout_id: String,
     markdown_path: String,

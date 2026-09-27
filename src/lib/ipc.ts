@@ -27,6 +27,15 @@ export function readCheckoutFile(checkoutId: string, path: string): Promise<File
   return invoke<FileContent>("file_read", { checkoutId, path });
 }
 
+export function writeCheckoutFile(
+  checkoutId: string,
+  path: string,
+  content: string,
+  expectedContent: string,
+): Promise<void> {
+  return invoke<void>("file_write", { checkoutId, path, content, expectedContent });
+}
+
 export function readCheckoutMarkdownImage(
   checkoutId: string,
   markdownPath: string,

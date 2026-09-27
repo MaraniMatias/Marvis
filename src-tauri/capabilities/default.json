@@ -8,6 +8,7 @@
     "core:window:allow-close",
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
-    "dialog:allow-open"
+    "dialog:allow-open",
+    "clipboard-manager:allow-write-text"
   ]
 }

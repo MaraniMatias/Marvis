@@ -25,6 +25,7 @@ fn with_dev_plugins(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
 fn main() {
     with_dev_plugins(tauri::Builder::default())
         .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
             use tauri::Manager;
 
@@ -116,6 +117,7 @@ fn main() {
             commands::files::files_list,
             commands::files::files_search,
             commands::files::file_read,
+            commands::files::file_write,
             commands::files::file_read_markdown_image,
             commands::git::git_status,
             commands::git::git_diff_stats,
@@ -181,7 +183,8 @@ mod security_tests {
                 "core:window:allow-start-dragging",
                 // Double-clicking the title-bar drag region zooms the window.
                 "core:window:allow-toggle-maximize",
-                "dialog:allow-open"
+                "dialog:allow-open",
+                "clipboard-manager:allow-write-text"
             ]
         );
 

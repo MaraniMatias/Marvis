@@ -1,9 +1,10 @@
 use std::{
     collections::HashSet,
-    fs::{self, File},
+    fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    time::{SystemTime, UNIX_EPOCH},
 };
 
 use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
@@ -326,6 +327,99 @@ pub fn read(
     Ok(FileContent { path, content })
 }
 
+pub fn write(
+    database: &Database,
+    checkout_id: &str,
+    relative_path: &Path,
+    content: &str,
+    expected_content: &str,
+) -> Result<(), IpcError> {
+    let (repo, checkout) = registered_checkout(database, checkout_id)?;
+    ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
+    if content.len() as u64 > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    if content.contains('\0') {
+        return Err(binary_file());
+    }
+    let relative_path = relative_path
+        .to_str()
+        .ok_or_else(|| IpcError::new(IpcErrorCode::InvalidPath, "file path is not valid UTF-8"))?;
+    let relative_path = parse_relative_path(relative_path)?;
+    let path =
+        crate::services::checkout::resolve_checkout_path(&repo, checkout_id, &relative_path)?;
+    let metadata =
+        fs::metadata(&path).map_err(|error| filesystem_error("could not inspect file", error))?;
+    if !metadata.is_file() {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidPath,
+            "selected path is not a file",
+        ));
+    }
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+
+    let current =
+        fs::read(&path).map_err(|error| filesystem_error("could not read file", error))?;
+    if current.len() as u64 > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    if current.contains(&0) {
+        return Err(binary_file());
+    }
+    let current = String::from_utf8(current).map_err(|_| binary_file())?;
+    if current != expected_content {
+        return Err(IpcError::new(
+            IpcErrorCode::FileChanged,
+            "file changed on disk; reload it before saving",
+        ));
+    }
+
+    atomic_write(&path, content.as_bytes())
+}
+
+/// Writes through a sibling temporary file so readers never observe a partial UTF-8 document.
+fn atomic_write(path: &Path, content: &[u8]) -> Result<(), IpcError> {
+    let parent = path.parent().ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::InvalidPath,
+            "selected file has no parent directory",
+        )
+    })?;
+    let name = path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidPath,
+                "selected file name is not valid UTF-8",
+            )
+        })?;
+    let nonce = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or_default();
+    let temporary = parent.join(format!(".{name}.marvis-{nonce}-{}", std::process::id()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|error| filesystem_error("could not create temporary file", error))?;
+        file.write_all(content)
+            .and_then(|_| file.sync_all())
+            .map_err(|error| filesystem_error("could not write file", error))?;
+        drop(file);
+        fs::rename(&temporary, path)
+            .map_err(|error| filesystem_error("could not replace file", error))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    result
+}
+
 pub fn read_markdown_image(
     database: &Database,
     checkout_id: &str,
@@ -526,10 +620,10 @@ fn registered_checkout(
 }
 
 fn parse_relative_path(path: &str) -> Result<PathBuf, IpcError> {
-    if path.is_empty() {
+    if path.is_empty() || path.contains('\0') {
         return Err(IpcError::new(
             IpcErrorCode::InvalidPath,
-            "path must be relative to the checkout",
+            "path must be relative to the checkout and cannot contain NUL",
         ));
     }
     let path = Path::new(path);
@@ -659,7 +753,7 @@ mod tests {
         services::workspace,
     };
 
-    use super::{list, read, read_markdown_image, search};
+    use super::{list, read, read_markdown_image, search, write};
 
     fn git(cwd: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -816,6 +910,99 @@ mod tests {
 
         assert!(matches!(large.code, IpcErrorCode::FileTooLarge));
         assert!(matches!(binary.code, IpcErrorCode::BinaryFile));
+    }
+
+    #[test]
+    fn writes_text_only_when_the_expected_content_still_matches() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("plain");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("notes.txt"), "before").unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+
+        write(
+            &database,
+            checkout_id,
+            Path::new("notes.txt"),
+            "after",
+            "before",
+        )
+        .unwrap();
+        assert_eq!(fs::read_to_string(root.join("notes.txt")).unwrap(), "after");
+
+        fs::write(root.join("notes.txt"), "external change").unwrap();
+        let changed = write(
+            &database,
+            checkout_id,
+            Path::new("notes.txt"),
+            "another edit",
+            "after",
+        )
+        .unwrap_err();
+        assert!(matches!(changed.code, IpcErrorCode::FileChanged));
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            "external change"
+        );
+    }
+
+    #[test]
+    fn rejects_unsafe_file_writes() {
+        #[cfg(unix)]
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(root.join("notes.txt"), "safe").unwrap();
+        fs::write(outside.join("secret.txt"), "secret").unwrap();
+        #[cfg(unix)]
+        symlink(&outside, root.join("escape")).unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+
+        assert!(matches!(
+            write(
+                &database,
+                checkout_id,
+                Path::new("../outside/secret.txt"),
+                "x",
+                "secret"
+            )
+            .unwrap_err()
+            .code,
+            IpcErrorCode::InvalidPath
+        ));
+        assert!(matches!(
+            write(
+                &database,
+                checkout_id,
+                Path::new("notes.txt"),
+                "bad\0text",
+                "safe"
+            )
+            .unwrap_err()
+            .code,
+            IpcErrorCode::BinaryFile
+        ));
+        #[cfg(unix)]
+        assert!(matches!(
+            write(
+                &database,
+                checkout_id,
+                Path::new("escape/secret.txt"),
+                "changed",
+                "secret"
+            )
+            .unwrap_err()
+            .code,
+            IpcErrorCode::PathOutsideCheckout
+        ));
     }
 
     #[test]

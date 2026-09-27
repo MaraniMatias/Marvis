@@ -2,6 +2,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import type { VueWrapper } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { defineComponent, reactive, ref } from "vue";
 import type { VNodeChild } from "vue";
 import type { GitStatus } from "../domain/git";
@@ -21,6 +22,7 @@ const mocks = vi.hoisted(() => ({
   listCheckoutFiles: vi.fn(),
   searchCheckoutFiles: vi.fn(),
   readCheckoutFile: vi.fn(),
+  writeCheckoutFile: vi.fn(),
   readCheckoutMarkdownImage: vi.fn(),
   getGitDiff: vi.fn(),
   getGitDiffPage: vi.fn(),
@@ -34,6 +36,7 @@ vi.mock("../lib/ipc", () => ({
   listCheckoutFiles: mocks.listCheckoutFiles,
   searchCheckoutFiles: mocks.searchCheckoutFiles,
   readCheckoutFile: mocks.readCheckoutFile,
+  writeCheckoutFile: mocks.writeCheckoutFile,
   readCheckoutMarkdownImage: mocks.readCheckoutMarkdownImage,
   getGitDiff: mocks.getGitDiff,
   getGitDiffPage: mocks.getGitDiffPage,
@@ -43,6 +46,10 @@ vi.mock("../lib/ipc", () => ({
   // MainPane imports the terminal pane; only its stub is mounted.
   loadTerminalLayout: mocks.loadTerminalLayout,
   saveTerminalLayout: mocks.saveTerminalLayout,
+}));
+
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
+  writeText: vi.fn(),
 }));
 
 vi.mock("reka-ui", async () => {
@@ -310,6 +317,42 @@ describe("DocumentPane", () => {
     await vi.waitFor(() => expect(wrapper.find('[aria-label="File contents"] article').exists()).toBe(true));
     await wrapper.get('[aria-label="File contents"] a[href="../guide.md"]').trigger("click");
     expect(wrapper.emitted("openMarkdownLink")).toEqual([["guide.md"]]);
+    wrapper.unmount();
+  });
+
+  it("copies the absolute checkout path and reports success", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const answer = 42;" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await flushPromises();
+
+    await wrapper.get('[aria-label="Copy file path"]').trigger("click");
+
+    expect(writeText).toHaveBeenCalledWith("/checkout:one/src/app.ts");
+    expect(toasts.value.at(-1)?.message).toBe("File path copied.");
+    wrapper.unmount();
+  });
+
+  it("keeps a Code draft visible and saves it with its original content", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const answer = 42;" });
+    mocks.writeCheckoutFile.mockResolvedValue(undefined);
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    const editor = wrapper.get(".cm-content").element as HTMLElement;
+    editor.textContent = "const answer = 43;";
+    editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "3" }));
+    await flushPromises();
+
+    expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(true);
+    await wrapper.get('button[aria-label="Save"]').trigger("click");
+    await flushPromises();
+    expect(mocks.writeCheckoutFile).toHaveBeenCalledWith(
+      "checkout:one",
+      "src/app.ts",
+      "const answer = 43;",
+      "const answer = 42;",
+    );
+    expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(false);
     wrapper.unmount();
   });
 

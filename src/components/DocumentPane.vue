@@ -1,14 +1,15 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-self-closing */
-import { Check as CheckIcon, ChevronDown as ChevronDownIcon } from "@lucide/vue";
+import { Check as CheckIcon, ChevronDown as ChevronDownIcon, Copy as CopyIcon } from "@lucide/vue";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { PopoverContent, PopoverRoot, PopoverTrigger } from "reka-ui";
-import { computed, nextTick, reactive, ref, watch } from "vue";
+import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
 import type { DocumentMode } from "../domain/main-document";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { useMarkdownPreview } from "../presentation/markdown-preview";
 import { isIpcError } from "../domain/ipc";
-import { readCheckoutFile } from "../lib/ipc";
+import { readCheckoutFile, writeCheckoutFile } from "../lib/ipc";
 import type { SourceLanguageOption } from "../lib/source-languages";
 import {
   PLAIN_TEXT,
@@ -17,6 +18,8 @@ import {
   languageExtensions,
   languageLabel,
 } from "../lib/source-languages";
+import { useToasts } from "../presentation/toasts";
+import type { EditorView } from "@codemirror/view";
 
 const props = withDefaults(
   defineProps<{
@@ -37,10 +40,23 @@ const emit = defineEmits<{
 }>();
 
 const content = ref("");
+const originalContent = ref("");
+const drafts = reactive(new Map<string, string>());
+const draftExpectedContent = reactive(new Map<string, string>());
 const contentState = ref<"idle" | "loading" | "ready" | "error">("idle");
 const contentError = ref("");
 const contentIdentity = ref<string | null>(null);
 const fileViewport = ref<HTMLElement | null>(null);
+const editorHost = ref<HTMLElement | null>(null);
+const editorLoading = ref(false);
+const saving = ref(false);
+let editorView: EditorView | null = null;
+let editorIdentity: string | null = null;
+let editorLanguage: string | null = null;
+let editorGeneration = 0;
+let syncingEditor = false;
+let restoringEditorPosition = false;
+const { push: pushToast, pushCause: reportCause } = useToasts();
 const deleted = computed(
   () =>
     props.path !== null &&
@@ -79,6 +95,8 @@ const languageSearch = ref("");
 const languageQuery = computed(() => languageSearch.value.trim().toLowerCase());
 const detectedLanguage = computed(() => (props.path === null ? null : (detectedLanguageName(props.path) ?? null)));
 const effectiveLanguage = computed(() => languageOverride.value ?? detectedLanguage.value);
+const isDirty = computed(() => (identity.value === null ? false : drafts.has(identity.value)));
+const currentDraft = computed(() => (identity.value === null ? undefined : drafts.get(identity.value)));
 
 // A Markdown preview renders its own fences, so in View mode there is no grammar left to choose.
 const showsSource = computed(() => !(props.mode === "view" && isMarkdown.value));
@@ -203,11 +221,164 @@ function errorText(error: unknown): string {
         return "This path resolves outside the active checkout and cannot be opened.";
       case "invalid_path":
         return "This path is not a valid file in the checkout.";
+      case "file_changed":
+        return "The file changed on disk. Your draft was kept; reload it before saving.";
       default:
         return error.message;
     }
   }
   return error instanceof Error ? error.message : String(error);
+}
+
+function absoluteFilePath() {
+  const checkoutPath = props.checkout?.canonicalPath;
+  const path = props.path;
+  if (!checkoutPath || path === null) return null;
+  return `${checkoutPath.replace(/[\\/]+$/, "")}/${path}`;
+}
+
+async function copyFilePath() {
+  const path = absoluteFilePath();
+  if (path === null) return;
+  try {
+    await writeText(path);
+    pushToast("File path copied.", "info");
+  } catch (error) {
+    reportCause(error);
+  }
+}
+
+function disposeEditor() {
+  editorGeneration += 1;
+  editorView?.destroy();
+  editorView = null;
+  editorIdentity = null;
+  editorLanguage = null;
+  editorLoading.value = false;
+}
+
+function updateDraft(nextContent: string) {
+  const fileIdentity = identity.value;
+  if (syncingEditor || fileIdentity === null) return;
+  content.value = nextContent;
+  if (!drafts.has(fileIdentity)) draftExpectedContent.set(fileIdentity, originalContent.value);
+  if (nextContent === originalContent.value) {
+    drafts.delete(fileIdentity);
+    draftExpectedContent.delete(fileIdentity);
+  } else {
+    drafts.set(fileIdentity, nextContent);
+  }
+}
+
+function syncEditorContent(nextContent: string) {
+  const view = editorView;
+  if (!view || view.state.doc.toString() === nextContent) return;
+  syncingEditor = true;
+  view.dispatch({ changes: { from: 0, to: view.state.doc.length, insert: nextContent } });
+  syncingEditor = false;
+}
+
+function restoreSourcePosition(position: { top: number; left: number }) {
+  restoringEditorPosition = true;
+  readingPosition.value = position;
+  if (editorView) {
+    editorView.scrollDOM.scrollTop = position.top;
+    editorView.scrollDOM.scrollLeft = position.left;
+  }
+  if (fileViewport.value) {
+    fileViewport.value.scrollTop = position.top;
+    fileViewport.value.scrollLeft = position.left;
+  }
+  restoringEditorPosition = false;
+}
+
+async function ensureEditor(fileIdentity: string) {
+  await nextTick();
+  if (identity.value !== fileIdentity || props.mode !== "code" || contentState.value !== "ready") return;
+  const host = editorHost.value;
+  if (!host) return;
+  if (editorView && editorIdentity === fileIdentity && editorLanguage === effectiveLanguage.value) {
+    syncEditorContent(content.value);
+    return;
+  }
+  disposeEditor();
+  const generation = editorGeneration;
+  editorLoading.value = true;
+  let editorInitializing = true;
+  try {
+    const { createCodeEditor } = await import("../lib/code-editor");
+    await nextTick();
+    if (
+      generation !== editorGeneration ||
+      identity.value !== fileIdentity ||
+      props.mode !== "code" ||
+      contentState.value !== "ready" ||
+      editorHost.value !== host
+    )
+      return;
+    editorView = createCodeEditor({
+      parent: host,
+      content: content.value,
+      language: effectiveLanguage.value,
+      readingPosition: readingPosition.value,
+      onChange: updateDraft,
+      onScroll: (position) => {
+        if (restoringEditorPosition || editorInitializing) return;
+        readingPosition.value = position;
+        emit("readingPositionChanged", position);
+      },
+    });
+    editorIdentity = fileIdentity;
+    editorLanguage = effectiveLanguage.value;
+    await nextTick();
+    window.setTimeout(() => {
+      if (generation === editorGeneration) editorInitializing = false;
+    }, 0);
+  } catch (error) {
+    if (generation === editorGeneration && identity.value === fileIdentity) reportCause(error);
+  } finally {
+    if (generation === editorGeneration) editorLoading.value = false;
+  }
+}
+
+async function saveDraft() {
+  const checkoutId = props.checkout?.id;
+  const path = props.path;
+  const fileIdentity = identity.value;
+  const draft = currentDraft.value;
+  if (saving.value || !checkoutId || path === null || fileIdentity === null || draft === undefined) return;
+  const expectedContent = draftExpectedContent.get(fileIdentity) ?? originalContent.value;
+  saving.value = true;
+  try {
+    await writeCheckoutFile(checkoutId, path, draft, expectedContent);
+    if (identity.value === fileIdentity && props.checkout?.id === checkoutId && props.path === path) {
+      originalContent.value = draft;
+      // The editor remains live while the write is in flight. Do not discard a newer edit that
+      // arrived after the request started; it is now based on the content we just persisted.
+      if (drafts.get(fileIdentity) === draft) {
+        content.value = draft;
+        drafts.delete(fileIdentity);
+        draftExpectedContent.delete(fileIdentity);
+        syncEditorContent(draft);
+      } else {
+        draftExpectedContent.set(fileIdentity, draft);
+      }
+      pushToast("File saved.", "info");
+    }
+  } catch (error) {
+    reportCause(error);
+  } finally {
+    saving.value = false;
+  }
+}
+
+function cancelDraft() {
+  const fileIdentity = identity.value;
+  if (fileIdentity === null || !drafts.has(fileIdentity)) return;
+  drafts.delete(fileIdentity);
+  draftExpectedContent.delete(fileIdentity);
+  content.value = originalContent.value;
+  syncEditorContent(content.value);
 }
 
 function unavailableText() {
@@ -222,9 +393,21 @@ async function loadFile(preservePosition = false) {
   const fileIdentity = identity.value;
   if (!checkoutId || path === null || fileIdentity === null) return;
   if (!available.value) {
+    const draft = drafts.get(fileIdentity);
+    if (draft !== undefined) {
+      requestGeneration += 1;
+      content.value = draft;
+      contentIdentity.value = fileIdentity;
+      contentState.value = "ready";
+      contentError.value = unavailableText();
+      loadedIdentity = null;
+      return;
+    }
+    disposeEditor();
     requestGeneration += 1;
     invalidateHighlight();
     content.value = "";
+    originalContent.value = "";
     contentIdentity.value = fileIdentity;
     contentState.value = "error";
     contentError.value = unavailableText();
@@ -244,18 +427,32 @@ async function loadFile(preservePosition = false) {
   try {
     const result = await readCheckoutFile(checkoutId, path);
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
+    const draft = drafts.get(fileIdentity);
     // The bytes are usually the ones already on screen, because whatever changed was somewhere
     // else in the checkout. Then there is nothing to repaint, re-highlight or re-render, and the
-    // scroll position is still where the reader put it.
-    if (refreshing && contentState.value === "ready" && result.content === content.value) return;
-    content.value = result.content;
+    // scroll position is still where the reader put it. A draft is different: its baseline must
+    // still be updated for Cancel, while the draft itself stays on screen.
+    if (refreshing && contentState.value === "ready" && draft === undefined && result.content === content.value) {
+      originalContent.value = result.content;
+      return;
+    }
+    if (draft !== undefined && draft === result.content) {
+      drafts.delete(fileIdentity);
+      draftExpectedContent.delete(fileIdentity);
+    }
+    originalContent.value = result.content;
+    content.value = drafts.get(fileIdentity) ?? result.content;
     contentIdentity.value = fileIdentity;
     contentState.value = "ready";
     loadedIdentity = fileIdentity;
     if (props.mode === "view" && isMarkdown.value) {
       invalidateHighlight();
+    } else if (props.mode === "code") {
+      // Keep the existing sanitized source render available as a fallback while the editor chunk
+      // loads. CodeMirror owns the visible Code view once it is ready.
+      startHighlight(fileIdentity, content.value);
     } else {
-      startHighlight(fileIdentity, result.content);
+      startHighlight(fileIdentity, content.value);
     }
     await nextTick();
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
@@ -263,14 +460,31 @@ async function loadFile(preservePosition = false) {
       fileViewport.value.scrollTop = previousPosition.top;
       fileViewport.value.scrollLeft = previousPosition.left;
     }
-    readingPosition.value = previousPosition;
+    restoreSourcePosition(previousPosition);
+    if (props.mode === "code") {
+      void ensureEditor(fileIdentity).then(async () => {
+        await nextTick();
+        if (identity.value === fileIdentity) restoreSourcePosition(previousPosition);
+      });
+    }
     if (props.mode === "view" && isMarkdown.value) {
       await load(checkoutId, path, result.content, refreshing);
       await restoreMarkdownReadingPosition(previousPosition, request, fileIdentity, checkoutId);
     }
   } catch (error) {
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
+    const draft = drafts.get(fileIdentity);
+    if (draft !== undefined) {
+      content.value = draft;
+      contentIdentity.value = fileIdentity;
+      contentState.value = "ready";
+      contentError.value = errorText(error);
+      loadedIdentity = fileIdentity;
+      reportCause(error);
+      return;
+    }
     content.value = "";
+    originalContent.value = "";
     contentIdentity.value = fileIdentity;
     contentError.value = errorText(error);
     contentState.value = "error";
@@ -341,6 +555,10 @@ watch(
         await load(checkoutId, props.path!, content.value);
         await restoreMarkdownReadingPosition(position, request, fileIdentity, checkoutId);
       }
+    } else if (mode === "code") {
+      if (contentState.value === "ready") startHighlight(fileIdentity, content.value);
+      clear();
+      if (contentState.value === "ready") void ensureEditor(fileIdentity);
     } else {
       if (contentState.value === "ready") startHighlight(fileIdentity, content.value);
       clear();
@@ -372,16 +590,44 @@ watch(
 // Choosing a grammar is the one thing about a reading that changes without the file or the mode
 // changing, so the source is read again. The Markdown preview owns its own fences and ignores this.
 watch(effectiveLanguage, () => {
-  if (contentState.value === "ready" && showsSource.value) {
-    startHighlight(identity.value!, content.value);
-  }
+  if (contentState.value !== "ready" || identity.value === null) return;
+  if (props.mode === "code") {
+    startHighlight(identity.value, content.value);
+    void ensureEditor(identity.value);
+  } else if (showsSource.value) startHighlight(identity.value, content.value);
 });
+
+watch(
+  () => [identity.value, props.mode] as const,
+  ([fileIdentity, mode]) => {
+    if (fileIdentity === null || mode !== "code") {
+      disposeEditor();
+      return;
+    }
+    if (contentState.value === "ready") void ensureEditor(fileIdentity);
+  },
+);
+
+onUnmounted(disposeEditor);
 
 function onFileScroll(event: Event) {
   const viewport = event.currentTarget as HTMLElement;
   readingPosition.value = { top: viewport.scrollTop, left: viewport.scrollLeft };
   emit("readingPositionChanged", readingPosition.value);
 }
+
+watch(
+  content,
+  async () => {
+    if (props.mode !== "code" || contentState.value !== "ready") return;
+    await nextTick();
+    if (fileViewport.value) {
+      fileViewport.value.scrollTop = readingPosition.value.top;
+      fileViewport.value.scrollLeft = readingPosition.value.left;
+    }
+  },
+  { flush: "post" },
+);
 
 function onMarkdownLink(event: MouseEvent) {
   const target = event.target;
@@ -410,11 +656,23 @@ function onMarkdownLink(event: MouseEvent) {
 </script>
 
 <template>
-  <main class="document-pane flex min-h-0 flex-1 flex-col">
+  <main class="document-pane relative flex min-h-0 flex-1 flex-col">
     <header class="document-toolbar flex h-10 shrink-0 items-center justify-between gap-3 border-b px-3">
-      <span class="min-w-0 truncate text-[11px] text-(--marvis-text-dim)" :title="path ?? undefined">{{
-        path ?? ""
-      }}</span>
+      <div class="flex min-w-0 items-center gap-1.5">
+        <span class="min-w-0 truncate text-[11px] text-(--marvis-text-dim)" :title="path ?? undefined">{{
+          path ?? ""
+        }}</span>
+        <button
+          v-if="path !== null"
+          type="button"
+          aria-label="Copy file path"
+          title="Copy absolute file path"
+          class="toolbar-icon-button shrink-0"
+          @click="copyFilePath"
+        >
+          <CopyIcon class="icon-xs" aria-hidden="true" />
+        </button>
+      </div>
       <!-- Both controls sit on the same row, at the same height, on the side the empty path text
            pushes them to. The mode group is Markdown's alone, so the language one is its sibling
            rather than another segment inside it. -->
@@ -515,10 +773,14 @@ function onMarkdownLink(event: MouseEvent) {
       <p v-else-if="contentState === 'error'" role="alert" class="pane-state text-sm">
         {{ contentError }}
       </p>
-      <p v-else-if="contentState === 'ready' && content.length === 0" role="status" class="pane-state text-sm">
+      <p
+        v-else-if="contentState === 'ready' && content.length === 0 && mode !== 'code'"
+        role="status"
+        class="pane-state text-sm"
+      >
         This file is empty.
       </p>
-      <p v-else-if="highlighting" role="status" class="pane-state text-sm">Highlighting source…</p>
+      <p v-else-if="highlighting && mode !== 'code'" role="status" class="pane-state text-sm">Highlighting source…</p>
       <template v-else-if="contentState === 'ready' || (contentState === 'loading' && contentIdentity === identity)">
         <template v-if="mode === 'view' && isMarkdown">
           <p
@@ -540,6 +802,25 @@ function onMarkdownLink(event: MouseEvent) {
           />
           <!-- eslint-enable vue/no-v-html -->
         </template>
+        <div v-else-if="mode === 'code'" ref="editorHost" class="code-editor-host" aria-label="Source code">
+          <p v-if="editorLoading" role="status" class="pane-state text-sm">Loading editor…</p>
+          <!-- Keep the existing Shiki output available as a read-only fallback while CM6 loads and
+               for the same source rendering used by the preview's language cache. -->
+          <pre v-if="compactSource" class="source-line-number source-compatibility">{{ sourceLineNumbers }}</pre>
+          <template v-else>
+            <span v-for="index in sourceLines.length" :key="index" class="source-line-number source-compatibility">{{
+              index
+            }}</span>
+          </template>
+          <!-- eslint-disable vue/no-v-html -- Shiki output is DOMPurify-sanitized. -->
+          <code
+            v-if="highlightedLines !== null"
+            class="shiki source-compatibility"
+            v-html="highlightedLines.join('\n')"
+          />
+          <!-- eslint-enable vue/no-v-html -->
+          <code v-else class="source-compatibility">{{ content }}</code>
+        </div>
         <div
           v-else-if="compactSource"
           class="flex py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
@@ -567,6 +848,30 @@ function onMarkdownLink(event: MouseEvent) {
           </div>
         </div>
       </template>
+      <div
+        v-if="isDirty && mode === 'code'"
+        class="absolute bottom-4 right-4 z-10 flex items-center gap-2 rounded border border-(--marvis-border) bg-(--marvis-bg-1) p-1.5 shadow-lg"
+        aria-label="Unsaved changes"
+      >
+        <button
+          type="button"
+          aria-label="Cancel"
+          class="document-action-button"
+          :disabled="saving"
+          @click="cancelDraft"
+        >
+          Cancel
+        </button>
+        <button
+          type="button"
+          aria-label="Save"
+          class="document-action-button document-action-primary"
+          :disabled="saving"
+          @click="saveDraft"
+        >
+          {{ saving ? "Saving…" : "Save" }}
+        </button>
+      </div>
     </section>
   </main>
 </template>
@@ -729,5 +1034,71 @@ function onMarkdownLink(event: MouseEvent) {
 .source-code {
   margin: 0;
   padding-left: 0.75rem;
+}
+
+.source-compatibility {
+  display: none;
+}
+
+.code-editor-host {
+  min-height: 100%;
+  height: 100%;
+}
+
+.code-editor-host :deep(.cm-editor) {
+  min-height: 100%;
+  height: 100%;
+  background: var(--marvis-bg-0);
+  color: var(--marvis-text);
+  font-family: var(--marvis-font);
+  font-size: 13px;
+}
+
+.code-editor-host :deep(.cm-scroller) {
+  font-family: var(--marvis-font);
+  line-height: 1.55;
+}
+
+.code-editor-host :deep(.cm-gutters) {
+  background: var(--marvis-bg-0);
+  border-right: 1px solid var(--marvis-border);
+  color: var(--marvis-text-faint);
+}
+
+.code-editor-host :deep(.cm-activeLineGutter),
+.code-editor-host :deep(.cm-activeLine) {
+  background: color-mix(in srgb, var(--marvis-border) 35%, transparent);
+}
+
+.toolbar-icon-button,
+.document-action-button {
+  border-radius: var(--marvis-radius);
+  color: var(--marvis-text-secondary);
+}
+
+.toolbar-icon-button {
+  display: inline-flex;
+  padding: 0.2rem;
+}
+
+.toolbar-icon-button:hover,
+.document-action-button:hover:not(:disabled) {
+  background: var(--marvis-border);
+  color: var(--marvis-text);
+}
+
+.document-action-button {
+  padding: 0.3rem 0.65rem;
+  font-size: 0.75rem;
+}
+
+.document-action-primary {
+  background: var(--marvis-accent);
+  color: var(--marvis-bg-0);
+}
+
+.document-action-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
 }
 </style>
