@@ -33,17 +33,25 @@ export function useMarkdownPreview(getCheckoutId: () => string | null) {
     markdownImageWarning.value = false;
   }
 
-  async function load(checkoutId: string, path: string, source: string) {
+  /**
+   * Renders `source` as the preview of `path`, or leaves the page that is already up when
+   * `keepVisible` says the file on screen is the one being re-read. The document is re-read twice
+   * for every change anywhere in the checkout, and emptying the rendered page each time is a blink
+   * the reader did nothing to cause.
+   */
+  async function load(checkoutId: string, path: string, source: string, keepVisible = false) {
     if (disposed) return;
     const requestGeneration = ++generation;
-    markdownHtml.value = "";
+    const settled = keepVisible && markdownPreviewState.value === "ready";
+    if (!settled) {
+      markdownHtml.value = "";
+      markdownPreviewState.value = "loading";
+    }
     markdownImageWarning.value = false;
     if (!isMarkdownPath(path)) {
       markdownPreviewState.value = "idle";
       return;
     }
-
-    markdownPreviewState.value = "loading";
     const { attachMarkdownImages, renderMarkdownPreview } = await import("../lib/markdown-preview");
     if (!isCurrent(requestGeneration, checkoutId)) return;
     const preview = await renderMarkdownPreview(source, path);

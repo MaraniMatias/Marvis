@@ -232,11 +232,22 @@ async function loadFile(preservePosition = false) {
   }
   const request = ++requestGeneration;
   const previousPosition = preservePosition ? readingPosition.value : props.readingPosition;
-  contentState.value = "loading";
-  contentError.value = "";
+  // Whatever is on screen already belongs to this same document, so a re-read leaves it where it
+  // is: the checkout watcher re-reads the open file twice for every change anywhere in the
+  // workdir, and dropping back to "loading" — or to a blank page where the reason it cannot be
+  // read was — until the read lands is what blinks.
+  const refreshing = contentIdentity.value === fileIdentity;
+  if (!refreshing) {
+    contentState.value = "loading";
+    contentError.value = "";
+  }
   try {
     const result = await readCheckoutFile(checkoutId, path);
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
+    // The bytes are usually the ones already on screen, because whatever changed was somewhere
+    // else in the checkout. Then there is nothing to repaint, re-highlight or re-render, and the
+    // scroll position is still where the reader put it.
+    if (refreshing && contentState.value === "ready" && result.content === content.value) return;
     content.value = result.content;
     contentIdentity.value = fileIdentity;
     contentState.value = "ready";
@@ -254,7 +265,7 @@ async function loadFile(preservePosition = false) {
     }
     readingPosition.value = previousPosition;
     if (props.mode === "view" && isMarkdown.value) {
-      await load(checkoutId, path, result.content);
+      await load(checkoutId, path, result.content, refreshing);
       await restoreMarkdownReadingPosition(previousPosition, request, fileIdentity, checkoutId);
     }
   } catch (error) {
@@ -625,6 +636,47 @@ function onMarkdownLink(event: MouseEvent) {
   border: 1px solid var(--marvis-border);
   padding: 0.45rem 0.65rem;
   text-align: left;
+}
+
+/* The metadata a document opens with, in GitHub's shape: a table with the keys across the top and
+   their values under them. One row of keys over one row of values is unreadable in a panel this
+   narrow, so the table is a two-column grid with its rows dissolved into it, which lands the keys
+   and their values on the same line, one pair at a time. */
+.markdown-preview :deep(table.markdown-frontmatter) {
+  display: grid;
+  grid-template-columns: minmax(4rem, 9rem) 1fr;
+  width: 100%;
+  max-width: 100%;
+  margin: 0 0 1.5rem;
+  border: 1px solid var(--marvis-border);
+  border-radius: var(--marvis-radius);
+}
+
+.markdown-preview :deep(table.markdown-frontmatter > thead),
+.markdown-preview :deep(table.markdown-frontmatter > tbody),
+.markdown-preview :deep(table.markdown-frontmatter > thead > tr),
+.markdown-preview :deep(table.markdown-frontmatter > tbody > tr) {
+  display: contents;
+}
+
+.markdown-preview :deep(table.markdown-frontmatter th),
+.markdown-preview :deep(table.markdown-frontmatter td) {
+  border: none;
+  border-bottom: 1px solid var(--marvis-border);
+  padding: 0.35rem 0.6rem;
+  font-weight: 400;
+  vertical-align: top;
+}
+
+.markdown-preview :deep(table.markdown-frontmatter th) {
+  color: var(--marvis-text-secondary);
+  font-size: 0.85em;
+}
+
+/* The last pair sits on the box's own edge, so it carries no rule under it. */
+.markdown-preview :deep(table.markdown-frontmatter > thead > tr > th:last-child),
+.markdown-preview :deep(table.markdown-frontmatter > tbody > tr > td:last-child) {
+  border-bottom: none;
 }
 
 .markdown-preview :deep(pre) {

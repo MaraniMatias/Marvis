@@ -787,15 +787,16 @@ const matchedSearchEntries = searchEntries.value
   text-overflow: ellipsis;
 }
 
-/* The name steps with the icon, mixed toward the panel so a dotfile and an ignored file both
-   stay readable rather than fading out. These two numbers are the name half of the ramp that
-   FileIcon's opacity rules make up the icon half. */
+/* The name steps with the icon, a dotfile and an ignored file both still readable rather than
+   fading out. Quieting is opacity and not a mixed color, which is the whole reason: a color of its
+   own would win over the one the row hands down, and these two numbers are the name half of the
+   ramp that FileIcon's opacity rules make up the icon half. */
 .file-name-hidden {
-  color: color-mix(in srgb, var(--marvis-text-secondary) 72%, var(--marvis-bg-1));
+  opacity: 0.72;
 }
 
 .file-name-ignored {
-  color: color-mix(in srgb, var(--marvis-text-secondary) 48%, var(--marvis-bg-1));
+  opacity: 0.48;
 }
 
 .file-icon,

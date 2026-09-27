@@ -97,4 +97,157 @@ describe("Markdown preview", () => {
     expect(preview.html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
     expect(preview.html).not.toContain("<script>");
   });
+
+  it("drops the HTML comments a page shows nothing of", async () => {
+    const preview = await renderMarkdownPreview(
+      [
+        "<!-- Describe the change here -->",
+        "",
+        "Lead paragraph.",
+        "",
+        "# What this does",
+        "",
+        "Body text <!-- a note for the reviewer --> and more.",
+        "",
+        "- item <!-- hidden -->",
+        "",
+        "> quoted <!-- hidden -->",
+      ].join("\n"),
+      "docs/readme.md",
+    );
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+
+    expect(preview.html).not.toContain("<!--");
+    expect(preview.html).not.toContain("Describe the change here");
+    expect(preview.html).not.toContain("a note for the reviewer");
+    // What the comment was sitting between stays: the words join up, as they do on GitHub. The lead
+    // paragraph is there because happy-dom's sanitizer drops the tags of the first element, and
+    // what is being checked here has to survive that to be worth asserting on.
+    expect(document.querySelector("h1")?.textContent).toBe("What this does");
+    expect([...document.querySelectorAll("p")].map((node) => node.textContent)).toContain("Body text  and more.");
+    expect(document.querySelector("li")?.textContent).toBe("item ");
+    expect(document.querySelector("blockquote p")?.textContent).toBe("quoted ");
+  });
+
+  it("drops a comment that runs over as many lines as it likes", async () => {
+    const preview = await renderMarkdownPreview(
+      "Lead paragraph.\n\n<!--\nfirst line\nsecond line\n-->\n\n# Title",
+      "readme.md",
+    );
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+
+    expect(preview.html).not.toContain("first line");
+    expect(document.querySelector("h1")?.textContent).toBe("Title");
+  });
+
+  it("keeps a comment that is code, and the text after one that shares its line", async () => {
+    const preview = await renderMarkdownPreview(
+      "```html\n<!-- kept -->\n```\n\nuse `<!-- kept -->` inline\n\n    <!-- kept -->\n\n<!-- gone --> trailing words",
+      "readme.md",
+    );
+
+    // A fence, an indented block and a code span are all one token by the time a comment could be
+    // taken out of a text run, so the comment in them is part of the code the file documents.
+    expect(preview.html.match(/&lt;!-- kept --&gt;/g)).toHaveLength(3);
+    expect(preview.html).not.toContain("&lt;!-- gone --&gt;");
+    expect(preview.html).toContain("trailing words");
+  });
+
+  it("leaves an unclosed comment as the text it is", async () => {
+    const preview = await renderMarkdownPreview("<!-- never closed\n\ntext after", "readme.md");
+
+    expect(preview.html).toContain("&lt;!-- never closed");
+    expect(preview.html).toContain("text after");
+  });
+
+  it("SEC-07 never lets a comment carry markup onto the page", async () => {
+    const preview = await renderMarkdownPreview(
+      "<!-- <script>alert(1)</script> -->\n\n```html\n<!-- <img src=x onerror=alert(2)> -->\n```\n\n<img src=x onerror=alert(3)>",
+      "readme.md",
+    );
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+
+    expect(document.querySelector("script, img")).toBeNull();
+    expect(preview.html).not.toContain("<script>");
+  });
+
+  it("shows YAML front matter as the key/value table GitHub puts above a document", async () => {
+    const preview = await renderMarkdownPreview(
+      [
+        "---",
+        "title: Add the export",
+        "draft: false",
+        "reviewer:",
+        "empty:",
+        "tags: [api, docs]",
+        "---",
+        "",
+        "Lead paragraph.",
+        "",
+        "# What this does",
+        "",
+        "- [x] done",
+        "",
+        "| a | b |",
+        "| --- | --- |",
+        "| 1 | 2 |",
+      ].join("\n"),
+      "docs/readme.md",
+    );
+
+    // The rows are asserted, not the table around them: happy-dom's sanitizer drops the `<table>`
+    // wrapper of the first table it sees, so the wrapper and its class are gone by the time the
+    // markup reaches this test. A browser keeps both, which is what the layout in DocumentPane.vue
+    // hangs on, and the re-wrap above the assertions puts a bare `<table>` back when it can.
+    expect(preview.html).toContain(
+      "<thead><tr><th>title</th><th>draft</th><th>reviewer</th><th>empty</th><th>tags</th></tr></thead>",
+    );
+    expect(preview.html).toContain("<th>title</th><th>draft</th><th>reviewer</th><th>empty</th><th>tags</th>");
+    expect(preview.html).toContain("<td>Add the export</td><td>false</td><td></td><td></td><td>api, docs</td>");
+    // The document behind the metadata is rendered whole: a table, a task list and a heading.
+    expect(preview.html).toContain("<h1>What this does</h1>");
+    expect(preview.html).toContain('type="checkbox"');
+    expect(preview.html).toContain("<th>a</th>");
+  });
+
+  it("reads a value that is more than one line as one line of text", async () => {
+    const preview = await renderMarkdownPreview(
+      "---\ndescription: |\n  first line\n  second line\ntags:\n  - one\n  - two\n---\n\nBody.",
+      "readme.md",
+    );
+
+    expect(preview.html).toContain("first line second line");
+    expect(preview.html).toContain("<td>one, two</td>");
+    expect(preview.html).toContain("Body.");
+  });
+
+  it("leaves a document that only opens with a rule alone", async () => {
+    // The rule is not front matter, and reading the rest of the file as a YAML mapping would take
+    // the heading with it: `body` parses as a scalar, and the page would come back empty.
+    const preview = await renderMarkdownPreview("---\n\n# Heading\n\nbody", "readme.md");
+
+    expect(preview.html).not.toContain("<th>");
+    expect(preview.html).not.toContain("<th>");
+    expect(preview.html).toContain("Heading");
+    expect(preview.html).toContain("body");
+  });
+
+  it("leaves the document alone when its front matter is not YAML", async () => {
+    const preview = await renderMarkdownPreview("---\ntitle: [unclosed\n---\n\ntext after", "readme.md");
+
+    expect(preview.html).not.toContain("<th>");
+    expect(preview.html).toContain("text after");
+  });
+
+  it("SEC-08 never lets a front-matter value carry markup onto the page", async () => {
+    const preview = await renderMarkdownPreview(
+      "---\ntitle: <img src=x onerror=alert(1)>\nbody: <script>alert(2)</script>\n---\n\ntext",
+      "readme.md",
+    );
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+
+    expect(document.querySelector("script, img")).toBeNull();
+    expect(preview.html).not.toContain("<script>");
+    expect(preview.html).toContain("&lt;script&gt;");
+  });
 });

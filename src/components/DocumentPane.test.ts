@@ -532,6 +532,91 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("keeps a file it cannot read on screen while the checkout reads it again", async () => {
+    // The watcher re-reads the open file twice for every change anywhere in the checkout, and a
+    // reason it cannot be read is not something to take away and hand back while that happens.
+    mocks.readCheckoutFile.mockRejectedValue({ code: "binary_file", message: "not utf-8" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("assets/logo.png") });
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toBe("This file is binary or is not valid UTF-8.");
+
+    let reRead!: (value: { path: string; content: string }) => void;
+    mocks.readCheckoutFile.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          reRead = resolve;
+        }),
+    );
+    await wrapper.setProps({ refreshRevision: 1 });
+    expect(wrapper.get('[role="alert"]').text()).toBe("This file is binary or is not valid UTF-8.");
+    expect(wrapper.text()).not.toContain("Loading file");
+
+    reRead({ path: "assets/logo.png", content: "readable now" });
+    await flushPromises();
+    expect(wrapper.text()).toContain("readable now");
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("leaves an unchanged document exactly where the reader left it", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const same = true;" });
+    const wrapper = mount(DocumentPane, {
+      props: { ...documentPaneProps("src/app.ts"), refreshRevision: 0 },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("const same = true;"));
+    const source = wrapper.get('[aria-label="Source code"]').element;
+    const viewport = wrapper.get('[aria-label="File contents"]');
+    (viewport.element as HTMLElement).scrollTop = 96;
+    await viewport.trigger("scroll");
+
+    await wrapper.setProps({ refreshRevision: 1 });
+    await flushPromises();
+    expect(mocks.readCheckoutFile).toHaveBeenCalledTimes(2);
+    // The same node, so nothing was taken down and built again, and the offset is still the
+    // reader's: the bytes were the ones already on screen.
+    expect(wrapper.get('[aria-label="Source code"]').element).toBe(source);
+    expect(wrapper.text()).not.toContain("Highlighting source");
+    expect((wrapper.get('[aria-label="File contents"]').element as HTMLElement).scrollTop).toBe(96);
+    wrapper.unmount();
+  });
+
+  it("keeps the rendered Markdown page on screen while the file is read again", async () => {
+    mocks.readCheckoutFile.mockResolvedValueOnce({
+      path: "docs/readme.md",
+      content: "![pic](pic.png)\n\n# First title",
+    });
+    const wrapper = mount(DocumentPane, {
+      props: { ...documentPaneProps("docs/readme.md", "view"), refreshRevision: 0 },
+    });
+    await vi.waitFor(() => expect(wrapper.get(".markdown-preview").text()).toContain("First title"));
+
+    let reRead!: (value: { path: string; content: string }) => void;
+    let reImage!: (value: { mimeType: string; dataBase64: string; sizeBytes: number }) => void;
+    mocks.readCheckoutFile.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          reRead = resolve;
+        }),
+    );
+    mocks.readCheckoutMarkdownImage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          reImage = resolve;
+        }),
+    );
+    await wrapper.setProps({ refreshRevision: 1 });
+    reRead({ path: "docs/readme.md", content: "![pic](pic.png)\n\n# Second title" });
+    // The new page is being put together, image and all, so this is the window in which the one
+    // the reader is on has to still be the one on screen.
+    await vi.waitFor(() => expect(mocks.readCheckoutMarkdownImage).toHaveBeenCalledTimes(2));
+    expect(wrapper.get(".markdown-preview").text()).toContain("First title");
+    expect(wrapper.text()).not.toContain("Rendering preview");
+
+    reImage({ mimeType: "image/png", dataBase64: "iVBORw0KGgo=", sizeBytes: 8 });
+    await vi.waitFor(() => expect(wrapper.get(".markdown-preview").text()).toContain("Second title"));
+    wrapper.unmount();
+  });
+
   it("restores the Markdown reading position after relative images finish decoding", async () => {
     const descriptor = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, "decode");
     const decode = vi.fn(function (this: HTMLImageElement) {

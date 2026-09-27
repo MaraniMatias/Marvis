@@ -1,4 +1,5 @@
 import DOMPurify from "dompurify";
+import matter from "gray-matter";
 import MarkdownIt from "markdown-it";
 import taskLists from "markdown-it-task-lists";
 import { highlightCodeBlock, languageForFenceInfo } from "./source-highlighter";
@@ -25,10 +26,58 @@ const MAX_HIGHLIGHTED_LANGUAGES = 8;
 const MAX_HIGHLIGHTED_BLOCKS = 80;
 const MAX_HIGHLIGHTED_BLOCK_LINES = 500;
 const MAX_HIGHLIGHTED_LINES = 5000;
+// Metadata is a header, not the document: past these it stops being a summary of the file and
+// starts being the file's second half.
+const MAX_FRONTMATTER_KEYS = 32;
+const MAX_FRONTMATTER_VALUE_LENGTH = 300;
 
 export function isMarkdownPath(path: string): boolean {
   const extension = path.split(".").pop()?.toLowerCase();
   return extension !== undefined && markdownExtensions.has(extension);
+}
+
+/**
+ * Whether the document really opens with a `---` fenced block.
+ *
+ * The shape of the file decides this, before anything is parsed. A document that merely *starts*
+ * with a rule is not front matter, and a parser left to guess reads the rest of it as a YAML
+ * mapping and hands back an empty page: the heading the file opens with is the mapping's scalar.
+ */
+function opensFrontMatter(source: string): boolean {
+  const lines = source.split(/\r?\n/);
+  if (lines[0]?.trim() !== "---") return false;
+  return lines.slice(1).some((line) => line.trim() === "---");
+}
+
+/**
+ * What one front-matter value says, as the page shows it: text, never markup, and a key of
+ * `null` says nothing rather than saying the word null. A nested block becomes one line, because
+ * this is a header and not a second document.
+ */
+function frontMatterValue(value: unknown): string {
+  if (value === null || value === undefined) return "";
+  if (Array.isArray(value)) return value.map(frontMatterValue).filter(Boolean).join(", ");
+  if (typeof value === "object") {
+    return Object.entries(value as Record<string, unknown>)
+      .map(([key, nested]) => `${key}: ${frontMatterValue(nested)}`)
+      .join(", ");
+  }
+  const text = String(value).replace(/\s+/g, " ").trim();
+  return text.length > MAX_FRONTMATTER_VALUE_LENGTH ? `${text.slice(0, MAX_FRONTMATTER_VALUE_LENGTH)}…` : text;
+}
+
+/**
+ * The metadata block GitHub puts above a document that carries some: a table with the keys across
+ * the top and their values under them. It is built here rather than parsed out of a rendered
+ * string so every value reaches the page escaped, and it goes through the same sanitizer as the
+ * document it precedes.
+ */
+function frontMatterTable(data: Record<string, unknown>, escape: (text: string) => string): string {
+  const keys = Object.keys(data).slice(0, MAX_FRONTMATTER_KEYS);
+  if (keys.length === 0) return "";
+  const header = keys.map((key) => `<th>${escape(key)}</th>`).join("");
+  const values = keys.map((key) => `<td>${escape(frontMatterValue(data[key]))}</td>`).join("");
+  return `<table class="markdown-frontmatter"><thead><tr>${header}</tr></thead><tbody><tr>${values}</tr></tbody></table>`;
 }
 
 function safeRelativeImagePath(markdownPath: string, source: string): string | null {
@@ -115,6 +164,66 @@ async function highlightFencedCode(sanitizedHtml: string): Promise<string> {
   return document.body.innerHTML;
 }
 
+/** The instance a plugin is handed. The default import is a value, so the type is its instance. */
+type MarkdownParser = InstanceType<typeof MarkdownIt>;
+
+/**
+ * Drops the HTML comments a preview never shows, the way GitHub and every other renderer does.
+ *
+ * `html: false` is what keeps markup out of the page, and it is also why a comment is *visible*:
+ * markdown-it never recognises the construct, so it escapes it and leaves `<!-- … -->` sitting in
+ * the text. A merge request template is mostly comment, so that is a page of noise.
+ *
+ * Two rules get it back, and neither can reach code. The block rule is registered after `code` and
+ * `fence`, so a fence or an indented block is consumed before it is offered the line, and the
+ * inline rule takes the comment out of the text run it sits in — a code span is already a token of
+ * its own by the time inline rules run, so `` `<!-- kept -->` `` keeps its comment.
+ */
+function dropHtmlComments(markdown: MarkdownParser): void {
+  markdown.block.ruler.before(
+    "paragraph",
+    "marvis_html_comment",
+    (state, startLine, endLine, silent) => {
+      const start = state.bMarks[startLine] + state.tShift[startLine];
+      // Four spaces of indent is a code block, whatever the line starts with.
+      if (state.sCount[startLine] - state.blkIndent >= 4) return false;
+      if (!state.src.startsWith("<!--", start)) return false;
+      // A comment can run over as many lines as it likes, and the block ends where the document
+      // does: a list item hands over an end line past its own content.
+      const limit = Math.max(endLine, state.lineMax);
+      let line = startLine;
+      let closing = -1;
+      for (; line < limit; line += 1) {
+        const from = line === startLine ? start + 4 : state.bMarks[line] + state.tShift[line];
+        const at = state.src.indexOf("-->", from);
+        if (at >= 0 && at <= state.eMarks[line]) {
+          closing = at;
+          break;
+        }
+      }
+      // `<!-- x --> words` is a line of text with a comment in it rather than a comment, so it
+      // belongs to the inline rule below, which keeps the words.
+      if (closing < 0 || state.src.slice(closing + 3, state.eMarks[line]).trim() !== "") return false;
+      if (silent) return true;
+      state.line = line + 1;
+      return true;
+    },
+    { alt: ["paragraph", "reference", "blockquote", "list"] },
+  );
+
+  // `html_inline` is in the chain whatever `html` says: the rule itself declines, it is not
+  // unregistered, so it is the one neighbour that is always there to sit in front of.
+  markdown.inline.ruler.before("html_inline", "marvis_html_comment", (state, silent) => {
+    if (!state.src.startsWith("<!--", state.pos)) return false;
+    const end = state.src.indexOf("-->", state.pos + 4);
+    // An `<!--` that is never closed is text, which is what GitHub leaves it as too.
+    if (end < 0) return false;
+    if (silent) return true;
+    state.pos = end + 3;
+    return true;
+  });
+}
+
 export async function renderMarkdownPreview(source: string, markdownPath: string): Promise<MarkdownPreview> {
   const images: MarkdownImageReference[] = [];
   const imageIndexes = new Map<string, number>();
@@ -122,6 +231,7 @@ export async function renderMarkdownPreview(source: string, markdownPath: string
     html: false,
     linkify: true,
   }).use(taskLists, { enabled: false });
+  dropHtmlComments(markdown);
   markdown.validateLink = safeMarkdownLink;
   markdown.renderer.rules.image = (tokens, index, options, env, renderer) => {
     const token = tokens[index];
@@ -144,7 +254,25 @@ export async function renderMarkdownPreview(source: string, markdownPath: string
     return renderer.renderToken(tokens, index, options);
   };
 
-  const sanitized = DOMPurify.sanitize(markdown.render(source), {
+  // Metadata only counts when the file really opens with a fenced block, and only when the block
+  // parses: one that is not YAML was never metadata, so the document is rendered whole rather than
+  // half-there, which is what a failed parse would leave behind.
+  let body = source;
+  let frontMatter = "";
+  if (opensFrontMatter(source)) {
+    try {
+      const parsed = matter(source);
+      const data = parsed.data as Record<string, unknown> | undefined;
+      if (data && typeof data === "object" && !Array.isArray(data)) {
+        frontMatter = frontMatterTable(data, markdown.utils.escapeHtml);
+        if (frontMatter) body = parsed.content;
+      }
+    } catch {
+      // Not YAML after all: the whole file is the document.
+    }
+  }
+
+  const sanitized = DOMPurify.sanitize(frontMatter + markdown.render(body), {
     ALLOWED_TAGS: [
       "a",
       "blockquote",
