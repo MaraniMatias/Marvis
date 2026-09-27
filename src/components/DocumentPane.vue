@@ -677,40 +677,34 @@ function onMarkdownLink(event: MouseEvent) {
            pushes them to. The mode group is Markdown's alone, so the language one is its sibling
            rather than another segment inside it. -->
       <div class="flex shrink-0 items-center gap-1.5">
-        <!-- The pill is a plain div and not the PopoverRoot: reka's PopperRoot renders only its
-             slot with inheritAttrs off, so a label and a surface set on it are dropped. -->
-        <div
-          v-if="showsSource"
-          role="group"
-          aria-label="Highlight language"
-          class="document-mode-control flex shrink-0 items-center"
-        >
+        <!-- The group is a plain div and not the PopoverRoot: reka's PopperRoot renders only its
+             slot with inheritAttrs off, so a label set on it is dropped. It carries no surface —
+             the picker is a crumb in the toolbar, and a pill around it is the one thing it must
+             not look like. -->
+        <div v-if="showsSource" role="group" aria-label="Highlight language" class="flex shrink-0 items-center">
           <PopoverRoot v-model:open="languageOpen">
             <PopoverTrigger
               data-testid="language-trigger"
               :title="`Resaltar como ${languageButtonLabel}. Solo afecta la vista Code.`"
-              class="document-mode-button flex items-center gap-1 rounded-sm px-2 py-1 text-[11px]"
+              class="text-menu-control gap-1 whitespace-nowrap"
             >
               {{ languageButtonLabel }}
               <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
             </PopoverTrigger>
-            <PopoverContent
-              side="bottom"
-              align="end"
-              :side-offset="4"
-              class="surface-popover flex w-56 flex-col gap-1 rounded p-1 text-[11px] text-(--marvis-text)"
-            >
+            <PopoverContent side="bottom" align="end" :side-offset="4" class="surface-popover marvis-menu w-56">
               <input
                 v-model="languageSearch"
                 type="search"
                 aria-label="Search highlight languages"
                 placeholder="Buscar…"
-                class="window-search min-w-0 appearance-none bg-transparent p-0 text-(--marvis-text-secondary) placeholder:text-(--marvis-text-faint)"
+                class="marvis-menu-search min-w-0 appearance-none"
                 @keydown.down.prevent="moveLanguageRow(1)"
                 @keydown.up.prevent="moveLanguageRow(-1)"
                 @keydown.enter.prevent="chooseActiveLanguage"
               />
-              <div role="listbox" aria-label="Grammar" class="flex max-h-60 flex-col overflow-auto">
+              <!-- The rows scroll under the search rather than with it: there are grammars enough
+                   to fill any reasonable column, and a filter that scrolls away is no filter. -->
+              <div role="listbox" aria-label="Grammar" class="marvis-menu-scroll flex flex-col">
                 <button
                   v-for="(row, index) in languageRows"
                   :key="row.name ?? 'auto'"
@@ -718,17 +712,15 @@ function onMarkdownLink(event: MouseEvent) {
                   role="option"
                   :aria-selected="row.name === languageOverride"
                   :title="row.label"
-                  class="flex items-center gap-1.5 rounded-sm px-2 py-1 text-left hover:bg-(--marvis-border)"
-                  :class="index === activeLanguageRow ? 'bg-(--marvis-border)' : ''"
+                  class="menu-item select-none text-left"
+                  :class="{ 'is-active': index === activeLanguageRow }"
                   @click="chooseLanguage(row)"
                 >
-                  <span class="min-w-0 flex-1 truncate">{{ row.label }}</span>
-                  <span v-if="row.hint" class="shrink-0 text-(--marvis-text-faint)">{{ row.hint }}</span>
-                  <CheckIcon v-if="row.name === languageOverride" class="icon-xs shrink-0" aria-hidden="true" />
+                  <span class="menu-item-label">{{ row.label }}</span>
+                  <CheckIcon v-if="row.name === languageOverride" class="icon-xxs menu-check" aria-hidden="true" />
+                  <span v-if="row.hint" class="menu-item-hint">{{ row.hint }}</span>
                 </button>
-                <p v-if="!matchingLanguages.length" class="px-2 py-1 text-(--marvis-text-faint)">
-                  No language matches "{{ languageSearch }}".
-                </p>
+                <p v-if="!matchingLanguages.length" class="menu-note">No language matches "{{ languageSearch }}".</p>
               </div>
             </PopoverContent>
           </PopoverRoot>

@@ -159,6 +159,9 @@ body {
   border-color: var(--marvis-border);
 }
 
+/* The mode group — View and Code — is a segmented control: one surface around its segments.
+   The grammar picker beside it is a crumb that opens a list, not a segment of this, and
+   carries none of it. */
 .document-mode-control {
   border: 1px solid var(--marvis-border);
   border-radius: var(--marvis-radius);

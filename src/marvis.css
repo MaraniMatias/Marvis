@@ -238,12 +238,20 @@
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.menu-item[data-highlighted] {
+.menu-item[data-highlighted],
+.menu-item:hover {
   background: var(--marvis-border);
 }
 .menu-item[data-disabled] {
   opacity: 0.5;
   cursor: default;
+}
+
+/* The row the arrow keys are on. A menu row is marked by the pointer or by the menu's own
+   focus, so this is the one that carries its highlight on the row instead: the grammar list is
+   walked with the arrows from the search field, and the field is what keeps the focus. */
+.menu-item.is-active {
+  background: var(--marvis-border);
 }
 
 /* An action at the foot of the menu is a command, not a place: it reads a step back, and it is

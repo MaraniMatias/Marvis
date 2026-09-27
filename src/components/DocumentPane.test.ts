@@ -405,6 +405,18 @@ describe("DocumentPane", () => {
     // applies to a non-Markdown file too, so it cannot live inside that group.
     expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Markdown");
     expect(language.element.compareDocumentPosition(mode.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    // The picker is a crumb that opens a list, not a button: the same text-and-cursor control the
+    // titlebar's crumbs use, and none of the surface the mode group beside it wears.
+    const trigger = wrapper.get('[data-testid="language-trigger"]');
+    expect(trigger.classes()).toContain("text-menu-control");
+    expect(trigger.classes()).not.toContain("document-mode-button");
+    expect(language.classes()).not.toContain("document-mode-control");
+    // And the list behind it is the menu the titlebar opens, the same one the worktree menu is.
+    expect(wrapper.find(".marvis-menu").exists()).toBe(true);
+    // The rows scroll, not the field that filters them.
+    expect(wrapper.get('[role="listbox"]').classes()).toContain("marvis-menu-scroll");
+    expect(wrapper.find(".marvis-menu-search").exists()).toBe(true);
+    expect(wrapper.get('[role="option"]').classes()).toContain("menu-item");
     expect(mode.findAll("button").map((button) => button.text())).toEqual(["View", "Code"]);
 
     // A Markdown preview renders its own fences, so there is no grammar left to choose there.
