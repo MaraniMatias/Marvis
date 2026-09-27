@@ -2,6 +2,7 @@
   "name": "marvis",
   "private": true,
   "version": "0.1.0",
+  "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@12.5.1",
   "scripts": {

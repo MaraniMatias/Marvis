@@ -31,10 +31,25 @@
   },
   "bundle": {
     "active": true,
-    "targets": ["dmg"],
+    "targets": ["dmg", "deb", "appimage"],
     "icon": ["icons/icon.png"],
+    "category": "DeveloperTool",
+    "homepage": "https://github.com/MaraniMatias/Marvis",
+    "copyright": "Copyright (c) 2026 Marani Matias Ezequiel",
+    "shortDescription": "A focused workspace for repositories and checkouts",
+    "longDescription": "Browse files, review diffs, leave notes, and keep a terminal per checkout, in one window.",
     "macOS": {
       "hardenedRuntime": true
+    },
+    "linux": {
+      "deb": {
+        "section": "devel",
+        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"],
+        "files": {
+          "/usr/share/doc/marvis/copyright": "../LICENSE",
+          "/usr/share/metainfo/dev.marvis.workspace.metainfo.xml": "dev.marvis.workspace.metainfo.xml"
+        }
+      }
     }
   }
 }

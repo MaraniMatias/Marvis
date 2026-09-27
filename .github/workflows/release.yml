@@ -13,7 +13,21 @@ jobs:
       # Lets GITHUB_TOKEN create the release and upload the bundles. Declared here so it works
       # even while the repository's default workflow permission is read-only.
       contents: write
-    runs-on: macos-latest # Apple Silicon, so the app builds for the host natively.
+    strategy:
+      # One platform failing must not take the other's artifacts down with it.
+      fail-fast: false
+      matrix:
+        include:
+          # Apple Silicon, so the app builds for the host natively.
+          - platform: macos-latest
+            args: --target aarch64-apple-darwin
+          # The .deb and the AppImage both come out of the one build; the matrix entry only pins
+          # the runner, since tauri.conf.json already asks for every target the host supports.
+          # Pinned, not ubuntu-latest: AppImage bundling wants the pre-t64 package names, and the
+          # newer images are on the t64 ones.
+          - platform: ubuntu-22.04
+            args: --target x86_64-unknown-linux-gnu --bundles deb,appimage
+    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -21,6 +35,22 @@ jobs:
           node-version: 22
       - uses: pnpm/action-setup@v4
       - uses: dtolnay/rust-toolchain@stable
+      - name: Install the Tauri Linux prerequisites
+        if: startsWith(matrix.platform, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev \
+            libfuse2 \
+            libgtk-3-0
       - run: pnpm install --frozen-lockfile
       - uses: tauri-apps/tauri-action@v1
         env:
@@ -29,4 +59,4 @@ jobs:
           tagName: ${{ github.ref_name }}
           releaseName: "Marvis ${{ github.ref_name }}"
           generateReleaseNotes: true
-          args: "--target aarch64-apple-darwin"
+          args: ${{ matrix.args }}

@@ -805,7 +805,7 @@ mod tests {
     use std::{
         net::TcpListener,
         path::{Path, PathBuf},
-        sync::{Arc, Mutex},
+        sync::{atomic::Ordering, Arc, Mutex},
         thread::sleep,
         time::{Duration, Instant},
     };
@@ -817,7 +817,8 @@ mod tests {
 
     use super::{
         agent_program, basic_credentials, free_port, same_directory, validate_session_id,
-        AgentEvent, AgentService, BridgeError, MAX_PROMPT_BYTES, PORT_RANGE_START,
+        AgentEvent, AgentService, BridgeError, MAX_PROMPT_BYTES, NEXT_PORT_ATTEMPT, PORT_RANGE_LEN,
+        PORT_RANGE_START,
     };
 
     #[test]
@@ -869,13 +870,42 @@ mod tests {
     fn a_port_range_full_of_leftovers_still_leaves_room_to_start() {
         // Every bridge killed with its parent leaves the port it was given taken by a process
         // nobody manages. Filling the front of the window must not be what stops the next one.
-        let held: Vec<TcpListener> = (0..24)
-            .map(|offset| TcpListener::bind(("127.0.0.1", PORT_RANGE_START + offset)).unwrap())
-            .collect();
-        assert!(held.len() == 24, "the window was not filled");
+        //
+        // Which ports that is cannot be assumed. The window is the range OpenCode itself listens
+        // in, so on a machine already running the agent the front of it belongs to processes this
+        // test did not start, and binding a fixed run would die on `AddrInUse` without ever
+        // reaching the search. Take the first ports of the window that are still free, and step
+        // over the ones that are not.
+        const HELD: u16 = 24;
+        let mut held: Vec<TcpListener> = Vec::new();
+        let mut ports: Vec<u16> = Vec::new();
+        for port in PORT_RANGE_START..PORT_RANGE_START + PORT_RANGE_LEN {
+            if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
+                held.push(listener);
+                ports.push(port);
+            }
+            if ports.len() == HELD as usize {
+                break;
+            }
+        }
+        assert_eq!(
+            ports.len(),
+            HELD as usize,
+            "the window is too occupied to fill"
+        );
+
+        // The search starts from wherever the counter was last left, so the counter has to be
+        // pinned to the front for the run above to be the one it meets: pointed at the open end of
+        // the window instead, the search would walk into free space and prove nothing. Nothing
+        // else in this suite allocates a port, so no other test can move it out from under us.
+        NEXT_PORT_ATTEMPT.store(0, Ordering::Relaxed);
+
+        let found = free_port().expect("a partly filled window is enough to wedge");
+        // Every port below the one it hands back is either already somebody's or one the run
+        // holds, so coming back at or under the top of the run means it never climbed over it.
         assert!(
-            free_port().is_ok(),
-            "a partly filled window is enough to wedge"
+            found > *ports.last().expect("the run is not empty"),
+            "handed back {found}, which the run should have covered: {ports:?}"
         );
     }
 

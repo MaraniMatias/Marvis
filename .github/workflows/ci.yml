@@ -27,3 +27,34 @@ jobs:
       - run: pnpm test
       - run: pnpm test:security
       - run: pnpm build:app
+
+  # macOS never compiles the Linux branches of the code or links webkit2gtk, so nothing above would
+  # notice them rotting. This only builds the .deb: proving the app can be packaged for the platform
+  # it ships to is the point, and the tests are platform-independent enough to run once.
+  linux-build:
+    # Pinned, not ubuntu-latest: AppImage bundling wants the pre-t64 package names, and the newer
+    # images are on the t64 ones.
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: pnpm/action-setup@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install the Tauri Linux prerequisites
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            build-essential \
+            curl \
+            wget \
+            file \
+            libxdo-dev \
+            libssl-dev \
+            libayatana-appindicator3-dev \
+            librsvg2-dev
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm test
+      - run: pnpm tauri build --bundles deb

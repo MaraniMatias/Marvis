@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  AppStream metadata, installed by the .deb at /usr/share/metainfo so the app shows up with its
+  name, summary and icon in GNOME Software, KDE Discover and the like.
+  The component ID must match the `identifier` in tauri.conf.json.
+-->
+<component type="desktop-application">
+  <id>dev.marvis.workspace</id>
+  <name>Marvis</name>
+  <summary>A focused workspace for repositories and checkouts</summary>
+  <metadata_license>MIT</metadata_license>
+  <project_license>MIT</project_license>
+  <description>
+    <p>
+      Marvis keeps a repository and its checkouts in one window: browse files, review diffs, leave
+      notes, and keep a terminal per checkout.
+    </p>
+  </description>
+  <launchable type="desktop-id">Marvis.desktop</launchable>
+  <url type="homepage">https://github.com/MaraniMatias/Marvis</url>
+  <provides>
+    <binary>marvis</binary>
+  </provides>
+  <categories>
+    <category>Development</category>
+  </categories>
+</component>

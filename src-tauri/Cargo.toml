@@ -2,6 +2,10 @@
 name = "marvis"
 version = "0.1.0"
 description = "A focused workspace for repositories and checkouts"
+authors = ["Marani Matias Ezequiel"]
+license = "MIT"
+homepage = "https://github.com/MaraniMatias/Marvis"
+repository = "https://github.com/MaraniMatias/Marvis"
 edition = "2021"
 
 [build-dependencies]
