@@ -66,16 +66,17 @@
   color: var(--marvis-red);
 }
 
-/* A control with a surface, in three states: resting, hover, and pressed darker. The accent
-   never fills it — in the mockup `--marvis-accent` only paints a selection bar, an active
-   icon, the prompt or a focus ring, so a filled accent button reads as another product. */
+/* A control with a surface, in three states: resting, hover, and pressed darker.
+   The resting surface is the accent washed over the background rather than a flat neutral, so
+   a control reads as a control and not as a piece of text. The accent still never fills
+   opaquely: these are tints, and the foreground stays light. */
 .marvis-control {
   display: inline-flex;
   align-items: center;
   gap: 6px;
   border: none;
   border-radius: var(--marvis-radius);
-  background: var(--marvis-bg-2);
+  background: color-mix(in srgb, var(--marvis-accent) 14%, transparent);
   padding: 3px 8px;
   cursor: pointer;
   font-family: inherit;
@@ -84,10 +85,10 @@
     color 120ms ease;
 }
 .marvis-control:hover {
-  background: var(--marvis-border);
+  background: color-mix(in srgb, var(--marvis-accent) 24%, transparent);
 }
 .marvis-control:active {
-  background: var(--marvis-bg-0);
+  background: color-mix(in srgb, var(--marvis-accent) 8%, transparent);
 }
 .marvis-control:disabled {
   cursor: not-allowed;
