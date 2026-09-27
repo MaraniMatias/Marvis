@@ -64,9 +64,9 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 }
 
 /* The message is centred in the toast and the dismiss button keeps its corner, which takes two
-   columns and not one: a 20px column on each side, the left one empty now that the dot that
-   filled it is gone. Centring the text in the space the button leaves it would sit it a button
-   to the left of the middle, which is the one thing centring it here is meant not to do. */
+   columns and not one: a 20px column on each side, the right one for the button and the left one
+   empty. Centring the text in the space the button leaves it would sit it a whole button-width to
+   the left of the middle, which is the one thing centring it here is meant not to do. */
 .toast {
   display: grid;
   grid-template-columns: 20px minmax(0, 1fr) 20px;
@@ -75,12 +75,20 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   width: 100%;
   padding: 8px;
   border: 1px solid var(--marvis-border);
+  /* How loud a message is is a stripe down the right edge, and it took the dot's place with the
+     dot's colour: a grey note, a red failure. The edge is where a box states its own importance
+     from without putting a glyph in the text's way. */
+  border-right: 4px solid var(--marvis-text-secondary);
   border-radius: var(--marvis-radius);
   background: var(--marvis-bg-2);
   color: var(--marvis-text);
   font-size: 13px;
   line-height: 1.4;
   pointer-events: auto;
+}
+
+.toast-error {
+  border-right-color: var(--marvis-red);
 }
 
 .toast-message {

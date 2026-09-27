@@ -42,6 +42,12 @@ describe("ToastStack", () => {
     const toasts = wrapper.findAll(".toast");
     expect(toasts.map((toast) => toast.attributes("role"))).toEqual(["alert", "status"]);
     expect(toasts.map((toast) => toast.text())).toEqual(["Could not read the index", "Worktree removed"]);
+    // The stripe that says which of the two is which is styled off the level class, so the class
+    // has to be there: drop the binding and a failure quietly stops being red.
+    expect(toasts.map((toast) => toast.classes().find((name) => name.startsWith("toast-")))).toEqual([
+      "toast-error",
+      "toast-info",
+    ]);
     wrapper.unmount();
   });
 
