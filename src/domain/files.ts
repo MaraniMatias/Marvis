@@ -31,3 +31,13 @@ export interface CheckoutImage {
   dataBase64: string;
   sizeBytes: number;
 }
+
+/**
+ * The path a terminal would need to open this file: the checkout's own directory, then the path
+ * the tree lists. The checkout directory is canonical and the file's path is relative, so this is
+ * the one place the two are joined, and it owns the separator: a checkout that arrives with a
+ * trailing slash must not produce a doubled one.
+ */
+export function absoluteFilePath(canonicalPath: string, path: string): string {
+  return `${canonicalPath.replace(/[\\/]+$/, "")}/${path}`;
+}
