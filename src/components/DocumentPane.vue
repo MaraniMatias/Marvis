@@ -16,17 +16,13 @@ const props = withDefaults(
     gitSnapshot: ActiveGitSnapshot;
     refreshRevision?: number;
     readingPosition?: { top: number; left: number };
-    zedAvailable?: boolean;
-    neovimAvailable?: boolean;
   }>(),
-  { refreshRevision: 0, readingPosition: () => ({ top: 0, left: 0 }), zedAvailable: false, neovimAvailable: false },
+  { refreshRevision: 0, readingPosition: () => ({ top: 0, left: 0 }) },
 );
 const emit = defineEmits<{
   updateMode: [mode: DocumentMode];
   readingPositionChanged: [position: { top: number; left: number }];
   openMarkdownLink: [path: string];
-  openInZed: [];
-  openInNeovim: [];
 }>();
 
 const content = ref("");
@@ -34,7 +30,6 @@ const contentState = ref<"idle" | "loading" | "ready" | "error">("idle");
 const contentError = ref("");
 const contentIdentity = ref<string | null>(null);
 const fileViewport = ref<HTMLElement | null>(null);
-const wrapCode = ref(false);
 const deleted = computed(
   () =>
     props.path !== null &&
@@ -348,66 +343,28 @@ function onMarkdownLink(event: MouseEvent) {
       <span class="min-w-0 truncate text-[11px] text-(--marvis-text-dim)" :title="path ?? undefined">{{
         path ?? ""
       }}</span>
-      <div role="group" aria-label="Document mode" class="document-mode-control flex shrink-0 items-center gap-0.5">
+      <div
+        v-if="isMarkdown"
+        role="group"
+        aria-label="Document mode"
+        class="document-mode-control flex shrink-0 items-center gap-0.5"
+      >
         <button
           type="button"
-          :disabled="!zedAvailable"
-          title="Open in Zed"
-          aria-label="Open file in Zed"
-          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
-          @click="$emit('openInZed')"
+          :aria-pressed="mode === 'view'"
+          class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
+          @click="$emit('updateMode', 'view')"
         >
-          ↗ Zed
+          View
         </button>
         <button
           type="button"
-          :disabled="!neovimAvailable"
-          title="Open in Neovim"
-          aria-label="Open file in Neovim"
-          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
-          @click="$emit('openInNeovim')"
-        >
-          ↗ Neovim
-        </button>
-        <button
-          v-if="path"
-          type="button"
-          :aria-pressed="wrapCode"
-          :disabled="compactSource"
-          :title="
-            compactSource
-              ? 'Wrapping is unavailable for files with more than 5,000 lines'
-              : 'Toggle source line wrapping'
-          "
-          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
-          @click="wrapCode = !wrapCode"
-        >
-          Wrap
-        </button>
-        <template v-if="isMarkdown">
-          <button
-            type="button"
-            :aria-pressed="mode === 'view'"
-            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
-            @click="$emit('updateMode', 'view')"
-          >
-            View
-          </button>
-          <button
-            type="button"
-            :aria-pressed="mode === 'code'"
-            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
-            @click="$emit('updateMode', 'code')"
-          >
-            Code
-          </button>
-        </template>
-        <span
-          v-else-if="path"
-          class="document-mode-button rounded-sm bg-(--marvis-border) px-2.5 py-1 text-[11px] text-(--marvis-text-secondary)"
+          :aria-pressed="mode === 'code'"
+          class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
+          @click="$emit('updateMode', 'code')"
         >
           Code
-        </span>
+        </button>
       </div>
     </header>
     <section ref="fileViewport" class="min-h-0 flex-1 overflow-auto" aria-label="File contents" @scroll="onFileScroll">
@@ -436,7 +393,7 @@ function onMarkdownLink(event: MouseEvent) {
             role="status"
             class="px-3 pt-3 text-xs text-(--marvis-text-faint)"
           >
-            Loading relative images…
+            Rendering preview…
           </p>
           <p v-if="markdownImageWarning" role="status" class="px-3 pt-3 text-xs text-(--marvis-red)">
             Some Markdown images were missing, unsupported, or over the preview limits.
@@ -465,28 +422,15 @@ function onMarkdownLink(event: MouseEvent) {
         </div>
         <div
           v-else
-          class="py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
-          :class="wrapCode ? 'w-full min-w-0' : 'min-w-max'"
+          class="min-w-max py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
           aria-label="Source code"
         >
-          <div
-            v-for="(line, index) in sourceLines"
-            :key="index"
-            class="flex min-h-5"
-            :class="wrapCode ? 'whitespace-pre-wrap break-all' : 'whitespace-pre'"
-          >
+          <div v-for="(line, index) in sourceLines" :key="index" class="flex min-h-5 whitespace-pre">
             <span class="source-line-number">{{ index + 1 }}</span>
             <!-- eslint-disable vue/no-v-html -- Line fragments come from one sanitized Shiki render. -->
-            <code
-              v-if="highlightedLines !== null"
-              class="shiki px-3"
-              :class="wrapCode ? 'min-w-0 whitespace-pre-wrap break-all' : 'min-w-max'"
-              v-html="highlightedLines[index]"
-            />
+            <code v-if="highlightedLines !== null" class="shiki min-w-max px-3" v-html="highlightedLines[index]" />
             <!-- eslint-enable vue/no-v-html -->
-            <code v-else class="px-3" :class="wrapCode ? 'min-w-0 whitespace-pre-wrap break-all' : 'min-w-max'">{{
-              line
-            }}</code>
+            <code v-else class="min-w-max px-3">{{ line }}</code>
           </div>
         </div>
       </template>
@@ -578,6 +522,14 @@ function onMarkdownLink(event: MouseEvent) {
   padding: 0.1rem 0.25rem;
   font-family: var(--marvis-font);
   font-size: 0.85em;
+}
+
+/* Shiki's own <pre> is dropped so this rule owns the block surface, which also drops the base
+   color it carried. Unstyled runs of a code block have no span of their own, so the text color
+   has to come from here or those runs fall back to the dimmer document color. */
+.markdown-preview :deep(pre code) {
+  color: #e6edf3;
+  font-family: var(--marvis-font);
 }
 
 .markdown-preview :deep(img) {

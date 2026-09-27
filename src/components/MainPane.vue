@@ -25,28 +25,16 @@ const props = withDefaults(
     activeSessionId: string | null;
     isOpening: boolean;
     shellRequest?: { checkoutId: string; token: number } | null;
-    nvimRequest?: {
-      checkoutId: string;
-      filePath?: string;
-      line?: number;
-      column?: number;
-      token: number;
-    } | null;
     registeredSessionIds?: string[];
-    zedAvailable?: boolean;
-    neovimAvailable?: boolean;
     refreshRevision?: number;
     readingPosition?: { top: number; left: number };
     diffScrollTop?: number;
   }>(),
   {
-    zedAvailable: false,
-    neovimAvailable: false,
     refreshRevision: 0,
     readingPosition: () => ({ top: 0, left: 0 }),
     diffScrollTop: 0,
     shellRequest: null,
-    nvimRequest: null,
     registeredSessionIds: () => [],
   },
 );
@@ -58,8 +46,6 @@ defineEmits<{
   readingPositionChanged: [position: { top: number; left: number }];
   diffPositionChanged: [top: number];
   openMarkdownLink: [path: string];
-  openInZed: [];
-  openInNeovim: [];
 }>();
 
 const sessionPane = ref<InstanceType<typeof SessionPane> | null>(null);
@@ -87,7 +73,6 @@ const diffView = computed(() => (props.view.kind === "diff" ? props.view : null)
         :is-opening="isOpening || !ready"
         :visible="ready && terminal"
         :shell-request="shellRequest"
-        :nvim-request="nvimRequest"
         :registered-session-ids="registeredSessionIds"
         @open-folder="$emit('openFolder')"
         @workspace-updated="$emit('workspaceUpdated', $event)"
@@ -103,13 +88,9 @@ const diffView = computed(() => (props.view.kind === "diff" ? props.view : null)
         :git-snapshot="gitSnapshot"
         :refresh-revision="refreshRevision"
         :reading-position="readingPosition"
-        :zed-available="zedAvailable"
-        :neovim-available="neovimAvailable"
         @update-mode="$emit('updateDocumentMode', $event)"
         @reading-position-changed="$emit('readingPositionChanged', $event)"
         @open-markdown-link="$emit('openMarkdownLink', $event)"
-        @open-in-zed="$emit('openInZed')"
-        @open-in-neovim="$emit('openInNeovim')"
       />
     </section>
     <section v-show="diffView" id="main-view-diff" class="absolute inset-0">
@@ -121,11 +102,7 @@ const diffView = computed(() => (props.view.kind === "diff" ? props.view : null)
         :review="review"
         :path="diffView.path"
         :scroll-top="diffScrollTop"
-        :zed-available="zedAvailable"
-        :neovim-available="neovimAvailable"
         @scroll-position-changed="$emit('diffPositionChanged', $event)"
-        @open-in-zed="$emit('openInZed')"
-        @open-in-neovim="$emit('openInNeovim')"
       />
     </section>
   </div>

@@ -21,13 +21,6 @@ const props = defineProps<{
   isOpening: boolean;
   visible?: boolean;
   shellRequest?: { checkoutId: string; token: number } | null;
-  nvimRequest?: {
-    checkoutId: string;
-    filePath?: string;
-    line?: number;
-    column?: number;
-    token: number;
-  } | null;
   registeredSessionIds?: string[];
 }>();
 const isVisible = computed(() => props.visible ?? true);
@@ -58,8 +51,6 @@ const layoutSaveQueues = new Map<string, Promise<void>>();
 const views = ref<TerminalView[]>([]);
 const pendingViewKey = ref<string | null>(null);
 const startingCheckoutIds = ref(new Set<string>());
-const nvimLaunchingCheckoutIds = ref(new Set<string>());
-const handledNvimRequestTokens = new Set<number>();
 const terminalRefs = new Map<string, TerminalSessionHandle>();
 const nextViewId = ref(1);
 const { push: pushToast } = useToasts();
@@ -166,50 +157,6 @@ async function requestClose(sessionId: string) {
 
 defineExpose({ focusActiveTerminal, requestClose });
 
-async function launchNeovim(target?: TerminalLaunchTarget) {
-  const selectedCheckout = props.checkout;
-  if (!selectedCheckout || selectedCheckout.isMissing || nvimLaunchingCheckoutIds.value.has(selectedCheckout.id))
-    return;
-  nvimLaunchingCheckoutIds.value = new Set(nvimLaunchingCheckoutIds.value).add(selectedCheckout.id);
-  try {
-    const currentView = activeView.value;
-    if (!currentView) {
-      await createTerminalSession("nvim", target);
-      return;
-    }
-    if (currentView.sessionType === "nvim") return;
-    // A terminal that has not answered yet has no handle to close, and asking again would
-    // race the one launch already in flight. Both are refusals, not failures: they say what
-    // to do next, which is what `info` is for.
-    if (!currentView.session) {
-      pushToast("Wait for the current terminal to start before opening Neovim.", "info");
-      return;
-    }
-    const terminal = terminalRefs.get(currentView.key);
-    if (!terminal) {
-      pushToast("The current terminal is not ready to open Neovim.", "info");
-      return;
-    }
-    if ((await terminal.requestClose()) && props.checkout?.id === selectedCheckout.id) {
-      await createTerminalSession("nvim", target, true);
-    }
-  } finally {
-    const pending = new Set(nvimLaunchingCheckoutIds.value);
-    pending.delete(selectedCheckout.id);
-    nvimLaunchingCheckoutIds.value = pending;
-  }
-}
-
-function handleNvimRequest(request: NonNullable<typeof props.nvimRequest>) {
-  if (handledNvimRequestTokens.has(request.token)) return false;
-  handledNvimRequestTokens.add(request.token);
-  const target = request.filePath
-    ? { filePath: request.filePath, line: request.line ?? 1, column: request.column }
-    : undefined;
-  void launchNeovim(target);
-  return true;
-}
-
 function onCreated(key: string, result: { session: Session; workspace: WorkspaceState }) {
   const view = views.value.find((item) => item.key === key);
   if (!view || view.session) return;
@@ -273,32 +220,10 @@ function handleKeyboard(event: KeyboardEvent) {
 }
 
 watch(
-  () => [props.checkout?.id, props.checkout?.isMissing, props.isOpening] as const,
-  ([checkoutId, isMissing, isOpening]) => {
-    if (!checkoutId || isMissing || isOpening) return;
-    // Selecting a workdir shows what that workdir already has. It never spawns a terminal on
-    // its own: a checkout with nothing open belongs on the "New terminal" empty state, and
-    // opening one is the user's call, from the empty state or from the row in the sidebar.
-    const request = props.nvimRequest;
-    if (request?.checkoutId === checkoutId) handleNvimRequest(request);
-  },
-  { immediate: true },
-);
-
-watch(
   () => props.shellRequest?.token,
   (token) => {
     if (token && props.shellRequest?.checkoutId === props.checkout?.id)
       void createTerminalSession("shell", undefined, true);
-  },
-);
-
-watch(
-  () => props.nvimRequest?.token,
-  () => {
-    const request = props.nvimRequest;
-    if (!request || request.checkoutId !== props.checkout?.id) return;
-    handleNvimRequest(request);
   },
 );
 

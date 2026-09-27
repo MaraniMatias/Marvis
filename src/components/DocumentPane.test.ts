@@ -272,10 +272,10 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
-  it("offers View/Code for a Markdown file, and the two editor buttons", async () => {
+  it("offers View/Code only for a Markdown file, and no mode control for anything else", async () => {
     mocks.readCheckoutFile.mockResolvedValue({ path: "docs/readme.md", content: "# Current file" });
     const wrapper = mount(DocumentPane, {
-      props: { ...documentPaneProps("docs/readme.md", "view"), zedAvailable: true, neovimAvailable: true },
+      props: documentPaneProps("docs/readme.md", "view"),
     });
     await flushPromises();
 
@@ -284,12 +284,7 @@ describe("DocumentPane", () => {
         .get('[aria-label="Document mode"]')
         .findAll("button")
         .map((button) => button.text()),
-    ).toEqual(["↗ Zed", "↗ Neovim", "Wrap", "View", "Code"]);
-
-    await wrapper.get('button[aria-label="Open file in Zed"]').trigger("click");
-    await wrapper.get('button[aria-label="Open file in Neovim"]').trigger("click");
-    expect(wrapper.emitted("openInZed")).toHaveLength(1);
-    expect(wrapper.emitted("openInNeovim")).toHaveLength(1);
+    ).toEqual(["View", "Code"]);
 
     await wrapper
       .get('[aria-label="Document mode"]')
@@ -297,6 +292,17 @@ describe("DocumentPane", () => {
       .find((button) => button.text() === "Code")!
       .trigger("click");
     expect(wrapper.emitted("updateMode")?.at(-1)).toEqual(["code"]);
+    wrapper.unmount();
+  });
+
+  it("shows no mode control for a file that has no modes to switch", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const answer: number = 42;" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await flushPromises();
+
+    expect(wrapper.find('[aria-label="Document mode"]').exists()).toBe(false);
+    expect(wrapper.text()).not.toContain("Wrap");
+    expect(wrapper.emitted("updateMode")).toBeUndefined();
     wrapper.unmount();
   });
 
@@ -324,7 +330,6 @@ describe("DocumentPane", () => {
     const source = wrapper.get('[aria-label="Source code"]');
     expect(source.findAll(".source-line-number")).toHaveLength(1);
     expect(source.get(".source-line-number").text().split("\n")).toHaveLength(5001);
-    expect(wrapper.get('button[title^="Wrapping is unavailable"]').attributes("disabled")).toBeDefined();
     wrapper.unmount();
   });
 

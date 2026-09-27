@@ -46,7 +46,7 @@ export function useMarkdownPreview(getCheckoutId: () => string | null) {
     markdownPreviewState.value = "loading";
     const { attachMarkdownImages, renderMarkdownPreview } = await import("../lib/markdown-preview");
     if (!isCurrent(requestGeneration, checkoutId)) return;
-    const preview = renderMarkdownPreview(source, path);
+    const preview = await renderMarkdownPreview(source, path);
     const paths = preview.images.map((image) => image.path);
     const loadedImages = new Map<string, { mimeType: string; dataBase64: string }>();
     markdownImageWarning.value = preview.images.length > MAX_MARKDOWN_IMAGES;

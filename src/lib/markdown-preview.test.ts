@@ -3,8 +3,8 @@ import { describe, expect, it } from "vitest";
 import { attachMarkdownImages, renderMarkdownPreview } from "./markdown-preview";
 
 describe("Markdown preview", () => {
-  it("renders GFM tables, task lists, and fenced code", () => {
-    const preview = renderMarkdownPreview(
+  it("renders GFM tables, task lists, and fenced code", async () => {
+    const preview = await renderMarkdownPreview(
       "| name | value |\n| --- | --- |\n| one | two |\n\n- [x] done\n- [ ] later\n\n```js\nconst answer = 42;\n```",
       "docs/readme.md",
     );
@@ -12,11 +12,12 @@ describe("Markdown preview", () => {
     expect(preview.html).toContain("<table>");
     expect(preview.html).toContain('type="checkbox"');
     expect(preview.html).toContain("checked");
-    expect(preview.html).toContain('<pre><code class="language-js">const answer = 42;');
+    expect(preview.html).toContain('<pre><code class="language-js">');
+    expect(preview.html).toContain('<span class="line">');
   });
 
-  it("SEC-04 sanitizes scripts, event handlers, and javascript URLs", () => {
-    const preview = renderMarkdownPreview(
+  it("SEC-04 sanitizes scripts, event handlers, and javascript URLs", async () => {
+    const preview = await renderMarkdownPreview(
       '<script>alert(1)</script>\n<img src="x" onerror="alert(2)">\n[bad](javascript:alert(3))\n![bad](javascript:alert(4))',
       "readme.md",
     );
@@ -26,8 +27,8 @@ describe("Markdown preview", () => {
     expect(preview.images).toEqual([]);
   });
 
-  it("only asks the backend for contained relative images and attaches trusted data URLs", () => {
-    const preview = renderMarkdownPreview(
+  it("only asks the backend for contained relative images and attaches trusted data URLs", async () => {
+    const preview = await renderMarkdownPreview(
       "![local](../images/pic.png) ![repeat](../images/pic.png) ![escape](../../../secret.png) ![remote](https://example.com/a.png)",
       "docs/guide/readme.md",
     );
@@ -41,5 +42,59 @@ describe("Markdown preview", () => {
     );
     expect(html).toContain('src="data:image/png;base64,iVBORw0KGgo="');
     expect(html).not.toContain("data-marvis-image");
+  });
+
+  it("colors fenced code, including a fence nested in a blockquote", async () => {
+    const preview = await renderMarkdownPreview(
+      "> ```python\n> value = 1\n> ```\n\n```rust\nlet answer = 42;\n```",
+      "docs/readme.md",
+    );
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+    const blocks = Array.from(document.querySelectorAll("pre > code"));
+
+    expect(blocks).toHaveLength(2);
+    for (const block of blocks) {
+      expect(block.querySelectorAll("span.line").length).toBeGreaterThan(0);
+      expect(block.querySelector("span[style]")).not.toBeNull();
+    }
+    expect(blocks[0]?.textContent).toBe("value = 1\n");
+    expect(blocks[1]?.textContent).toBe("let answer = 42;\n");
+  });
+
+  it("leaves blocks plain when no language, an unknown one, or the budget says so", async () => {
+    const preview = await renderMarkdownPreview(
+      "```\nno language\n```\n\n```not-a-language\nstill plain\n```\n",
+      "docs/readme.md",
+    );
+
+    expect(preview.html).toContain("no language");
+    expect(preview.html).toContain("still plain");
+    expect(preview.html).not.toContain("span.line");
+  });
+
+  it("SEC-05 never resolves a fence info string to anything outside the allowlist", async () => {
+    const preview = await renderMarkdownPreview(
+      "```../../etc/passwd\nnope\n```\n\n```<img src=x onerror=alert(1)>\nnope\n```\n\n```javascript:alert(1)\nnope\n```",
+      "docs/readme.md",
+    );
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+
+    expect(document.querySelector("span.line, img, script")).toBeNull();
+    expect(document.querySelector("a[href^='javascript:']")).toBeNull();
+  });
+
+  it("SEC-06 escapes a code body that tries to inject markup", async () => {
+    const preview = await renderMarkdownPreview(
+      "```html\n<script>alert(1)</script><img src=x onerror=alert(2)>\n```",
+      "docs/readme.md",
+    );
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+
+    // The body has to reach the page as text. Asserted over the whole document rather than from
+    // inside `pre > code`: happy-dom's parser drops the `<pre>` when its content holds escaped
+    // angle brackets, which is a test-environment quirk a browser does not have.
+    expect(document.querySelector("script, img")).toBeNull();
+    expect(preview.html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
+    expect(preview.html).not.toContain("<script>");
   });
 });

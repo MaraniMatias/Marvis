@@ -293,57 +293,6 @@ describe("SessionPane terminal UI", () => {
     wrapper.unmount();
   });
 
-  it("routes a Neovim file target through one terminal launch request", async () => {
-    const launchRequest = {
-      checkoutId: checkout.id,
-      filePath: "src/file; name.rs",
-      line: 23,
-      column: 8,
-      token: 1,
-    };
-    const wrapper = mount(SessionPane, {
-      props: { checkout: null, activeSessionId: null, isOpening: true, nvimRequest: null },
-    });
-
-    await wrapper.setProps({ checkout, isOpening: true, nvimRequest: launchRequest });
-    await flushPromises();
-
-    const terminal = wrapper.findComponent({ name: "TerminalSession" });
-    expect(terminal.props("sessionType")).toBe("nvim");
-    expect(terminal.props("launchTarget")).toEqual({
-      filePath: "src/file; name.rs",
-      line: 23,
-      column: 8,
-    });
-    wrapper.unmount();
-  });
-
-  it("launches Neovim in the single terminal after confirming replacement of the shell", async () => {
-    terminalMock.autoCreate = true;
-    const wrapper = mount(SessionPane, {
-      props: { checkout, activeSessionId: null, isOpening: true },
-    });
-    await wrapper.setProps({ isOpening: false });
-    await flushPromises();
-    await openTerminal(wrapper);
-
-    await wrapper.setProps({
-      nvimRequest: {
-        checkoutId: checkout.id,
-        filePath: "src/main.rs",
-        line: 10,
-        token: 1,
-      },
-    });
-    await flushPromises();
-
-    expect(terminalMock.closeRequests).toBe(1);
-    expect(terminalMock.mounts).toBe(2);
-    expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(1);
-    expect(wrapper.findComponent({ name: "TerminalSession" }).props("sessionType")).toBe("nvim");
-    wrapper.unmount();
-  });
-
   it("normalizes a legacy split layout and does not mount historical PTYs", async () => {
     const otherSession: Session = {
       id: "session:old-split",

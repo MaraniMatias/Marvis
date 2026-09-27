@@ -30,18 +30,14 @@ const props = withDefaults(
     /** Null is the whole change set: one diff per changed file, stacked in status order. */
     path: string | null;
     scrollTop: number;
-    zedAvailable?: boolean;
-    neovimAvailable?: boolean;
     /** Nested in the change-set stack, where the row above already names the file. */
     embedded?: boolean;
   }>(),
-  { zedAvailable: false, neovimAvailable: false, embedded: false },
+  { embedded: false },
 );
 const emit = defineEmits<{
   ready: [path: string];
   scrollPositionChanged: [top: number];
-  openInZed: [];
-  openInNeovim: [];
 }>();
 
 const diff = shallowRef<GitFileDiff | null>(null);
@@ -433,28 +429,6 @@ onUnmounted(() => {
           <p class="truncate text-[11px] text-(--marvis-text-dim)" :title="title">{{ title }}</p>
           <p v-if="!path && branch" class="truncate text-[11px] text-(--marvis-text-faint)">{{ branch }}</p>
         </div>
-        <div role="group" aria-label="Diff actions" class="document-mode-control flex shrink-0 items-center gap-0.5">
-          <button
-            type="button"
-            :disabled="!zedAvailable"
-            title="Open in Zed"
-            aria-label="Open file in Zed"
-            class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
-            @click="$emit('openInZed')"
-          >
-            ↗ Zed
-          </button>
-          <button
-            type="button"
-            :disabled="!neovimAvailable"
-            title="Open in Neovim"
-            aria-label="Open file in Neovim"
-            class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
-            @click="$emit('openInNeovim')"
-          >
-            ↗ Neovim
-          </button>
-        </div>
       </div>
       <div v-if="sender" class="mt-2 flex flex-col items-end gap-1">
         <div class="flex flex-wrap items-center justify-end gap-1.5">
@@ -565,8 +539,6 @@ onUnmounted(() => {
               :review="review"
               :path="file.path"
               :scroll-top="0"
-              :zed-available="zedAvailable"
-              :neovim-available="neovimAvailable"
               embedded
             />
           </section>

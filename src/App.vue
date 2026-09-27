@@ -18,8 +18,6 @@ import {
   Settings as SettingsIcon,
 } from "@lucide/vue";
 import type { Checkout } from "./domain/workspace";
-import { parseEditorPosition } from "./domain/editor";
-import type { EditorPosition } from "./domain/editor";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
 import InspectorPane from "./components/InspectorPane.vue";
@@ -29,13 +27,10 @@ import ToastStack from "./components/ToastStack.vue";
 import WorktreeDialog from "./components/WorktreeDialog.vue";
 import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
 import {
-  getEditorAvailability,
-  openInZed,
   closeMissingCheckout as persistMissingCheckoutClose,
   selectCheckout as persistCheckoutSelection,
 } from "./lib/ipc";
 
-import type { EditorAvailability } from "./lib/ipc";
 import { useWorkspaceState } from "./presentation/workspace";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
 import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
@@ -117,20 +112,11 @@ watch(
   },
 );
 const shellRequest = ref<{ checkoutId: string; token: number } | null>(null);
-const nvimRequest = ref<{
-  checkoutId: string;
-  filePath?: string;
-  line?: number;
-  column?: number;
-  token: number;
-} | null>(null);
 const sendingReview = ref(false);
 const mainViews = ref<Record<string, MainView>>({});
-const editorAvailability = ref<EditorAvailability>({ zed: false, neovim: false });
 const sessionRuntimeStatuses = ref<Record<string, TerminalSessionStatus>>({});
 const documentRefreshRevisions = ref<Record<string, number>>({});
 let shellRequestToken = 0;
-let nvimRequestToken = 0;
 let unlistenFileActivity: (() => void) | undefined;
 let activityListenerDisposed = false;
 let unlistenCloseRequested: (() => void) | undefined;
@@ -167,11 +153,6 @@ const activeSession = computed(() => {
 });
 /** What the last crumb names. A file or a change set is not a session, so it is named as itself. */
 const activeViewLabel = computed(() => mainViewLabel(activeMainView.value, activeSession.value?.name ?? null));
-/** The file an external editor would open, or null when the view is the whole change set. */
-const activeViewFile = computed(() => {
-  const view = activeMainView.value;
-  return view.kind === "terminal" ? null : view.path;
-});
 const activeCheckoutUiState = computed(() => {
   const checkoutId = activeCheckout.value?.id;
   return checkoutId ? checkoutUiStates.value[checkoutId] : undefined;
@@ -422,11 +403,6 @@ onMounted(async () => {
   } catch {
     // File-write activity is optional; PTY foreground-process activity remains observable.
   }
-  try {
-    editorAvailability.value = await getEditorAvailability();
-  } catch {
-    editorAvailability.value = { zed: false, neovim: false };
-  }
 });
 
 onUnmounted(() => {
@@ -508,43 +484,6 @@ async function requestShell(checkoutId: string) {
   }
 }
 
-async function requestNvim(checkoutId: string, filePath?: string, position?: EditorPosition) {
-  showView(checkoutId, { kind: "terminal", sessionId: null });
-  const request = {
-    checkoutId,
-    ...(filePath && position && { filePath, line: position.line, column: position.column }),
-    token: ++nvimRequestToken,
-  };
-  nvimRequest.value = request;
-  try {
-    workspace.value = await persistCheckoutSelection(checkoutId);
-  } catch (cause) {
-    if (nvimRequest.value?.token === request.token) nvimRequest.value = null;
-    reportCause(cause);
-  }
-}
-
-/**
- * Hands the file the main panel is showing to an external editor. A line is asked for only when
- * there is a file to place the cursor in, so opening an editor without one takes no input.
- */
-async function requestEditor(editor: "zed" | "neovim") {
-  const checkout = activeCheckout.value;
-  if (!checkout || checkout.isMissing) return;
-  const file = activeViewFile.value ?? undefined;
-  const position = file ? promptEditorPosition() : undefined;
-  if (file && !position) return;
-  if (editor === "neovim") {
-    await requestNvim(checkout.id, file, position ?? undefined);
-    return;
-  }
-  try {
-    await openInZed(checkout.id, file, position?.line, position?.column);
-  } catch (cause) {
-    reportCause(cause);
-  }
-}
-
 /**
  * Ships the notes the caller chose to one agent session as a single message.
  *
@@ -614,14 +553,6 @@ const reviewSender: ReviewSender = {
   send: sendReviewToAgent,
 };
 provide(REVIEW_SENDER, reviewSender);
-
-function promptEditorPosition(): EditorPosition | null {
-  const value = window.prompt("Open selected file at line[:column]:", "1");
-  if (value === null) return null;
-  const position = parseEditorPosition(value);
-  if (!position) pushToast("Enter a positive line number with an optional column (for example, 42:7).");
-  return position;
-}
 
 function updateSessionStatus(sessionId: string, status: TerminalSessionStatus | null) {
   if (status) sessionRuntimeStatuses.value[sessionId] = status;
@@ -784,10 +715,7 @@ function reportWarning(message: string) {
           :active-session-id="workspace.activeSessionId"
           :is-opening="isOpening"
           :shell-request="shellRequest"
-          :nvim-request="nvimRequest"
           :registered-session-ids="registeredSessionIds"
-          :zed-available="editorAvailability.zed"
-          :neovim-available="editorAvailability.neovim"
           :refresh-revision="documentRefreshRevisions[activeCheckout?.id ?? ''] ?? 0"
           :reading-position="{
             top: activeCheckoutUiState?.documentScrollTop ?? 0,
@@ -801,8 +729,6 @@ function reportWarning(message: string) {
           @reading-position-changed="activeCheckout && updateDocumentReadingPosition(activeCheckout.id, $event)"
           @diff-position-changed="activeCheckout && updateDiffReadingPosition(activeCheckout.id, $event)"
           @open-markdown-link="activeCheckout && openFileDocument({ checkoutId: activeCheckout.id, path: $event })"
-          @open-in-zed="requestEditor('zed')"
-          @open-in-neovim="requestEditor('neovim')"
         />
       </SplitterPanel>
       <SplitterResizeHandle
