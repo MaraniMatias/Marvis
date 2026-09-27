@@ -75,12 +75,10 @@ function snapshot(files: string[] = ["src/app.ts"]): ActiveGitSnapshot {
     statusState: "ready",
     statusError: "",
     changesStatusError: "",
-    viewedError: "",
     changesWatchError: "",
     statusRevision: 0,
     statusEventRevision: 0,
     statusEventCheckoutId: null,
-    markViewed: vi.fn(async () => undefined),
   });
 }
 
@@ -163,7 +161,6 @@ function mountDiff(props: Record<string, unknown>, sender: ReviewSender | null =
           gitSnapshot: snapshot(),
           review: reviewApi(),
           path: "src/app.ts",
-          active: true,
           scrollTop: 0,
           ...props,
         });
@@ -320,7 +317,6 @@ describe("FileDiff", () => {
         gitSnapshot: snapshot(),
         review: reviewApi([note()]),
         path: "src/app.ts",
-        active: true,
         scrollTop: 0,
       },
     });

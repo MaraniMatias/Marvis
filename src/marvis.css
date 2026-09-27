@@ -30,8 +30,8 @@
   outline-offset: -2px;
 }
 
-/* Resize handle: repaints the shadcn `bg-border` divider and grip with the
-   marvis palette. The grip is rendered inside ResizableHandle's own template. */
+/* Resize handle: repaints the divider and grip the resizable renders with the marvis
+   palette. The grip comes from the handle's own template. */
 .app-shell [data-slot="resizable-handle"] {
   background: var(--marvis-border);
 }

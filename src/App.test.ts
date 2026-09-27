@@ -40,7 +40,6 @@ const mocks = vi.hoisted(() => ({
   }>,
   agentTargetId: null as string | null,
   createAgentSession: vi.fn(),
-  sendAgentPrompt: vi.fn(),
   dispatchReviewRound: vi.fn(),
   reconcileRounds: vi.fn(),
   flushQueuedRounds: vi.fn(),
@@ -103,11 +102,9 @@ vi.mock("@tauri-apps/api/window", () => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./lib/ipc", () => ({
-  closeMissingCheckout: vi.fn(),
   getEditorAvailability: mocks.getEditorAvailability,
   loadAppLayout: mocks.loadAppLayout,
   loadCheckoutUiState: mocks.loadCheckoutUiState,
-  locateMissingCheckout: vi.fn(),
   openInZed: vi.fn(),
   saveAppLayout: mocks.saveAppLayout,
   saveCheckoutUiState: mocks.saveCheckoutUiState,
@@ -166,12 +163,10 @@ vi.mock("./presentation/active-git-snapshot", () => ({
     statusState: "idle",
     statusError: "",
     changesStatusError: "",
-    viewedError: "",
     changesWatchError: "",
     statusRevision: 0,
     statusEventRevision: 0,
     statusEventCheckoutId: null,
-    markViewed: vi.fn(),
   }),
 }));
 vi.mock("./presentation/review-notes", () => ({
@@ -186,7 +181,6 @@ vi.mock("./presentation/review-notes", () => ({
     addNote: vi.fn(),
     updateNote: vi.fn(),
     deleteNote: vi.fn(),
-    markSent: vi.fn(),
     verifyAnchors: vi.fn(),
     clearOutdated: vi.fn(),
     resolveNote: vi.fn(),
@@ -211,7 +205,6 @@ vi.mock("./presentation/agent-sessions", async () => {
       events: [],
       reload: vi.fn(),
       createSession: mocks.createAgentSession,
-      sendReview: mocks.sendAgentPrompt,
       selectTarget: vi.fn(),
       stop: vi.fn(),
       // A getter, so the watcher that observes turn completions tracks this source.
@@ -402,7 +395,6 @@ describe("App UI integration", () => {
     mocks.agentSessions = [];
     mocks.agentTargetId = null;
     mocks.createAgentSession.mockReset();
-    mocks.sendAgentPrompt.mockReset();
     mocks.dispatchReviewRound.mockReset();
     mocks.reconcileRounds.mockReset();
     mocks.flushQueuedRounds.mockReset();
@@ -468,7 +460,6 @@ describe("App UI integration", () => {
       expect(search.attributes("aria-label")).toBe("Search files and commands");
       expect(search.attributes("placeholder")).toBe("Search...");
       expect(wrapper.find("kbd").exists()).toBe(false);
-      expect(wrapper.findComponent({ name: "CommandPalette" }).exists()).toBe(false);
       wrapper.unmount();
     });
 

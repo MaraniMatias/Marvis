@@ -24,7 +24,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   openFile: [value: { checkoutId: string; path: string }];
   openChange: [value: { checkoutId: string; path: string }];
-  /** Every changed file in one diff. App.vue binds it in phase 4, when main becomes a diff. */
+  /** Every changed file in one diff, which is the one view with no path. */
   openAllChanges: [value: { checkoutId: string }];
   updateUiState: [
     value: Pick<

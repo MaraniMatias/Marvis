@@ -14,11 +14,9 @@ import {
   listAgentSessions,
   listReviewNotes,
   listReviewRounds,
-  markReviewNotesSent,
   reconcileReviewRound,
   requeueReviewRounds,
   resolveReviewNote,
-  sendAgentPrompt,
   stopAgent,
   updateReviewNote,
   verifyReviewNoteAnchors,
@@ -26,9 +24,7 @@ import {
   getGitCheckoutDiffStats,
   getGitDiffPage,
   getGitDiffStats,
-  getGitViewedFiles,
   loadTerminalLayout,
-  markGitFileViewed,
   openFolder,
   openInZed,
   resizeTerminal,
@@ -159,26 +155,16 @@ describe("terminal IPC client", () => {
 describe("Git review IPC client", () => {
   beforeEach(() => vi.clearAllMocks());
 
-  it("uses checkout-scoped page and viewed-state commands", async () => {
-    vi.mocked(invoke)
-      .mockResolvedValueOnce({ path: "src/file.ts", lines: [] })
-      .mockResolvedValueOnce([])
-      .mockResolvedValueOnce(undefined);
+  it("uses the checkout-scoped diff page command", async () => {
+    vi.mocked(invoke).mockResolvedValueOnce({ path: "src/file.ts", lines: [] });
 
     await getGitDiffPage("checkout:one", "src/file.ts", 320, 32);
-    await getGitViewedFiles("checkout:one");
-    await markGitFileViewed("checkout:one", "src/file.ts");
 
     expect(invoke).toHaveBeenNthCalledWith(1, "git_diff_page", {
       checkoutId: "checkout:one",
       path: "src/file.ts",
       offset: 320,
       limit: 32,
-    });
-    expect(invoke).toHaveBeenNthCalledWith(2, "git_viewed_files", { checkoutId: "checkout:one" });
-    expect(invoke).toHaveBeenNthCalledWith(3, "git_mark_viewed", {
-      checkoutId: "checkout:one",
-      path: "src/file.ts",
     });
   });
 
@@ -214,7 +200,6 @@ describe("Review note IPC client", () => {
     });
     await updateReviewNote("checkout:one", "note:1", "edited");
     await deleteReviewNote("checkout:one", "note:1");
-    await markReviewNotesSent("checkout:one", ["note:1"]);
 
     expect(invoke).toHaveBeenNthCalledWith(1, "review_notes", { checkoutId: "checkout:one" });
     expect(invoke).toHaveBeenNthCalledWith(2, "review_note_create", {
@@ -237,10 +222,6 @@ describe("Review note IPC client", () => {
       checkoutId: "checkout:one",
       id: "note:1",
     });
-    expect(invoke).toHaveBeenNthCalledWith(5, "review_notes_mark_sent", {
-      checkoutId: "checkout:one",
-      ids: ["note:1"],
-    });
   });
 
   it("sends checkout-scoped agent commands", async () => {
@@ -248,7 +229,6 @@ describe("Review note IPC client", () => {
 
     await listAgentSessions("checkout:one");
     await createAgentSession("checkout:one", "Review 2026-09-26");
-    await sendAgentPrompt("checkout:one", "ses_one", "fix the review");
     await stopAgent("checkout:one");
 
     expect(invoke).toHaveBeenNthCalledWith(1, "agent_sessions", { checkoutId: "checkout:one" });
@@ -256,12 +236,7 @@ describe("Review note IPC client", () => {
       checkoutId: "checkout:one",
       title: "Review 2026-09-26",
     });
-    expect(invoke).toHaveBeenNthCalledWith(3, "agent_prompt", {
-      checkoutId: "checkout:one",
-      sessionId: "ses_one",
-      text: "fix the review",
-    });
-    expect(invoke).toHaveBeenNthCalledWith(4, "agent_stop", { checkoutId: "checkout:one" });
+    expect(invoke).toHaveBeenNthCalledWith(3, "agent_stop", { checkoutId: "checkout:one" });
   });
 
   it("sends review round commands, which record before they send", async () => {

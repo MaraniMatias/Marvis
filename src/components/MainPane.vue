@@ -120,7 +120,6 @@ const diffView = computed(() => (props.view.kind === "diff" ? props.view : null)
         :git-snapshot="gitSnapshot"
         :review="review"
         :path="diffView.path"
-        :active="ready"
         :scroll-top="diffScrollTop"
         :zed-available="zedAvailable"
         :neovim-available="neovimAvailable"

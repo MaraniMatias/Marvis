@@ -7,7 +7,6 @@ import type { Checkout, Repo } from "../domain/workspace";
 const mocks = vi.hoisted(() => ({
   listAgentSessions: vi.fn(),
   createAgentSession: vi.fn(),
-  sendAgentPrompt: vi.fn(),
   stopAgent: vi.fn(),
   listen: vi.fn(),
 }));
@@ -16,7 +15,6 @@ vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("../lib/ipc", () => ({
   listAgentSessions: mocks.listAgentSessions,
   createAgentSession: mocks.createAgentSession,
-  sendAgentPrompt: mocks.sendAgentPrompt,
   stopAgent: mocks.stopAgent,
 }));
 
@@ -114,9 +112,8 @@ describe("useAgentSessions", () => {
     expect(state.targetId).toBe("ses_new");
   });
 
-  it("keeps a chosen target while it still exists and re-reads after a send", async () => {
+  it("keeps a chosen target across a reload while it still exists", async () => {
     mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_one" }), session({ id: "ses_two", updatedAt: 9 })]);
-    mocks.sendAgentPrompt.mockResolvedValue(session());
     const state = useAgentSessions(
       computed(() => checkout),
       computed(() => gitRepo),
@@ -126,11 +123,14 @@ describe("useAgentSessions", () => {
     state.selectTarget("ses_one");
     expect(state.targetId).toBe("ses_one");
 
-    expect(await state.sendReview("ses_one", "fix the review")).toBe(true);
-    expect(mocks.sendAgentPrompt).toHaveBeenCalledWith("checkout:first", "ses_one", "fix the review");
-    // A send re-reads rather than assuming the turn started, but keeps the choice.
+    expect(await state.reload()).toBe(true);
     expect(mocks.listAgentSessions).toHaveBeenCalledTimes(2);
     expect(state.targetId).toBe("ses_one");
+
+    // Gone from the server: the target follows what is actually there.
+    mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_two", updatedAt: 9 })]);
+    expect(await state.reload()).toBe(true);
+    expect(state.targetId).toBe("ses_two");
   });
 
   it("surfaces an agent that cannot start", async () => {

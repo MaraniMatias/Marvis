@@ -15,19 +15,15 @@ import { useDiffStats } from "../presentation/diff-stats";
 
 defineOptions({ name: "FolderSidebar" });
 
-// `activityByCheckout`, `locateMissing` and `closeMissing` are still bound by App.vue: the sidebar
-// stopped representing them (C.1, C.2), so the wiring is dropped in the phase that owns App.vue.
 const props = withDefaults(
   defineProps<{
     repos: Repo[];
     activeCheckoutId: string | null;
     activeSessionId: string | null;
     isOpening: boolean;
-    activityByCheckout?: Record<string, string[]>;
     sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
   }>(),
   {
-    activityByCheckout: () => ({}),
     sessionRuntimeStatuses: () => ({}),
   },
 );
@@ -36,8 +32,6 @@ const emit = defineEmits<{
   openFolder: [];
   selectCheckout: [checkoutId: string];
   selectSession: [sessionId: string];
-  locateMissing: [checkoutId: string];
-  closeMissing: [checkoutId: string];
   createWorktree: [checkoutId: string];
   newTerminal: [checkoutId: string];
   removeWorktree: [checkoutId: string];

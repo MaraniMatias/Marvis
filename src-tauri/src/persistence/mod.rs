@@ -74,6 +74,9 @@ pub struct CheckoutUiState {
     pub version: u8,
     pub document: Option<PersistedDocument>,
     pub main_view: String,
+    /// The whole-change-set diff has no path, so it cannot be a `document`. Added after
+    /// version 1 shipped: absent in state saved before it, which means `false`.
+    pub diff_all_files: bool,
     pub inspector_tab: String,
     pub selected_file_path: Option<String>,
     pub selected_change_path: Option<String>,
@@ -91,6 +94,7 @@ impl Default for CheckoutUiState {
             version: 1,
             document: None,
             main_view: "terminal".into(),
+            diff_all_files: false,
             inspector_tab: "files".into(),
             selected_file_path: None,
             selected_change_path: None,
@@ -1657,6 +1661,8 @@ fn validate_checkout_ui_state(checkout_id: &str, state: &CheckoutUiState) -> boo
                 && (document.source != "file" || document.mode != "diff")
         })
         && (state.main_view != "document" || state.document.is_some())
+        // The whole-change-set diff names no file, so a document alongside it is contradictory.
+        && (!state.diff_all_files || (state.main_view == "terminal" && state.document.is_none()))
         && state
             .selected_file_path
             .as_ref()
@@ -2588,12 +2594,58 @@ mod tests {
         assert_eq!(state.files_scroll_top, 64);
         assert_eq!(state.changes_scroll_top, 0);
         assert_eq!(state.diff_scroll_top, 0);
+        // The whole-change-set diff postdates this saved shape, so it reads as not shown.
+        assert!(!state.diff_all_files);
 
         let invalid = CheckoutUiState {
             changes_scroll_top: 10_000_001,
             ..CheckoutUiState::default()
         };
         assert!(!super::validate_checkout_ui_state("checkout:one", &invalid));
+    }
+
+    #[test]
+    fn the_whole_change_set_view_survives_a_save_and_load() {
+        let temp = tempdir().unwrap();
+        let folder = temp.path().join("checkout");
+        fs::create_dir(&folder).unwrap();
+        let repo = plain_repo(&folder, "now");
+        let checkout_id = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("ui-state.sqlite3")).unwrap();
+        database.register_plain_repo(repo).unwrap();
+
+        let all_changes = CheckoutUiState {
+            diff_all_files: true,
+            ..CheckoutUiState::default()
+        };
+        assert!(super::validate_checkout_ui_state(
+            &checkout_id,
+            &all_changes
+        ));
+        database
+            .save_checkout_ui_state(&checkout_id, &all_changes)
+            .unwrap();
+        assert_eq!(
+            database.load_checkout_ui_state(&checkout_id).unwrap(),
+            all_changes
+        );
+
+        // It names no file, so a state that also carries one is contradictory, not a guess.
+        let contradictory = CheckoutUiState {
+            diff_all_files: true,
+            main_view: "document".into(),
+            document: Some(PersistedDocument {
+                checkout_id: checkout_id.clone(),
+                path: "src/main.rs".into(),
+                source: "change".into(),
+                mode: "diff".into(),
+            }),
+            ..CheckoutUiState::default()
+        };
+        assert!(!super::validate_checkout_ui_state(
+            &checkout_id,
+            &contradictory
+        ));
     }
 
     #[test]

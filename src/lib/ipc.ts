@@ -83,14 +83,6 @@ export function getGitDiffPage(checkoutId: string, path: string, offset: number,
   return invoke<GitDiffPage>("git_diff_page", { checkoutId, path, offset, limit });
 }
 
-export function getGitViewedFiles(checkoutId: string): Promise<string[]> {
-  return invoke<string[]>("git_viewed_files", { checkoutId });
-}
-
-export function markGitFileViewed(checkoutId: string, path: string): Promise<void> {
-  return invoke<void>("git_mark_viewed", { checkoutId, path });
-}
-
 export function watchGitCheckout(checkoutId: string): Promise<void> {
   return invoke<void>("git_watch_checkout", { checkoutId });
 }
@@ -129,10 +121,6 @@ export function updateReviewNote(checkoutId: string, id: string, content: string
 
 export function deleteReviewNote(checkoutId: string, id: string): Promise<void> {
   return invoke<void>("review_note_delete", { checkoutId, id });
-}
-
-export function markReviewNotesSent(checkoutId: string, ids: string[]): Promise<void> {
-  return invoke<void>("review_notes_mark_sent", { checkoutId, ids });
 }
 
 export interface ReviewAnchorCheck {
@@ -202,11 +190,6 @@ export function createAgentSession(checkoutId: string, title: string): Promise<A
   return invoke<AgentSession>("agent_session_create", { checkoutId, title });
 }
 
-/** Sends one review round as a single message to a session of this checkout. */
-export function sendAgentPrompt(checkoutId: string, sessionId: string, text: string): Promise<AgentSession> {
-  return invoke<AgentSession>("agent_prompt", { checkoutId, sessionId, text });
-}
-
 export function stopAgent(checkoutId: string): Promise<void> {
   return invoke<void>("agent_stop", { checkoutId });
 }
@@ -225,14 +208,6 @@ export function restoreWorkspace(): Promise<WorkspaceState> {
 
 export function registerFolder(path: string): Promise<WorkspaceState> {
   return invoke<WorkspaceState>("register_folder", { path });
-}
-
-export function locateMissingCheckout(checkoutId: string, path: string): Promise<WorkspaceState> {
-  return invoke<WorkspaceState>("locate_missing_checkout", { checkoutId, path });
-}
-
-export function closeMissingCheckout(checkoutId: string): Promise<WorkspaceState> {
-  return invoke<WorkspaceState>("close_missing_checkout", { checkoutId });
 }
 
 export function setDefaultBranch(repoId: string, branch: string): Promise<WorkspaceState> {

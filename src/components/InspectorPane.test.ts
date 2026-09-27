@@ -53,12 +53,10 @@ function gitSnapshot(checkoutId: string, status: GitStatus | null = null): Activ
     statusState: status ? ("ready" as const) : ("error" as const),
     statusError: "",
     changesStatusError: "",
-    viewedError: "",
     changesWatchError: "",
     statusRevision: 0,
     statusEventRevision: 0,
     statusEventCheckoutId: null,
-    markViewed: async () => undefined,
   });
 }
 

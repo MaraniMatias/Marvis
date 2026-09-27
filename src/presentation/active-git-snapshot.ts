@@ -4,7 +4,7 @@ import type { ComputedRef } from "vue";
 import type { GitStatus } from "../domain/git";
 import { isIpcError } from "../domain/ipc";
 import type { Checkout, Repo } from "../domain/workspace";
-import { getGitStatus, markGitFileViewed, unwatchGitCheckout, watchGitCheckout } from "../lib/ipc";
+import { getGitStatus, unwatchGitCheckout, watchGitCheckout } from "../lib/ipc";
 
 export interface ActiveGitSnapshot {
   checkoutId: string | null;
@@ -13,12 +13,10 @@ export interface ActiveGitSnapshot {
   statusState: "loading" | "ready" | "error";
   statusError: string;
   changesStatusError: string;
-  viewedError: string;
   changesWatchError: string;
   statusRevision: number;
   statusEventRevision: number;
   statusEventCheckoutId: string | null;
-  markViewed(checkoutId: string, path: string): Promise<void>;
 }
 
 function errorText(cause: unknown): string {
@@ -35,14 +33,13 @@ export function useActiveGitSnapshot(
   let refreshCurrentStatus: (() => Promise<void>) | undefined;
   let refreshCurrentStatusGeneration = 0;
   const watcherOperations = new Map<string, Promise<void>>();
-  const state = reactive<Omit<ActiveGitSnapshot, "markViewed">>({
+  const state = reactive<ActiveGitSnapshot>({
     checkoutId: null,
     status: null,
     loading: false,
     statusState: "ready",
     statusError: "",
     changesStatusError: "",
-    viewedError: "",
     changesWatchError: "",
     statusRevision: 0,
     statusEventRevision: 0,
@@ -62,18 +59,6 @@ export function useActiveGitSnapshot(
       },
     );
     return queued;
-  }
-
-  /** E.7: nothing in the UI tracks "viewed" anymore. `FileDiff` still reports it to the
-   *  backend, so the call and its error stay until the diff view owns them (phase 6). */
-  async function markViewed(checkoutId: string, path: string) {
-    const requestGeneration = generation;
-    try {
-      await markGitFileViewed(checkoutId, path);
-      if (requestGeneration === generation && state.checkoutId === checkoutId) state.viewedError = "";
-    } catch (cause) {
-      if (requestGeneration === generation && state.checkoutId === checkoutId) state.viewedError = errorText(cause);
-    }
   }
 
   watch(
@@ -102,7 +87,6 @@ export function useActiveGitSnapshot(
       state.statusState = "ready";
       state.statusError = "";
       state.changesStatusError = "";
-      state.viewedError = "";
       state.changesWatchError = "";
       state.statusEventCheckoutId = null;
       requestedDefaultBranch = false;
@@ -194,5 +178,5 @@ export function useActiveGitSnapshot(
     },
   );
 
-  return Object.assign(state, { markViewed });
+  return state;
 }

@@ -4,7 +4,7 @@ import { isIpcError } from "../domain/ipc";
 import type { AgentSession } from "../domain/agent";
 import type { ReviewNote, ReviewRound, ReviewSide } from "../domain/review";
 import type { Checkout, Repo } from "../domain/workspace";
-import { createReviewNote, deleteReviewNote, listReviewNotes, markReviewNotesSent, updateReviewNote } from "../lib/ipc";
+import { createReviewNote, deleteReviewNote, listReviewNotes, updateReviewNote } from "../lib/ipc";
 import {
   ackReviewRound,
   clearReviewNoteOutdated,
@@ -37,7 +37,6 @@ export interface ActiveReviewNotes {
   addNote(input: NewReviewNoteInput): Promise<boolean>;
   updateNote(id: string, content: string): Promise<boolean>;
   deleteNote(id: string): Promise<boolean>;
-  markSent(ids: string[]): Promise<boolean>;
   /** Reports the anchor text the diff currently renders, so the backend can stamp drift. */
   verifyAnchors(path: string, checks: ReviewAnchorCheck[]): Promise<boolean>;
   clearOutdated(id: string): Promise<boolean>;
@@ -116,7 +115,6 @@ export function useReviewNotes(
       | "addNote"
       | "updateNote"
       | "deleteNote"
-      | "markSent"
       | "verifyAnchors"
       | "clearOutdated"
       | "resolveNote"
@@ -173,24 +171,6 @@ export function useReviewNotes(
       await deleteReviewNote(checkoutId, id);
       if (state.checkoutId !== checkoutId) return false;
       state.notes = state.notes.filter((note) => note.id !== id);
-      state.error = "";
-      return true;
-    } catch (cause) {
-      return state.checkoutId === checkoutId ? fail(cause) : false;
-    }
-  }
-
-  async function markSent(ids: string[]) {
-    const checkoutId = state.checkoutId;
-    if (!checkoutId || ids.length === 0) return false;
-    try {
-      await markReviewNotesSent(checkoutId, ids);
-      if (state.checkoutId !== checkoutId) return false;
-      const sent = new Set(ids);
-      const now = new Date().toISOString();
-      state.notes = state.notes.map((note) =>
-        sent.has(note.id) ? { ...note, status: "sent" as const, updatedAt: now } : note,
-      );
       state.error = "";
       return true;
     } catch (cause) {
@@ -363,7 +343,6 @@ export function useReviewNotes(
     addNote,
     updateNote,
     deleteNote,
-    markSent,
     verifyAnchors,
     clearOutdated,
     resolveNote,

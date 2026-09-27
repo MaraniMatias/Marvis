@@ -9,7 +9,6 @@ const mocks = vi.hoisted(() => ({
   createReviewNote: vi.fn(),
   updateReviewNote: vi.fn(),
   deleteReviewNote: vi.fn(),
-  markReviewNotesSent: vi.fn(),
   verifyReviewNoteAnchors: vi.fn(),
   clearReviewNoteOutdated: vi.fn(),
   listReviewRounds: vi.fn(),
@@ -26,7 +25,6 @@ vi.mock("../lib/ipc", () => ({
   createReviewNote: mocks.createReviewNote,
   updateReviewNote: mocks.updateReviewNote,
   deleteReviewNote: mocks.deleteReviewNote,
-  markReviewNotesSent: mocks.markReviewNotesSent,
   verifyReviewNoteAnchors: mocks.verifyReviewNoteAnchors,
   clearReviewNoteOutdated: mocks.clearReviewNoteOutdated,
   listReviewRounds: mocks.listReviewRounds,
@@ -102,12 +100,11 @@ describe("useReviewNotes", () => {
     mocks.listReviewRounds.mockResolvedValue([]);
   });
 
-  it("loads notes for the active git checkout and adds, edits, deletes and marks them", async () => {
+  it("loads notes for the active git checkout and adds, edits and deletes them", async () => {
     mocks.listReviewNotes.mockResolvedValue([note()]);
     mocks.createReviewNote.mockResolvedValue(note({ id: "note:2", lineStart: 20, content: "second" }));
     mocks.updateReviewNote.mockResolvedValue(note({ id: "note:1", content: "edited" }));
     mocks.deleteReviewNote.mockResolvedValue(undefined);
-    mocks.markReviewNotesSent.mockResolvedValue(undefined);
     const state = useReviewNotes(harness().checkout, harness().repo);
     await settle();
 
@@ -128,10 +125,6 @@ describe("useReviewNotes", () => {
     await state.updateNote("note:1", "edited");
     expect(mocks.updateReviewNote).toHaveBeenCalledWith("checkout:first", "note:1", "edited");
     expect(state.notes[0].content).toBe("edited");
-
-    await state.markSent(["note:1"]);
-    expect(mocks.markReviewNotesSent).toHaveBeenCalledWith("checkout:first", ["note:1"]);
-    expect(state.notes[0].status).toBe("sent");
 
     await state.deleteNote("note:2");
     expect(mocks.deleteReviewNote).toHaveBeenCalledWith("checkout:first", "note:2");

@@ -100,12 +100,10 @@ function snapshot(checkoutId: string, files: GitStatus["files"] = []): ActiveGit
     statusState: "ready",
     statusError: "",
     changesStatusError: "",
-    viewedError: "",
     changesWatchError: "",
     statusRevision: 0,
     statusEventRevision: 0,
     statusEventCheckoutId: null,
-    markViewed: vi.fn(async () => undefined),
   });
 }
 
@@ -252,7 +250,6 @@ describe("DocumentPane", () => {
     expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
     expect((wrapper.get("#main-view-diff").element as HTMLElement).style.display).not.toBe("none");
     expect(wrapper.find('[data-testid="diff-view"]').exists()).toBe(true);
-    await vi.waitFor(() => expect(gitSnapshot.markViewed).toHaveBeenCalledWith(currentCheckout.id, "src/app.ts"));
 
     view.value = { kind: "diff", path: null };
     await vi.waitFor(() => expect(wrapper.get(".diff-file-header").text()).toContain("src/app.ts"));
@@ -473,7 +470,6 @@ describe("DocumentPane", () => {
         gitSnapshot,
         review: reviewApi(),
         path: null,
-        active: true,
         scrollTop: 0,
       },
     });
@@ -511,7 +507,6 @@ describe("DocumentPane", () => {
         gitSnapshot: loading,
         review: reviewApi(),
         path: null,
-        active: true,
         scrollTop: 0,
       },
     });
@@ -540,7 +535,6 @@ describe("DocumentPane", () => {
         gitSnapshot: snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]),
         review: reviewApi(),
         path: "src/app.ts",
-        active: true,
         scrollTop: 0,
       },
     });
@@ -552,7 +546,7 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
-  it("pages a large diff and marks it viewed only once its first page is displayed", async () => {
+  it("pages a large diff lazily", async () => {
     const checkoutId = "checkout:large-diff";
     const gitSnapshot = snapshot(checkoutId, [{ path: "large.txt", status: "M" }]);
     mocks.getGitDiff.mockResolvedValue({
@@ -579,16 +573,11 @@ describe("DocumentPane", () => {
         gitSnapshot,
         review: reviewApi(),
         path: "large.txt",
-        active: false,
         scrollTop: 0,
       },
     });
     await vi.waitFor(() => expect(wrapper.text()).toContain("+new line"));
     expect(mocks.getGitDiffPage).toHaveBeenCalledWith(checkoutId, "large.txt", 0, 32);
-    expect(gitSnapshot.markViewed).not.toHaveBeenCalled();
-
-    await wrapper.setProps({ active: true });
-    await vi.waitFor(() => expect(gitSnapshot.markViewed).toHaveBeenCalledWith(checkoutId, "large.txt"));
     wrapper.unmount();
   });
 
@@ -600,7 +589,6 @@ describe("DocumentPane", () => {
         gitSnapshot: snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]),
         review: reviewApi(),
         path: "src/app.ts",
-        active: true,
         scrollTop: 72,
       },
     });
@@ -620,7 +608,7 @@ describe("DocumentPane", () => {
     const review = reviewApi();
     review.notes = [note, reviewNote({ id: "note:2", path: "src/other.ts", lineStart: 5 })];
     const wrapper = mount(FileDiff, {
-      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "src/app.ts", active: true, scrollTop: 0 },
+      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "src/app.ts", scrollTop: 0 },
     });
     await flushPromises();
 
@@ -636,7 +624,7 @@ describe("DocumentPane", () => {
     const gitSnapshot = snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]);
     const review = reviewApi();
     const wrapper = mount(FileDiff, {
-      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "src/app.ts", active: true, scrollTop: 0 },
+      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "src/app.ts", scrollTop: 0 },
     });
     await flushPromises();
 
@@ -684,7 +672,6 @@ describe("DocumentPane", () => {
         gitSnapshot,
         review,
         path: "large.txt",
-        active: true,
         scrollTop: 0,
       },
     });
@@ -736,7 +723,6 @@ describe("DocumentPane", () => {
         gitSnapshot,
         review,
         path: "large.txt",
-        active: true,
         scrollTop: 0,
       },
     });
@@ -795,7 +781,6 @@ describe("DocumentPane", () => {
         gitSnapshot,
         review,
         path: "large.txt",
-        active: true,
         scrollTop: 0,
       },
     });
@@ -837,7 +822,6 @@ describe("DocumentPane", () => {
         gitSnapshot,
         review,
         path: "src/app.ts",
-        active: true,
         scrollTop: 0,
       },
     });
@@ -889,7 +873,6 @@ describe("DocumentPane", () => {
         gitSnapshot,
         review,
         path: "large.txt",
-        active: true,
         scrollTop: 0,
       },
     });
@@ -912,7 +895,6 @@ describe("DocumentPane", () => {
         gitSnapshot,
         review: reviewApi(),
         path: "src/app.ts",
-        active: true,
         scrollTop: 0,
       },
     });
@@ -943,12 +925,10 @@ describe("DocumentPane", () => {
           gitSnapshot: isolatedSnapshot,
           review: reviewApi(),
           path: "src/app.ts",
-          active: true,
           scrollTop: 0,
         },
       });
       await vi.waitFor(() => expect(special.text()).toContain(result.message));
-      expect(isolatedSnapshot.markViewed).not.toHaveBeenCalled();
       special.unmount();
     }
   });

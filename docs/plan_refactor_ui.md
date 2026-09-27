@@ -1,6 +1,6 @@
 # Marvis — plan de refactor de UI hacia el mockup
 
-**Estado:** plan aprobado en conversación, pendiente de ejecución. **Alcance:** llevar el diseño visual de `docs/marvis-ui/` (mockup) a la aplicación Tauri real. **No** es un plan de alcance de producto: no sustituye a [MARVIS_DELIVERY_PLAN_v0.4.md](MARVIS_DELIVERY_PLAN_v0.4.md) ni a [PLAN_PENDIENTE.md](PLAN_PENDIENTE.md). **Plataforma:** macOS. **Origen:** análisis comparativo del mockup contra la app, y las decisiones tomadas sobre ese análisis.
+**Estado:** plan aprobado en conversación, pendiente de ejecución. **Alcance:** llevar el diseño visual de `docs/marvis-ui/` (mockup) a la aplicación Tauri real. **No** es un plan de alcance de producto: es una corriente paralela de forma, y su deuda está inventariada en [DEUDA.md](DEUDA.md) §5. **Plataforma:** macOS. **Origen:** análisis comparativo del mockup contra la app, y las decisiones tomadas sobre ese análisis.
 
 > **Convención de este documento.** Los puntos marcados **[DECIDIDO]** están cerrados y no se revisan durante la ejecución. Los marcados **[DEFAULT]** son un supuesto quemado por falta de respuesta: se aplican salvo que se digan lo contrario antes de empezar la fase correspondiente. Los marcados **[ABIERTO]** necesitan una decisión y bloquean lo que indiquen.
 
@@ -336,7 +336,7 @@ Cada fase termina en algo que corre y se puede ver. Los tests se reescriben **de
 - `changeGroups`: `Map<parentDir, rows>` con `group.dir` como `.group-header` y las filas un nivel adentro (`padding-left: 20px`), exactamente como el mockup.
 - Status `M` → `--marvis-text`, `A` → `--marvis-green`, `D` → `--marvis-red`, `U` → `--marvis-text-faint`.
 - Badge en el tab: **cantidad de archivos cambiados** (`changedRows.length`, default E.3-bis).
-- **Fila `square-arrow-out-up-right`** arriba de la lista → `mainViews → diff` con `path: null` (diff de todos los archivos). Visual: `PlusIcon` + texto `All changes` en `.new-item` (default G.6).
+- **Fila `square-arrow-out-up-right`** arriba de la lista → `mainViews → diff` con `path: null` (diff de todos los archivos). Icono `SquareArrowOutUpRight` de `@lucide/vue` + texto `All changes` en `.new-item` (default G.6).
 - Se elimina: input de filtro de changed files, summary block (branch, `vs defaultBranch`, `N changed`, `N commits ahead`, `X/N viewed`), flag `Viewed`, y los `viewedPaths` de `src/presentation/active-git-snapshot.ts:12,43,73,76-77,110,142,150` (default E.7).
 
 **Verificación:** `src/components/InspectorPane.test.ts` (6 tests) reescrito; la virtualización no desalinea con el nuevo row height; seleccionar un archivo emite el evento que la fase 4 consume.
@@ -499,7 +499,7 @@ Cada toast es `role="status"`; los de error, `role="alert"`. Botón `✕` de dis
 
 Además, los tests de `presentation/` que arman `gitSnapshot` con `viewedPaths: []` (`active-git-snapshot.test.ts:79`, `DocumentPane.test.ts:85`, `InspectorPane.test.ts:37`, `ChangesPane.test.ts:76`) hay que sacarlos.
 
-Estrategia: **re-escribir por fase, no al final**. La repo valora cobertura (64 pruebas frontend + 80 Rust en la última auditoría de `PLAN_PENDIENTE.md`); una fase que rompe tests queda sin cerrar.
+Estrategia: **re-escribir por fase, no al final**. La repo valora cobertura y CI corre `fmt:check`, `lint`, `lint:rust`, `typecheck`, `test`, `test:security` y `build:app` en cada push; una fase que rompe tests queda sin cerrar.
 
 ---
 

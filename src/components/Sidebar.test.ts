@@ -219,7 +219,6 @@ describe("Sidebar workdir rows", () => {
         activeCheckoutId: "checkout:activity",
         activeSessionId: "session:exited",
         isOpening: false,
-        activityByCheckout: { "checkout:activity": ["Terminal · Running", "Recent file writes"] },
         sessionRuntimeStatuses: { "session:exited": { state: "exited", exitCode: 1 } },
       },
     });

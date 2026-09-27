@@ -5,7 +5,7 @@ import type { AgentEvent, AgentSession } from "../domain/agent";
 import { defaultAgentSession, isTurnEvent } from "../domain/agent";
 import { isIpcError } from "../domain/ipc";
 import type { Checkout, Repo } from "../domain/workspace";
-import { createAgentSession, listAgentSessions, sendAgentPrompt, stopAgent } from "../lib/ipc";
+import { createAgentSession, listAgentSessions, stopAgent } from "../lib/ipc";
 
 /** Name of the Tauri event the bridge emits normalized agent events on. */
 export const AGENT_EVENT = "marvis://agent-event";
@@ -26,7 +26,6 @@ export interface ActiveAgentSessions {
   turnsCompleted: number;
   reload(): Promise<boolean>;
   createSession(title: string): Promise<AgentSession | null>;
-  sendReview(sessionId: string, text: string): Promise<boolean>;
   selectTarget(sessionId: string | null): void;
   stop(): Promise<void>;
 }
@@ -92,9 +91,7 @@ export function useAgentSessions(
   let generation = 0;
   /** Sessions whose turn this client saw start and has not yet seen go idle. */
   const startedTurns = new Set<string>();
-  const state = reactive<
-    Omit<ActiveAgentSessions, "reload" | "createSession" | "sendReview" | "selectTarget" | "stop">
-  >({
+  const state = reactive<Omit<ActiveAgentSessions, "reload" | "createSession" | "selectTarget" | "stop">>({
     checkoutId: null,
     sessions: [],
     targetId: null,
@@ -147,21 +144,6 @@ export function useAgentSessions(
     } catch (cause) {
       fail(cause);
       return null;
-    }
-  }
-
-  async function sendReview(sessionId: string, text: string) {
-    const checkoutId = state.checkoutId;
-    if (!checkoutId) return false;
-    try {
-      await sendAgentPrompt(checkoutId, sessionId, text);
-      if (state.checkoutId !== checkoutId) return false;
-      // Re-read rather than assume: the server decides whether a turn actually started.
-      await reload();
-      state.error = "";
-      return true;
-    } catch (cause) {
-      return fail(cause);
     }
   }
 
@@ -254,5 +236,5 @@ export function useAgentSessions(
     state.sessions = applyAgentEvent(state.sessions, payload);
   });
 
-  return Object.assign(state, { reload, createSession, sendReview, selectTarget, stop });
+  return Object.assign(state, { reload, createSession, selectTarget, stop });
 }

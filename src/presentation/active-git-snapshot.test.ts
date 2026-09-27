@@ -8,7 +8,6 @@ import type { Checkout, Repo } from "../domain/workspace";
 
 const mocks = vi.hoisted(() => ({
   getGitStatus: vi.fn(),
-  markGitFileViewed: vi.fn(),
   watchGitCheckout: vi.fn(),
   unwatchGitCheckout: vi.fn(),
   listen: vi.fn(),
@@ -18,7 +17,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../lib/ipc", () => ({
   getGitStatus: mocks.getGitStatus,
-  markGitFileViewed: mocks.markGitFileViewed,
   watchGitCheckout: mocks.watchGitCheckout,
   unwatchGitCheckout: mocks.unwatchGitCheckout,
 }));

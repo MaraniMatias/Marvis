@@ -29,7 +29,6 @@ const props = withDefaults(
     >;
     /** Null is the whole change set: one diff per changed file, stacked in status order. */
     path: string | null;
-    active: boolean;
     scrollTop: number;
     zedAvailable?: boolean;
     neovimAvailable?: boolean;
@@ -188,7 +187,6 @@ function chooseTarget(event: Event) {
 
 let diffGeneration = 0;
 let mounted = true;
-let markedViewedKey: string | null = null;
 
 function lineCode(side: ReviewSide, line: number): string {
   return diffLineText(lineTexts.value, side, line);
@@ -398,37 +396,6 @@ watch(
   },
 );
 
-watch(
-  [() => props.active, diffState, diff, visibleLargeDiffWindow],
-  async ([active, state, currentDiff, largeWindow]) => {
-    if (!active || state !== "ready" || !currentDiff) return;
-    const path = props.path;
-    if (path === null) return;
-    const canMark =
-      !currentDiff.tooLarge &&
-      !currentDiff.isBinary &&
-      currentDiff.symlinkTarget === undefined &&
-      (currentDiff.large ? largeWindow.rows.some((row) => row.line) : hasTextHunks.value);
-    if (!canMark) return;
-    const checkoutId = props.checkout.id;
-    const request = diffGeneration;
-    const key = `${checkoutId}:${path}:${request}`;
-    if (markedViewedKey === key) return;
-    await nextTick();
-    if (
-      !mounted ||
-      !props.active ||
-      request !== diffGeneration ||
-      props.checkout.id !== checkoutId ||
-      props.path !== path
-    )
-      return;
-    markedViewedKey = key;
-    void props.gitSnapshot.markViewed(checkoutId, path);
-  },
-  { flush: "post" },
-);
-
 function onDiffScroll(event: Event) {
   diffScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
   emit("scrollPositionChanged", diffScrollTop.value);
@@ -597,7 +564,6 @@ onUnmounted(() => {
               :git-snapshot="gitSnapshot"
               :review="review"
               :path="file.path"
-              :active="false"
               :scroll-top="0"
               :zed-available="zedAvailable"
               :neovim-available="neovimAvailable"

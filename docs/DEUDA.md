@@ -10,18 +10,18 @@ Este archivo no duplica el plan: la secuencia de ejecución sigue en [PLAN_PENDI
 
 ## 1. Fotografía
 
-| Métrica              | Valor                                                                                                            |
-| -------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Pruebas frontend     | 164 (`pnpm test:frontend`)                                                                                       |
-| Pruebas Rust         | 122 (`pnpm test:rust`)                                                                                           |
-| Pruebas de seguridad | 1 frontend (`SEC-`) + 12 Rust (`sec_`) con `pnpm test:security`                                                  |
-| D1-01…D1-20          | **10 PASS automatizado · 8 PARCIAL · 2 SIN VERIFICAR**                                                           |
-| SEC-01…SEC-07        | **4 PASS automatizado · 3 PARCIAL**                                                                              |
-| D2-01…D2-15          | **5 pasaron · 1 no ejecutado (D2-13) · 2 bloqueados por API (D2-07/08) · 7 sin ensayar (D2-03 sin implementar)** |
-| D3-01…D3-10          | **0 empezados**                                                                                                  |
-| Build                | `pnpm build:app` arma el DMG; **sin firmar ni notarizar**                                                        |
-| Chequeos locales     | `fmt:check`, `lint` (2 avisos preexistentes), `lint:rust`, `typecheck`, `test`, `test:security` en verde         |
-| Plan de refactor de UI | **0 de 8 fases ejecutadas** (corriente paralela, ver §5) |
+| Métrica                | Valor                                                                                                            |
+| ---------------------- | ---------------------------------------------------------------------------------------------------------------- |
+| Pruebas frontend       | 201 (`pnpm test:frontend`)                                                                                       |
+| Pruebas Rust           | 132 (`pnpm test:rust`)                                                                                           |
+| Pruebas de seguridad   | 1 frontend (`SEC-`) + 14 Rust (`sec_`) con `pnpm test:security`                                                  |
+| D1-01…D1-20            | **10 PASS automatizado · 8 PARCIAL · 2 SIN VERIFICAR**                                                           |
+| SEC-01…SEC-07          | **4 PASS automatizado · 3 PARCIAL**                                                                              |
+| D2-01…D2-15            | **5 pasaron · 1 no ejecutado (D2-13) · 2 bloqueados por API (D2-07/08) · 7 sin ensayar (D2-03 sin implementar)** |
+| D3-01…D3-10            | **0 empezados**                                                                                                  |
+| Build                  | `pnpm build:app` arma el DMG; **sin firmar ni notarizar**                                                        |
+| Chequeos locales       | `fmt:check`, `lint` (2 avisos preexistentes), `lint:rust`, `typecheck`, `test`, `test:security` en verde         |
+| Plan de refactor de UI | **8 de 8 fases ejecutadas**; falta el recorrido manual nativo (ver §5)                                           |
 
 ---
 
@@ -140,23 +140,27 @@ No adelantar el reanclaje sin diffs reales de agente, y no empezar el renderer h
 
 ## 5. Refactor de UI hacia el mockup (corriente paralela)
 
-Plan propio en [plan_refactor_ui.md](plan_refactor_ui.md): **no sustituye** a v0.4 ni a `PLAN_PENDIENTE.md`, pero está aprobado y sin ejecutar, así que toda su deuda entra aquí.
+Plan propio en [plan_refactor_ui.md](plan_refactor_ui.md): **no sustituye** a v0.4 ni a `PLAN_PENDIENTE.md`, pero está aprobado. **Las 8 fases están ejecutadas**; lo que queda de esta corriente es la deuda que la ejecución destapó y la que falta cerrar a mano.
 
-- **0 de 8 fases ejecutadas.** Fase 0 (tokens y ventana) → 1 (titlebar/splitter) → 2 (sidebar) → 3 (Files/Changes) → 4 (main unificado) → 5 (toasts) → 6 (notas y envío a opencode) → 7 (limpieza).
-- **Cierre de fase = el checklist §8 del plan:** los 8 puntos de funcionalidad más `fmt:check`, `lint`, `lint:rust`, `typecheck`, `test:frontend`, `test:rust`, `test:security`, `build:app` y el recorrido manual en la app nativa (worktree, terminal, `nvim`, diff, diff completo, comentar, enviar al agente, `.md`, error de repo, resize angosto).
-- **12 decisiones pendientes con default quemado** (§9): JetBrains Mono bundleada o no, chevron del crumb, doble-click-to-zoom, punto de estado del sidebar, click en workdir, qué cuenta el badge de Changes, **si se cae el tracking `Viewed`** (34 ocurrencias Rust quedarían huérfanas), persistencia de anchos, copy, `↗ Neovim`, copy del diff completo y destino del dato `viewed`.
-- **Hallazgo bloqueante sin resolver (§3):** con la nueva navegación **Neovim queda huérfano**: falta decidir el destino de los 13 comandos de la palette (8 tienen destino, 5 son decisión).
-- **Riesgo de rework:** reescribir o borrar ~106 tests **por fase, no al final**. Si se aceptan los defaults G.5 y E.7 quedan huérfanas dos capacidades (`Neovim` y `Viewed`); si se rechazan, hay que dejarlo escrito.
-- **Doble sistema de tokens:** la fase 0 debe borrar `--surface-*` a mano; `pnpm lint` no lo detecta.
+- **8 de 8 fases ejecutadas.** Fase 0 (tokens y ventana) → 1 (titlebar/splitter) → 2 (sidebar) → 3 (Files/Changes) → 4 (main unificado) → 5 (toasts) → 6 (notas y envío a opencode) → 7 (limpieza).
+- **Cierre de fase = el checklist §8 del plan:** los 8 puntos de funcionalidad más `fmt:check`, `lint`, `lint:rust`, `typecheck`, `test:frontend`, `test:rust`, `test:security`, `build:app` y el recorrido manual en la app nativa (worktree, terminal, `nvim`, diff, diff completo, comentar, enviar al agente, `.md`, error de repo, resize angosto). **Las 9 verificaciones automáticas están en verde tras la fase 7**; **el recorrido manual en la app nativa sigue `NO EJECUTADO`** y es lo único que impide dar la corriente por cerrada.
+- **Deuda que dejó la fase 7 (limpieza):**
+  - **El dato `viewed` sigue persistido en Rust y ya no lo lee nadie** (~34 ocurrencias en `services/workspace.rs`, `services/git.rs`, `commands/git.rs`, `main.rs`, `persistence/mod.rs`: tabla `viewed_files`, `mark_file_viewed`, `viewed_files`, y los comandos `git_viewed_files` / `git_mark_viewed`). La decisión E.7 sacó la lectura del frontend; **borrar la capa de persistencia es una migración de datos** que este refactor no estaba autorizado a hacer. Hay que decidir: recuperar la capacidad o migrar la tabla fuera.
+  - **Seis comandos Rust quedaron sin `invoke` desde el WebView** al borrar sus wrappers del frontend: `git_viewed_files`, `git_mark_viewed`, `agent_prompt`, `review_notes_mark_sent`, `locate_missing_checkout` y `close_missing_checkout`. Los servicios que hay detrás siguen vivos (`agents.prompt` lo usa el envío de rondas; `review::mark_sent` lo usa la capa de review), pero **los comandos registrados no tienen consumidor**. Decidir si se bajan del `invoke_handler` o si se les vuelve a dar entrada de UI.
+  - **`D1-14/17/19` quedaron sin destino:** la decisión C.1 sacó los botones Locate/Close del sidebar, y la fase 7 borró el wrapper que era su último camino. Borrar un worktree fuera de Marvis deja la fila en Missing sin forma de reubicarlo ni de cerrarla. **Es una decisión de producto, no de refactor**: o vuelve la UI, o el caso D1 se reescribe.
+  - **`src/components/ui/button/Button.vue`** es un botón escrito a mano que quedó en la carpeta que usa la convención de shadcn, ya sin `components.json` ni CLI. Vive, pero está fuera de lugar.
+- **Decisiones que se aceptaron con default quemado** (§9 del plan) y que **nadie ha ratified**: JetBrains Mono no bundleada, chevron del crumb con dropdown, doble-click-to-zoom sí, punto de estado solo por color, click en workdir muestra el item activo, el badge de Changes cuenta archivos, **E.7 (se cae `Viewed`)**, se siguen guardando los anchos, no se reescribe el copy, `↗ Neovim` sí, el copy del diff completo es `All changes`. Cada una está en el código y ninguna está escrita como decisión estable.
+- **Riesgo de rework superado:** se reescribieron o borraron los tests **por fase, no al final**. HOY son **201 frontend / 132 Rust** (el §6 del plan parte de «64 + 80» y ya no describe el estado real).
+- **Doble sistema de tokens:** resuelto; `--surface-*` no existe (la fase 0 lo borró a mano, `pnpm lint` no lo caza).
 
-**Inventario de tests desalineado.** El §6 del plan parte de «64 pruebas frontend + 80 Rust» y cuenta 36 tests en `App.test.ts`, 23 en `DocumentPane` y 14 en `SessionPane`. Hoy son **164 / 122**, y **15 / 21 / 11** respectivamente (`ChangesPane` sí coincide en 8). Recalcular el esfuerzo antes de estimar fases.
+**Inventario de tests, al cierre de la fase 7:** 201 frontend (`pnpm test:frontend`) y 132 Rust (`pnpm test:rust`), más 1 frontend `SEC-` y 14 Rust `sec_` con `pnpm test:security`.
 
 ## 6. Deuda de documento
 
 | Dónde                                 | Qué sobra o está mal                                                                                                                                                                                                   |
 | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `PLAN_PENDIENTE.md` §1                | Dice «9 casos con cobertura automatizada, 9 parciales y 2 sin verificar» y «64 pruebas frontend y 80 Rust». **Desactualizado**: hoy son **10/8/2** y **164/122**. Es histórico, pero conviene fecharlo o actualizarlo. |
-| `MVP_VALIDATION.md` §Verification run | La tabla de resultados también quedó en **64/80** y en **8** pruebas `sec_`. Hoy son 164/122 y **12**. Debe reejecutarse y regrabarse antes de dar por buena la auditoría.                                             |
+| `PLAN_PENDIENTE.md` §1                | Dice «9 casos con cobertura automatizada, 9 parciales y 2 sin verificar» y «64 pruebas frontend y 80 Rust». **Desactualizado**: hoy son **10/8/2** y **201/132**. Es histórico, pero conviene fecharlo o actualizarlo. |
+| `MVP_VALIDATION.md` §Verification run | La tabla de resultados también quedó en **64/80** y en **8** pruebas `sec_`. Hoy son 201/132 y **14**. Debe reejecutarse y regrabarse antes de dar por buena la auditoría.                                             |
 | `PLAN_PENDIENTE.md` §3                | Los checkboxes de **P1.1, P1.2 y P1.3** siguen sin marcar pese a que buena parte del trabajo ya existe y está probado (ver §3.1). Mientras no se marquen, la puerta P1→P2 no se puede declarar.                        |
 | `docs/`                               | `GIT_SPIKE_FINDINGS.md` **no tiene ninguna referencia cruzada**. Documenta `git-spike/`, que todavía existe en el repo. Candidato a borrar o a enlazar desde el plan; ahora mismo flota.                               |
 | Requisitos v0.2                       | Renombrado a `MARVIS_REQUIREMENTS.md` (era `.old`). **Comprobar de vez en cuando** que v0.4 sigue refiriéndose a ellos como compañía y no hay una v0.3 suelta.                                                         |

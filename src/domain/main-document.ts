@@ -12,10 +12,10 @@ export type MainView =
 /**
  * What `CheckoutUiState` persists about the main panel.
  *
- * The stored shape is Rust's, and it only knows a document with a mode, so this projection is
- * what survives a restart. The whole-change-set diff is the one view it cannot name — an empty
- * path is not a safe checkout-relative path and there is no third `mainView` value — so it
- * travels in `diffAllFiles` of its own.
+ * The stored shape is Rust's, and its `mainView` only knows a document with a mode, so this
+ * projection is what survives a restart. The whole-change-set diff is the one view it cannot
+ * name — an empty path is not a safe checkout-relative path and there is no third `mainView`
+ * value — so it travels in `diffAllFiles` of its own, which Rust stores as a boolean beside it.
  */
 export interface MainViewState {
   mainView: "terminal" | "document";
