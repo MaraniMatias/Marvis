@@ -247,9 +247,13 @@ impl Session {
 impl Drop for TerminalBackend {
     fn drop(&mut self) {
         if let Ok(sessions) = self.sessions.get_mut() {
-            for session in sessions.values_mut() {
+            for (id, session) in sessions.iter_mut() {
                 if session.exit_code.is_none() {
-                    let _ = session.child.kill();
+                    // The last chance to notice a child that would otherwise keep running with
+                    // nothing holding it, now that the app that spawned it is going away.
+                    if let Err(error) = session.child.kill() {
+                        log::warn!("terminal {id} did not stop with the app: {error}");
+                    }
                     let _ = session.child.wait();
                 }
             }
@@ -259,12 +263,22 @@ impl Drop for TerminalBackend {
 
 fn read_output(mut reader: Box<dyn Read + Send>, output: &mut OutputSink) {
     let mut buffer = [0_u8; 64 * 1024];
+    // Said once. A window that is gone refuses every chunk from here to the end of the session,
+    // and a line per chunk would bury everything else the log is for.
+    let mut reported = false;
     loop {
         match reader.read(&mut buffer) {
             Ok(0) | Err(_) => break,
             Ok(count) => {
                 // A disconnected renderer must not stop draining the PTY and deadlock its child.
-                let _ = output(&buffer[..count]);
+                if let Err(error) = output(&buffer[..count]) {
+                    if !reported {
+                        reported = true;
+                        log::warn!(
+                            "terminal output stopped being delivered, dropping the rest: {error}"
+                        );
+                    }
+                }
             }
         }
     }

@@ -1,6 +1,6 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
-use tauri::Emitter;
+use tauri::{Emitter, Manager};
 
 mod commands;
 pub mod domain;
@@ -23,7 +23,21 @@ fn with_dev_plugins(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
 }
 
 fn main() {
-    with_dev_plugins(tauri::Builder::default())
+    // The one plugin that has to come before every other, and before `setup`, because plugins run
+    // in the order they are added. A second launch has to stop before it opens the database:
+    // opening the database is what clears the stored terminal sessions, so two copies of the app
+    // would each wipe the other's on the way in. What the second launch does instead is bring the
+    // window that is already open back to the front.
+    let builder =
+        tauri::Builder::default().plugin(tauri_plugin_single_instance::init(|app, _, _| {
+            if let Some(window) = app.get_webview_window("main") {
+                let _ = window.unminimize();
+                let _ = window.show();
+                let _ = window.set_focus();
+            }
+        }));
+    with_dev_plugins(builder)
+        .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
@@ -70,16 +84,24 @@ fn main() {
                         if let (Ok(position), Ok(size)) =
                             (tracked_window.outer_position(), tracked_window.outer_size())
                         {
-                            let _ =
+                            // The app is on its way out, so this is the only chance to keep the
+                            // window where the user put it. Losing it silently costs them the
+                            // placement on every launch after this one.
+                            if let Err(error) =
                                 window_database.set_window_geometry(persistence::WindowGeometry {
                                     x: position.x,
                                     y: position.y,
                                     width: size.width,
                                     height: size.height,
-                                });
+                                })
+                            {
+                                log::warn!("the window's size and place were not saved: {error}");
+                            }
                         }
                     }
-                    let _ = window_database.set_window_maximized(maximized);
+                    if let Err(error) = window_database.set_window_maximized(maximized) {
+                        log::warn!("the window's maximized state was not saved: {error}");
+                    }
                 });
             }
             app.manage(database);
@@ -204,5 +226,126 @@ mod security_tests {
         let csp = config["app"]["security"]["csp"].as_str().unwrap();
         assert!(!csp.contains("unsafe-eval"));
         assert!(!csp.contains("*"));
+
+        // The whole Tauri API is reached through the `@tauri-apps/api` imports, so injecting it a
+        // second way as a global on the window would be reachability nothing needs and anything
+        // running in the document would have.
+        assert!(
+            !config["app"]
+                .get("withGlobalTauri")
+                .is_some_and(|enabled| enabled.as_bool() == Some(true)),
+            "`withGlobalTauri` hands the webview a global copy of the API it does not use"
+        );
+    }
+
+    #[test]
+    fn sec_05_2_the_only_write_the_webview_can_reach_is_contained_by_the_checkout() {
+        // `sec_05` says what the webview may ask for. This says what it may change, which is the
+        // question that only became one when the app started writing into the user's
+        // repositories. It is numbered beside `sec_05` rather than on its own: `sec_06` is
+        // already taken three times over by the ownership checks, and `sec_01_02` is the
+        // precedent for a companion.
+        //
+        // Everything the webview can invoke is a domain command: the setup hook runs before any
+        // of it and is not part of this surface.
+        let registered_commands = include_str!("main.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        let handler = registered_commands
+            .split("generate_handler![")
+            .nth(1)
+            .and_then(|block| block.split("])").next())
+            .expect("the invoke handler is not a list of commands any more");
+        for entry in handler
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.is_empty())
+        {
+            assert!(
+                entry.starts_with("commands::"),
+                "`{entry}` is reachable from the webview outside the domain commands"
+            );
+        }
+
+        // And no command module reaches for the filesystem itself, outside its own tests: each one
+        // names a `services::` entry instead, which is where containment lives. Read from disk
+        // rather than listed here, so a module added later is covered without editing this test.
+        let commands_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/commands");
+        let mut modules: Vec<_> = std::fs::read_dir(&commands_dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+            .collect();
+        modules.sort();
+        assert!(!modules.is_empty(), "no command module was found to check");
+        for module in modules {
+            let source = std::fs::read_to_string(&module).unwrap();
+            let production = source.split("#[cfg(test)]").next().unwrap();
+            for primitive in ["fs::", "File::", "OpenOptions", "Command::new"] {
+                assert!(
+                    !production.contains(primitive),
+                    "{} reached for `{primitive}` instead of a service",
+                    module.display()
+                );
+            }
+        }
+
+        // The one command that mutates a file names the checkout it is allowed to write inside
+        // and hands the work to the service that resolves the path against it. A `file_write`
+        // that grew a bare path, or that stopped going through the service, is the escape.
+        let write_command = include_str!("commands/files.rs")
+            .split("#[tauri::command]")
+            .find(|block| block.contains("pub async fn file_write("))
+            .expect("file_write is not a command any more");
+        assert!(write_command.contains("checkout_id: String"));
+        assert!(write_command.contains("services::files::write"));
+
+        // And that service is the one holding the guards: the path is resolved against the
+        // checkout, a traversal is refused, and a read-only file is not replaced.
+        let file_service = include_str!("services/files.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+        for guard in [
+            "resolve_checkout_path",
+            "parse_relative_path",
+            "permissions.readonly()",
+            "fs::set_permissions",
+        ] {
+            assert!(
+                file_service.contains(guard),
+                "the write path stopped checking for `{guard}`"
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    #[test]
+    fn a_second_launch_is_stopped_before_the_database_is_opened() {
+        // The single-instance plugin works by being registered first, and "first" is the whole of
+        // it: the plugins run in the order they are added, and `setup` is where the database is
+        // opened. Opening it is what clears the stored terminal sessions, so a second copy that got
+        // that far would take the first copy's sessions with it and leave a set of terminals whose
+        // PTYs belong to a process that is gone.
+        let main = include_str!("main.rs");
+        let registered = main.split("#[cfg(test)]").next().unwrap();
+        let guard = registered
+            .find("tauri_plugin_single_instance::init")
+            .expect("the single-instance plugin is not registered at all");
+        for later in [
+            ".setup(",
+            "tauri_plugin_log::Builder",
+            "tauri_plugin_dialog::init",
+            "tauri_plugin_clipboard_manager::init",
+        ] {
+            assert!(
+                !registered[..guard].contains(later),
+                "`{later}` is registered before the single-instance plugin, so a second launch \
+                 reaches it before anything can turn it away"
+            );
+        }
     }
 }

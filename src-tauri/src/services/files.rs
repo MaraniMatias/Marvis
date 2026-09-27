@@ -359,6 +359,16 @@ pub fn write(
     if metadata.len() > MAX_FILE_BYTES {
         return Err(too_large());
     }
+    // A read-only file is a decision someone made outside this app, and the temporary-file
+    // replacement would quietly undo it: `rename` needs write access to the *directory*, not to
+    // the file, so the save would succeed and the bit would be gone. Refuse instead.
+    let permissions = metadata.permissions();
+    if permissions.readonly() {
+        return Err(IpcError::new(
+            IpcErrorCode::PermissionDenied,
+            "file is read-only",
+        ));
+    }
 
     let current =
         fs::read(&path).map_err(|error| filesystem_error("could not read file", error))?;
@@ -376,11 +386,15 @@ pub fn write(
         ));
     }
 
-    atomic_write(&path, content.as_bytes())
+    atomic_write(&path, content.as_bytes(), permissions)
 }
 
 /// Writes through a sibling temporary file so readers never observe a partial UTF-8 document.
-fn atomic_write(path: &Path, content: &[u8]) -> Result<(), IpcError> {
+///
+/// The replacement arrives carrying the mode of the file it replaces, because a temporary file is
+/// created with the default one and `rename` does not reconcile it: without this a saved script
+/// loses its executable bit and a private file gains a group-read it never had.
+fn atomic_write(path: &Path, content: &[u8], permissions: fs::Permissions) -> Result<(), IpcError> {
     let parent = path.parent().ok_or_else(|| {
         IpcError::new(
             IpcErrorCode::InvalidPath,
@@ -411,6 +425,8 @@ fn atomic_write(path: &Path, content: &[u8]) -> Result<(), IpcError> {
             .and_then(|_| file.sync_all())
             .map_err(|error| filesystem_error("could not write file", error))?;
         drop(file);
+        fs::set_permissions(&temporary, permissions)
+            .map_err(|error| filesystem_error("could not apply file permissions", error))?;
         fs::rename(&temporary, path)
             .map_err(|error| filesystem_error("could not replace file", error))
     })();
@@ -1003,6 +1019,66 @@ mod tests {
             .code,
             IpcErrorCode::PathOutsideCheckout
         ));
+    }
+
+    #[test]
+    fn a_save_keeps_the_files_permissions_and_refuses_a_read_only_one() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("script.sh"), "echo one\n").unwrap();
+        fs::write(root.join("locked.txt"), "locked\n").unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+
+        // A read-only file is refused rather than quietly made writable by the replacement, and
+        // refusing it leaves the bytes on disk untouched.
+        let mut locked = fs::metadata(root.join("locked.txt")).unwrap().permissions();
+        locked.set_readonly(true);
+        fs::set_permissions(root.join("locked.txt"), locked).unwrap();
+        assert!(matches!(
+            write(
+                &database,
+                checkout_id,
+                Path::new("locked.txt"),
+                "changed\n",
+                "locked\n"
+            )
+            .unwrap_err()
+            .code,
+            IpcErrorCode::PermissionDenied
+        ));
+        assert_eq!(
+            fs::read_to_string(root.join("locked.txt")).unwrap(),
+            "locked\n"
+        );
+
+        // And a file that is writable keeps the mode it arrived with, so saving a script does not
+        // quietly make it unrunnable.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+
+            fs::set_permissions(root.join("script.sh"), fs::Permissions::from_mode(0o755)).unwrap();
+            write(
+                &database,
+                checkout_id,
+                Path::new("script.sh"),
+                "echo two\n",
+                "echo one\n",
+            )
+            .unwrap();
+            let mode = fs::metadata(root.join("script.sh"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o777, 0o755);
+            assert_eq!(
+                fs::read_to_string(root.join("script.sh")).unwrap(),
+                "echo two\n"
+            );
+        }
     }
 
     #[test]
