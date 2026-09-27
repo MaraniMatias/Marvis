@@ -123,18 +123,19 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.find('button[aria-label="Add worktree from main"]').exists()).toBe(true);
     expect(wrapper.find('button[aria-label="Remove worktree Base"]').exists()).toBe(false);
     expect(wrapper.find('button[aria-label="Remove worktree feature"]').exists()).toBe(true);
-    expect(wrapper.find('button[aria-label="New terminal for Base"]').exists()).toBe(true);
+    // Neither checkout has a terminal open, so the mockup hangs no "New terminal" row here:
+    // its first terminal is started from the main panel, once the workdir is selected.
+    expect(wrapper.find('button[aria-label="New terminal for Base"]').exists()).toBe(false);
+    expect(wrapper.find('button[aria-label="New terminal for feature"]').exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Plain");
 
     await wrapper.get(".workdir-item.active .workdir-select").trigger("click");
     await wrapper.get('button[aria-label="Add worktree from main"]').trigger("click");
     await wrapper.get('button[aria-label="Remove worktree feature"]').trigger("click");
-    await wrapper.get('button[aria-label="New terminal for Base"]').trigger("click");
 
     expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature"]]);
     expect(wrapper.emitted("createWorktree")).toEqual([["checkout:primary"]]);
     expect(wrapper.emitted("removeWorktree")).toEqual([["checkout:feature"]]);
-    expect(wrapper.emitted("newTerminal")).toEqual([["checkout:primary"]]);
   });
 
   it("gives a plain folder neither worktree action", () => {
@@ -169,7 +170,42 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.find(".workdir-actions button").exists()).toBe(false);
     expect(wrapper.find("button[aria-label^='Add worktree']").exists()).toBe(false);
     expect(wrapper.find("button[aria-label^='Remove worktree']").exists()).toBe(false);
-    expect(wrapper.find("button[aria-label='New terminal for Base']").exists()).toBe(true);
+    // Nothing is open on a plain folder either, so it hangs no "New terminal" row.
+    expect(wrapper.find("button[aria-label='New terminal for Base']").exists()).toBe(false);
+  });
+
+  it("hangs a New terminal row only under a workdir that already has one open", () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              checkout({ id: "checkout:empty", isPrimary: true, branch: "main" }),
+              {
+                ...checkout({
+                  id: "checkout:busy",
+                  path: "/test-busy",
+                  canonicalPath: "/test-busy",
+                  isPrimary: false,
+                  branch: "feature",
+                }),
+                sessions: [session("session:one", "zsh", "checkout:busy")],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+
+    // The mockup puts "New terminal" at the end of the open terminals, so it appears with them
+    // and not before: one row for the workdir that has a terminal, none for the one without.
+    expect(
+      wrapper.findAll('button[aria-label^="New terminal for"]').map((row) => row.attributes("aria-label")),
+    ).toEqual(["New terminal for feature"]);
+    wrapper.unmount();
   });
 
   it("lists every terminal child, marks the active one and offers a close", async () => {
