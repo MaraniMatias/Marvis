@@ -1,4 +1,3 @@
-import { basicSetup } from "codemirror";
 import { cpp } from "@codemirror/lang-cpp";
 import { css } from "@codemirror/lang-css";
 import { html } from "@codemirror/lang-html";
@@ -11,9 +10,31 @@ import { rust } from "@codemirror/lang-rust";
 import { sql } from "@codemirror/lang-sql";
 import { xml } from "@codemirror/lang-xml";
 import { yaml } from "@codemirror/lang-yaml";
-import { StreamLanguage, syntaxHighlighting, HighlightStyle, type StringStream } from "@codemirror/language";
+import {
+  StreamLanguage,
+  syntaxHighlighting,
+  HighlightStyle,
+  foldGutter,
+  foldKeymap,
+  indentOnInput,
+  bracketMatching,
+  type StringStream,
+} from "@codemirror/language";
 import { EditorState, type Extension } from "@codemirror/state";
-import { EditorView } from "@codemirror/view";
+import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
+import { history, defaultKeymap, historyKeymap } from "@codemirror/commands";
+import {
+  EditorView,
+  crosshairCursor,
+  drawSelection,
+  dropCursor,
+  highlightActiveLine,
+  highlightActiveLineGutter,
+  highlightSpecialChars,
+  keymap,
+  lineNumbers,
+  rectangularSelection,
+} from "@codemirror/view";
 import { tags } from "@lezer/highlight";
 import { csharp, kotlin, objectiveC } from "@codemirror/legacy-modes/mode/clike";
 import { diff } from "@codemirror/legacy-modes/mode/diff";
@@ -46,9 +67,9 @@ export interface CodeEditorOptions {
  * readable. These are the colors the `github-dark-default` Shiki theme already uses to render the
  * same file read-only, so a file stops changing color when it becomes editable.
  *
- * This has to name every tag `defaultHighlightStyle` colors, not the ones that happen to come up:
- * `basicSetup` keeps injecting the light palette, so a tag missing here falls through to it. The
- * test that says so is the one that would notice.
+ * This has to name every tag a readable color is wanted for, and it is now the only palette in
+ * play: nothing injects `defaultHighlightStyle` as a fallback, so a tag missing here is painted in
+ * the editor's own text color rather than in a light one.
  */
 export const marvisHighlightStyle = HighlightStyle.define([
   { tag: tags.comment, color: "#8b949e" },
@@ -119,8 +140,21 @@ const gitignoreLanguage = StreamLanguage.define({
 });
 
 /**
+ * What the editor needs for itself: a height it does not grow past, and a scroller that scrolls.
+ *
+ * The two colors CodeMirror hardcodes for a light page — a lavender selection, a black caret —
+ * are not here: `EditorView.theme` refuses the selectors its own base theme uses (`&dark`), and a
+ * shorter selector loses to that theme anyway. They live in `DocumentPane`'s stylesheet, which can
+ * out-specify it.
+ */
+const marvisTheme = EditorView.theme({
+  "&": { height: "100%" },
+  ".cm-scroller": { overflow: "auto" },
+});
+
+/**
  * The editor is imported by DocumentPane only after a Code view is opened. Shiki remains the
- * renderer for read-only source, while this small CM6 setup owns editing, history, gutters, and
+ * renderer for the read-only view, while this small CM6 setup owns editing, history, gutters, and
  * the language selected by the existing toolbar.
  */
 export function createCodeEditor(options: CodeEditorOptions): EditorView {
@@ -128,7 +162,33 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
     state: EditorState.create({
       doc: options.content,
       extensions: [
-        basicSetup,
+        // This is `basicSetup` written out, minus the search panel, the linter and the completion
+        // popup. Those three are the only reason the `codemirror` package was a dependency, and
+        // none of them is a thing this editor does: it draws source and takes typed text. Two
+        // consequences worth keeping in mind before adding one back — the light palette
+        // `basicSetup` also injects as a fallback does not come with it (so every readable color is
+        // named in `marvisHighlightStyle`), and a package that is not in `package.json` cannot be
+        // imported here at all.
+        lineNumbers(),
+        highlightActiveLineGutter(),
+        highlightSpecialChars(),
+        drawSelection(),
+        dropCursor(),
+        rectangularSelection(),
+        crosshairCursor(),
+        highlightActiveLine(),
+        foldGutter(),
+        indentOnInput(),
+        bracketMatching(),
+        closeBrackets(),
+        history(),
+        EditorState.allowMultipleSelections.of(true),
+        keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, ...foldKeymap]),
+        // CodeMirror assumes a light page unless told otherwise, and the two things it paints
+        // itself say so: a lavender selection and a black caret, both unreadable here. The
+        // selection is drawn on its own layer, which the shell's `::selection` cannot reach.
+        EditorView.darkTheme.of(true),
+        marvisTheme,
         languageExtension(options.language),
         syntaxHighlighting(marvisHighlightStyle),
         EditorView.updateListener.of((update) => {

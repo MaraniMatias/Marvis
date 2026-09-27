@@ -22,6 +22,8 @@
     "test": "pnpm test:frontend && pnpm test:rust"
   },
   "dependencies": {
+    "@codemirror/autocomplete": "^6.20.3",
+    "@codemirror/commands": "^6.11.1",
     "@codemirror/lang-cpp": "^6.0.3",
     "@codemirror/lang-css": "^6.3.1",
     "@codemirror/lang-html": "^6.4.12",
@@ -49,7 +51,6 @@
     "@xterm/addon-unicode11": "^0.9.0",
     "@xterm/addon-webgl": "^0.19.0",
     "@xterm/xterm": "^6.0.0",
-    "codemirror": "^6.0.2",
     "dompurify": "^3.4.16",
     "markdown-it": "^15.0.2",
     "markdown-it-task-lists": "^2.1.1",

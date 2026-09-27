@@ -1,8 +1,9 @@
 // @vitest-environment happy-dom
 import { describe, expect, it } from "vitest";
 import { defaultHighlightStyle, syntaxTree } from "@codemirror/language";
+import { redo, undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
-import { createCodeEditor, marvisHighlightStyle } from "./code-editor";
+import { createCodeEditor } from "./code-editor";
 
 function mount(language: string, content: string): EditorView {
   return createCodeEditor({
@@ -34,10 +35,9 @@ function tokensByLine(view: EditorView): Map<string, string[]> {
 }
 
 /** The color the editor actually painted a token with, read back out of the injected stylesheet. */
-function colorPaintedOn(view: EditorView, text: string): string | undefined {
-  const span = Array.from(view.contentDOM.querySelectorAll("span")).find((node) => node.textContent === text);
-  if (!span) return undefined;
+function colorForSpan(span: Element): string | undefined {
   const classes = span.className.split(/\s+/);
+  if (classes.length === 0) return undefined;
   const css = Array.from(document.querySelectorAll("style"))
     .map((style) => style.textContent ?? "")
     .join("}");
@@ -46,6 +46,22 @@ function colorPaintedOn(view: EditorView, text: string): string | undefined {
     if (rule?.[2] && rule[1].split(/\s+/).some((name) => classes.includes(name))) return rule[2];
   }
   return undefined;
+}
+
+function colorPaintedOn(view: EditorView, text: string): string | undefined {
+  const span = Array.from(view.contentDOM.querySelectorAll("span")).find((node) => node.textContent === text);
+  return span ? colorForSpan(span) : undefined;
+}
+
+/** Every node name in the tree, so an assertion can name a construct instead of a position. */
+function nodeNames(view: EditorView): string[] {
+  const names: string[] = [];
+  syntaxTree(view.state).iterate({
+    enter: (node) => {
+      names.push(node.name);
+    },
+  });
+  return names;
 }
 
 describe("code editor", () => {
@@ -71,39 +87,47 @@ describe("code editor", () => {
     view.destroy();
   });
 
-  it("paints tokens in the dark palette the read-only preview already uses", () => {
-    const view = mount("typescript", "const answer: number = 42;\n// note");
+  it("paints no token in the light palette, which is the one it no longer carries", () => {
+    // Nothing injects `defaultHighlightStyle` as a fallback any more, so this list is the only
+    // palette in play. A token still painted from the light one is a dark red keyword on `#17191f`,
+    // and it would only show up in a language nobody happened to open while this was written.
+    const light = new Set(
+      defaultHighlightStyle.specs.flatMap((spec) => (spec.color ? [spec.color.toLowerCase()] : [])),
+    );
+    const documents = [
+      ["typescript", "const answer: number = 42;\n// note"],
+      ["python", "def answer():\n    return 42"],
+      ["json", '{"answer": 42, "nested": {"deep": [true, null]}}'],
+      ["yaml", "answer: 42\nnested:\n  deep: true"],
+      ["markdown", ["---", "name: tamis", "---", "", "# Title", "", "- item", "> quote"].join("\n")],
+      ["gitignore", "# deps\nnode_modules\n!.env.example\n*.log"],
+    ] as const;
 
-    // `defaultHighlightStyle` is a light palette — dark red keywords, mid-blue strings — that was
-    // laid over Marvis' `#17191f` editor background, where the darker half is barely readable.
-    expect(colorPaintedOn(view, "const")).toBe("#ff7b72");
-    expect(colorPaintedOn(view, "answer")).toBe("#ffa657");
-    expect(colorPaintedOn(view, "number")).toBe("#7ee787");
-    expect(colorPaintedOn(view, "42")).toBe("#79c0ff");
-    expect(colorPaintedOn(view, "// note")).toBe("#8b949e");
+    for (const [language, content] of documents) {
+      const view = mount(language, content);
+      const fromLightPalette = Array.from(view.contentDOM.querySelectorAll("span"))
+        .map((span) => colorForSpan(span))
+        .filter((color): color is string => color !== undefined && light.has(color.toLowerCase()));
 
-    view.destroy();
+      expect({ language, fromLightPalette }).toEqual({ language, fromLightPalette: [] });
+      view.destroy();
+    }
   });
 
-  it("leaves no tag of the light palette to show through", () => {
-    // `basicSetup` goes on injecting `defaultHighlightStyle`, so this list is only as good as the
-    // tags it happens to cover. A tag the light palette colors and this one does not is a token
-    // painted `#30a` on a `#17191f` background, and it would only show up in a language nobody
-    // happened to open while this was written.
-    const coloredBy = (style: typeof marvisHighlightStyle) =>
-      new Set(
-        style.specs
-          .flatMap((spec) => (Array.isArray(spec.tag) ? spec.tag : [spec.tag]))
-          .filter((tag) => tag)
-          .map((tag) => tag.id),
-      );
-    const dark = coloredBy(marvisHighlightStyle);
-    const lightThrough = defaultHighlightStyle.specs.flatMap((spec) =>
-      (Array.isArray(spec.tag) ? spec.tag : [spec.tag])
-        .filter((tag) => spec.color && tag && !dark.has(tag.id))
-        .map((tag) => `${tag.label ?? tag.id} as ${spec.color}`),
-    );
+  it("has the gutter and the undo history the extension list claims", () => {
+    const view = mount("typescript", "const answer = 1;");
 
-    expect(lightThrough).toEqual([]);
+    expect(view.dom.querySelector(".cm-lineNumbers")).not.toBeNull();
+
+    // The history is one line of the list nothing else pulls in, so a typo there is invisible
+    // until someone types into the document and then cannot take it back.
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "// typed" } });
+    expect(view.state.doc.toString()).toBe("const answer = 1;// typed");
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("const answer = 1;");
+    expect(redo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("const answer = 1;// typed");
+
+    view.destroy();
   });
 });
