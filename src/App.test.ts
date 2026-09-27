@@ -165,7 +165,6 @@ vi.mock("./presentation/active-git-snapshot", () => ({
     statusError: "",
     changesStatusError: "",
     viewedError: "",
-    watchError: "",
     changesWatchError: "",
     statusRevision: 0,
     statusEventRevision: 0,

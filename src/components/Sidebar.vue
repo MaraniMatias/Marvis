@@ -67,6 +67,8 @@ interface Workdir {
   /** The checkout's own line counts, absent when Git has none to show. */
   additions?: number;
   deletions?: number;
+  /** What is wrong with this workdir, if anything (E.4). */
+  error?: string;
   kind: IconKind;
   /** Repo roots can host a new worktree. */
   gitdir: boolean;
@@ -98,6 +100,9 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     branch: checkout.isPrimary ? checkout.branch : undefined,
     additions: counts?.additions || undefined,
     deletions: counts?.deletions || undefined,
+    // The one failure that belongs to a single workdir (E.4): it names the checkout whose
+    // directory is gone, so it belongs in that row and not in a toast about the window.
+    error: checkout.isMissing ? "Directory missing" : undefined,
     kind: !isGit ? "folder" : checkout.isPrimary ? "git" : "worktree",
     gitdir: isGit && checkout.isPrimary,
     worktree: isGit && !checkout.isPrimary,
@@ -144,9 +149,15 @@ function sessionState(session: Session) {
                       <span>{{ workdir.branch }}</span>
                     </div>
                   </div>
-                  <div class="workdir-meta">
-                    <span v-if="workdir.additions" class="diff-add">+{{ workdir.additions }}</span>
-                    <span v-if="workdir.deletions" class="diff-del">-{{ workdir.deletions }}</span>
+                  <!-- One slot for the row's right-hand text. The error takes it whole: a missing
+                       directory has no counts, and a line that mixed a failure with figures
+                       would read as two different facts. -->
+                  <div class="workdir-meta" :class="{ 'workdir-meta-error': !!workdir.error }">
+                    <span v-if="workdir.error">{{ workdir.error }}</span>
+                    <template v-else>
+                      <span v-if="workdir.additions" class="diff-add">+{{ workdir.additions }}</span>
+                      <span v-if="workdir.deletions" class="diff-del">-{{ workdir.deletions }}</span>
+                    </template>
                   </div>
                 </div>
               </button>
@@ -460,8 +471,14 @@ function sessionState(session: Session) {
   font-size: 11px;
 }
 
-.workdir-item:hover .workdir-meta {
+/* Hover drops the counts to clear the row actions. An error stays: the hover gutter already
+   reserves the room, and a row that is being hovered at is exactly the row being read. */
+.workdir-item:hover .workdir-meta:not(.workdir-meta-error) {
   display: none;
+}
+
+.workdir-meta-error {
+  color: var(--marvis-red);
 }
 
 .meta-dot {

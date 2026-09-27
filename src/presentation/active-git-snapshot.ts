@@ -14,7 +14,6 @@ export interface ActiveGitSnapshot {
   statusError: string;
   changesStatusError: string;
   viewedError: string;
-  watchError: string;
   changesWatchError: string;
   statusRevision: number;
   statusEventRevision: number;
@@ -44,7 +43,6 @@ export function useActiveGitSnapshot(
     statusError: "",
     changesStatusError: "",
     viewedError: "",
-    watchError: "",
     changesWatchError: "",
     statusRevision: 0,
     statusEventRevision: 0,
@@ -105,7 +103,6 @@ export function useActiveGitSnapshot(
       state.statusError = "";
       state.changesStatusError = "";
       state.viewedError = "";
-      state.watchError = "";
       state.changesWatchError = "";
       state.statusEventCheckoutId = null;
       requestedDefaultBranch = false;
@@ -164,10 +161,7 @@ export function useActiveGitSnapshot(
         }
         unlistenStatus = dispose;
       } catch (cause) {
-        if (isCurrent()) {
-          state.watchError = errorText(cause);
-          state.changesWatchError = errorText(cause);
-        }
+        if (isCurrent()) state.changesWatchError = errorText(cause);
       }
       if (!isCurrent()) return;
 
@@ -177,7 +171,7 @@ export function useActiveGitSnapshot(
           if (isCurrent()) await watchGitCheckout(checkoutId);
         });
       } catch (cause) {
-        if (isCurrent()) state.watchError = errorText(cause);
+        if (isCurrent()) state.changesWatchError = errorText(cause);
       }
       if (isCurrent()) await refreshStatus();
     },

@@ -7,6 +7,7 @@ import { DEFAULT_CHECKOUT_UI_STATE } from "../domain/ui-state";
 import type { CheckoutUiState } from "../domain/ui-state";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
+import { useToasts } from "../presentation/toasts";
 
 const mocks = vi.hoisted(() => ({
   listCheckoutFiles: vi.fn(),
@@ -22,6 +23,8 @@ vi.mock("../lib/ipc", () => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn(async () => () => undefined) }));
 
 import InspectorPane from "./InspectorPane.vue";
+
+const { toasts, dismiss } = useToasts();
 
 /** Mirrors TREE_ROW_HEIGHT, TREE_WINDOW_SIZE and TREE_OVERSCAN: the window math is only right
  *  when the rendered rows are exactly this tall, so the test pins both sides. */
@@ -51,7 +54,6 @@ function gitSnapshot(checkoutId: string, status: GitStatus | null = null): Activ
     statusError: "",
     changesStatusError: "",
     viewedError: "",
-    watchError: "",
     changesWatchError: "",
     statusRevision: 0,
     statusEventRevision: 0,
@@ -93,6 +95,7 @@ describe("InspectorPane", () => {
     vi.resetAllMocks();
     mocks.getGitCheckoutDiffStats.mockResolvedValue({});
     mocks.getGitDiffStats.mockResolvedValue([]);
+    for (const toast of [...toasts.value]) dismiss(toast.id);
   });
 
   it("opens a selected file in the central document and marks the open row per checkout", async () => {
@@ -136,10 +139,34 @@ describe("InspectorPane", () => {
     mocks.listCheckoutFiles.mockRejectedValueOnce({ code: "permission_denied", message: "denied" });
     await wrapper.setProps({ checkout: checkout("denied") });
     await flushPromises();
-    expect(wrapper.get('[role="alert"]').text()).toContain("Permission denied");
+    // The root of the tree has no row of its own, so the reason is announced instead (A.6).
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect(toasts.value.map((toast) => toast.message)).toContain(
+      "Permission denied while reading this folder or file.",
+    );
 
     await wrapper.setProps({ checkout: checkout("gone", true) });
     expect(wrapper.text()).toContain("Checkout is missing.");
+    wrapper.unmount();
+  });
+
+  it("keeps a folder that will not list on its own row", async () => {
+    mocks.listCheckoutFiles.mockImplementation(async (_checkoutId: string, path: string) => {
+      if (path === ".")
+        return { entries: [{ name: "src", path: "src", kind: "directory" as const }], truncated: false };
+      throw { code: "permission_denied", message: "denied" };
+    });
+    const wrapper = mountInspector({ checkout: checkout("folder") });
+    await flushPromises();
+
+    await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
+    await flushPromises();
+
+    // The row says what failed, and it lasts as long as the row does.
+    expect(wrapper.get('[aria-label="Checkout files"]').text()).toContain(
+      "Permission denied while reading this folder or file.",
+    );
+    expect(toasts.value).toHaveLength(0);
     wrapper.unmount();
   });
 

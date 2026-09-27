@@ -11,6 +11,7 @@ import type { AnchorOutcome, ReviewNote, ReviewSide } from "../domain/review";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
+import { useToasts } from "../presentation/toasts";
 import type { ReviewAnchorCheck } from "../lib/ipc";
 import { getGitDiff } from "../lib/ipc";
 import { DIFF_ROW_HEIGHT, useLargeDiff } from "./use-large-diff";
@@ -45,7 +46,7 @@ const diff = shallowRef<GitFileDiff | null>(null);
 const diffHunks = shallowRef<Array<{ title: string; file: DiffFile }>>([]);
 const collapsedHunks = ref<number[]>([]);
 const diffState = ref<"idle" | "loading" | "ready" | "error">("idle");
-const diffError = ref("");
+const { push: pushToast } = useToasts();
 const hasTextHunks = computed(() => Boolean(diff.value?.patch.includes("@@") || diff.value?.totalLines));
 const showNoTextHunks = computed(
   () =>
@@ -64,7 +65,7 @@ const changedFiles = computed(() => props.gitSnapshot.status?.files ?? []);
 const title = computed(() => props.path ?? ALL_CHANGES_LABEL);
 const branch = computed(() => props.gitSnapshot.status?.branch ?? props.gitSnapshot.status?.head ?? "");
 const largeDiff = useLargeDiff(() => props.checkout.id, selectedPath, diff, collapsedHunks, diffScrollTop);
-const { diffPageError, largeDiffLineCount, loadVisiblePages, visibleLargeDiffWindow } = largeDiff;
+const { largeDiffLineCount, loadVisiblePages, visibleLargeDiffWindow } = largeDiff;
 const draft = ref<{ side: ReviewSide; lineStart: number; lineEnd: number } | null>(null);
 /** Diff texts keyed by `${side}:${line}`, for the whole file or for the rendered window. */
 const lineTexts = computed(() => {
@@ -253,7 +254,6 @@ async function loadDiff(path: string, preservePosition = false) {
   }
   collapsedHunks.value = [];
   diffScrollTop.value = oldScrollTop;
-  diffError.value = "";
   diffState.value = "loading";
   try {
     const result = await getGitDiff(checkoutId, path);
@@ -284,7 +284,9 @@ async function loadDiff(path: string, preservePosition = false) {
       props.path !== path
     )
       return;
-    diffError.value = errorText(error);
+    // A diff that cannot be read leaves the panel with nothing to show, so the reason is
+    // announced rather than drawn where it would be the only thing on screen (A.6).
+    pushToast(errorText(error));
     diffState.value = "error";
   }
 }
@@ -340,7 +342,7 @@ watch(
       diffHunks.value = [];
       diffScrollTop.value = 0;
       diffState.value = "error";
-      diffError.value = "This file is no longer in the current Git changes.";
+      pushToast("This file is no longer in the current Git changes.");
     }
   },
 );
@@ -474,7 +476,8 @@ onUnmounted(() => {
     </template>
     <template v-else>
       <p v-if="diffState === 'loading' && !diff" role="status" class="pane-state text-sm">Loading diff…</p>
-      <p v-else-if="diffState === 'error'" role="alert" class="pane-state text-sm">{{ diffError }}</p>
+      <!-- A state of the file itself, not a failure: the panel's whole content is the reason,
+           so it stays drawn here rather than expiring in a toast. Same for the three below. -->
       <p v-else-if="diff?.isBinary" role="status" class="pane-state text-sm">Binary file; text diff is unavailable.</p>
       <p v-else-if="diff?.symlinkTarget !== undefined" role="status" class="pane-state text-sm">
         Symlink target: <code class="break-all text-(--marvis-text)">{{ diff.symlinkTarget }}</code>
@@ -489,9 +492,6 @@ onUnmounted(() => {
       <template v-else-if="(diffState === 'ready' || diffState === 'loading') && diff">
         <p v-if="diff.large" class="shrink-0 px-3 py-1 text-[10px] text-(--marvis-text-faint)">
           {{ diff.totalLines.toLocaleString() }} diff rows · virtualized view · all rows available by scrolling
-        </p>
-        <p v-if="diffPageError" role="alert" class="shrink-0 px-3 py-1 text-xs text-(--marvis-red)">
-          {{ diffPageError }}
         </p>
         <div
           ref="diffViewport"

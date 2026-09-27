@@ -8,10 +8,13 @@ import type { DocumentMode, MainView } from "../domain/main-document";
 import type { ReviewNote } from "../domain/review";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
+import { useToasts } from "../presentation/toasts";
 import DocumentPane from "./DocumentPane.vue";
 import FileDiff from "./FileDiff.vue";
 import InspectorPane from "./InspectorPane.vue";
 import MainPane from "./MainPane.vue";
+
+const { toasts, dismiss } = useToasts();
 
 const mocks = vi.hoisted(() => ({
   listCheckoutFiles: vi.fn(),
@@ -98,7 +101,6 @@ function snapshot(checkoutId: string, files: GitStatus["files"] = []): ActiveGit
     statusError: "",
     changesStatusError: "",
     viewedError: "",
-    watchError: "",
     changesWatchError: "",
     statusRevision: 0,
     statusEventRevision: 0,
@@ -179,6 +181,7 @@ describe("DocumentPane", () => {
       totalLines: 3,
       hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
     });
+    for (const toast of [...toasts.value]) dismiss(toast.id);
   });
 
   it("opens a file selection in the central document, rendering Markdown by default and allowing Code mode", async () => {
@@ -525,6 +528,26 @@ describe("DocumentPane", () => {
     await wrapper.setProps({ gitSnapshot: snapshot(checkoutId) });
     await flushPromises();
     expect(wrapper.get('[role="status"]').text()).toBe("No changed files.");
+    wrapper.unmount();
+  });
+
+  it("announces a diff that cannot be read instead of drawing the reason in the panel", async () => {
+    const checkoutId = "checkout:diff-error";
+    mocks.getGitDiff.mockRejectedValueOnce(new Error("git is not available"));
+    const wrapper = mount(FileDiff, {
+      props: {
+        checkout: checkout(checkoutId),
+        gitSnapshot: snapshot(checkoutId, [{ path: "src/app.ts", status: "M" }]),
+        review: reviewApi(),
+        path: "src/app.ts",
+        active: true,
+        scrollTop: 0,
+      },
+    });
+    await flushPromises();
+
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect(toasts.value.map((toast) => toast.message)).toContain("git is not available");
     wrapper.unmount();
   });
 

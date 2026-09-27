@@ -10,6 +10,7 @@ import {
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { TerminalLaunchTarget } from "../lib/ipc";
 import { loadTerminalLayout, saveTerminalLayout } from "../lib/ipc";
+import { useToasts } from "../presentation/toasts";
 import Button from "./ui/button/Button.vue";
 import TerminalSession from "./TerminalSession.vue";
 
@@ -60,7 +61,7 @@ const nvimLaunchingCheckoutIds = ref(new Set<string>());
 const handledNvimRequestTokens = new Set<number>();
 const terminalRefs = new Map<string, TerminalSessionHandle>();
 const nextViewId = ref(1);
-const terminalError = ref<string | null>(null);
+const { push: pushToast } = useToasts();
 const checkout = computed(() => props.checkout);
 const activeView = computed(() => {
   const checkoutViews = views.value.filter((view) => view.checkoutId === checkout.value?.id);
@@ -76,9 +77,16 @@ const isStarting = computed(
     Boolean(activeView.value && !activeView.value.session),
 );
 
+/**
+ * A failure to read or write the layout is not shown at all: a stale layout is healed into a
+ * working one, so reporting it would name a problem the user never has. Everything else is
+ * announced (A.6) rather than left in a bar under the terminal, which pushed the last lines of
+ * output out of the panel for a message that is gone six seconds later.
+ */
 function reportTerminalError(cause: unknown) {
   const message = cause instanceof Error ? cause.message : String(cause);
-  terminalError.value = /^(?:saved terminal layout is invalid|terminal layout\b)/.test(message) ? null : message;
+  if (/^(?:saved terminal layout is invalid|terminal layout\b)/.test(message)) return;
+  pushToast(message);
 }
 
 function saveLayout(checkoutId: string, layout: CheckoutTerminalLayout) {
@@ -129,7 +137,6 @@ async function createTerminalSession(
   try {
     await initializeLayout(target);
     if (props.checkout?.id !== target.id || target.isMissing) return;
-    terminalError.value = null;
     const key = `pending-${nextViewId.value++}`;
     pendingViewKey.value = key;
     views.value.push({ key, checkoutId: target.id, session: null, sessionType, launchTarget });
@@ -169,14 +176,17 @@ async function launchNeovim(target?: TerminalLaunchTarget) {
       await createTerminalSession("nvim", target);
       return;
     }
+    if (currentView.sessionType === "nvim") return;
+    // A terminal that has not answered yet has no handle to close, and asking again would
+    // race the one launch already in flight. Both are refusals, not failures: they say what
+    // to do next, which is what `info` is for.
     if (!currentView.session) {
-      terminalError.value = "Wait for the current terminal to start before opening Neovim.";
+      pushToast("Wait for the current terminal to start before opening Neovim.", "info");
       return;
     }
-    if (currentView.sessionType === "nvim") return;
     const terminal = terminalRefs.get(currentView.key);
     if (!terminal) {
-      terminalError.value = "The current terminal is not ready to open Neovim.";
+      pushToast("The current terminal is not ready to open Neovim.", "info");
       return;
     }
     if ((await terminal.requestClose()) && props.checkout?.id === selectedCheckout.id) {
@@ -239,7 +249,7 @@ function onFailed(key: string, message: string) {
   }
   if (pendingViewKey.value === key) pendingViewKey.value = null;
   views.value = views.value.filter((item) => item.key !== key);
-  terminalError.value = message;
+  pushToast(message);
 }
 
 watch(
@@ -360,13 +370,5 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
         </div>
       </div>
     </section>
-
-    <p
-      v-if="terminalError"
-      role="alert"
-      class="m-0 border-t border-(--marvis-border) px-3 py-2 text-sm text-(--marvis-red)"
-    >
-      {{ terminalError }}
-    </p>
   </main>
 </template>

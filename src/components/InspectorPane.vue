@@ -14,6 +14,7 @@ import type { CheckoutUiState } from "../domain/ui-state";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
 import { useDiffStats } from "../presentation/diff-stats";
+import { useToasts } from "../presentation/toasts";
 import { listCheckoutFiles } from "../lib/ipc";
 
 const props = defineProps<{
@@ -75,11 +76,14 @@ const diffStats = useDiffStats(
   computed(() => (props.repo?.kind === "git" ? (props.checkout?.id ?? null) : null)),
 );
 
+const { push: pushToast } = useToasts();
+
 const directories = ref<Record<string, FileEntry[]>>({});
 const directoryStates = ref<Record<string, DirectoryState>>({});
 const expanded = ref<string[]>([]);
 const rootState = ref<"idle" | "loading" | "ready" | "error" | "missing">("idle");
-const rootError = ref("");
+/** The last reason a folder could not be listed, which its own row in the tree shows (E.2). */
+const folderError = ref("");
 const selectedPaths = ref<Record<string, string | null>>({});
 const selectedChangedPaths = ref<Record<string, string | null>>({});
 const selectedPath = computed(() => (props.checkout ? (selectedPaths.value[props.checkout.id] ?? null) : null));
@@ -165,16 +169,16 @@ async function loadDirectory(checkoutId: string, path: string, requestGeneration
     directoryStates.value = nextStates;
     if (path === ".") rootState.value = "ready";
   } catch (error) {
-    if (requestGeneration !== generation) return;
+    if (requestGeneration !== generation || hasCachedEntries) return;
     const message = errorText(error);
     if (path === ".") {
-      if (!hasCachedEntries) {
-        rootState.value = isIpcError(error) && error.code === "folder_missing" ? "missing" : "error";
-      }
-      rootError.value = message;
-    } else if (!hasCachedEntries) {
+      // The root has no row of its own to hold the reason, so the toast is where it goes (A.6).
+      rootState.value = isIpcError(error) && error.code === "folder_missing" ? "missing" : "error";
+      if (rootState.value === "error") pushToast(message);
+    } else {
+      // A folder keeps it on its own row, where it lasts as long as the row does.
       directoryStates.value = { ...directoryStates.value, [path]: "error" };
-      rootError.value = message;
+      folderError.value = message;
     }
   }
 }
@@ -195,14 +199,13 @@ watch(
       selectedPaths.value = { ...selectedPaths.value, [checkoutId]: saved.selectedFilePath };
     if (checkoutId && saved?.selectedChangePath)
       selectedChangedPaths.value = { ...selectedChangedPaths.value, [checkoutId]: saved.selectedChangePath };
-    rootError.value = "";
+    folderError.value = "";
     if (!checkoutId) {
       rootState.value = "idle";
       return;
     }
     if (isMissing) {
       rootState.value = "missing";
-      rootError.value = "Checkout is no longer available.";
       return;
     }
     rootState.value = "loading";
@@ -353,7 +356,7 @@ const visibleEntries = computed<VisibleEntry[]>(() => {
       const state = directoryStates.value[entry.path];
       if (state === "loading") result.push({ depth: depth + 1, message: "Loading folder…" });
       else if (state === "error")
-        result.push({ depth: depth + 1, message: rootError.value || "Could not load folder." });
+        result.push({ depth: depth + 1, message: folderError.value || "Could not load folder." });
       else if (state === "empty") result.push({ depth: depth + 1, message: "Empty folder." });
       else {
         if (state === "truncated")
@@ -536,8 +539,6 @@ const matchedSearchEntries = searchEntries.value
         <p v-if="rootState === 'idle'" class="pane-state">Open a checkout to browse files.</p>
         <p v-else-if="rootState === 'loading'" role="status" class="pane-state">Loading files…</p>
         <p v-else-if="rootState === 'missing'" role="status" class="pane-state">Checkout is missing.</p>
-        <!-- Phase 5: the per-folder error goes to a toast, same text as `errorText()` -->
-        <p v-else-if="rootState === 'error'" role="alert" class="pane-state">{{ rootError }}</p>
         <p
           v-else-if="directories['.']?.length === 0 && directoryStates['.'] !== 'truncated'"
           role="status"

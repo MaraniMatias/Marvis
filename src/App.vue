@@ -20,15 +20,16 @@ import type { DocumentMode, MainView } from "./domain/main-document";
 import InspectorPane from "./components/InspectorPane.vue";
 import MainPane from "./components/MainPane.vue";
 import Sidebar from "./components/Sidebar.vue";
+import ToastStack from "./components/ToastStack.vue";
 import WorktreeDialog from "./components/WorktreeDialog.vue";
 import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
-import { isIpcError } from "./domain/ipc";
 import { getEditorAvailability, openInZed, selectCheckout as persistCheckoutSelection } from "./lib/ipc";
 import type { EditorAvailability } from "./lib/ipc";
 import { useWorkspaceState } from "./presentation/workspace";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
 import { useReviewNotes } from "./presentation/review-notes";
 import { useAgentSessions } from "./presentation/agent-sessions";
+import { useToasts } from "./presentation/toasts";
 import { defaultAgentSession } from "./domain/agent";
 import { buildReviewMarkdown } from "./domain/review";
 import { isMarkdownPath } from "./presentation/markdown-preview";
@@ -49,13 +50,13 @@ const {
   workspace,
   activeCheckout,
   isOpening,
-  error,
   chooseFolder,
   selectCheckout,
   selectSession: selectWorkspaceSession,
   updateWorkspace,
   promptForDefaultBranchIfNeeded,
 } = useWorkspaceState();
+const { push: pushToast, pushCause: reportCause } = useToasts();
 const appLayout = ref<AppLayoutState>({ ...DEFAULT_APP_LAYOUT });
 const appLayoutReady = ref(false);
 const checkoutUiStates = ref<Record<string, CheckoutUiState>>({});
@@ -258,7 +259,7 @@ function scheduleUiWrite(write: () => Promise<void>) {
     .catch(() => {})
     .then(write)
     .catch((cause: unknown) => {
-      error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+      reportCause(cause);
     });
   uiStateWriteQueue = pending;
 }
@@ -385,7 +386,7 @@ onMounted(async () => {
   try {
     appLayout.value = normalizeAppLayout(await loadAppLayout());
   } catch (cause) {
-    error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+    reportCause(cause);
     appLayout.value = { ...DEFAULT_APP_LAYOUT };
   } finally {
     appLayoutReady.value = true;
@@ -424,7 +425,7 @@ function onViewportResize() {
 }
 
 function showWindowError(cause: unknown) {
-  error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+  reportCause(cause);
 }
 
 function requestWindowClose(currentWindow: ReturnType<typeof getCurrentWindow>): Promise<void> {
@@ -464,7 +465,7 @@ async function requestShell(checkoutId: string) {
     workspace.value = await persistCheckoutSelection(checkoutId);
     shellRequest.value = { checkoutId, token: ++shellRequestToken };
   } catch (cause) {
-    error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+    reportCause(cause);
   }
 }
 
@@ -480,7 +481,7 @@ async function requestNvim(checkoutId: string, filePath?: string, position?: Edi
     workspace.value = await persistCheckoutSelection(checkoutId);
   } catch (cause) {
     if (nvimRequest.value?.token === request.token) nvimRequest.value = null;
-    error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+    reportCause(cause);
   }
 }
 
@@ -501,7 +502,7 @@ async function requestEditor(editor: "zed" | "neovim") {
   try {
     await openInZed(checkout.id, file, position?.line, position?.column);
   } catch (cause) {
-    error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+    reportCause(cause);
   }
 }
 
@@ -538,7 +539,7 @@ async function sendReviewToAgent(ids: string[], queue = false) {
       queue,
     );
   } catch (cause) {
-    error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+    reportCause(cause);
   } finally {
     sendingReview.value = false;
   }
@@ -557,8 +558,7 @@ function promptEditorPosition(): EditorPosition | null {
   const value = window.prompt("Open selected file at line[:column]:", "1");
   if (value === null) return null;
   const position = parseEditorPosition(value);
-  if (!position) error.value = "Enter a positive line number with an optional column (for example, 42:7).";
-  else error.value = null;
+  if (!position) pushToast("Enter a positive line number with an optional column (for example, 42:7).");
   return position;
 }
 
@@ -576,7 +576,7 @@ function applyWorkspace(next: WorkspaceState) {
 }
 
 function reportWarning(message: string) {
-  error.value = message;
+  pushToast(message, "info");
 }
 </script>
 
@@ -781,6 +781,7 @@ function reportWarning(message: string) {
       @request-shell="requestShell"
       @warning="reportWarning"
     />
+    <ToastStack />
   </div>
   <div v-else class="h-full bg-transparent p-5 text-sm text-zinc-400" role="status">Restoring workspace layout…</div>
 </template>

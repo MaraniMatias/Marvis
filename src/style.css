@@ -119,10 +119,6 @@ body {
   background: var(--marvis-bg-0);
 }
 
-.sidebar-toolbar,
-.inspector-tablist,
-.inspector-filter,
-.changes-summary,
 .document-toolbar {
   border-color: var(--marvis-border);
 }
@@ -141,45 +137,6 @@ body {
 .document-mode-button[aria-pressed="true"] {
   background: var(--marvis-border);
   color: var(--marvis-text);
-}
-
-.sidebar-filter,
-.inspector-filter {
-  border: 1px solid var(--marvis-border);
-  background: var(--marvis-bg-2);
-  color: var(--marvis-text);
-}
-
-.sidebar-filter:focus,
-.inspector-filter:focus {
-  border-color: var(--marvis-accent);
-  outline: none;
-}
-
-.inspector-tablist {
-  background: var(--marvis-bg-1);
-}
-
-.inspector-tab {
-  color: var(--marvis-text-faint);
-  transition:
-    background-color 120ms ease,
-    color 120ms ease;
-}
-
-.inspector-tab:hover,
-.inspector-tab:focus-visible {
-  color: var(--marvis-text-secondary);
-}
-
-.inspector-tab[aria-selected="true"] {
-  background: var(--marvis-border);
-  color: var(--marvis-text);
-}
-
-.inspector-tree-row:hover,
-.changes-file-row:hover {
-  background: var(--marvis-bg-2);
 }
 
 .pane-state {
@@ -203,31 +160,6 @@ body {
 
 .terminal-host .xterm-viewport {
   background: var(--marvis-bg-0) !important;
-}
-
-.changes-status-added {
-  background: var(--marvis-bg-2);
-  color: var(--marvis-green);
-}
-
-.changes-status-modified {
-  background: var(--marvis-bg-2);
-  color: var(--marvis-text);
-}
-
-.changes-status-removed {
-  background: var(--marvis-bg-2);
-  color: var(--marvis-red);
-}
-
-.changes-status-renamed {
-  background: var(--marvis-bg-2);
-  color: var(--marvis-accent);
-}
-
-.changes-status-default {
-  background: var(--marvis-bg-2);
-  color: var(--marvis-text-faint);
 }
 
 /* The window is opaque (B.4): no tauri transparency and no blur filters. */

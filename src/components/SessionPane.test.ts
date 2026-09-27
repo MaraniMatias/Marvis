@@ -4,7 +4,10 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Checkout, Session, WorkspaceState } from "../domain/workspace";
 import { addSessionToLayout, createTerminalLayout } from "../domain/terminal-layout";
 import { loadTerminalLayout, saveTerminalLayout } from "../lib/ipc";
+import { useToasts } from "../presentation/toasts";
 import SessionPane from "./SessionPane.vue";
+
+const { toasts, dismiss } = useToasts();
 
 const terminalMock = vi.hoisted(() => ({
   mounts: 0,
@@ -102,6 +105,7 @@ beforeEach(() => {
   terminalMock.closedIds = [];
   vi.mocked(loadTerminalLayout).mockResolvedValue(null);
   vi.mocked(saveTerminalLayout).mockResolvedValue(undefined);
+  for (const toast of [...toasts.value]) dismiss(toast.id);
 });
 
 describe("SessionPane terminal UI", () => {
@@ -352,6 +356,22 @@ describe("SessionPane terminal UI", () => {
         tabs: [expect.objectContaining({ root: { kind: "session", sessionId: "session:old" } })],
       }),
     );
+    wrapper.unmount();
+  });
+
+  it("announces a terminal that will not start, with no error bar under the panel", async () => {
+    const wrapper = mount(SessionPane, {
+      props: { checkout, activeSessionId: null, isOpening: true },
+    });
+    await wrapper.setProps({ isOpening: false });
+    await flushPromises();
+
+    wrapper.findComponent({ name: "TerminalSession" }).vm.$emit("failed", "pty could not be spawned");
+    await flushPromises();
+
+    expect(toasts.value.map((toast) => toast.message)).toEqual(["pty could not be spawned"]);
+    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+    expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(0);
     wrapper.unmount();
   });
 

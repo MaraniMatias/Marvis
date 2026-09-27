@@ -349,4 +349,36 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.get(".workdir-meta").text()).toBe("");
     wrapper.unmount();
   });
+
+  it("names a missing directory in the row that owns it, in place of its counts", async () => {
+    mocks.getGitCheckoutDiffStats.mockResolvedValue({
+      "checkout:primary": { additions: 12, deletions: 4 },
+      "checkout:gone": { additions: 3, deletions: 1 },
+    });
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              checkout({ id: "checkout:primary" }),
+              checkout({ id: "checkout:gone", path: "/test-gone", isMissing: true }),
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    await flushPromises();
+
+    const [base, gone] = wrapper.findAll(".workdir-item .workdir-meta");
+    expect(base.text()).toBe("+12-4");
+    // E.4: a failure of one workdir is written in that row, and it takes the slot the counts
+    // would have used, so a row never shows a failure next to figures it cannot have.
+    expect(gone.text()).toBe("Directory missing");
+    expect(gone.classes()).toContain("workdir-meta-error");
+    expect(gone.find(".diff-add").exists()).toBe(false);
+    wrapper.unmount();
+  });
 });

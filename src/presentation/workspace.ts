@@ -2,7 +2,6 @@ import { computed, onMounted, ref } from "vue";
 import { open } from "@tauri-apps/plugin-dialog";
 import { createWorkspaceState, getActiveCheckout } from "../domain/workspace";
 import type { WorkspaceState } from "../domain/workspace";
-import { isIpcError } from "../domain/ipc";
 import {
   registerFolder,
   restoreWorkspace,
@@ -10,13 +9,21 @@ import {
   selectSession as persistSessionSelection,
   setDefaultBranch as persistDefaultBranch,
 } from "../lib/ipc";
+import { useToasts } from "./toasts";
+
+const { pushCause: reportCause } = useToasts();
 
 export function useWorkspaceState() {
   const workspace = ref<WorkspaceState>(createWorkspaceState());
   const activeCheckout = computed(() => getActiveCheckout(workspace.value));
   const isOpening = ref(true);
+  /** The last failure, for callers that want to read it; the toast is what shows it (A.6). */
   const error = ref<string | null>(null);
   const promptingDefaultBranch = new Set<string>();
+
+  function reportError(cause: unknown) {
+    error.value = reportCause(cause);
+  }
 
   async function promptForDefaultBranchIfNeeded(force = false) {
     const checkoutId = workspace.value.activeCheckoutId;
@@ -41,7 +48,7 @@ export function useWorkspaceState() {
       if (branch === null || !branch.trim()) return;
       workspace.value = await persistDefaultBranch(repo.id, branch);
     } catch (cause) {
-      error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+      reportError(cause);
     } finally {
       promptingDefaultBranch.delete(repo.id);
     }
@@ -51,7 +58,7 @@ export function useWorkspaceState() {
     try {
       workspace.value = await restoreWorkspace();
     } catch (cause) {
-      error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+      reportError(cause);
     } finally {
       isOpening.value = false;
     }
@@ -68,7 +75,7 @@ export function useWorkspaceState() {
       workspace.value = await registerFolder(selectedPath);
       await promptForDefaultBranchIfNeeded();
     } catch (cause) {
-      error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+      reportError(cause);
     } finally {
       isOpening.value = false;
     }
@@ -89,7 +96,7 @@ export function useWorkspaceState() {
         workspace.value = await persistCheckoutSelection(checkoutId);
         await promptForDefaultBranchIfNeeded();
       } catch (cause) {
-        error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+        reportError(cause);
       }
     },
     selectSession: async (sessionId: string | null) => {
@@ -97,7 +104,7 @@ export function useWorkspaceState() {
         workspace.value = await persistSessionSelection(sessionId);
         await promptForDefaultBranchIfNeeded();
       } catch (cause) {
-        error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+        reportError(cause);
       }
     },
   };

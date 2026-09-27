@@ -2,6 +2,7 @@ import { computed, onUnmounted, ref, shallowRef, watch } from "vue";
 import type { Ref } from "vue";
 import type { GitDiffPage, GitDiffPageLine, GitFileDiff } from "../domain/git";
 import { isIpcError } from "../domain/ipc";
+import { useToasts } from "../presentation/toasts";
 import { getGitDiffPage } from "../lib/ipc";
 
 const DIFF_PAGE_SIZE = 32;
@@ -52,9 +53,11 @@ export function useLargeDiff(
   scrollTop: Ref<number>,
 ) {
   const diffPages = shallowRef<Record<number, GitDiffPage>>({});
+  // Keyed by page: the row that could not load says so in place, so a repeated failure on
+  // every scroll does not become a toast wall.
   const diffPageErrors = ref<Record<number, string>>({});
-  const diffPageError = ref("");
   const pending = new Set<string>();
+  const { push: pushToast } = useToasts();
   let pageUseOrder: number[] = [];
   let generation = 0;
   let mounted = true;
@@ -110,7 +113,6 @@ export function useLargeDiff(
     generation += 1;
     diffPages.value = {};
     diffPageErrors.value = {};
-    diffPageError.value = "";
     pageUseOrder = [];
   }
 
@@ -135,7 +137,6 @@ export function useLargeDiff(
         return;
       }
       const pages = { ...diffPages.value, [offset]: result };
-      diffPageError.value = "";
       pageUseOrder = [...pageUseOrder.filter((pageOffset) => pageOffset !== offset), offset];
       while (pageUseOrder.length > MAX_CACHED_DIFF_PAGES) {
         const expired = pageUseOrder.shift();
@@ -145,8 +146,10 @@ export function useLargeDiff(
     } catch (error) {
       if (isCurrent(request, path, requestCheckoutId)) {
         const message = errorText(error);
+        // The row says what failed; the toast announces it once, so scrolling the window
+        // over the same broken page does not stack one message per attempt.
+        pushToast(message);
         diffPageErrors.value = { ...diffPageErrors.value, [offset]: message };
-        diffPageError.value = message;
       }
     } finally {
       pending.delete(cacheKey);
@@ -171,5 +174,5 @@ export function useLargeDiff(
     reset();
   });
 
-  return { diffPageError, largeDiffLineCount, loadVisiblePages, reset, visibleLargeDiffWindow };
+  return { largeDiffLineCount, loadVisiblePages, reset, visibleLargeDiffWindow };
 }
