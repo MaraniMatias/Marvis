@@ -41,6 +41,22 @@ describe("source highlighter", () => {
     expect(await highlightSourceAs("python", "answer = 42")).toHaveLength(1);
   });
 
+  it("colors the config dotfiles that carry no extension, and keeps a negation out of a comment", async () => {
+    // `gitignore` has no grammar of its own in Shiki, so it renders as `ini` under a separate name.
+    // If the indirection ever drops that name, this is the file that goes back to plain.
+    const lines = await highlightSource(".gitignore", "# deps\nnode_modules\n!.env.example");
+    expect(lines).toHaveLength(3);
+    expect(lines?.[0]).toContain("#8B949E");
+    // `!.env.example` re-includes a pattern, so it must not be painted as the `#` comment above.
+    expect(lines?.[2]).not.toContain("#8B949E");
+
+    const env = await highlightSource(".env.local", "# local\nNODE_ENV=development");
+    expect(env).toHaveLength(2);
+    expect(env?.[1]).toContain("color:");
+
+    expect(await highlightSource(".prettierrc", '{ "semi": true }')).toHaveLength(1);
+  });
+
   it("gives a name that asks for no grammar no highlighting, and no grammar a module path", async () => {
     for (const name of [
       "",

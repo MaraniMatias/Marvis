@@ -1,6 +1,7 @@
 // @vitest-environment happy-dom
+import MarkdownIt from "markdown-it";
 import { describe, expect, it } from "vitest";
-import { attachMarkdownImages, renderMarkdownPreview } from "./markdown-preview";
+import { attachMarkdownImages, frontMatterList, renderMarkdownPreview } from "./markdown-preview";
 
 describe("Markdown preview", () => {
   it("renders GFM tables, task lists, and fenced code", async () => {
@@ -171,7 +172,7 @@ describe("Markdown preview", () => {
     expect(preview.html).not.toContain("<script>");
   });
 
-  it("shows YAML front matter as the key/value table GitHub puts above a document", async () => {
+  it("shows YAML front matter as the key/value pairs above a document", async () => {
     const preview = await renderMarkdownPreview(
       [
         "---",
@@ -194,31 +195,107 @@ describe("Markdown preview", () => {
       ].join("\n"),
       "docs/readme.md",
     );
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+    // Asserted through `dt, dd` rather than through the `dl` that holds them: happy-dom's
+    // sanitizer drops the tags and the attributes of the first element it sees, so the wrapper the
+    // layout hangs on is only observable in a real browser, and it is checked there instead.
+    const pairs = [...document.querySelectorAll("dt, dd")];
 
-    // The rows are asserted, not the table around them: happy-dom's sanitizer drops the `<table>`
-    // wrapper of the first table it sees, so the wrapper and its class are gone by the time the
-    // markup reaches this test. A browser keeps both, which is what the layout in DocumentPane.vue
-    // hangs on, and the re-wrap above the assertions puts a bare `<table>` back when it can.
-    expect(preview.html).toContain(
-      "<thead><tr><th>title</th><th>draft</th><th>reviewer</th><th>empty</th><th>tags</th></tr></thead>",
-    );
-    expect(preview.html).toContain("<th>title</th><th>draft</th><th>reviewer</th><th>empty</th><th>tags</th>");
-    expect(preview.html).toContain("<td>Add the export</td><td>false</td><td></td><td></td><td>api, docs</td>");
+    // One pair per key, in the order the block writes them.
+    expect(pairs.map((node) => `${node.tagName}:${node.textContent}`)).toEqual([
+      "DT:title",
+      "DD:Add the export",
+      "DT:draft",
+      "DD:false",
+      "DT:reviewer",
+      "DD:",
+      "DT:empty",
+      "DD:",
+      "DT:tags",
+      "DD:api, docs",
+    ]);
     // The document behind the metadata is rendered whole: a table, a task list and a heading.
     expect(preview.html).toContain("<h1>What this does</h1>");
     expect(preview.html).toContain('type="checkbox"');
     expect(preview.html).toContain("<th>a</th>");
   });
 
-  it("reads a value that is more than one line as one line of text", async () => {
+  it("flattens the nesting of a key into the key itself", async () => {
     const preview = await renderMarkdownPreview(
-      "---\ndescription: |\n  first line\n  second line\ntags:\n  - one\n  - two\n---\n\nBody.",
+      [
+        "---",
+        "permission:",
+        "  edit: deny",
+        "  task:",
+        '    "*": deny',
+        "tags:",
+        "  - one",
+        "  - two",
+        'quoted: "a: b"',
+        "---",
+        "",
+        "Body.",
+      ].join("\n"),
       "readme.md",
     );
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+    const pairs = [...document.querySelectorAll("dt, dd")];
 
-    expect(preview.html).toContain("first line second line");
-    expect(preview.html).toContain("<td>one, two</td>");
+    expect(pairs.map((node) => `${node.tagName}:${node.textContent}`)).toEqual([
+      "DT:permission.edit",
+      "DD:deny",
+      "DT:permission.task.*",
+      "DD:deny",
+      "DT:tags",
+      "DD:one, two",
+      "DT:quoted",
+      "DD:a: b",
+    ]);
     expect(preview.html).toContain("Body.");
+  });
+
+  it("keeps a key the reader does not understand as the text it was written in", async () => {
+    const preview = await renderMarkdownPreview(
+      "---\ndescription: |\n  first line\n  second line\nanchor: &a value\n---\n\nBody.",
+      "readme.md",
+    );
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+
+    // A value written across lines is the lines, and a construct with no reading of its own is
+    // shown as it was written: both are more honest than leaving the key out.
+    expect([...document.querySelectorAll("dt, dd")].map((node) => node.textContent)).toContain(
+      "first line second line",
+    );
+    expect(preview.html).toContain("&amp;a value");
+    expect(preview.html).toContain("Body.");
+  });
+
+  it("writes the metadata as the class the layout in DocumentPane.vue hangs on", () => {
+    // Asserted here, on the markup before the sanitizer, because the test DOM drops the class off
+    // whatever element it is handed first. A browser keeps it, which is the only place it matters.
+    const markup = frontMatterList(
+      [
+        { key: "name", value: "tamis" },
+        { key: "tags", value: "a, b" },
+        { key: "long", value: "x".repeat(400) },
+        { key: "markup", value: '<img src=x onerror="alert(1)">' },
+      ],
+      new MarkdownIt().utils.escapeHtml,
+    );
+
+    expect(markup).toContain('<dl class="markdown-frontmatter">');
+    expect(markup).toContain("<dt>name</dt><dd>tamis</dd><dt>tags</dt><dd>a, b</dd>");
+    // A value that runs long is cut, and one that carries markup arrives as text.
+    expect(markup).toContain("…</dd>");
+    expect(markup).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
+    expect(frontMatterList([], new MarkdownIt().utils.escapeHtml)).toBe("");
+  });
+
+  it("shows a key written twice once, with what it says the second time", async () => {
+    const preview = await renderMarkdownPreview("---\nname: one\nname: two\n---\n\nBody.", "readme.md");
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+
+    expect([...document.querySelectorAll("dt, dd")].map((node) => node.textContent)).toEqual(["name", "two"]);
   });
 
   it("leaves a document that only opens with a rule alone", async () => {

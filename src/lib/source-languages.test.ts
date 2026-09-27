@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { languageForName } from "./source-highlighter";
 import {
   LANGUAGE_BY_EXTENSION,
+  LANGUAGE_BY_FILENAME,
   PLAIN_TEXT,
   SELECTABLE_LANGUAGES,
   detectedLanguageName,
@@ -19,10 +20,29 @@ describe("source languages", () => {
     expect(detectedLanguageName("")).toBeUndefined();
   });
 
+  it("detects the dotfiles whose leading dot is the whole name, and the tail of .env", () => {
+    expect(detectedLanguageName(".gitignore")).toBe("gitignore");
+    // The basename decides, so a nested dotfile reads like the root one.
+    expect(detectedLanguageName("packages/app/.gitignore")).toBe("gitignore");
+    expect(detectedLanguageName(".gitconfig")).toBe("ini");
+    expect(detectedLanguageName(".gitattributes")).toBe("ini");
+    expect(detectedLanguageName(".prettierrc")).toBe("json");
+    // `.env` is a format, not a name: the tail is unbounded, and the dot keeps `.envrc` out.
+    expect(detectedLanguageName(".env")).toBe("dotenv");
+    expect(detectedLanguageName(".env.local")).toBe("dotenv");
+    expect(detectedLanguageName(".env.production.local")).toBe("dotenv");
+    expect(detectedLanguageName("apps/api/.env.test")).toBe("dotenv");
+    expect(detectedLanguageName(".envrc")).toBeUndefined();
+    // A dotfile with a real extension still resolves on the extension.
+    expect(detectedLanguageName(".eslintrc.json")).toBe("json");
+  });
+
   it("names every grammar it detects, and every grammar the toolbar offers", () => {
     // The table is split across two modules, so this is what keeps a renamed grammar from turning
     // into a silent "no highlighting" for a file that used to have it.
     for (const name of new Set(LANGUAGE_BY_EXTENSION.values())) expect(languageForName(name)).toBeDefined();
+    for (const name of new Set(LANGUAGE_BY_FILENAME.values())) expect(languageForName(name)).toBeDefined();
+    expect(languageForName("dotenv")).toBeDefined();
     for (const language of SELECTABLE_LANGUAGES) expect(languageForName(language.name)).toBeDefined();
     // Plain text is the one name on offer that is deliberately not a grammar.
     expect(SELECTABLE_LANGUAGES.map((language) => language.name)).not.toContain(PLAIN_TEXT);

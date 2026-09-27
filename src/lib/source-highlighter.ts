@@ -3,11 +3,12 @@ import { createHighlighterCore } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 import type typescript from "shiki/langs/typescript.mjs";
 import githubDarkDefault from "shiki/themes/github-dark-default.mjs";
-import { LANGUAGE_BY_EXTENSION } from "./source-languages";
+import { detectedLanguageName } from "./source-languages";
 
 type SourceLanguage = (typeof typescript)[number];
 type LanguageLoader = () => Promise<SourceLanguage[]>;
-type LanguageDefinition = { name: string; load: LanguageLoader };
+/** `shikiName` is the grammar Shiki renders with, when it is not the one Marvis calls the language. */
+type LanguageDefinition = { name: string; load: LanguageLoader; shikiName?: string };
 
 const languageDefinitions = {
   ada: { name: "ada", load: () => import("shiki/langs/ada.mjs").then(({ default: language }) => language) },
@@ -39,6 +40,10 @@ const languageDefinitions = {
   dart: { name: "dart", load: () => import("shiki/langs/dart.mjs").then(({ default: language }) => language) },
   diff: { name: "diff", load: () => import("shiki/langs/diff.mjs").then(({ default: language }) => language) },
   docker: { name: "docker", load: () => import("shiki/langs/docker.mjs").then(({ default: language }) => language) },
+  dotenv: {
+    name: "dotenv",
+    load: () => import("shiki/langs/dotenv.mjs").then(({ default: language }) => language),
+  },
   elixir: { name: "elixir", load: () => import("shiki/langs/elixir.mjs").then(({ default: language }) => language) },
   erlang: { name: "erlang", load: () => import("shiki/langs/erlang.mjs").then(({ default: language }) => language) },
   fish: { name: "fish", load: () => import("shiki/langs/fish.mjs").then(({ default: language }) => language) },
@@ -46,6 +51,16 @@ const languageDefinitions = {
   gdscript: {
     name: "gdscript",
     load: () => import("shiki/langs/gdscript.mjs").then(({ default: language }) => language),
+  },
+  /**
+   * Shiki ships no gitignore grammar, and `ini` is the one that already reads a file of bare
+   * patterns the right way: comments grey, every glob in the foreground. The name stays separate
+   * from `ini` so the editor can tokenize the same file differently from `.gitconfig`.
+   */
+  gitignore: {
+    name: "gitignore",
+    shikiName: "ini",
+    load: () => import("shiki/langs/ini.mjs").then(({ default: language }) => language),
   },
   glsl: { name: "glsl", load: () => import("shiki/langs/glsl.mjs").then(({ default: language }) => language) },
   go: { name: "go", load: () => import("shiki/langs/go.mjs").then(({ default: language }) => language) },
@@ -176,18 +191,12 @@ const languageDefinitions = {
 } satisfies Record<string, LanguageDefinition>;
 
 /**
- * The two doors onto a grammar: the Shiki name, and the file extension that asks for it. A name
- * that is in neither resolves to no highlighting, which is a plain file rather than an error.
+ * The one door onto a grammar: the name Marvis calls it. A name no grammar answers to resolves to
+ * no highlighting, which is a plain file rather than an error.
  */
 const languageByName = new Map<string, LanguageDefinition>(
   Object.values(languageDefinitions).map((language) => [language.name, language as LanguageDefinition]),
 );
-
-const languageByExtension = new Map<string, LanguageDefinition>();
-for (const [extension, name] of LANGUAGE_BY_EXTENSION) {
-  const language = languageByName.get(name);
-  if (language) languageByExtension.set(extension, language);
-}
 
 const highlighters = new Map<string, ReturnType<typeof createHighlighterCore>>();
 const highlightedSourceCache = new Map<string, Promise<readonly string[]>>();
@@ -246,8 +255,10 @@ const fenceLanguageAliases = {
   diff: "diff",
   docker: "docker",
   dockerfile: "docker",
+  dotenv: "dotenv",
   editorconfig: "ini",
   edn: "clojure",
+  env: "dotenv",
   elisp: "commonLisp",
   elixir: "elixir",
   emacs: "commonLisp",
@@ -260,6 +271,7 @@ const fenceLanguageAliases = {
   fsharp: "fsharp",
   gd: "gdscript",
   gdscript: "gdscript",
+  gitignore: "gitignore",
   glsl: "glsl",
   go: "go",
   golang: "go",
@@ -400,8 +412,8 @@ function cacheKey(language: string, source: string): string {
 }
 
 function languageForPath(path: string) {
-  const extension = path.split(".").pop()?.toLowerCase();
-  return extension ? languageByExtension.get(extension) : undefined;
+  const name = detectedLanguageName(path);
+  return name ? languageByName.get(name) : undefined;
 }
 
 /** The grammar a Markdown fence asks for, or undefined when its info string names no known one. */
@@ -479,7 +491,9 @@ export function highlightCodeBlock(language: LanguageDefinition, code: string): 
     if (oldest !== undefined) highlightedBlockCache.delete(oldest);
   }
   const request = highlighterFor(language)
-    .then((instance) => instance.codeToHtml(code, { lang: language.name, theme: "github-dark-default" }))
+    .then((instance) =>
+      instance.codeToHtml(code, { lang: language.shikiName ?? language.name, theme: "github-dark-default" }),
+    )
     .then((html) => sanitizeShikiFragment(html)?.innerHTML || null)
     .catch(() => null);
   highlightedBlockCache.set(key, request);
@@ -504,7 +518,9 @@ export function highlightSourceAs(languageName: string, source: string): Promise
   }
 
   const request = highlighterFor(language)
-    .then((instance) => instance.codeToHtml(source, { lang: language.name, theme: "github-dark-default" }))
+    .then((instance) =>
+      instance.codeToHtml(source, { lang: language.shikiName ?? language.name, theme: "github-dark-default" }),
+    )
     .then(sanitizeHighlightedHtml)
     .then((lines) => {
       if (lines.length === 0) throw new Error("Shiki returned no source lines");

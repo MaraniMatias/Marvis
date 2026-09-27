@@ -948,45 +948,34 @@ function onMarkdownLink(event: MouseEvent) {
   text-align: left;
 }
 
-/* The metadata a document opens with, in GitHub's shape: a table with the keys across the top and
-   their values under them. One row of keys over one row of values is unreadable in a panel this
-   narrow, so the table is a two-column grid with its rows dissolved into it, which lands the keys
-   and their values on the same line, one pair at a time. */
-.markdown-preview :deep(table.markdown-frontmatter) {
+/* The metadata a document opens with, as the key/value pairs it is. Two columns and a rule under
+   each pair, so it reads as a header over the document rather than as part of it. A `dl` rather
+   than a table because that is what a key and its value are, and because its children are already
+   the grid items: no row has to be dissolved to get them on the same line. */
+.markdown-preview :deep(dl.markdown-frontmatter) {
   display: grid;
-  grid-template-columns: minmax(4rem, 9rem) 1fr;
-  width: 100%;
-  max-width: 100%;
+  grid-template-columns: minmax(4rem, 10rem) 1fr;
   margin: 0 0 1.5rem;
   border: 1px solid var(--marvis-border);
   border-radius: var(--marvis-radius);
+  padding: 0.15rem 0;
 }
 
-.markdown-preview :deep(table.markdown-frontmatter > thead),
-.markdown-preview :deep(table.markdown-frontmatter > tbody),
-.markdown-preview :deep(table.markdown-frontmatter > thead > tr),
-.markdown-preview :deep(table.markdown-frontmatter > tbody > tr) {
-  display: contents;
-}
-
-.markdown-preview :deep(table.markdown-frontmatter th),
-.markdown-preview :deep(table.markdown-frontmatter td) {
-  border: none;
-  border-bottom: 1px solid var(--marvis-border);
+.markdown-preview :deep(dl.markdown-frontmatter dt) {
   padding: 0.35rem 0.6rem;
-  font-weight: 400;
-  vertical-align: top;
-}
-
-.markdown-preview :deep(table.markdown-frontmatter th) {
   color: var(--marvis-text-secondary);
   font-size: 0.85em;
 }
 
-/* The last pair sits on the box's own edge, so it carries no rule under it. */
-.markdown-preview :deep(table.markdown-frontmatter > thead > tr > th:last-child),
-.markdown-preview :deep(table.markdown-frontmatter > tbody > tr > td:last-child) {
-  border-bottom: none;
+.markdown-preview :deep(dl.markdown-frontmatter dd) {
+  padding: 0.35rem 0.6rem;
+  border-left: 1px solid var(--marvis-border);
+  overflow-wrap: anywhere;
+}
+
+/* A key with nothing to say still holds its column, or every value below it shifts sideways. */
+.markdown-preview :deep(dl.markdown-frontmatter dd:empty) {
+  border-left-color: var(--marvis-border);
 }
 
 .markdown-preview :deep(pre) {

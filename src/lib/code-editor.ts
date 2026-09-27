@@ -11,9 +11,10 @@ import { rust } from "@codemirror/lang-rust";
 import { sql } from "@codemirror/lang-sql";
 import { xml } from "@codemirror/lang-xml";
 import { yaml } from "@codemirror/lang-yaml";
-import { StreamLanguage, syntaxHighlighting, defaultHighlightStyle } from "@codemirror/language";
+import { StreamLanguage, syntaxHighlighting, HighlightStyle, type StringStream } from "@codemirror/language";
 import { EditorState, type Extension } from "@codemirror/state";
 import { EditorView } from "@codemirror/view";
+import { tags } from "@lezer/highlight";
 import { csharp, kotlin, objectiveC } from "@codemirror/legacy-modes/mode/clike";
 import { diff } from "@codemirror/legacy-modes/mode/diff";
 import { dockerFile } from "@codemirror/legacy-modes/mode/dockerfile";
@@ -40,6 +41,84 @@ export interface CodeEditorOptions {
 }
 
 /**
+ * `defaultHighlightStyle` is a light palette — dark red keywords, mid-blue strings — and it was
+ * being laid over Marvis' `#17191f` editor background, where the darker half of it is barely
+ * readable. These are the colors the `github-dark-default` Shiki theme already uses to render the
+ * same file read-only, so a file stops changing color when it becomes editable.
+ *
+ * This has to name every tag `defaultHighlightStyle` colors, not the ones that happen to come up:
+ * `basicSetup` keeps injecting the light palette, so a tag missing here falls through to it. The
+ * test that says so is the one that would notice.
+ */
+export const marvisHighlightStyle = HighlightStyle.define([
+  { tag: tags.comment, color: "#8b949e" },
+  { tag: tags.keyword, color: "#ff7b72" },
+  { tag: tags.controlKeyword, color: "#ff7b72" },
+  { tag: tags.moduleKeyword, color: "#ff7b72" },
+  { tag: tags.definitionKeyword, color: "#ff7b72" },
+  { tag: tags.operatorKeyword, color: "#ff7b72" },
+  { tag: tags.string, color: "#a5d6ff" },
+  { tag: tags.special(tags.string), color: "#a5d6ff" },
+  { tag: tags.escape, color: "#a5d6ff" },
+  { tag: tags.regexp, color: "#a5d6ff" },
+  { tag: tags.atom, color: "#79c0ff" },
+  { tag: tags.bool, color: "#79c0ff" },
+  { tag: tags.literal, color: "#79c0ff" },
+  { tag: tags.null, color: "#79c0ff" },
+  { tag: tags.number, color: "#79c0ff" },
+  { tag: tags.contentSeparator, color: "#79c0ff" },
+  { tag: tags.meta, color: "#79c0ff" },
+  { tag: tags.propertyName, color: "#79c0ff" },
+  { tag: tags.constant(tags.variableName), color: "#79c0ff" },
+  { tag: tags.special(tags.variableName), color: "#79c0ff" },
+  { tag: tags.function(tags.variableName), color: "#d2a8ff" },
+  { tag: tags.macroName, color: "#d2a8ff" },
+  { tag: tags.definition(tags.variableName), color: "#ffa657" },
+  { tag: tags.definition(tags.propertyName), color: "#79c0ff" },
+  { tag: tags.inserted, color: "#7ee787" },
+  { tag: tags.deleted, color: "#ffa198" },
+  { tag: tags.labelName, color: "#ffa657" },
+  { tag: tags.local(tags.variableName), color: "#ffa657" },
+  { tag: tags.variableName, color: "#ffa657" },
+  { tag: tags.namespace, color: "#ffa657" },
+  { tag: tags.url, color: "#a5d6ff" },
+  { tag: tags.className, color: "#7ee787" },
+  { tag: tags.tagName, color: "#7ee787" },
+  { tag: tags.attributeName, color: "#7ee787" },
+  { tag: tags.typeName, color: "#7ee787" },
+  { tag: tags.heading, color: "#79c0ff", fontWeight: "bold" },
+  { tag: tags.quote, color: "#7ee787" },
+  { tag: tags.emphasis, fontStyle: "italic" },
+  { tag: tags.strong, fontWeight: "bold" },
+  { tag: tags.strikethrough, textDecoration: "line-through" },
+  { tag: tags.link, color: "#a5d6ff" },
+  { tag: tags.invalid, color: "#ffa198" },
+]);
+
+/**
+ * A gitignore is a list of bare globs, which the `properties` mode the other INI files use reads as
+ * one very long key — and a leading `!` negation as a comment, which is backwards. Only two
+ * characters carry meaning: `#` opens a comment and must sit at the start of the line, and `!` at
+ * that same spot re-includes a pattern. The glob metacharacters are marked so a `*.log` reads as
+ * glob syntax rather than prose; everything else is a path, and stays in the base color.
+ */
+const gitignoreLanguage = StreamLanguage.define({
+  name: "gitignore",
+  token(stream: StringStream) {
+    if (stream.sol()) {
+      if (stream.eat("#")) {
+        stream.skipToEnd();
+        return "comment";
+      }
+      if (stream.eat("!")) return "keyword";
+    }
+    if (stream.eat(/[[\]*?]/)) return "operator";
+    stream.next();
+    return null;
+  },
+});
+
+/**
  * The editor is imported by DocumentPane only after a Code view is opened. Shiki remains the
  * renderer for read-only source, while this small CM6 setup owns editing, history, gutters, and
  * the language selected by the existing toolbar.
@@ -51,7 +130,7 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
       extensions: [
         basicSetup,
         languageExtension(options.language),
-        syntaxHighlighting(defaultHighlightStyle),
+        syntaxHighlighting(marvisHighlightStyle),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) options.onChange(update.state.doc.toString());
         }),
@@ -94,8 +173,12 @@ function languageExtension(language: string | null): Extension {
       return html();
     case "http":
       return StreamLanguage.define(http);
+    // A dotenv is a properties file, and the legacy modes have no tokenizer of its own for either.
     case "ini":
+    case "dotenv":
       return StreamLanguage.define(properties);
+    case "gitignore":
+      return gitignoreLanguage;
     case "java":
       return java();
     case "javascript":

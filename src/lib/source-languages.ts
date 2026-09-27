@@ -4,8 +4,8 @@
  * `source-highlighter.ts` imports `shiki/core` at module scope, so the document toolbar cannot
  * import anything from it without dragging the highlighter into the first chunk: the toolbar needs
  * the detected language and the list of choices synchronously, long before anyone asks a
- * highlighter for anything. It owns the extension allowlist and the labels, while
- * `source-highlighter.ts` keeps the grammar loaders and resolves every name through that allowlist.
+ * highlighter for anything. It owns the file-name and extension allowlists and the labels, while
+ * `source-highlighter.ts` keeps the grammar loaders and resolves every name through those tables.
  */
 
 export interface SourceLanguageOption {
@@ -173,6 +173,42 @@ export const LANGUAGE_BY_EXTENSION: ReadonlyMap<string, string> = new Map<string
   ["zsh", "shellscript"],
 ]);
 
+/**
+ * The file names that ask for a grammar on their own, because a leading dot is the whole name and
+ * the extension table cannot see them: `.gitignore` ends in `gitignore`, not in a suffix anyone
+ * registered. Matched against the basename in any directory, the way VS Code and GitHub do, so
+ * `docs/.gitignore` reads like the root one.
+ *
+ * `gitignore` is its own name rather than `ini` on purpose. Shiki has no gitignore grammar, so it
+ * borrows `ini`, which renders the patterns correctly — but the editor has no `ini` tokenizer that
+ * survives a file of bare patterns, and naming the family separately is what lets it use one.
+ */
+export const LANGUAGE_BY_FILENAME: ReadonlyMap<string, string> = new Map<string, string>([
+  // INI: a `[section]` header over `key = value` lines, or the attribute names gitattributes holds.
+  [".curlrc", "ini"],
+  [".editorconfig", "ini"],
+  [".gitattributes", "ini"],
+  [".gitconfig", "ini"],
+  [".gitmodules", "ini"],
+  [".npmrc", "ini"],
+  [".yarnrc", "ini"],
+  // One pattern per line under `#` comments.
+  [".cvsignore", "gitignore"],
+  [".dockerignore", "gitignore"],
+  [".eslintignore", "gitignore"],
+  [".gitignore", "gitignore"],
+  [".hgignore", "gitignore"],
+  [".npmignore", "gitignore"],
+  [".prettierignore", "gitignore"],
+  // Dotfiles whose body is bare JSON.
+  [".babelrc", "json"],
+  [".eslintrc", "json"],
+  [".jshintrc", "json"],
+  [".prettierrc", "json"],
+  [".swcrc", "json"],
+  [".watchmanconfig", "json"],
+]);
+
 const labelByName = new Map(SELECTABLE_LANGUAGES.map((language) => [language.name, language.label]));
 const extensionsByName = new Map<string, string[]>();
 for (const [extension, name] of LANGUAGE_BY_EXTENSION) {
@@ -181,9 +217,21 @@ for (const [extension, name] of LANGUAGE_BY_EXTENSION) {
   else extensionsByName.set(name, [extension]);
 }
 
-/** The grammar a path's extension asks for, or undefined when it asks for none. */
+/**
+ * The grammar a path asks for, or undefined when neither its name nor its extension asks for one.
+ * The name is checked first because for a dotfile it is the only part that carries the format.
+ */
 export function detectedLanguageName(path: string): string | undefined {
-  const extension = path.split(".").pop()?.toLowerCase();
+  const fileName = path.split(/[/\\]/).pop()?.toLowerCase() ?? "";
+  // `.env.local` and `.env.production.local` are the same format as `.env`, and a table of every
+  // suffix anyone has ever typed would stop at the first one it forgot. The dot is what separates
+  // them from `.envrc`, which is a shell script.
+  if (fileName === ".env" || fileName.startsWith(".env.")) return "dotenv";
+  return LANGUAGE_BY_FILENAME.get(fileName) ?? extensionLanguageName(fileName);
+}
+
+function extensionLanguageName(fileName: string): string | undefined {
+  const extension = fileName.split(".").pop()?.toLowerCase();
   return extension === undefined ? undefined : LANGUAGE_BY_EXTENSION.get(extension);
 }
 
