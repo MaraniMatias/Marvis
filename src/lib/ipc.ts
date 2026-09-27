@@ -4,7 +4,7 @@ import type { OpenedFolder } from "../domain/folder";
 import type { CheckoutImage, FileContent, FileSearchResult, FileTree } from "../domain/files";
 import type { GitCheckoutDiffStats, GitDiffPage, GitFileDiff, GitFileDiffStats, GitStatus } from "../domain/git";
 import type { ReviewNote, ReviewRound, ReviewSide } from "../domain/review";
-import type { Session, TerminalLaunchType, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
+import type { Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalInfo } from "../domain/worktree";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { AppLayoutState, CheckoutUiState } from "../domain/ui-state";
@@ -13,30 +13,6 @@ import type { AgentSession } from "../domain/agent";
 export interface CreatedTerminal {
   session: Session;
   workspace: WorkspaceState;
-}
-
-export interface EditorAvailability {
-  zed: boolean;
-  neovim: boolean;
-}
-
-export interface TerminalLaunchTarget {
-  filePath: string;
-  line: number;
-  column?: number;
-}
-
-export function getEditorAvailability(): Promise<EditorAvailability> {
-  return invoke<EditorAvailability>("editor_availability");
-}
-
-export function openInZed(checkoutId: string, filePath?: string, line?: number, column?: number): Promise<void> {
-  return invoke<void>("editor_open_zed", {
-    checkoutId,
-    filePath: filePath ?? null,
-    line: line ?? null,
-    column: column ?? null,
-  });
 }
 
 export function listCheckoutFiles(checkoutId: string, path: string): Promise<FileTree> {
@@ -231,20 +207,10 @@ export function createTerminal(
   checkoutId: string,
   cols: number,
   rows: number,
-  sessionType: TerminalLaunchType,
   onOutput: Channel<ArrayBuffer>,
-  target?: TerminalLaunchTarget,
 ): Promise<CreatedTerminal> {
   return invoke<CreatedTerminal>("terminal_create", {
-    request: {
-      checkoutId,
-      cols,
-      rows,
-      sessionType,
-      filePath: target?.filePath ?? null,
-      line: target?.line ?? null,
-      column: target?.column ?? null,
-    },
+    request: { checkoutId, cols, rows },
     onOutput,
   });
 }

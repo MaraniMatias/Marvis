@@ -104,8 +104,6 @@ fn main() {
             commands::agent::agent_session_create,
             commands::agent::agent_prompt,
             commands::agent::agent_stop,
-            commands::editor::editor_availability,
-            commands::editor::editor_open_zed,
             commands::folder::open_folder,
             commands::workspace::restore_workspace,
             commands::workspace::register_folder,

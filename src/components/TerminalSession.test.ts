@@ -101,7 +101,7 @@ describe("TerminalSession UI", () => {
     await flushPromises();
 
     expect(terminalMock.output).toEqual([Array.from(output)]);
-    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "shell", expect.anything(), undefined);
+    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, expect.anything());
     // B.1: the face, size and ligatures are fixed. Only the colors come from the tokens.
     expect(terminalMock.options).toMatchObject({
       fontFamily: '"FiraCode Nerd Font Mono", monospace',
@@ -141,39 +141,13 @@ describe("TerminalSession UI", () => {
     confirm.mockRestore();
   });
 
-  it("launches Neovim through its typed session request", async () => {
-    const wrapper = mount(TerminalSession, {
-      props: { checkoutId: "checkout:repo", active: true, sessionType: "nvim" },
-    });
-    await flushPromises();
-
-    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "nvim", expect.anything(), undefined);
-    expect(wrapper.text()).not.toContain("Neovim running");
-    wrapper.unmount();
-  });
-
-  it("passes the selected file and exact line to the in-app Neovim session", async () => {
-    const launchTarget = { filePath: "src/main file.rs", line: 42, column: 7 };
-    const wrapper = mount(TerminalSession, {
-      props: { checkoutId: "checkout:repo", active: true, sessionType: "nvim", launchTarget },
-    });
-    await flushPromises();
-
-    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "nvim", expect.anything(), launchTarget);
-    wrapper.unmount();
-  });
-
   it("launches a terminal without any prompt, because reviews go to the agent bridge", async () => {
     const wrapper = mount(TerminalSession, {
-      props: {
-        checkoutId: "checkout:repo",
-        active: true,
-        sessionType: "shell",
-      },
+      props: { checkoutId: "checkout:repo", active: true },
     });
     await flushPromises();
 
-    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, "shell", expect.anything(), undefined);
+    expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, expect.anything());
     wrapper.unmount();
   });
 

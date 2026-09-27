@@ -53,13 +53,12 @@ vi.mock("./TerminalSession.vue", async () => {
         onMounted(() => {
           terminalMock.mounts++;
           if (!terminalMock.autoCreate) return;
-          const sessionType = props.sessionType as "shell" | "nvim";
           sessionId = terminalMock.createdCount++ === 0 ? "session:live" : `session:live-${terminalMock.createdCount}`;
           const session: Session = {
-            id: sessionType === "nvim" ? "session:nvim" : sessionId,
-            type: sessionType,
+            id: sessionId,
+            type: "shell",
             checkoutId: props.checkoutId,
-            name: sessionType === "nvim" ? "nvim" : "zsh",
+            name: "zsh",
             createdAt: "now",
             status: "active",
           };

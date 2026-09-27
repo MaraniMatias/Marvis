@@ -1,6 +1,6 @@
 pub mod agent;
 pub mod checkout;
-pub mod editor;
+pub mod executable;
 pub mod files;
 pub mod folder;
 pub mod git;

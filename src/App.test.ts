@@ -19,7 +19,6 @@ const mocks = vi.hoisted(() => ({
   loadAppLayout: vi.fn(),
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
-  getEditorAvailability: vi.fn(),
   closeMissingCheckout: vi.fn(),
   toggleMaximize: vi.fn(),
   onCloseRequested: null as ((event: { preventDefault(): void }) => Promise<void>) | null,
@@ -103,11 +102,9 @@ vi.mock("@tauri-apps/api/window", () => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./lib/ipc", () => ({
-  getEditorAvailability: mocks.getEditorAvailability,
   closeMissingCheckout: mocks.closeMissingCheckout,
   loadAppLayout: mocks.loadAppLayout,
   loadCheckoutUiState: mocks.loadCheckoutUiState,
-  openInZed: vi.fn(),
   saveAppLayout: mocks.saveAppLayout,
   saveCheckoutUiState: mocks.saveCheckoutUiState,
   // The real command returns the refreshed workspace; App assigns it straight back,
@@ -408,7 +405,6 @@ describe("App UI integration", () => {
     mocks.loadCheckoutUiState.mockResolvedValue({ ...DEFAULT_CHECKOUT_UI_STATE });
     mocks.saveAppLayout.mockResolvedValue(undefined);
     mocks.saveCheckoutUiState.mockResolvedValue(undefined);
-    mocks.getEditorAvailability.mockResolvedValue({ zed: false, neovim: false });
     mocks.toggleMaximize.mockResolvedValue(undefined);
     mocks.currentWindow = {
       onCloseRequested: vi.fn(async (handler) => {

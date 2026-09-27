@@ -21,13 +21,11 @@ import {
   stopAgent,
   updateReviewNote,
   verifyReviewNoteAnchors,
-  getEditorAvailability,
   getGitCheckoutDiffStats,
   getGitDiffPage,
   getGitDiffStats,
   loadTerminalLayout,
   openFolder,
-  openInZed,
   resizeTerminal,
   saveTerminalLayout,
   writeTerminal,
@@ -52,25 +50,6 @@ describe("openFolder IPC client", () => {
   });
 });
 
-describe("editor IPC client", () => {
-  beforeEach(() => vi.clearAllMocks());
-
-  it("uses only the supported Zed command and preserves an exact file location", async () => {
-    vi.mocked(invoke).mockResolvedValueOnce({ zed: true, neovim: false }).mockResolvedValueOnce(undefined);
-
-    await expect(getEditorAvailability()).resolves.toEqual({ zed: true, neovim: false });
-    await openInZed("checkout:/work/repo", "src/file; name.rs", 23, 8);
-
-    expect(invoke).toHaveBeenNthCalledWith(1, "editor_availability");
-    expect(invoke).toHaveBeenNthCalledWith(2, "editor_open_zed", {
-      checkoutId: "checkout:/work/repo",
-      filePath: "src/file; name.rs",
-      line: 23,
-      column: 8,
-    });
-  });
-});
-
 describe("workspace IPC client", () => {
   beforeEach(() => vi.clearAllMocks());
 
@@ -89,7 +68,7 @@ describe("terminal IPC client", () => {
     const bytes = new Uint8Array([0, 195, 169, 255]);
     vi.mocked(invoke).mockResolvedValue(undefined);
 
-    await createTerminal("checkout:/work/repo", 96, 30, "shell", channel);
+    await createTerminal("checkout:/work/repo", 96, 30, channel);
     await writeTerminal("checkout:one", "session:one", bytes);
     await resizeTerminal("checkout:one", "session:one", 97, 31);
     await closeTerminal("checkout:one", "session:one");
@@ -99,10 +78,6 @@ describe("terminal IPC client", () => {
         checkoutId: "checkout:/work/repo",
         cols: 96,
         rows: 30,
-        sessionType: "shell",
-        filePath: null,
-        line: null,
-        column: null,
       },
       onOutput: channel,
     });
@@ -120,30 +95,6 @@ describe("terminal IPC client", () => {
     expect(invoke).toHaveBeenNthCalledWith(4, "terminal_close", {
       checkoutId: "checkout:one",
       sessionId: "session:one",
-    });
-  });
-
-  it("passes exact file locations only as Neovim launch data", async () => {
-    const channel = { onmessage: null } as never;
-    vi.mocked(invoke).mockResolvedValue(undefined);
-
-    await createTerminal("checkout:/work/repo", 80, 24, "nvim", channel, {
-      filePath: "src/file; name.rs",
-      line: 23,
-      column: 8,
-    });
-
-    expect(invoke).toHaveBeenCalledWith("terminal_create", {
-      request: {
-        checkoutId: "checkout:/work/repo",
-        cols: 80,
-        rows: 24,
-        sessionType: "nvim",
-        filePath: "src/file; name.rs",
-        line: 23,
-        column: 8,
-      },
-      onOutput: channel,
     });
   });
 

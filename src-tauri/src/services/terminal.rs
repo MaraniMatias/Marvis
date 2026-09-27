@@ -7,7 +7,6 @@ use std::{
 use crate::{
     domain::workspace::{Session, SessionStatus, SessionType, WorkspaceState},
     persistence::{timestamp, Database},
-    services::editor::{self, EditorTarget},
     terminal::{OutputSink, SpawnOptions, TerminalBackend},
 };
 
@@ -18,18 +17,9 @@ pub struct CreatedTerminal {
     pub workspace: WorkspaceState,
 }
 
-#[derive(Debug, Clone, Copy, serde::Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum TerminalLaunchType {
-    Shell,
-    Nvim,
-}
-
 pub struct TerminalOptions {
     pub cols: u16,
     pub rows: u16,
-    pub session_type: TerminalLaunchType,
-    pub target: Option<EditorTarget>,
     pub prompt: Option<String>,
 }
 
@@ -39,7 +29,6 @@ pub fn create(
     checkout_id: &str,
     cols: u16,
     rows: u16,
-    session_type: TerminalLaunchType,
     output: OutputSink,
 ) -> Result<CreatedTerminal, String> {
     create_with_options(
@@ -49,8 +38,6 @@ pub fn create(
         TerminalOptions {
             cols,
             rows,
-            session_type,
-            target: None,
             prompt: None,
         },
         output,
@@ -64,34 +51,14 @@ pub fn create_with_options(
     options: TerminalOptions,
     output: OutputSink,
 ) -> Result<CreatedTerminal, String> {
-    let TerminalOptions {
-        cols,
-        rows,
-        session_type,
-        target,
-        prompt,
-    } = options;
+    let TerminalOptions { cols, rows, prompt } = options;
     let cwd = database.terminal_checkout_path(checkout_id)?;
-    let (program, args, name, stored_type) = match session_type {
-        TerminalLaunchType::Shell => {
-            if target.is_some() {
-                return Err("a file location can only be opened by a Neovim session".into());
-            }
-            reject_prompt(prompt.as_deref())?;
-            let program = inherited_shell();
-            let name = program
-                .file_name()
-                .map(|name| name.to_string_lossy().into_owned())
-                .unwrap_or_else(|| "shell".into());
-            (program, vec!["-l".into()], name, SessionType::Shell)
-        }
-        TerminalLaunchType::Nvim => {
-            reject_prompt(prompt.as_deref())?;
-            let (program, args) =
-                editor::nvim_launch_spec(target.as_ref()).map_err(|error| error.message)?;
-            (program, args, "nvim".into(), SessionType::Nvim)
-        }
-    };
+    reject_prompt(prompt.as_deref())?;
+    let program = inherited_shell();
+    let name = program
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "shell".into());
     let session = Session {
         id: format!(
             "session:terminal:{}-{}-{}",
@@ -99,7 +66,7 @@ pub fn create_with_options(
             std::process::id(),
             NEXT_SESSION_ID.fetch_add(1, Ordering::Relaxed)
         ),
-        session_type: stored_type,
+        session_type: SessionType::Shell,
         checkout_id: checkout_id.to_string(),
         name,
         created_at: timestamp(),
@@ -110,7 +77,7 @@ pub fn create_with_options(
         session.id.clone(),
         SpawnOptions {
             program,
-            args,
+            args: vec!["-l".into()],
             cwd,
             cols,
             rows,
@@ -169,7 +136,7 @@ mod tests {
         terminal::{OutputSink, TerminalBackend},
     };
 
-    use super::{create, create_with_options, TerminalLaunchType, TerminalOptions};
+    use super::{create, create_with_options, TerminalOptions};
 
     fn plain_repo(path: &Path) -> Repo {
         Repo::plain(path, "now").unwrap()
@@ -197,27 +164,16 @@ mod tests {
             "checkout:unknown",
             80,
             24,
-            TerminalLaunchType::Shell,
             Box::new(|_| Ok(()))
         )
         .is_err());
-        let first = create(
-            &database,
-            &backend,
-            &repo.checkouts[0].id,
-            80,
-            24,
-            TerminalLaunchType::Shell,
-            output,
-        )
-        .unwrap();
+        let first = create(&database, &backend, &repo.checkouts[0].id, 80, 24, output).unwrap();
         let second = create(
             &database,
             &backend,
             &repo.checkouts[0].id,
             80,
             24,
-            TerminalLaunchType::Shell,
             Box::new(|_| Ok(())),
         )
         .unwrap();
@@ -237,7 +193,6 @@ mod tests {
             &other_repo.checkouts[0].id,
             80,
             24,
-            TerminalLaunchType::Shell,
             Box::new(|_| Ok(())),
         )
         .unwrap();
@@ -279,20 +234,6 @@ mod tests {
     }
 
     #[test]
-    fn launch_type_only_accepts_backend_owned_shell_and_nvim_presets() {
-        assert_eq!(
-            serde_json::from_str::<TerminalLaunchType>("\"shell\"").unwrap(),
-            TerminalLaunchType::Shell
-        );
-        assert_eq!(
-            serde_json::from_str::<TerminalLaunchType>("\"nvim\"").unwrap(),
-            TerminalLaunchType::Nvim
-        );
-        assert!(serde_json::from_str::<TerminalLaunchType>("\"server\"").is_err());
-        assert!(serde_json::from_str::<TerminalLaunchType>("\"custom\"").is_err());
-    }
-
-    #[test]
     fn terminals_reject_a_prompt_because_the_review_goes_to_the_agent_bridge() {
         let directory = tempdir().unwrap();
         let checkout = directory.path().join("checkout");
@@ -302,21 +243,17 @@ mod tests {
         database.register_plain_repo(repo.clone()).unwrap();
         let backend = TerminalBackend::default();
 
-        for session_type in [TerminalLaunchType::Shell, TerminalLaunchType::Nvim] {
-            assert!(create_with_options(
-                &database,
-                &backend,
-                &repo.checkouts[0].id,
-                TerminalOptions {
-                    cols: 80,
-                    rows: 24,
-                    session_type,
-                    target: None,
-                    prompt: Some("injected".into()),
-                },
-                Box::new(|_| Ok(())),
-            )
-            .is_err());
-        }
+        assert!(create_with_options(
+            &database,
+            &backend,
+            &repo.checkouts[0].id,
+            TerminalOptions {
+                cols: 80,
+                rows: 24,
+                prompt: Some("injected".into()),
+            },
+            Box::new(|_| Ok(())),
+        )
+        .is_err());
     }
 }

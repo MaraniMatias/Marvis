@@ -1,5 +1,4 @@
 pub mod agent;
-pub mod editor;
 pub mod files;
 pub mod folder;
 pub mod git;

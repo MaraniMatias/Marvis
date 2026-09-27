@@ -4,9 +4,8 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
 import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
-import type { TerminalLaunchType, TerminalSessionStatus } from "../domain/workspace";
+import type { TerminalSessionStatus } from "../domain/workspace";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
-import type { TerminalLaunchTarget } from "../lib/ipc";
 import { renderPtyOutput } from "../lib/terminal-renderer";
 
 const props = withDefaults(
@@ -15,10 +14,8 @@ const props = withDefaults(
     active: boolean;
     visible?: boolean;
     focused?: boolean;
-    sessionType?: TerminalLaunchType;
-    launchTarget?: TerminalLaunchTarget;
   }>(),
-  { visible: true, focused: false, sessionType: "shell", launchTarget: undefined },
+  { visible: true, focused: false },
 );
 const emit = defineEmits<{
   created: [result: Awaited<ReturnType<typeof createTerminal>>];
@@ -151,14 +148,7 @@ async function startSession() {
   channel.onmessage = (buffer) => renderPtyOutput(terminal, buffer);
   const initialSize = { cols: terminal.cols || 80, rows: terminal.rows || 24 };
   try {
-    const created = await createTerminal(
-      props.checkoutId,
-      initialSize.cols,
-      initialSize.rows,
-      props.sessionType,
-      channel,
-      props.launchTarget,
-    );
+    const created = await createTerminal(props.checkoutId, initialSize.cols, initialSize.rows, channel);
     if (disposed) {
       await closeTerminal(props.checkoutId, created.session.id);
       return;

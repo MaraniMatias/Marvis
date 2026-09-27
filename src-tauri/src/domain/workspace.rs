@@ -13,6 +13,9 @@ pub enum RepoKind {
 #[serde(rename_all = "lowercase")]
 pub enum SessionType {
     Shell,
+    /// No session is created with this type any more, but it is still stored: `session_type` is
+    /// persisted, and a workspace that opened Neovim before that entry point was removed still
+    /// holds rows with it. Dropping the variant would make those rows unreadable.
     Nvim,
     Server,
     Custom,

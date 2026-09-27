@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Plus as PlusIcon } from "@lucide/vue";
-import type { Checkout, Session, TerminalLaunchType, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
+import type { Checkout, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import {
   addSessionToLayout,
   createTerminalLayout,
@@ -9,7 +9,6 @@ import {
   removeSessionFromLayout,
 } from "../domain/terminal-layout";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
-import type { TerminalLaunchTarget } from "../lib/ipc";
 import { loadTerminalLayout, saveTerminalLayout } from "../lib/ipc";
 import { useToasts } from "../presentation/toasts";
 import Button from "./ui/button/Button.vue";
@@ -36,8 +35,6 @@ interface TerminalView {
   key: string;
   checkoutId: string;
   session: Session | null;
-  sessionType: TerminalLaunchType;
-  launchTarget?: TerminalLaunchTarget;
 }
 interface TerminalSessionHandle {
   requestClose(): Promise<boolean>;
@@ -117,11 +114,7 @@ function initializeLayout(target: Checkout) {
   return pending;
 }
 
-async function createTerminalSession(
-  sessionType: TerminalLaunchType = "shell",
-  launchTarget?: TerminalLaunchTarget,
-  additional = false,
-) {
+async function createTerminalSession(additional = false) {
   const target = props.checkout;
   if (!target || target.isMissing || (!additional && views.value.some((view) => view.checkoutId === target.id))) return;
   if (startingCheckoutIds.value.has(target.id)) return;
@@ -131,7 +124,7 @@ async function createTerminalSession(
     if (props.checkout?.id !== target.id || target.isMissing) return;
     const key = `pending-${nextViewId.value++}`;
     pendingViewKey.value = key;
-    views.value.push({ key, checkoutId: target.id, session: null, sessionType, launchTarget });
+    views.value.push({ key, checkoutId: target.id, session: null });
   } finally {
     const pending = new Set(startingCheckoutIds.value);
     pending.delete(target.id);
@@ -215,15 +208,14 @@ function handleKeyboard(event: KeyboardEvent) {
   if (!(event.metaKey || event.ctrlKey) || isEditableTarget(event.target) || !props.checkout) return;
   if (event.key.toLowerCase() === "t") {
     event.preventDefault();
-    void createTerminalSession("shell");
+    void createTerminalSession();
   }
 }
 
 watch(
   () => props.shellRequest?.token,
   (token) => {
-    if (token && props.shellRequest?.checkoutId === props.checkout?.id)
-      void createTerminalSession("shell", undefined, true);
+    if (token && props.shellRequest?.checkoutId === props.checkout?.id) void createTerminalSession(true);
   },
 );
 
@@ -257,8 +249,6 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
           :ref="(instance) => setTerminalRef(view.key, instance)"
           :key="view.key"
           :checkout-id="view.checkoutId"
-          :session-type="view.sessionType"
-          :launch-target="view.launchTarget"
           :active="view.checkoutId === checkout?.id && view.key === activeView?.key"
           :visible="isVisible"
           :focused="isVisible && view.session?.id === activeSessionId"
@@ -282,11 +272,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
                   : "Open a folder to start a terminal."
             }}
           </p>
-          <Button
-            v-if="checkout && !checkout.isMissing && !isStarting"
-            class="mt-4"
-            @click="createTerminalSession('shell')"
-          >
+          <Button v-if="checkout && !checkout.isMissing && !isStarting" class="mt-4" @click="createTerminalSession()">
             <PlusIcon class="size-3.5 shrink-0" aria-hidden="true" />
             New terminal
           </Button>

@@ -26,7 +26,7 @@ use crate::{
         agent::{agent_event_kind, AgentSession},
         ipc::{IpcError, IpcErrorCode},
     },
-    services::editor,
+    services::executable,
 };
 
 pub use crate::domain::agent::AgentEvent;
@@ -427,7 +427,7 @@ fn basic_credentials(password: &str) -> String {
 }
 
 fn agent_program() -> Option<PathBuf> {
-    editor::find_executable(AGENT_PROGRAM)
+    executable::find_executable(AGENT_PROGRAM)
 }
 
 /// Reserves a port by binding it, then releases it for the child. A collision is retried a

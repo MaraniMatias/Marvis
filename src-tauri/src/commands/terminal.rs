@@ -7,10 +7,7 @@ use crate::{
     domain::terminal_layout::CheckoutTerminalLayout,
     domain::workspace::{Session, TerminalSessionStatus, WorkspaceState},
     persistence::Database,
-    services::{
-        editor,
-        terminal::{self, TerminalLaunchType},
-    },
+    services::terminal,
     terminal::{OutputSink, TerminalBackend},
 };
 
@@ -52,11 +49,7 @@ pub struct TerminalCreateRequest {
     checkout_id: String,
     cols: u16,
     rows: u16,
-    session_type: TerminalLaunchType,
     prompt: Option<String>,
-    file_path: Option<String>,
-    line: Option<u32>,
-    column: Option<u32>,
 }
 
 #[tauri::command]
@@ -69,24 +62,6 @@ pub async fn terminal_create(
     let database = database.inner().clone();
     let backend = backend.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let target =
-            if request.file_path.is_some() || request.line.is_some() || request.column.is_some() {
-                if request.session_type != TerminalLaunchType::Nvim {
-                    return Err("only Neovim sessions can open a file location".into());
-                }
-                Some(
-                    editor::resolve_target(
-                        &database,
-                        &request.checkout_id,
-                        request.file_path.as_deref(),
-                        request.line,
-                        request.column,
-                    )
-                    .map_err(|error| error.message)?,
-                )
-            } else {
-                None
-            };
         let output: OutputSink = Box::new(move |bytes| {
             on_output
                 .send(Response::new(bytes.to_vec()))
@@ -99,8 +74,6 @@ pub async fn terminal_create(
             terminal::TerminalOptions {
                 cols: request.cols,
                 rows: request.rows,
-                session_type: request.session_type,
-                target,
                 prompt: request.prompt,
             },
             output,
