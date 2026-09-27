@@ -54,7 +54,22 @@ vi.mock("@tauri-apps/api/core", () => ({
 const terminalLib = vi.hoisted(() => ({
   attachTerminalRenderer: vi.fn(),
   enableTerminalLigatures: vi.fn(),
+  fitCalls: 0,
 }));
+
+// happy-dom has no font loading API, and the panel waits on it before fitting a second time. A
+// browser that has already resolved the face resolves this immediately, which is what this is.
+Object.defineProperty(document, "fonts", { value: { ready: Promise.resolve() }, configurable: true });
+
+// And no layout either, so every element measures zero and the fit that sizes the grid would never
+// run. 80x24 is what a mock terminal of this size already reports, so the dimensions are the ones
+// the rest of this file already asserts against.
+for (const [property, value] of [
+  ["clientWidth", 640],
+  ["clientHeight", 480],
+] as const) {
+  Object.defineProperty(HTMLElement.prototype, property, { value, configurable: true });
+}
 
 vi.mock("../lib/marvis-terminal", () => ({
   createMarvisTerminal: () => new MockTerminal(),
@@ -64,7 +79,9 @@ vi.mock("../lib/marvis-terminal", () => ({
 
 vi.mock("@xterm/addon-fit", () => ({
   FitAddon: class MockFitAddon {
-    fit() {}
+    fit() {
+      terminalLib.fitCalls += 1;
+    }
   },
 }));
 
@@ -98,6 +115,7 @@ describe("TerminalSession UI", () => {
     terminalMock.output = [];
     terminalMock.openCalls = 0;
     terminalMock.focusCalls = 0;
+    terminalLib.fitCalls = 0;
     vi.mocked(createTerminal).mockResolvedValue(created);
     vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running" });
     vi.mocked(closeTerminal).mockResolvedValue(workspace);
@@ -121,6 +139,18 @@ describe("TerminalSession UI", () => {
     expect(terminalLib.attachTerminalRenderer).toHaveBeenCalledTimes(1);
     expect(writeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", new TextEncoder().encode("λ pasted"));
     expect(resizeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", 97, 31);
+    wrapper.unmount();
+  });
+
+  it("fits a second time once the face has loaded, so the grid is not sized for the fallback's cell", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    // The first fit measures the cell the fallback has, and the browser resolves the `local()`
+    // face after it. Nothing else refits, so without the second one the grid stays short by the
+    // columns and the row the two cells differ in — a strip down the right and along the bottom,
+    // flush at the top-left corner, which is the one shape a padding bug cannot explain.
+    expect(terminalLib.fitCalls).toBeGreaterThanOrEqual(2);
     wrapper.unmount();
   });
 

@@ -180,6 +180,13 @@ onMounted(() => {
   enableTerminalLigatures(terminal);
   attachTerminalRenderer(terminal);
   fitActiveView();
+  // The face is a `local()` one, so the browser resolves it after the first paint, and the fit
+  // above measures whatever cell the *fallback* has — a monospace fallback's advance is wider
+  // than this one's, so the grid that gets sized for it is short by a few columns and a row. When
+  // the real face lands, xterm re-measures the cell and repaints at the same cols and rows, and
+  // what is left unpainted is a strip down the right and along the bottom: flush at the top-left
+  // corner, short everywhere else. Nothing else re-fits the terminal, so this does.
+  void document.fonts.ready.then(() => fitActiveView());
   resizeObserver = new ResizeObserver(() => fitActiveView());
   resizeObserver.observe(terminalElement.value);
   void startSession();
