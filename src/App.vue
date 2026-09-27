@@ -678,11 +678,11 @@ function reportWarning(message: string) {
           <PopoverRoot v-if="activeMainView.kind === 'terminal'">
             <PopoverTrigger
               data-testid="item-crumb"
-              class="flex min-w-0 items-center gap-1 text-(--marvis-text)"
+              class="marvis-control min-w-0 text-xs text-(--marvis-text) hover:text-(--marvis-text)"
               :title="activeViewLabel"
             >
               <span class="truncate">{{ activeViewLabel }}</span>
-              <ChevronDownIcon class="icon-xs shrink-0" aria-hidden="true" />
+              <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
             </PopoverTrigger>
             <PopoverContent
               side="bottom"

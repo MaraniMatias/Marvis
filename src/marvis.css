@@ -71,3 +71,24 @@
 .diff-del {
   color: var(--marvis-red);
 }
+
+/* A control with a surface, in three states: resting, hover, and pressed darker. The accent
+   never fills it — in the mockup `--marvis-accent` only paints a selection bar, an active
+   icon, the prompt or a focus ring, so a filled accent button reads as another product. */
+.marvis-control {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border-radius: var(--marvis-radius);
+  background: var(--marvis-bg-2);
+  padding: 3px 8px;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.marvis-control:hover {
+  background: var(--marvis-border);
+}
+.marvis-control:active {
+  background: var(--marvis-bg-0);
+}
