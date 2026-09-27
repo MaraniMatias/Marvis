@@ -214,12 +214,25 @@ body {
 
 /* xterm.js paints its own background as an inline style from the theme it was given, so owning the
    surface from CSS means out-specifying it here. One declaration instead of a second copy of the
-   same hex, and the terminal keeps a background that is the page's background. `auto` and not
-   `scroll`: the one xterm ships reserves the gutter on every terminal, so a full-screen TUI loses
-   a column to a scrollbar it is not showing. */
+   same hex, and the terminal keeps a background that is the page's background. */
 .terminal-host .xterm-viewport {
   background: var(--marvis-bg-0) !important;
   overflow-y: auto;
+}
+
+/* The scrollbars go to zero width, and both of them. They were the two grey stripes around a
+   full-screen TUI: one down the right, and one along the bottom that only exists because the
+   vertical one takes its width out of the box the fit measures the grid from — the fit reads the
+   host's width, the gutter comes out of it, the canvas overflows by exactly that, and the second
+   stripe is the proof. A terminal is scrolled with the wheel and with Shift+PageUp, so nothing is
+   lost by giving the bar no width; the scrollback still scrolls. */
+.terminal-host .xterm-viewport {
+  scrollbar-width: none;
+}
+
+.terminal-host .xterm-viewport::-webkit-scrollbar {
+  width: 0;
+  height: 0;
 }
 
 /* The chrome is not a text document. A click that lands on a sidebar row, a title-bar crumb or a
