@@ -201,12 +201,12 @@ function sessionState(session: Session) {
             </div>
           </div>
 
-          <!-- Child items: the same row as the workdir, minus the diff, plus a close. The mockup
-               hangs "New terminal" off the end of this block, so a workdir with nothing open
-               shows only its own row: starting its first terminal happens on the main panel,
-               once that workdir is selected. A directory that is gone has no live sessions
-               and nothing to run one in. -->
-          <div v-if="!workdir.missing && workdir.items.length" class="workdir-items">
+          <!-- Child items: the same row as the workdir, minus the diff, plus a close.
+               "New terminal" is deliberately NOT gated on having terminals open, unlike the
+               mockup: picking a workdir no longer opens a terminal by itself, so a workdir
+               with nothing running would otherwise offer no way to start one from here. A
+               directory that is gone has no live sessions and nothing to run one in. -->
+          <div v-if="!workdir.missing" class="workdir-items">
             <div
               v-for="item in workdir.items"
               :key="item.session.id"
