@@ -773,15 +773,15 @@ function reportWarning(message: string) {
            flush whatever the line box measures, and the mockup's own 5px then falls out of the
            centering at the shell's 14px base size. The width is the mockup's flat 220px rather
            than a fluid one, so the field does not drift wider as the window grows. -->
-      <div class="search-field flex w-[220px] shrink-0 items-center gap-2 self-stretch bg-(--marvis-bg-2) px-2.5">
-        <SearchIcon class="icon-sm shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
+      <div class="search-field flex w-[220px] shrink-0 items-stretch gap-2 self-stretch bg-(--marvis-bg-2) px-2.5">
+        <SearchIcon class="icon-sm shrink-0 self-center text-(--marvis-text-faint)" aria-hidden="true" />
         <input
           ref="searchField"
           type="search"
           data-testid="search-field"
           aria-label="Search files and commands"
           placeholder="Search..."
-          class="window-search min-w-0 flex-1 appearance-none bg-transparent p-0 text-(--marvis-text-secondary) placeholder:text-(--marvis-text-faint)"
+          class="window-search min-w-0 flex-1 appearance-none bg-transparent p-0 text-xs text-(--marvis-text-secondary) placeholder:text-(--marvis-text-faint)"
           @keydown.esc="blurSearchField"
         />
       </div>

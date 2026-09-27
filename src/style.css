@@ -42,9 +42,19 @@ body {
 /* The mockup's search box is a flat `--marvis-bg-2` surface: no border, no radius. The input
    itself stays transparent and the field lifts as one piece — lifting the input drew a
    brighter rectangle inside the field, which is what read as broken. The global focus ring is
-   dropped for the same reason. */
+   dropped for the same reason.
+
+   The field is 31px tall and the shell's 14px base would put the glyphs in a 21px box, which
+   sits low in the field: the line box is centred, the type inside it is not. The way out is not
+   to fight the font's metrics — at 12px this one draws 7.7px above the baseline and almost
+   nothing below it, so the glyph box is lopsided whichever way it is placed — but to give the
+   input the whole height of the field and let the line itself carry the centring. The field
+   stretches; the input fills it; the line is the height of the field, so the type sits in the
+   middle of it and the lopsidedness of the glyphs reads as the font's own, not as a bug. */
 .window-search {
+  height: 100%;
   background: transparent;
+  line-height: 31px;
   transition: color 120ms ease;
 }
 
