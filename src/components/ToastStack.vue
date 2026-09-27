@@ -37,7 +37,6 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
       @mouseenter="hold(toast.id)"
       @mouseleave="release(toast.id)"
     >
-      <span class="toast-accent" aria-hidden="true" />
       <p class="toast-message">{{ toast.message }}</p>
       <button type="button" class="toast-dismiss" :aria-label="`Dismiss: ${toast.message}`" @click="dismiss(toast.id)">
         <XIcon class="icon-xs" aria-hidden="true" />
@@ -64,12 +63,17 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   pointer-events: none;
 }
 
+/* The message is centred in the toast and the dismiss button keeps its corner, which takes two
+   columns and not one: a 20px column on each side, the left one empty now that the dot that
+   filled it is gone. Centring the text in the space the button leaves it would sit it a button
+   to the left of the middle, which is the one thing centring it here is meant not to do. */
 .toast {
-  display: flex;
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr) 20px;
+  align-items: center;
   gap: 8px;
   width: 100%;
-  padding: 8px 8px 8px 10px;
+  padding: 8px;
   border: 1px solid var(--marvis-border);
   border-radius: var(--marvis-radius);
   background: var(--marvis-bg-2);
@@ -79,27 +83,15 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   pointer-events: auto;
 }
 
-.toast-accent {
-  width: 6px;
-  height: 6px;
-  margin-top: 6px;
-  flex-shrink: 0;
-  border-radius: 50%;
-  background: var(--marvis-text-secondary);
-}
-
-.toast-error .toast-accent {
-  background: var(--marvis-red);
-}
-
 .toast-message {
-  flex: 1;
-  min-width: 0;
+  grid-column: 2;
   margin: 0;
   overflow-wrap: anywhere;
+  text-align: center;
 }
 
 .toast-dismiss {
+  grid-column: 3;
   display: flex;
   align-items: center;
   justify-content: center;
