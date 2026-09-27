@@ -176,8 +176,7 @@ mod tests {
     }
 
     #[test]
-    fn creates_multiple_sessions_only_for_persisted_checkouts_and_marks_them_inactive_after_restart(
-    ) {
+    fn creates_multiple_sessions_only_for_persisted_checkouts_and_forgets_them_on_restart() {
         let directory = tempdir().unwrap();
         let checkout = directory.path().join("checkout");
         let other_checkout = directory.path().join("other-checkout");
@@ -252,6 +251,8 @@ mod tests {
         backend.close(&second.session.id).unwrap();
         backend.close(&other.session.id).unwrap();
         drop(database);
+        // The PTYs died with the processes above, so the reopened database keeps the checkouts
+        // and none of the sessions.
         let restored = Database::open(database_path)
             .unwrap()
             .load_workspace()
@@ -266,11 +267,7 @@ mod tests {
             .iter()
             .find(|checkout| checkout.id == repo.checkouts[0].id)
             .unwrap();
-        assert_eq!(restored_checkout.sessions.len(), 2);
-        assert!(restored_checkout
-            .sessions
-            .iter()
-            .all(|session| session.status == crate::domain::workspace::SessionStatus::Inactive));
+        assert!(restored_checkout.sessions.is_empty());
         let restored_other_repo = restored
             .repos
             .iter()
@@ -278,11 +275,7 @@ mod tests {
             .unwrap();
         let restored_other = restored_other_repo.checkouts.first().unwrap();
         assert_eq!(restored_other.id, other_repo.checkouts[0].id);
-        assert_eq!(restored_other.sessions.len(), 1);
-        assert_eq!(
-            restored_other.sessions[0].status,
-            crate::domain::workspace::SessionStatus::Inactive
-        );
+        assert!(restored_other.sessions.is_empty());
     }
 
     #[test]

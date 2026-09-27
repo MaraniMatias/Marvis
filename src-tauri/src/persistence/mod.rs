@@ -7,7 +7,7 @@ use std::{
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::{Deserialize, Serialize};
 
-use crate::domain::review::{review_anchor_hash, ReviewNote, ReviewRound};
+use crate::domain::review::{ReviewNote, ReviewRound};
 use crate::domain::terminal_layout::CheckoutTerminalLayout;
 use crate::domain::workspace::{
     Checkout, Repo, RepoKind, Session, SessionStatus, SessionType, WorkspaceState,
@@ -132,10 +132,19 @@ impl Database {
         connection
             .pragma_update(None, "foreign_keys", "ON")
             .map_err(db_error)?;
-        migrate(&connection)?;
-        connection
-            .execute("UPDATE sessions SET status = 'inactive'", [])
+        create_schema(&connection)?;
+        // No PTY outlives the process that spawned it, so every stored session is dead the
+        // moment the app reopens. Keeping the rows piled one per launch per checkout up
+        // forever, and every one of them drags a dead tab into that checkout's saved layout.
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        transaction
+            .execute("DELETE FROM sessions", [])
             .map_err(db_error)?;
+        transaction
+            .execute("DELETE FROM checkout_terminal_layouts", [])
+            .map_err(db_error)?;
+        set_preference(&transaction, ACTIVE_SESSION, None)?;
+        transaction.commit().map_err(db_error)?;
 
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
@@ -1746,250 +1755,124 @@ fn validate_checkout_ui_state(checkout_id: &str, state: &CheckoutUiState) -> boo
         && state.diff_scroll_top <= 10_000_000
 }
 
-fn migrate(connection: &Connection) -> Result<(), String> {
+/// Writes the whole schema into a file that has none and stamps it with `SCHEMA_VERSION`.
+///
+/// There is no ladder: a file stamped with this build's version is left untouched, a file
+/// with no stamp is written from scratch, and a file stamped with anything else is refused
+/// rather than upgraded. Refusing is the point. The alternative was to reshape a database
+/// this build did not write, and losing the repos someone registered is worse than asking
+/// them to delete a file they were told to delete.
+fn create_schema(connection: &Connection) -> Result<(), String> {
     let version: i64 = connection
         .pragma_query_value(None, "user_version", |row| row.get(0))
         .map_err(db_error)?;
-    if version > SCHEMA_VERSION {
+    if version == SCHEMA_VERSION {
+        return Ok(());
+    }
+    if version != 0 {
         return Err(format!(
-            "database schema version {version} is newer than supported version {SCHEMA_VERSION}"
+            "the workspace database is schema version {version} and this build speaks version \
+             {SCHEMA_VERSION}: update by deleting {} and opening the app again, which starts an \
+             empty workspace",
+            connection.path().unwrap_or("the workspace database"),
         ));
     }
-    if version < 1 {
-        let transaction = connection.unchecked_transaction().map_err(db_error)?;
-        transaction
-            .execute_batch(
-                "CREATE TABLE repos (
-                    id TEXT PRIMARY KEY NOT NULL,
-                    kind TEXT NOT NULL CHECK (kind IN ('git', 'plain')),
-                    name TEXT NOT NULL,
-                    root TEXT NOT NULL,
-                    default_branch TEXT,
-                    position INTEGER NOT NULL UNIQUE,
-                    created_at TEXT NOT NULL,
-                    last_opened_at TEXT NOT NULL
-                );
-                CREATE TABLE checkouts (
-                    id TEXT PRIMARY KEY NOT NULL,
-                    repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
-                    path TEXT NOT NULL,
-                    canonical_path TEXT NOT NULL UNIQUE,
-                    is_primary INTEGER NOT NULL CHECK (is_primary IN (0, 1)),
-                    branch TEXT,
-                    head TEXT,
-                    ahead_of_default INTEGER,
-                    changed_files INTEGER NOT NULL DEFAULT 0,
-                    position INTEGER NOT NULL,
-                    UNIQUE (repo_id, position)
-                );
-                CREATE TABLE sessions (
-                    id TEXT PRIMARY KEY NOT NULL,
-                    checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                    session_type TEXT NOT NULL CHECK (session_type IN ('shell', 'nvim', 'server', 'custom', 'agent')),
-                    name TEXT NOT NULL,
-                    created_at TEXT NOT NULL,
-                    status TEXT NOT NULL DEFAULT 'inactive' CHECK (status = 'inactive')
-                );
-                CREATE TABLE recent_paths (
-                    canonical_path TEXT PRIMARY KEY NOT NULL,
-                    last_opened_at TEXT NOT NULL
-                );
-                CREATE TABLE preferences (
-                    key TEXT PRIMARY KEY NOT NULL,
-                    value TEXT NOT NULL
-                );
-                PRAGMA user_version = 1;",
-            )
-            .map_err(db_error)?;
-        transaction.commit().map_err(db_error)?;
-    }
-    if version < 2 {
-        connection
-            .execute_batch(
-                "ALTER TABLE checkouts ADD COLUMN is_missing INTEGER NOT NULL DEFAULT 0;
-                 PRAGMA user_version = 2;",
-            )
-            .map_err(db_error)?;
-    }
-    if version < 3 {
-        let transaction = connection.unchecked_transaction().map_err(db_error)?;
-        transaction
-            .execute_batch(
-                "ALTER TABLE sessions RENAME TO sessions_v2;
-                 CREATE TABLE sessions (
-                     id TEXT PRIMARY KEY NOT NULL,
-                     checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                     session_type TEXT NOT NULL CHECK (session_type IN ('shell', 'nvim', 'server', 'custom', 'agent')),
-                     name TEXT NOT NULL,
-                     created_at TEXT NOT NULL,
-                     status TEXT NOT NULL DEFAULT 'inactive' CHECK (status IN ('active', 'inactive'))
-                 );
-                 INSERT INTO sessions (id, checkout_id, session_type, name, created_at, status)
-                     SELECT id, checkout_id, session_type, name, created_at, 'inactive' FROM sessions_v2;
-                 DROP TABLE sessions_v2;
-                 PRAGMA user_version = 3;",
-            )
-            .map_err(db_error)?;
-        transaction.commit().map_err(db_error)?;
-    }
-    if version < 4 {
-        connection
-            .execute_batch(
-                "CREATE TABLE checkout_terminal_layouts (
-                    checkout_id TEXT PRIMARY KEY NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                    layout_json TEXT NOT NULL
-                );
-                PRAGMA user_version = 4;",
-            )
-            .map_err(db_error)?;
-    }
-    if version < 5 {
-        let transaction = connection.unchecked_transaction().map_err(db_error)?;
-        transaction
-            .execute_batch(
-                "CREATE TABLE viewed_files (
-                    checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                    path TEXT NOT NULL,
-                    viewed_at TEXT NOT NULL,
-                    PRIMARY KEY (checkout_id, path)
-                );
-                PRAGMA user_version = 5;",
-            )
-            .map_err(db_error)?;
-        transaction.commit().map_err(db_error)?;
-    }
-    if version < 6 {
-        let transaction = connection.unchecked_transaction().map_err(db_error)?;
-        transaction
-            .execute_batch(
-                "CREATE TABLE checkout_ui_states (
-                    checkout_id TEXT PRIMARY KEY NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                    state_json TEXT NOT NULL
-                );
-                PRAGMA user_version = 6;",
-            )
-            .map_err(db_error)?;
-        transaction.commit().map_err(db_error)?;
-    }
-    if version < 7 {
-        let transaction = connection.unchecked_transaction().map_err(db_error)?;
-        transaction
-            .execute_batch(
-                "CREATE TABLE review_notes (
-                    id TEXT PRIMARY KEY NOT NULL,
-                    checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                    path TEXT NOT NULL,
-                    side TEXT NOT NULL CHECK (side IN ('old', 'new')),
-                    line_start INTEGER NOT NULL,
-                    line_end INTEGER,
-                    content TEXT NOT NULL,
-                    code TEXT NOT NULL,
-                    status TEXT NOT NULL CHECK (status IN ('draft', 'sent')),
-                    created_at TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
-                CREATE INDEX review_notes_checkout_path ON review_notes (checkout_id, path);
-                PRAGMA user_version = 7;",
-            )
-            .map_err(db_error)?;
-        transaction.commit().map_err(db_error)?;
-    }
-    if version < 8 {
-        let transaction = connection.unchecked_transaction().map_err(db_error)?;
-        transaction
-            .execute_batch(
-                "ALTER TABLE review_notes ADD COLUMN code_hash TEXT NOT NULL DEFAULT '';
-                 ALTER TABLE review_notes ADD COLUMN outdated INTEGER NOT NULL DEFAULT 0
-                     CHECK (outdated IN (0, 1));
-                 PRAGMA user_version = 8;",
-            )
-            .map_err(db_error)?;
-        // Notes that already existed have no fingerprint. Derive it from the code they
-        // captured, otherwise every one of them would look drifted on the first check.
-        let unfingerprinted = {
-            let mut statement = transaction
-                .prepare("SELECT id, code FROM review_notes WHERE code_hash = ''")
-                .map_err(db_error)?;
-            let rows = statement
-                .query_map([], |row| {
-                    Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
-                })
-                .map_err(db_error)?
-                .collect::<Result<Vec<_>, _>>()
-                .map_err(db_error)?;
-            rows
-        };
-        for (id, code) in unfingerprinted {
-            transaction
-                .execute(
-                    "UPDATE review_notes SET code_hash = ?1 WHERE id = ?2",
-                    params![review_anchor_hash(&code), id],
-                )
-                .map_err(db_error)?;
-        }
-        transaction.commit().map_err(db_error)?;
-    }
-    if version < 9 {
-        let transaction = connection.unchecked_transaction().map_err(db_error)?;
-        // The status CHECK cannot be altered in place, so the table is rebuilt. This is also
-        // where a note learns which round carried it.
-        transaction
-            .execute_batch(
-                "CREATE TABLE review_notes_v9 (
-                     id TEXT PRIMARY KEY NOT NULL,
-                     checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                     path TEXT NOT NULL,
-                     side TEXT NOT NULL CHECK (side IN ('old', 'new')),
-                     line_start INTEGER NOT NULL,
-                     line_end INTEGER,
-                     content TEXT NOT NULL,
-                     code TEXT NOT NULL,
-                     status TEXT NOT NULL CHECK (status IN ('draft', 'sent', 'resolved')),
-                     code_hash TEXT NOT NULL,
-                     outdated INTEGER NOT NULL DEFAULT 0 CHECK (outdated IN (0, 1)),
-                     round_id TEXT,
-                     created_at TEXT NOT NULL,
-                     updated_at TEXT NOT NULL
-                 );
-                 INSERT INTO review_notes_v9
-                     SELECT id, checkout_id, path, side, line_start, line_end, content, code,
-                            status, code_hash, outdated, NULL, created_at, updated_at
-                     FROM review_notes;
-                 DROP TABLE review_notes;
-                 ALTER TABLE review_notes_v9 RENAME TO review_notes;
-                 CREATE INDEX review_notes_checkout_path ON review_notes (checkout_id, path);
-                 CREATE INDEX review_notes_round ON review_notes (round_id);
-                 CREATE TABLE review_rounds (
-                     id TEXT PRIMARY KEY NOT NULL,
-                     checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                     session_id TEXT,
-                     status TEXT NOT NULL CHECK (
-                         status IN ('queued', 'dispatching', 'dispatched', 'acked')
-                     ),
-                     marker TEXT NOT NULL,
-                     note_ids TEXT NOT NULL,
-                     created_at TEXT NOT NULL,
-                     updated_at TEXT NOT NULL
-                 );
-                 CREATE INDEX review_rounds_checkout ON review_rounds (checkout_id, created_at);
-                 PRAGMA user_version = 9;",
-            )
-            .map_err(db_error)?;
-        transaction.commit().map_err(db_error)?;
-    }
-    if version < 10 {
-        let transaction = connection.unchecked_transaction().map_err(db_error)?;
-        // A round queued while the agent was busy has to be able to send itself later,
-        // without the UI that wrote it, and with exactly the bytes it was accepted with.
-        transaction
-            .execute_batch(
-                "ALTER TABLE review_rounds ADD COLUMN prompt TEXT;
-                 PRAGMA user_version = 10;",
-            )
-            .map_err(db_error)?;
-        transaction.commit().map_err(db_error)?;
-    }
-    Ok(())
+
+    let transaction = connection.unchecked_transaction().map_err(db_error)?;
+    transaction
+        .execute_batch(
+            "CREATE TABLE repos (
+                id TEXT PRIMARY KEY NOT NULL,
+                kind TEXT NOT NULL CHECK (kind IN ('git', 'plain')),
+                name TEXT NOT NULL,
+                root TEXT NOT NULL,
+                default_branch TEXT,
+                position INTEGER NOT NULL UNIQUE,
+                created_at TEXT NOT NULL,
+                last_opened_at TEXT NOT NULL
+            );
+            CREATE TABLE checkouts (
+                id TEXT PRIMARY KEY NOT NULL,
+                repo_id TEXT NOT NULL REFERENCES repos(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                canonical_path TEXT NOT NULL UNIQUE,
+                is_primary INTEGER NOT NULL CHECK (is_primary IN (0, 1)),
+                branch TEXT,
+                head TEXT,
+                ahead_of_default INTEGER,
+                changed_files INTEGER NOT NULL DEFAULT 0,
+                is_missing INTEGER NOT NULL DEFAULT 0,
+                position INTEGER NOT NULL,
+                UNIQUE (repo_id, position)
+            );
+            CREATE TABLE sessions (
+                id TEXT PRIMARY KEY NOT NULL,
+                checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                session_type TEXT NOT NULL CHECK (session_type IN ('shell', 'nvim', 'server', 'custom', 'agent')),
+                name TEXT NOT NULL,
+                created_at TEXT NOT NULL,
+                status TEXT NOT NULL DEFAULT 'inactive' CHECK (status IN ('active', 'inactive'))
+            );
+            CREATE TABLE recent_paths (
+                canonical_path TEXT PRIMARY KEY NOT NULL,
+                last_opened_at TEXT NOT NULL
+            );
+            CREATE TABLE preferences (
+                key TEXT PRIMARY KEY NOT NULL,
+                value TEXT NOT NULL
+            );
+            CREATE TABLE checkout_terminal_layouts (
+                checkout_id TEXT PRIMARY KEY NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                layout_json TEXT NOT NULL
+            );
+            CREATE TABLE viewed_files (
+                checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                viewed_at TEXT NOT NULL,
+                PRIMARY KEY (checkout_id, path)
+            );
+            CREATE TABLE checkout_ui_states (
+                checkout_id TEXT PRIMARY KEY NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                state_json TEXT NOT NULL
+            );
+            CREATE TABLE review_notes (
+                id TEXT PRIMARY KEY NOT NULL,
+                checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                path TEXT NOT NULL,
+                side TEXT NOT NULL CHECK (side IN ('old', 'new')),
+                line_start INTEGER NOT NULL,
+                line_end INTEGER,
+                content TEXT NOT NULL,
+                code TEXT NOT NULL,
+                status TEXT NOT NULL CHECK (status IN ('draft', 'sent', 'resolved')),
+                code_hash TEXT NOT NULL,
+                outdated INTEGER NOT NULL DEFAULT 0 CHECK (outdated IN (0, 1)),
+                round_id TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX review_notes_checkout_path ON review_notes (checkout_id, path);
+            CREATE INDEX review_notes_round ON review_notes (round_id);
+            CREATE TABLE review_rounds (
+                id TEXT PRIMARY KEY NOT NULL,
+                checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
+                session_id TEXT,
+                status TEXT NOT NULL CHECK (
+                    status IN ('queued', 'dispatching', 'dispatched', 'acked')
+                ),
+                marker TEXT NOT NULL,
+                note_ids TEXT NOT NULL,
+                prompt TEXT,
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE INDEX review_rounds_checkout ON review_rounds (checkout_id, created_at);",
+        )
+        .map_err(db_error)?;
+    transaction
+        .pragma_update(None, "user_version", SCHEMA_VERSION)
+        .map_err(db_error)?;
+    transaction.commit().map_err(db_error)
 }
 
 fn load_workspace(connection: &Connection) -> Result<WorkspaceState, String> {
@@ -2206,10 +2089,11 @@ fn db_error(error: rusqlite::Error) -> String {
 mod tests {
     use std::{fs, path::Path};
 
-    use rusqlite::params;
+    use rusqlite::{params, Connection};
     use tempfile::tempdir;
 
     use crate::domain::{
+        review::review_anchor_hash,
         terminal_layout::{CheckoutTerminalLayout, TerminalLayoutNode, TerminalLayoutTab},
         workspace::{
             checkout_id_for_path, repo_id_for_path, Checkout, Repo, RepoKind, Session,
@@ -2218,206 +2102,106 @@ mod tests {
     };
 
     use super::{
-        review_anchor_hash, AppLayoutState, CheckoutUiState, Database, PersistedDocument,
-        ReviewNote, SCHEMA_VERSION,
+        AppLayoutState, CheckoutUiState, Database, PersistedDocument, ReviewNote, SCHEMA_VERSION,
     };
 
     fn plain_repo(path: &Path, now: &str) -> Repo {
         Repo::plain(path, now).expect("plain repo")
     }
 
+    /// A file with no stamp gets the whole schema, a file already stamped with this build's
+    /// version is left alone, and a file from any other version is refused by name.
     #[test]
-    fn versioned_migration_is_idempotent_and_has_no_diff_reference_column() {
-        let database = Database::open_in_memory().expect("database");
-        let version: i64 = database
-            .connection
-            .lock()
-            .unwrap()
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-
-        super::migrate(&database.connection.lock().unwrap()).expect("migration reruns safely");
-        let has_diff_reference: bool = database
-            .connection
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM pragma_table_info('checkouts') WHERE name = 'diff_ref')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(!has_diff_reference);
-
-        let has_checkout_layouts: bool = database
-            .connection
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'checkout_terminal_layouts')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(has_checkout_layouts);
-
-        let has_checkout_ui_states: bool = database
-            .connection
-            .lock()
-            .unwrap()
-            .query_row(
-                "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'checkout_ui_states')",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert!(has_checkout_ui_states);
-    }
-
-    #[test]
-    fn migrating_to_v8_backfills_anchor_hashes_for_existing_notes() {
+    fn a_fresh_file_gets_the_whole_schema_and_a_foreign_one_is_refused() {
         let temp = tempdir().unwrap();
-        let folder = temp.path().join("checkout");
-        fs::create_dir(&folder).unwrap();
-        let repo = plain_repo(&folder, "now");
-        let checkout_id = repo.checkouts[0].id.clone();
-        let database = Database::open(temp.path().join("v8.sqlite3")).unwrap();
-        database.register_plain_repo(repo).unwrap();
-
-        let now = "2026-09-26T00:00:00Z";
-        let note = ReviewNote {
-            id: "note:legacy".into(),
-            checkout_id,
-            path: "src/main.rs".into(),
-            side: "new".into(),
-            line_start: 4,
-            line_end: Some(6),
-            content: "legacy note".into(),
-            code: "let first = 1;\nlet second = 2;".into(),
-            status: "draft".into(),
-            code_hash: review_anchor_hash("let first = 1;\nlet second = 2;"),
-            outdated: false,
-            round_id: None,
-            created_at: now.into(),
-            updated_at: now.into(),
-        };
-        database.add_review_note(&note).unwrap();
-
-        // Pretend the database predates anchor hashes: rebuild the table in its v7 shape.
+        let path = temp.path().join("workspace.sqlite3");
+        let database = Database::open(&path).expect("fresh database");
         {
             let connection = database.connection.lock().unwrap();
-            connection
-                .execute_batch(
-                    "CREATE TABLE review_notes_v7 (
-                         id TEXT PRIMARY KEY NOT NULL,
-                         checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                         path TEXT NOT NULL,
-                         side TEXT NOT NULL CHECK (side IN ('old', 'new')),
-                         line_start INTEGER NOT NULL,
-                         line_end INTEGER,
-                         content TEXT NOT NULL,
-                         code TEXT NOT NULL,
-                         status TEXT NOT NULL CHECK (status IN ('draft', 'sent')),
-                         created_at TEXT NOT NULL,
-                         updated_at TEXT NOT NULL
-                     );
-                     INSERT INTO review_notes_v7
-                         SELECT id, checkout_id, path, side, line_start, line_end,
-                                content, code, status, created_at, updated_at
-                         FROM review_notes;
-                     DROP TABLE review_notes;
-                     DROP TABLE review_rounds;
-                     ALTER TABLE review_notes_v7 RENAME TO review_notes;
-                     CREATE INDEX review_notes_checkout_path ON review_notes (checkout_id, path);
-                     PRAGMA user_version = 7;",
+            assert_eq!(
+                connection
+                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
+                    .unwrap(),
+                SCHEMA_VERSION
+            );
+            let tables: i64 = connection
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name IN
+                     ('repos', 'checkouts', 'sessions', 'recent_paths', 'preferences',
+                      'checkout_terminal_layouts', 'viewed_files', 'checkout_ui_states',
+                      'review_notes', 'review_rounds')",
+                    [],
+                    |row| row.get(0),
                 )
                 .unwrap();
-            super::migrate(&connection).unwrap();
+            assert_eq!(tables, 10);
+            // Reopening what this build already wrote has nothing left to do.
+            super::create_schema(&connection).expect("a stamped file is left alone");
         }
 
-        let migrated = database.review_notes(&note.checkout_id).unwrap();
-        assert_eq!(migrated[0].code_hash, note.code_hash);
-        assert!(!migrated[0].outdated);
+        let foreign_path = temp.path().join("foreign.sqlite3");
+        Connection::open(&foreign_path)
+            .unwrap()
+            .pragma_update(None, "user_version", 3)
+            .unwrap();
+        let error = Database::open(&foreign_path)
+            .err()
+            .expect("a file from another schema version is refused");
+        assert!(error.contains("schema version 3"), "{error}");
+        assert!(error.contains(&SCHEMA_VERSION.to_string()), "{error}");
+        assert!(error.contains("deleting"), "{error}");
     }
 
+    /// A session outlives nothing: its PTY died with the process, so reopening drops the rows
+    /// instead of letting one dead session per launch pile up per checkout.
     #[test]
-    fn migrating_to_v9_keeps_existing_notes_and_adds_the_resolved_state() {
+    fn reopening_drops_the_terminal_sessions_the_previous_process_owned() {
         let temp = tempdir().unwrap();
+        let path = temp.path().join("workspace.sqlite3");
         let folder = temp.path().join("checkout");
         fs::create_dir(&folder).unwrap();
         let repo = plain_repo(&folder, "now");
         let checkout_id = repo.checkouts[0].id.clone();
-        let database = Database::open(temp.path().join("v9.sqlite3")).unwrap();
-        database.register_plain_repo(repo).unwrap();
-
-        let now = "2026-09-26T00:00:00Z";
-        let note = ReviewNote {
-            id: "note:v8".into(),
+        let session = Session {
+            id: "session:dead".into(),
+            session_type: SessionType::Shell,
             checkout_id: checkout_id.clone(),
-            path: "src/main.rs".into(),
-            side: "new".into(),
-            line_start: 4,
-            line_end: None,
-            content: "from v8".into(),
-            code: "let first = 1;".into(),
-            status: "sent".into(),
-            code_hash: review_anchor_hash("let first = 1;"),
-            outdated: true,
-            round_id: None,
-            created_at: now.into(),
-            updated_at: now.into(),
+            name: "zsh".into(),
+            created_at: "now".into(),
+            status: SessionStatus::Active,
         };
-        database.add_review_note(&note).unwrap();
-
-        // Put the database back on the v8 shape and migrate again.
         {
-            let connection = database.connection.lock().unwrap();
-            connection
-                .execute_batch(
-                    "CREATE TABLE review_notes_v8 (
-                         id TEXT PRIMARY KEY NOT NULL,
-                         checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                         path TEXT NOT NULL,
-                         side TEXT NOT NULL CHECK (side IN ('old', 'new')),
-                         line_start INTEGER NOT NULL,
-                         line_end INTEGER,
-                         content TEXT NOT NULL,
-                         code TEXT NOT NULL,
-                         status TEXT NOT NULL CHECK (status IN ('draft', 'sent')),
-                         code_hash TEXT NOT NULL,
-                         outdated INTEGER NOT NULL DEFAULT 0 CHECK (outdated IN (0, 1)),
-                         created_at TEXT NOT NULL,
-                         updated_at TEXT NOT NULL
-                     );
-                     INSERT INTO review_notes_v8
-                         SELECT id, checkout_id, path, side, line_start, line_end, content, code,
-                                status, code_hash, outdated, created_at, updated_at
-                         FROM review_notes;
-                     DROP TABLE review_notes;
-                     DROP TABLE review_rounds;
-                     ALTER TABLE review_notes_v8 RENAME TO review_notes;
-                     CREATE INDEX review_notes_checkout_path ON review_notes (checkout_id, path);
-                     PRAGMA user_version = 8;",
+            let database = Database::open(&path).unwrap();
+            database.register_plain_repo(repo).unwrap();
+            database.add_terminal_session(&session).unwrap();
+            database
+                .save_terminal_layout(
+                    &checkout_id,
+                    &CheckoutTerminalLayout {
+                        active_tab_id: Some("tab:dead".into()),
+                        tabs: vec![TerminalLayoutTab {
+                            id: "tab:dead".into(),
+                            root: TerminalLayoutNode::Session {
+                                session_id: session.id.clone(),
+                            },
+                        }],
+                        session_order: vec![session.id.clone()],
+                    },
                 )
                 .unwrap();
-            super::migrate(&connection).unwrap();
+            assert_eq!(
+                database.load_workspace().unwrap().repos[0].checkouts[0]
+                    .sessions
+                    .len(),
+                1
+            );
         }
 
-        let migrated = database.review_notes(&checkout_id).unwrap();
-        assert_eq!(migrated.len(), 1);
-        assert_eq!(migrated[0].content, "from v8");
-        assert_eq!(migrated[0].status, "sent");
-        assert_eq!(migrated[0].code_hash, note.code_hash);
-        assert!(migrated[0].outdated);
-        assert_eq!(migrated[0].round_id, None);
-        assert!(database.review_rounds(&checkout_id).unwrap().is_empty());
-
-        // The rebuilt table must accept the new state, not just the old ones.
-        let resolved = database
-            .resolve_review_note("note:v8", &checkout_id)
-            .unwrap();
-        assert_eq!(resolved.status, "resolved");
+        let database = Database::open(&path).unwrap();
+        let restored = database.load_workspace().unwrap();
+        assert!(restored.repos[0].checkouts[0].sessions.is_empty());
+        assert_eq!(restored.active_session_id, None);
+        assert_eq!(database.load_terminal_layout(&checkout_id).unwrap(), None);
     }
 
     /// D2-04: three line comments across two files, still drafts after a restart.
@@ -2494,7 +2278,7 @@ mod tests {
     }
 
     #[test]
-    fn ui_state_round_trips_migrates_and_discards_invalid_saved_data() {
+    fn ui_state_round_trips_and_discards_invalid_saved_data() {
         let temp = tempdir().unwrap();
         let db_path = temp.path().join("ui-state.sqlite3");
         let folder = temp.path().join("checkout");
@@ -2578,27 +2362,6 @@ mod tests {
             )
             .unwrap();
         assert!(!invalid_global_state_remains);
-        drop(connection);
-
-        let old_version = Database::open_in_memory().unwrap();
-        {
-            let connection = old_version.connection.lock().unwrap();
-            connection
-                .execute_batch(
-                    "DROP TABLE checkout_ui_states;
-                     DROP TABLE review_notes;
-                     DROP TABLE review_rounds;
-                     PRAGMA user_version = 5;",
-                )
-                .unwrap();
-            super::migrate(&connection).unwrap();
-            assert_eq!(
-                connection
-                    .pragma_query_value(None, "user_version", |row| row.get::<_, i64>(0))
-                    .unwrap(),
-                SCHEMA_VERSION
-            );
-        }
     }
 
     #[test]
@@ -2957,48 +2720,6 @@ mod tests {
     }
 
     #[test]
-    fn historical_session_metadata_is_inactive_after_restart() {
-        let temp = tempdir().expect("temporary directory");
-        let db_path = temp.path().join("workspace.sqlite3");
-        let folder = temp.path().join("plain");
-        fs::create_dir(&folder).unwrap();
-        let repo = plain_repo(&folder, "1");
-        {
-            let database = Database::open(&db_path).expect("database");
-            database
-                .register_plain_repo(repo.clone())
-                .expect("register plain repo");
-            database
-                .connection
-                .lock()
-                .unwrap()
-                .execute(
-                    "INSERT INTO sessions (id, checkout_id, session_type, name, created_at) VALUES ('old-shell', ?1, 'shell', 'zsh', '1')",
-                    [&repo.checkouts[0].id],
-                )
-                .unwrap();
-            database
-                .select_session(Some("old-shell".into()))
-                .expect("select saved session");
-            let state = database
-                .register_plain_repo(plain_repo(&folder, "2"))
-                .expect("reopen same checkout");
-            assert_eq!(state.active_session_id.as_deref(), Some("old-shell"));
-        }
-
-        let state = Database::open(&db_path)
-            .expect("restart database")
-            .load_workspace()
-            .expect("restore workspace");
-        assert_eq!(state.active_session_id.as_deref(), Some("old-shell"));
-        let session = &state.repos[0].checkouts[0].sessions[0];
-        assert_eq!(
-            session.status,
-            crate::domain::workspace::SessionStatus::Inactive
-        );
-    }
-
-    #[test]
     fn terminal_checkout_path_comes_from_persisted_non_missing_checkouts() {
         let temp = tempdir().expect("temporary directory");
         let folder = temp.path().join("checkout");
@@ -3148,16 +2869,7 @@ mod tests {
                 .expect("failed save leaves old layout intact"),
             Some(layout.clone())
         );
-        drop(database);
-
-        let reopened = Database::open(&database_path).expect("reopen database");
-        assert_eq!(
-            reopened
-                .load_terminal_layout(&first_repo.checkouts[0].id)
-                .expect("restore layout from SQLite"),
-            Some(layout)
-        );
-        reopened
+        database
             .connection
             .lock()
             .unwrap()
@@ -3166,7 +2878,7 @@ mod tests {
                 [&first_split_session.id],
             )
             .unwrap();
-        let pruned = reopened
+        let pruned = database
             .load_terminal_layout(&first_repo.checkouts[0].id)
             .expect("prune a removed historical session");
         assert_eq!(
@@ -3174,6 +2886,17 @@ mod tests {
             TerminalLayoutNode::Session {
                 session_id: first_session.id
             }
+        );
+        drop(database);
+
+        // A restart is not a session: what the saved layout pointed at is gone, so the layout
+        // goes with it instead of healing into a row of dead tabs.
+        let reopened = Database::open(&database_path).expect("reopen database");
+        assert_eq!(
+            reopened
+                .load_terminal_layout(&first_repo.checkouts[0].id)
+                .expect("load layout from SQLite"),
+            None
         );
     }
 

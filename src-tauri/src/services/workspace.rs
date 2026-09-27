@@ -494,7 +494,7 @@ mod tests {
     }
 
     #[test]
-    fn restart_restores_checkout_order_focus_and_historical_session_selection() {
+    fn restart_restores_checkout_order_and_focus_but_no_terminal_sessions() {
         let temp = tempdir().unwrap();
         let primary = temp.path().join("repo");
         let linked = temp.path().join("feature checkout");
@@ -553,14 +553,9 @@ mod tests {
             restored.active_checkout_id.as_deref(),
             Some(session.checkout_id.as_str())
         );
-        assert_eq!(
-            restored.active_session_id.as_deref(),
-            Some(session.id.as_str())
-        );
-        let restored_session = &repo.checkouts[1].sessions[0];
-        assert_eq!(restored_session.name, session.name);
-        assert_eq!(restored_session.created_at, session.created_at);
-        assert_eq!(restored_session.status, SessionStatus::Inactive);
+        // The session the previous process selected is gone with its PTY, so nothing points at it.
+        assert_eq!(restored.active_session_id, None);
+        assert!(repo.checkouts[1].sessions.is_empty());
     }
 
     #[test]
@@ -773,23 +768,12 @@ mod tests {
             .unwrap();
         assert_eq!(checkout.branch.as_deref(), Some("feature"));
         assert!(!checkout.is_missing);
-        assert_eq!(
-            checkout.sessions,
-            [Session {
-                checkout_id: new_id.clone(),
-                status: SessionStatus::Inactive,
-                ..session
-            }]
-        );
+        // The restart that precedes the relocation already took the session and its layout with
+        // it, so what still has to move is the history that outlives a terminal.
+        assert!(checkout.sessions.is_empty());
         assert_eq!(located.active_checkout_id.as_deref(), Some(new_id.as_str()));
-        assert_eq!(
-            located.active_session_id.as_deref(),
-            Some("session:feature-shell")
-        );
-        assert_eq!(
-            database.load_terminal_layout(&new_id).unwrap(),
-            Some(layout)
-        );
+        assert_eq!(located.active_session_id, None);
+        assert_eq!(database.load_terminal_layout(&new_id).unwrap(), None);
         assert_eq!(database.viewed_files(&new_id).unwrap(), ["README.md"]);
         assert_eq!(repo.id, registered.repos[0].id);
     }
@@ -850,20 +834,13 @@ mod tests {
         );
         assert!(repo.checkouts.iter().all(|checkout| checkout.id != old_id));
         assert_eq!(repo.checkouts[0].id, new_id);
-        assert_eq!(repo.checkouts[0].sessions[0].checkout_id, new_id);
-        assert_eq!(
-            repo.checkouts[0].sessions[0].status,
-            SessionStatus::Inactive
-        );
+        assert!(repo.checkouts[0].sessions.is_empty());
         assert_eq!(database.viewed_files(&new_id).unwrap(), ["notes.md"]);
         assert_eq!(
             relocated.active_checkout_id.as_deref(),
             Some(new_id.as_str())
         );
-        assert_eq!(
-            relocated.active_session_id.as_deref(),
-            Some("session:plain-shell")
-        );
+        assert_eq!(relocated.active_session_id, None);
     }
 
     #[test]
