@@ -377,4 +377,26 @@ mod startup_tests {
             );
         }
     }
+
+    #[test]
+    fn the_window_opens_on_the_page_background_and_not_on_a_white_frame() {
+        // A webview with no background color of its own paints white until the page covers it, and
+        // wry only stops it doing so when one is set. So the window opens on white and the app
+        // opens on `--marvis-bg-0`, and the difference is a frame the user sees on every launch.
+        // Setting it is not enough on its own: the value lives in a config file and the color it
+        // has to match lives in a stylesheet, and nothing makes the two follow each other when
+        // the palette changes. This is where that is said out loud.
+        let config: serde_json::Value =
+            serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let page_background = config["app"]["windows"][0]["backgroundColor"]
+            .as_str()
+            .expect("the window has no `backgroundColor`, so it opens on a white frame")
+            .to_lowercase();
+        let stylesheet = include_str!("../../src/marvis.css");
+        assert!(
+            stylesheet.contains(&format!("--marvis-bg-0: {page_background};")),
+            "the window opens on {page_background} but the page is painted on something else, so \
+             the frame before the first paint is a different color than the app"
+        );
+    }
 }
