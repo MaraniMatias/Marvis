@@ -242,6 +242,36 @@ describe("SessionPane terminal UI", () => {
     wrapper.unmount();
   });
 
+  it("answers a shell request that arrived before the workdir it is for", async () => {
+    // Picking a workdir for the first time reads its saved UI state, and the pane is handed no
+    // checkout until that read finishes. The request is made in between, so watching the token
+    // alone would drop it and the click would have to be made twice.
+    const wrapper = mount(SessionPane, {
+      props: { checkout: null, activeSessionId: null, isOpening: false, shellRequest: null },
+    });
+
+    await wrapper.setProps({ shellRequest: { checkoutId: checkout.id, token: 1 } });
+    await flushPromises();
+    expect(terminalMock.mounts).toBe(0);
+
+    await wrapper.setProps({ checkout });
+    await flushPromises();
+
+    expect(terminalMock.mounts).toBe(1);
+    expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(1);
+
+    // The pair is watched, not the token alone: coming back to the same workdir later replays
+    // the same props, and that is not a second click.
+    const other: Checkout = { ...checkout, id: "checkout:/work/other", path: "/work/other" };
+    await wrapper.setProps({ checkout: other });
+    await flushPromises();
+    await wrapper.setProps({ checkout });
+    await flushPromises();
+
+    expect(terminalMock.mounts).toBe(1);
+    wrapper.unmount();
+  });
+
   it("creates additional shells on request and closes only the requested session", async () => {
     terminalMock.autoCreate = true;
     const wrapper = mount(SessionPane, {

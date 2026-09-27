@@ -212,10 +212,21 @@ function handleKeyboard(event: KeyboardEvent) {
   }
 }
 
+/** The shell request this pane has already answered, so one request is one terminal. */
+let answeredShellToken = 0;
+
+/**
+ * A shell request names the workdir it is for, and the pane only has that workdir once its saved
+ * UI state has been read — which for a workdir picked for the first time is after the request was
+ * made. Keyed on the pair, so a request that arrives before its workdir is answered as soon as
+ * the workdir lands instead of being dropped and needing a second click.
+ */
 watch(
-  () => props.shellRequest?.token,
-  (token) => {
-    if (token && props.shellRequest?.checkoutId === props.checkout?.id) void createTerminalSession(true);
+  () => [props.shellRequest?.token, props.checkout?.id] as const,
+  ([token, checkoutId]) => {
+    if (!token || token === answeredShellToken || props.shellRequest?.checkoutId !== checkoutId) return;
+    answeredShellToken = token;
+    void createTerminalSession(true);
   },
 );
 
