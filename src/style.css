@@ -205,18 +205,50 @@ body {
 
 .terminal-host .xterm {
   height: 100%;
-  padding: 0.75rem 1rem;
+  /* No padding: a Neovim window or the agent's TUI draws its own statusline against the last row
+     and its own border against the last column, and every pixel of padding here is a row and a
+     half-column the grid never gets. */
+  padding: 0;
   background: var(--marvis-bg-0);
 }
 
+/* xterm.js paints its own background as an inline style from the theme it was given, so owning the
+   surface from CSS means out-specifying it here. One declaration instead of a second copy of the
+   same hex, and the terminal keeps a background that is the page's background. `auto` and not
+   `scroll`: the one xterm ships reserves the gutter on every terminal, so a full-screen TUI loses
+   a column to a scrollbar it is not showing. */
 .terminal-host .xterm-viewport {
   background: var(--marvis-bg-0) !important;
+  overflow-y: auto;
+}
+
+/* The chrome is not a text document. A click that lands on a sidebar row, a title-bar crumb or a
+   pane header should not paint a selection nobody asked for, and on those the pointer is the whole
+   affordance. The content is the other way round, and it is listed rather than assumed: a diff, a
+   file and every field a name or a snippet gets typed into have to be selectable, because Cmd+C
+   over one of them is the point of reading it. Deny by default, named grants.
+
+   The terminal is not on the list, and that is not an oversight: xterm.css declares `user-select`
+   in its own subtree, the selection inside a terminal is xterm's own, and granting it here only
+   ever competes with what that stylesheet already decides. */
+.app-shell {
+  user-select: none;
+}
+
+.source-read,
+.markdown-preview,
+.code-editor-host .cm-content,
+.diff-viewport,
+.diff-files,
+input,
+textarea {
+  user-select: text;
 }
 
 /* The window is opaque (B.4): no tauri transparency and no blur filters. */
 
 ::selection {
-  background: rgb(124 158 255 / 30%);
+  background: var(--marvis-selection);
 }
 
 /* Every scrollbar in the app, the editor's and the terminal's included, is that one grey. The

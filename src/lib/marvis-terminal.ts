@@ -21,16 +21,20 @@ const TERMINAL_FONT_SIZE = 16;
 
 /**
  * Only the colors come from the design tokens (B.1); the face and the size are the ones the app
- * has always had. The ANSI entries are there because a colorscheme that uses them would otherwise
- * draw xterm.js' own palette, which has nothing to do with this window. Yellow, magenta and cyan
- * have no token yet: these three are proposals that sit with the rest.
+ * has always had. The background is in the theme rather than left to CSS because xterm.js paints
+ * it as an inline style: the stylesheet has one declaration for the surface and out-specifies that
+ * one, rather than pretending the canvas is not painted.
+ *
+ * The ANSI entries are there because a colorscheme that uses them would otherwise draw xterm.js'
+ * own palette, which has nothing to do with this window. Yellow, magenta and cyan have no token
+ * yet: these three are proposals that sit with the rest.
  */
 const TERMINAL_THEME: ITheme = {
   background: "#17191f", // --marvis-bg-0
   foreground: "#d6d9e0", // --marvis-text
   cursor: "#7c9eff", // --marvis-accent
   cursorAccent: "#17191f", // --marvis-bg-0
-  selectionBackground: "#22252e", // --marvis-bg-2
+  selectionBackground: "#22252e", // --marvis-selection, the same value ::selection paints with
   black: "#22252e", // --marvis-bg-2
   red: "#e08585", // --marvis-red
   green: "#7fd88f", // --marvis-green

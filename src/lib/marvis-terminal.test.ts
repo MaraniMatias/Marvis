@@ -107,7 +107,7 @@ describe("createMarvisTerminal", () => {
         background: "#17191f", // --marvis-bg-0
         foreground: "#d6d9e0", // --marvis-text
         cursor: "#7c9eff", // --marvis-accent
-        selectionBackground: "#22252e", // --marvis-bg-2
+        selectionBackground: "#22252e", // --marvis-selection
       },
     });
   });
