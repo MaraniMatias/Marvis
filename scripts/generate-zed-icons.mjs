@@ -13,6 +13,7 @@
  */
 import { readFileSync, writeFileSync, readdirSync } from "node:fs";
 import { join } from "node:path";
+import { optimize } from "svgo";
 
 const FLAVOUR = "Catppuccin Mocha";
 const THEME = join("icon_themes", "catppuccin-icons.json");
@@ -59,25 +60,54 @@ const referenced = new Set([
 ]);
 
 /**
- * The inside of the `<svg>` element, with the wrapper dropped: every icon is the same 16x16
- * box, so the viewBox and the dimensions are the renderer's job and repeating them 400 times
- * would be a third of the file.
- */
-/**
  * The inside of the `<svg>` element, with the wrapper dropped. Every icon but three is on the
  * same 16x16 box, so the viewBox is the renderer's job and repeating it 500-odd times would be a
  * third of the file; the three that declare their own get it back.
+ *
+ * `convertPathData` alone takes the markup from 255 kB to 185 kB. The fuller presets buy no
+ * further compression but delete zero-length paths, and in these icons such a path is a
+ * deliberate dot: a zero-length stroke under `stroke-linecap="round"`. The full preset drops one
+ * of those from seven icons, so the list stays one plugin long and `painted` guards the result.
  */
 function inner(icon) {
-  const svg = readFileSync(join(checkout, "icons", FLAVOUR.split(" ").pop().toLowerCase(), `${icon}.svg`), "utf8");
-  const viewBox = svg.match(/viewBox="([^"]+)"/)?.[1];
+  const source = readFileSync(join(checkout, "icons", FLAVOUR.split(" ").pop().toLowerCase(), `${icon}.svg`), "utf8");
+  const viewBox = source.match(/viewBox="([^"]+)"/)?.[1];
   if (!viewBox) throw new Error(`${icon} declares no viewBox`);
   if (viewBox !== VIEWBOX) viewBoxes[icon] = viewBox;
+  const markup = strip(source);
+  const optimised = strip(
+    optimize(source, {
+      multipass: true,
+      plugins: [{ name: "convertPathData", params: { floatPrecision: 2 } }],
+    }).data,
+  );
+  if (painted(optimised) !== painted(markup)) {
+    throw new Error(`optimising ${icon} changed which shapes it paints`);
+  }
+  return optimised;
+}
+
+/** The markup without the box, since the renderer supplies that. */
+function strip(svg) {
   return svg
     .replace(/^[\s\S]*?<svg[^>]*>/, "")
     .replace(/<\/svg>\s*$/, "")
     .replace(/\s+/g, " ")
     .trim();
+}
+
+/**
+ * The paint an icon lays down, as a sorted multiset: which colours are stroked and filled, and how
+ * each is filled. An icon that loses or gains one is no longer the shape the theme drew, whatever
+ * happened to its path data. `stroke-width` is left out on purpose, since a path carrying a
+ * `transform` has its scale folded into the geometry and the line weight written back out, which
+ * is the same picture described differently.
+ */
+function painted(svg) {
+  return [...svg.matchAll(/ (stroke|fill|fill-rule)="([^"]+)"/g)]
+    .map((match) => `${match[1]}="${match[2]}"`)
+    .sort()
+    .join(" | ");
 }
 
 const viewBoxes = {};
