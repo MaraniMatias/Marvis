@@ -1,7 +1,10 @@
 name: CI
 
 on:
+  # Branch-scoped so a release tag only runs release.yml, instead of building the same commit here too.
   push:
+    branches:
+      - main
   pull_request:
 
 jobs:
