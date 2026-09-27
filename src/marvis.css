@@ -1,11 +1,44 @@
-/* The terminal's face under one name, so whichever Nerd Font is installed is the one it draws
-   with. A stack of family names would fall through to `monospace` on every machine that does not
-   have Fira Code Nerd Font Mono, and `monospace` has no icons and no ligatures. */
+/* The terminal's face under this one name, so whichever Nerd Font is installed is the one it
+   draws with. The names below are the real family names of the fonts people actually have,
+   because a name that does not match is not a fallback: the face fails as a whole and
+   `monospace` takes over, which has no icons and no ligatures.
+
+   The weights are separate faces on purpose. A `local()` by family name resolves the Regular for
+   every weight, and `font-synthesis: none` (style.css) means the browser will not invent the
+   rest either, so a bold request quietly comes back at 400 — the whole of the agent's and Neovim's
+   TUI, drawn regular, with the metrics unchanged, which is why it reads as "another font" and not
+   as a missing weight. So each face names one weight, and the bold and the italic ones ask for the
+   font's *full* name, the only name a bold face answers to. A machine with none of the bolds
+   installed falls back to the regular face: not bold, which is honest, rather than synthesised. */
 @font-face {
   font-family: "Marvis Nerd Mono";
+  font-style: normal;
+  font-weight: 400;
   src:
-    local("FiraCode Nerd Font Mono"), local("FiraCode Nerd Font"), local("CaskaydiaMono"), local("MesloLGS NF"),
-    local("MesloLGS Nerd Font Mono"), local("JetBrainsMono Nerd Font Mono"), local("Hack Nerd Font Mono");
+    local("FiraCode Nerd Font Mono"), local("FiraCode NF"), local("CaskaydiaCove NFM"), local("CaskaydiaMono NFM"),
+    local("CaskaydiaMono NF"), local("MesloLGS NF"), local("JetBrainsMono Nerd Font Mono"), local("Hack Nerd Font Mono");
+}
+
+@font-face {
+  font-family: "Marvis Nerd Mono";
+  font-style: normal;
+  font-weight: 700;
+  src:
+    local("FiraCode Nerd Font Mono Bold"), local("CaskaydiaCove NFM Bold"), local("CaskaydiaMono NFM Bold"),
+    local("MesloLGS NF Bold"), local("JetBrainsMono Nerd Font Mono Bold"), local("Hack Nerd Font Mono Bold");
+}
+
+/* Italic is the same question with a shorter answer: it resolves on fewer machines than the bold
+   does, because FiraCode Nerd Font Mono — first in the list above — ships no italic at all. SGR 3
+   stays flat there, which is better than a slope borrowed from a face that has nothing to do with
+   this document. */
+@font-face {
+  font-family: "Marvis Nerd Mono";
+  font-style: italic;
+  font-weight: 400;
+  src:
+    local("FiraCode Nerd Font Mono Italic"), local("CaskaydiaCove NFM Italic"), local("CaskaydiaMono NFM Italic"),
+    local("MesloLGS NF Italic"), local("JetBrainsMono Nerd Font Mono Italic"), local("Hack Nerd Font Mono Italic");
 }
 
 /* Marvis design tokens. Custom properties resolve globally, so they cannot live
@@ -24,17 +57,25 @@
   --marvis-green: #7fd88f;
   --marvis-red: #e08585;
   --marvis-scrollbar: #5d5f70;
+  /* One selection, for the DOM and for the terminal canvas: the same value in two places that
+     cannot read each other, since the terminal's theme is an object and this is a stylesheet. It
+     is the raised surface, one step off the page, so it reads as a band and not as a glow. */
+  --marvis-selection: #22252e;
   --marvis-radius: 6px;
   /* Named families first, generic last: `ui-monospace` always resolves to the system UI
      monospace, so leading with it meant "JetBrains Mono" was never reached. */
   --marvis-font: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
-/* No focus ring anywhere, for now. The mockup's ring does not survive being ported onto
-   controls the mockup never had, so it is being reworked before it comes back. Global
-   because the focused controls live inside child components. */
-.app-shell :focus {
-  outline: none;
+/* The focus ring is drawn for the keyboard and only for the keyboard. It used to be dropped
+   everywhere: the mockup's ring did not survive being ported onto controls the mockup never had,
+   and every control below inherited a focus nobody could see. A source view the Tab key walks
+   into makes that hole impossible to keep, so this is the rework the comment above promised —
+   `:focus-visible` is the whole of it, since a click still paints no ring and a click is what a
+   pointer user has. */
+.app-shell :focus-visible {
+  outline: 2px solid var(--marvis-accent);
+  outline-offset: 1px;
 }
 
 /* Resize handle: repaints the divider and grip the resizable renders with the marvis
@@ -197,10 +238,6 @@
 .marvis-menu-scroll {
   max-height: 60vh;
   overflow-y: auto;
-}
-
-.marvis-menu :focus {
-  outline: none;
 }
 
 /* The search sits on the surface and rules the list off. */
