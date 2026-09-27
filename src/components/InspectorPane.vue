@@ -731,12 +731,14 @@ const matchedSearchEntries = searchEntries.value
   font-size: 10px;
 }
 
-/* The tab strip stays put, each list scrolls on its own */
+/* The tab strip stays put, each list scrolls on its own. The right padding is the scrollbar's:
+   macOS draws its own overlay scrollbar on top of the content, so a row whose status letter or
+   +/- counts end 6px from the edge is read through it while it is showing. */
 .details-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 0;
+  padding: 4px 12px 4px 0;
 }
 
 /*
