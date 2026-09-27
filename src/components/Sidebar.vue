@@ -3,7 +3,6 @@ import { computed, toRef } from "vue";
 import {
   Folder as FolderIcon,
   FolderGit2 as FolderGit2Icon,
-  GitBranch as GitBranchIcon,
   GitFork as GitForkIcon,
   Plus as PlusIcon,
   SquareTerminal as SquareTerminalIcon,
@@ -58,7 +57,6 @@ interface WorkdirItem {
 interface Workdir {
   checkout: Checkout;
   title: string;
-  branch?: string;
   /** The checkout's own line counts, absent when Git has none to show. */
   additions?: number;
   deletions?: number;
@@ -103,9 +101,10 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
   const counts = isGit ? diffStats.checkoutTotals[checkout.id] : undefined;
   return {
     checkout,
-    // The repo root is "Base" and carries its branch aside; a worktree is named by its branch.
-    title: checkout.isPrimary ? "Base" : checkout.branch || checkout.path,
-    branch: checkout.isPrimary ? checkout.branch : undefined,
+    // A git repo root is named by the branch it is on, the same as a worktree. The only
+    // checkouts with no branch to show — a plain folder, or a repo on a detached HEAD — keep
+    // the plain "Base".
+    title: checkout.isPrimary ? checkout.branch || "Base" : checkout.branch || checkout.path,
     additions: counts?.additions || undefined,
     deletions: counts?.deletions || undefined,
     // The one failure that belongs to a single workdir (E.4): it names the checkout whose
@@ -153,11 +152,6 @@ function sessionState(session: Session) {
                 <div class="workdir-main">
                   <div class="workdir-title">
                     <span class="workdir-name">{{ workdir.title }}</span>
-                    <div v-if="workdir.branch" class="workdir-branch">
-                      <span class="meta-dot">·</span>
-                      <GitBranchIcon class="icon-xxs" aria-hidden="true" />
-                      <span>{{ workdir.branch }}</span>
-                    </div>
                   </div>
                   <!-- One slot for the row's right-hand text. The error takes it whole: a missing
                        directory has no counts, and a line that mixed a failure with figures
@@ -199,7 +193,7 @@ function sessionState(session: Session) {
                   v-if="workdir.gitdir && !workdir.missing"
                   type="button"
                   class="workdir-action"
-                  :aria-label="`Add worktree from ${workdir.branch || workdir.checkout.path}`"
+                  :aria-label="`Add worktree from ${workdir.checkout.branch || workdir.checkout.path}`"
                   title="Add worktree"
                   @click="emit('createWorktree', workdir.checkout.id)"
                 >
@@ -482,15 +476,6 @@ function sessionState(session: Session) {
   text-overflow: ellipsis;
 }
 
-.workdir-branch {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  color: var(--marvis-text-faint);
-  font-size: 11px;
-  flex-shrink: 0;
-}
-
 /* Diff stats share the title's baseline: same line, same center. They step aside
    for the row actions, which is why the box needs no transition of its own. */
 .workdir-meta {
@@ -510,9 +495,5 @@ function sessionState(session: Session) {
 
 .workdir-meta-error {
   color: var(--marvis-red);
-}
-
-.meta-dot {
-  opacity: 0.6;
 }
 </style>

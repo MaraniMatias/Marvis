@@ -77,7 +77,7 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.emitted("openFolder")).toHaveLength(1);
   });
 
-  it("names the repo root Base with its branch and keeps worktree actions apart", async () => {
+  it("names the repo root after its branch and keeps worktree actions apart", async () => {
     const wrapper = mount(Sidebar, {
       props: {
         repos: [
@@ -115,29 +115,48 @@ describe("Sidebar workdir rows", () => {
     });
 
     expect(wrapper.get(".group-header").text()).toBe("test");
-    // The repo root is "Base" with the branch aside; a worktree is named by its branch.
-    expect(wrapper.get(".workdir-item .workdir-name").text()).toBe("Base");
-    expect(wrapper.get(".workdir-branch").text()).toBe("·main");
+    // The repo root is named by the branch it is on, like a worktree is, and the branch is
+    // never repeated beside it.
+    expect(wrapper.get(".workdir-item .workdir-name").text()).toBe("main");
+    expect(wrapper.find(".workdir-branch").exists()).toBe(false);
     expect(wrapper.get(".workdir-item.active .workdir-select").attributes("title")).toBe("/test-feature");
 
     expect(wrapper.find('button[aria-label="Add worktree from main"]').exists()).toBe(true);
-    expect(wrapper.find('button[aria-label="Remove worktree Base"]').exists()).toBe(false);
+    expect(wrapper.find('button[aria-label="Remove worktree main"]').exists()).toBe(false);
     expect(wrapper.find('button[aria-label="Remove worktree feature"]').exists()).toBe(true);
     // A workdir with nothing open still offers a terminal: picking a workdir no longer opens
     // one by itself, so this row is the way in.
-    expect(wrapper.find('button[aria-label="New terminal for Base"]').exists()).toBe(true);
+    expect(wrapper.find('button[aria-label="New terminal for main"]').exists()).toBe(true);
     expect(wrapper.find('button[aria-label="New terminal for feature"]').exists()).toBe(true);
     expect(wrapper.text()).not.toContain("Plain");
 
     await wrapper.get(".workdir-item.active .workdir-select").trigger("click");
     await wrapper.get('button[aria-label="Add worktree from main"]').trigger("click");
     await wrapper.get('button[aria-label="Remove worktree feature"]').trigger("click");
-    await wrapper.get('button[aria-label="New terminal for Base"]').trigger("click");
+    await wrapper.get('button[aria-label="New terminal for main"]').trigger("click");
 
     expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature", false]]);
     expect(wrapper.emitted("createWorktree")).toEqual([["checkout:primary"]]);
     expect(wrapper.emitted("removeWorktree")).toEqual([["checkout:feature"]]);
     expect(wrapper.emitted("newTerminal")).toEqual([["checkout:primary"]]);
+  });
+
+  it("keeps the plain name for a git root Git has no branch to name it by", () => {
+    // A detached HEAD is the only checkout Git reports without a branch, and the row still has
+    // to be called something: "Base", the same as a plain folder.
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [repo({ checkouts: [{ ...checkout(), branch: undefined }] })],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+
+    expect(wrapper.get(".workdir-name").text()).toBe("Base");
+    expect(wrapper.find(".workdir-branch").exists()).toBe(false);
+    expect(wrapper.find('button[aria-label="New terminal for Base"]').exists()).toBe(true);
+    wrapper.unmount();
   });
 
   it("gives a plain folder neither worktree action", () => {
@@ -216,7 +235,7 @@ describe("Sidebar workdir rows", () => {
     // hide it is a directory that is gone, which has no shell to run.
     expect(
       wrapper.findAll('button[aria-label^="New terminal for"]').map((row) => row.attributes("aria-label")),
-    ).toEqual(["New terminal for Base", "New terminal for feature"]);
+    ).toEqual(["New terminal for main", "New terminal for feature"]);
     wrapper.unmount();
   });
 
