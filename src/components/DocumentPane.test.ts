@@ -71,6 +71,10 @@ vi.mock("reka-ui", async () => {
   return {
     PopoverRoot: passThrough("PopoverRoot"),
     PopoverTrigger: passThrough("PopoverTrigger"),
+    // The list is portalled out of the pane so the CodeMirror view underneath cannot paint over
+    // it. The portal is the library's and is the one thing here that is worth stubbing as itself:
+    // a pass-through stands in for it, and where the content lands is not this file's business.
+    PopoverPortal: passThrough("PopoverPortal"),
     PopoverContent: passThrough("PopoverContent"),
   };
 });

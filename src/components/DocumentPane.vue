@@ -2,7 +2,7 @@
 /* eslint-disable vue/html-self-closing */
 import { Check as CheckIcon, ChevronDown as ChevronDownIcon, Copy as CopyIcon } from "@lucide/vue";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
-import { PopoverContent, PopoverRoot, PopoverTrigger } from "reka-ui";
+import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui";
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
 import type { DocumentMode } from "../domain/main-document";
 import type { Checkout } from "../domain/workspace";
@@ -691,38 +691,44 @@ function onMarkdownLink(event: MouseEvent) {
               {{ languageButtonLabel }}
               <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
             </PopoverTrigger>
-            <PopoverContent side="bottom" align="end" :side-offset="4" class="surface-popover marvis-menu w-56">
-              <input
-                v-model="languageSearch"
-                type="search"
-                aria-label="Search highlight languages"
-                placeholder="Buscar…"
-                class="marvis-menu-search min-w-0 appearance-none"
-                @keydown.down.prevent="moveLanguageRow(1)"
-                @keydown.up.prevent="moveLanguageRow(-1)"
-                @keydown.enter.prevent="chooseActiveLanguage"
-              />
-              <!-- The rows scroll under the search rather than with it: there are grammars enough
-                   to fill any reasonable column, and a filter that scrolls away is no filter. -->
-              <div role="listbox" aria-label="Grammar" class="marvis-menu-scroll flex flex-col">
-                <button
-                  v-for="(row, index) in languageRows"
-                  :key="row.name ?? 'auto'"
-                  type="button"
-                  role="option"
-                  :aria-selected="row.name === languageOverride"
-                  :title="row.label"
-                  class="menu-item select-none text-left"
-                  :class="{ 'is-active': index === activeLanguageRow }"
-                  @click="chooseLanguage(row)"
-                >
-                  <span class="menu-item-label">{{ row.label }}</span>
-                  <CheckIcon v-if="row.name === languageOverride" class="icon-xxs menu-check" aria-hidden="true" />
-                  <span v-if="row.hint" class="menu-item-hint">{{ row.hint }}</span>
-                </button>
-                <p v-if="!matchingLanguages.length" class="menu-note">No language matches "{{ languageSearch }}".</p>
-              </div>
-            </PopoverContent>
+            <!-- The list is portalled out of the pane for the same reason the crumb menus are: it
+                 is absolutely positioned, and the Code view underneath it — CodeMirror's scroller
+                 is positioned and comes later in the document — paints over anything that is
+                 still inside the toolbar. A z-index on the menu would only move that fight. -->
+            <PopoverPortal>
+              <PopoverContent side="bottom" align="end" :side-offset="4" class="surface-popover marvis-menu w-56">
+                <input
+                  v-model="languageSearch"
+                  type="search"
+                  aria-label="Search highlight languages"
+                  placeholder="Buscar…"
+                  class="marvis-menu-search min-w-0 appearance-none"
+                  @keydown.down.prevent="moveLanguageRow(1)"
+                  @keydown.up.prevent="moveLanguageRow(-1)"
+                  @keydown.enter.prevent="chooseActiveLanguage"
+                />
+                <!-- The rows scroll under the search rather than with it: there are grammars enough
+                     to fill any reasonable column, and a filter that scrolls away is no filter. -->
+                <div role="listbox" aria-label="Grammar" class="marvis-menu-scroll flex flex-col">
+                  <button
+                    v-for="(row, index) in languageRows"
+                    :key="row.name ?? 'auto'"
+                    type="button"
+                    role="option"
+                    :aria-selected="row.name === languageOverride"
+                    :title="row.label"
+                    class="menu-item select-none text-left"
+                    :class="{ 'is-active': index === activeLanguageRow }"
+                    @click="chooseLanguage(row)"
+                  >
+                    <span class="menu-item-label">{{ row.label }}</span>
+                    <CheckIcon v-if="row.name === languageOverride" class="icon-xxs menu-check" aria-hidden="true" />
+                    <span v-if="row.hint" class="menu-item-hint">{{ row.hint }}</span>
+                  </button>
+                  <p v-if="!matchingLanguages.length" class="menu-note">No language matches "{{ languageSearch }}".</p>
+                </div>
+              </PopoverContent>
+            </PopoverPortal>
           </PopoverRoot>
         </div>
         <div
