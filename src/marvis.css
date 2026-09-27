@@ -1,3 +1,13 @@
+/* The terminal's face under one name, so whichever Nerd Font is installed is the one it draws
+   with. A stack of family names would fall through to `monospace` on every machine that does not
+   have Fira Code Nerd Font Mono, and `monospace` has no icons and no ligatures. */
+@font-face {
+  font-family: "Marvis Nerd Mono";
+  src:
+    local("FiraCode Nerd Font Mono"), local("FiraCode Nerd Font"), local("CaskaydiaMono"), local("MesloLGS NF"),
+    local("MesloLGS Nerd Font Mono"), local("JetBrainsMono Nerd Font Mono"), local("Hack Nerd Font Mono");
+}
+
 /* Marvis design tokens. Custom properties resolve globally, so they cannot live
    in a scoped component block. Imported before style.css so the unlayered rules
    below win over tailwind's `utilities` layer. */
@@ -93,4 +103,171 @@
 .marvis-control:disabled {
   cursor: not-allowed;
   opacity: 0.6;
+}
+
+/* A crumb that opens a menu is text, not a button: no surface at rest, none under the pointer
+   and none while the menu is open, which is what the chip on the last crumb used to be. The
+   cursor is the whole affordance and the text clears a step under it, the way the file list
+   does. The crumbs read as one line of type: the workdir is the brightest, because it is the
+   one that says where you are, and everything after it is a step back. */
+.crumb-control {
+  display: inline-flex;
+  align-items: center;
+  padding: 0;
+  background: transparent;
+  border: none;
+  font: inherit;
+  color: inherit;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+.crumb-control:hover {
+  color: var(--marvis-text);
+}
+
+/* Where each crumb sits decides two things at once: how bright it reads, and what it gives up
+   when the line runs out of room. The ends keep their text — the workdir says where you are and
+   the item says what is open — so the branch is the one that absorbs the squeeze, and its full
+   name is one click away in its own menu. The workdir is the last thing to be cut, and only
+   when there is nothing left to cut. */
+.crumb-workdir {
+  flex: 0 0 auto;
+  color: var(--marvis-text);
+}
+.crumb-branch {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+.crumb-item {
+  flex: 0 0 auto;
+}
+
+/* The separator inside the file crumb, which is the same rule the rest of the line is joined
+   with: the line's own separators get their space from the gap between its children, and this
+   one is inside a run of text, so it carries the same space itself. */
+.crumb-sep {
+  padding: 0 6px;
+  color: var(--marvis-text-faint);
+}
+
+/* The probe is the path at the width it wants, kept out of the flow and out of sight so the
+   crumb can be weighed against the room it has. It is not the text the reader gets. */
+.path-probe {
+  position: absolute;
+  visibility: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* A button that is nothing but its glyph: no surface to rest on, and the glyph is what the
+   pointer changes, the way the crumbs change theirs. The padding is here rather than in a
+   utility because an unlayered rule outranks one from tailwind's layer, so a `p-*` class on
+   the button would silently do nothing — and a 12px target is not a target. */
+.icon-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 6px;
+  background: transparent;
+  border: none;
+  color: inherit;
+  cursor: pointer;
+  transition: color 120ms ease;
+}
+
+/* A crumb menu, in Zed's proportions: one fixed column, roomy rows, and a shadow so it reads
+   as floating over the app. Global because reka-ui portals it out of the shell, which is also
+   why the shell's own "no focus ring" rule has to be repeated here. */
+.titlebar-menu {
+  width: 18rem;
+  max-height: 60vh;
+  overflow-y: auto;
+  padding: 4px;
+  font-size: 13px;
+  line-height: 18px;
+  color: var(--marvis-text);
+  box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
+}
+
+.titlebar-menu :focus {
+  outline: none;
+}
+
+/* The search sits on the surface and rules the list off, as it does in Zed. */
+.titlebar-menu-search {
+  display: block;
+  width: 100%;
+  margin-bottom: 4px;
+  padding: 6px 8px;
+  background: transparent;
+  border: none;
+  border-bottom: 1px solid var(--marvis-border);
+  color: var(--marvis-text);
+  font: inherit;
+}
+.titlebar-menu-search::placeholder {
+  color: var(--marvis-text-faint);
+}
+
+.menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 5px 8px;
+  border-radius: var(--marvis-radius);
+  color: var(--marvis-text);
+  text-align: left;
+  cursor: pointer;
+}
+/* The label takes what the hint does not need: a branch name is the long one and it is the one
+   that gives way, because the hint is what tells two same-named branches apart. */
+.menu-item-label {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.menu-item[data-highlighted] {
+  background: var(--marvis-border);
+}
+.menu-item[data-disabled] {
+  opacity: 0.5;
+  cursor: default;
+}
+
+/* An action at the foot of the menu is a command, not a place: it reads a step back, and it is
+   the one row the search never takes away. */
+.menu-item.is-pinned {
+  color: var(--marvis-text-secondary);
+}
+
+.menu-check {
+  flex-shrink: 0;
+  color: var(--marvis-accent);
+}
+
+.menu-item-hint {
+  flex: 0 1 auto;
+  min-width: 0;
+  max-width: 50%;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--marvis-text-faint);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.menu-note {
+  padding: 5px 8px;
+  color: var(--marvis-text-faint);
+  font-size: 12px;
+}
+
+.menu-separator {
+  height: 1px;
+  margin: 4px 0;
+  background: var(--marvis-border);
 }
