@@ -489,6 +489,11 @@ async function loadFile(preservePosition = false) {
     contentError.value = errorText(error);
     contentState.value = "error";
     loadedIdentity = fileIdentity;
+    // The reason is the whole panel now, so the Code view is gone and the editor that lived in
+    // it went with it. Left standing, `ensureEditor` would find one that still names this file
+    // and reuse it instead of building the one the Code view needs, and the next file that opens
+    // would show nothing at all.
+    disposeEditor();
     invalidateHighlight();
     clear();
   }
@@ -535,6 +540,8 @@ watch(
     }
     if (isAvailable === false) {
       requestGeneration += 1;
+      // The Code view is about to be taken down for this file, so the editor in it goes with it.
+      disposeEditor();
       invalidateHighlight();
       content.value = "";
       contentIdentity.value = fileIdentity;
