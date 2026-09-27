@@ -220,19 +220,25 @@ body {
   overflow-y: auto;
 }
 
-/* The scrollbars go to zero width, and both of them. They were the two grey stripes around a
-   full-screen TUI: one down the right, and one along the bottom that only exists because the
-   vertical one takes its width out of the box the fit measures the grid from — the fit reads the
-   host's width, the gutter comes out of it, the canvas overflows by exactly that, and the second
-   stripe is the proof. A terminal is scrolled with the wheel and with Shift+PageUp, so nothing is
-   lost by giving the bar no width; the scrollback still scrolls. */
+/* The scrollbars are xterm's own and not the browser's: a VS Code scrollable element draws them
+   as sibling elements and reserves their ten pixels out of the box the fit measures the grid
+   from, which is the stripe down the right and the one along the bottom that comes with it. Both
+   halves have to go — the drawn ones stop painting, and the native ones behind them take no
+   width, so the grid is measured from the whole box. A terminal is scrolled with the wheel and
+   with Shift+PageUp, so the bar was never the affordance that mattered. */
+.terminal-host .xterm-scrollable-element,
 .terminal-host .xterm-viewport {
   scrollbar-width: none;
 }
 
+.terminal-host .xterm-scrollable-element::-webkit-scrollbar,
 .terminal-host .xterm-viewport::-webkit-scrollbar {
   width: 0;
   height: 0;
+}
+
+.terminal-host .xterm-scrollable-element > .scrollbar {
+  display: none;
 }
 
 /* The chrome is not a text document. A click that lands on a sidebar row, a title-bar crumb or a
