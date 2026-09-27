@@ -236,6 +236,35 @@ mod security_tests {
                 .is_some_and(|enabled| enabled.as_bool() == Some(true)),
             "`withGlobalTauri` hands the webview a global copy of the API it does not use"
         );
+
+        // The dev bridge is the one build that does need it, and it needs it completely: it drives
+        // the webview through `window.__TAURI__`, so without the global the automation can still
+        // read the DOM but can no longer reach the app. Dropping the global from the base config
+        // without putting it back here is what broke it, and nothing in the app's own source says
+        // so. It is merged in by the one script that cannot produce an installable build, which is
+        // what keeps it out of every build a user runs.
+        let dev_bridge: Value =
+            serde_json::from_str(include_str!("../tauri.dev-bridge.conf.json")).unwrap();
+        assert_eq!(
+            dev_bridge["app"]["withGlobalTauri"],
+            Value::Bool(true),
+            "the dev bridge overlay is the only place the global comes back"
+        );
+        let scripts: Value = serde_json::from_str(include_str!("../../package.json")).unwrap();
+        assert!(
+            scripts["scripts"]["dev:app"]
+                .as_str()
+                .unwrap()
+                .contains("tauri.dev-bridge.conf.json"),
+            "the dev-bridge build is the one that gets the global"
+        );
+        assert!(
+            !scripts["scripts"]["build:app"]
+                .as_str()
+                .unwrap()
+                .contains("tauri.dev-bridge.conf.json"),
+            "the build that ships must not get the global back"
+        );
     }
 
     #[test]
