@@ -221,6 +221,17 @@ body {
   background: var(--marvis-bg-0);
 }
 
+/* Share the sub-cell space left by the fitted grid between opposite edges. The viewport still
+   fills the pane; only the rendered screen moves, so terminal dimensions and scrollback stay put. */
+.terminal-host .xterm-scrollable-element {
+  top: 50%;
+  transform: translateY(-50%);
+}
+
+.terminal-host .xterm-screen {
+  margin-inline: auto;
+}
+
 /* xterm.js paints its own background as an inline style from the theme it was given, so owning the
    surface from CSS means out-specifying it here. One declaration instead of a second copy of the
    same hex, and the terminal keeps a background that is the page's background. */
