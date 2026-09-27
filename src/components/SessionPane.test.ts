@@ -108,8 +108,17 @@ beforeEach(() => {
   for (const toast of [...toasts.value]) dismiss(toast.id);
 });
 
+/** The empty state's own action is how a terminal starts, now that picking a workdir no
+ *  longer opens one. */
+async function openTerminal(wrapper: ReturnType<typeof mount>) {
+  const button = wrapper.findAll("button").find((candidate) => candidate.text() === "New terminal");
+  expect(button, "the empty state offers New terminal").toBeDefined();
+  button!.element.dispatchEvent(new Event("click", { bubbles: true }));
+  await flushPromises();
+}
+
 describe("SessionPane terminal UI", () => {
-  it("automatically starts one shell for the selected checkout, without type or split controls", async () => {
+  it("does not start a terminal on its own when a workdir is selected", async () => {
     const wrapper = mount(SessionPane, {
       props: { checkout, activeSessionId: null, isOpening: true },
     });
@@ -119,12 +128,20 @@ describe("SessionPane terminal UI", () => {
     await wrapper.setProps({ isOpening: false });
     await flushPromises();
 
-    expect(loadTerminalLayout).toHaveBeenCalledWith(checkout.id);
+    // Selecting a workdir shows whatever it already has; it never spawns a terminal by
+    // itself. A checkout with nothing open belongs on its empty state.
+    expect(terminalMock.mounts).toBe(0);
+    expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(0);
+    expect(wrapper.text()).toContain("No terminal session.");
+
+    // The shell it used to open by surprise is still one click away, from that state.
+    await openTerminal(wrapper);
     expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(1);
+    expect(wrapper.findComponent({ name: "TerminalSession" }).props("sessionType")).toBe("shell");
+    // And it is still a bare shell, with no type or split controls.
     expect(wrapper.findAll('[role="tab"]')).toHaveLength(0);
     expect(wrapper.findAll("select")).toHaveLength(0);
     expect(wrapper.text()).not.toContain("Split");
-    expect(wrapper.findComponent({ name: "TerminalSession" }).props("sessionType")).toBe("shell");
     wrapper.unmount();
   });
 
@@ -180,6 +197,7 @@ describe("SessionPane terminal UI", () => {
     });
     await wrapper.setProps({ isOpening: false });
     await flushPromises();
+    await openTerminal(wrapper);
     const terminal = wrapper.findComponent({ name: "TerminalSession" });
     expect(terminal.exists()).toBe(true);
     expect(terminal.props("visible")).toBe(true);
@@ -199,6 +217,7 @@ describe("SessionPane terminal UI", () => {
     });
     await wrapper.setProps({ isOpening: false });
     await flushPromises();
+    await openTerminal(wrapper);
     expect(terminalMock.mounts).toBe(1);
 
     await wrapper.setProps({ activeSessionId: "session:old" });
@@ -208,7 +227,7 @@ describe("SessionPane terminal UI", () => {
     wrapper.unmount();
   });
 
-  it("creates only one terminal for simultaneous automatic and explicit shell requests", async () => {
+  it("creates one terminal for a shell request on a checkout that has none", async () => {
     const wrapper = mount(SessionPane, {
       props: { checkout, activeSessionId: null, isOpening: true, shellRequest: null },
     });
@@ -232,6 +251,7 @@ describe("SessionPane terminal UI", () => {
 
     await wrapper.setProps({ isOpening: false });
     await flushPromises();
+    await openTerminal(wrapper);
     await wrapper.setProps({ shellRequest: { checkoutId: checkout.id, token: 2 } });
     await flushPromises();
 
@@ -250,6 +270,7 @@ describe("SessionPane terminal UI", () => {
     });
     await wrapper.setProps({ isOpening: false });
     await flushPromises();
+    await openTerminal(wrapper);
 
     wrapper.findComponent({ name: "TerminalSession" }).vm.$emit("closed", {
       repos: [],
@@ -304,6 +325,7 @@ describe("SessionPane terminal UI", () => {
     });
     await wrapper.setProps({ isOpening: false });
     await flushPromises();
+    await openTerminal(wrapper);
 
     await wrapper.setProps({
       nvimRequest: {
@@ -347,6 +369,7 @@ describe("SessionPane terminal UI", () => {
 
     await wrapper.setProps({ isOpening: false });
     await flushPromises();
+    await openTerminal(wrapper);
 
     expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(1);
     expect(terminalMock.mounts).toBe(1);
@@ -365,6 +388,7 @@ describe("SessionPane terminal UI", () => {
     });
     await wrapper.setProps({ isOpening: false });
     await flushPromises();
+    await openTerminal(wrapper);
 
     wrapper.findComponent({ name: "TerminalSession" }).vm.$emit("failed", "pty could not be spawned");
     await flushPromises();
@@ -391,6 +415,7 @@ describe("SessionPane terminal UI", () => {
 
     await wrapper.setProps({ isOpening: false });
     await flushPromises();
+    await openTerminal(wrapper);
 
     expect(wrapper.find('[role="alert"]').exists()).toBe(false);
     expect(saveTerminalLayout).toHaveBeenCalledWith(

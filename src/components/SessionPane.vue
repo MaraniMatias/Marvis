@@ -276,9 +276,11 @@ watch(
   () => [props.checkout?.id, props.checkout?.isMissing, props.isOpening] as const,
   ([checkoutId, isMissing, isOpening]) => {
     if (!checkoutId || isMissing || isOpening) return;
+    // Selecting a workdir shows what that workdir already has. It never spawns a terminal on
+    // its own: a checkout with nothing open belongs on the "New terminal" empty state, and
+    // opening one is the user's call, from the empty state or from the row in the sidebar.
     const request = props.nvimRequest;
-    if (request?.checkoutId === checkoutId && handleNvimRequest(request)) return;
-    void createTerminalSession("shell");
+    if (request?.checkoutId === checkoutId) handleNvimRequest(request);
   },
   { immediate: true },
 );

@@ -654,8 +654,9 @@ function reportWarning(message: string) {
           @keydown.esc="blurSearchField"
         />
       </div>
-      <!-- Keep native dragging and double-click zoom on this empty spacer, clear of controls. -->
-      <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-4 flex-1" @dblclick="zoomFromTitlebar" />
+      <!-- The mockup packs the field and the crumbs against the left, with the empty space and
+           the gear at the far end. Dragging lives on that empty space, so the crumbs keep their
+           place instead of being pushed to the opposite edge. -->
       <nav
         aria-label="Repository location"
         class="window-breadcrumb flex h-full min-w-0 shrink items-center gap-1.5 text-xs"
@@ -709,6 +710,9 @@ function reportWarning(message: string) {
           </span>
         </template>
       </nav>
+      <!-- Native dragging and double-click zoom live on the empty space the mockup leaves at
+           the far end, so they cannot swallow a click on a crumb or the gear. -->
+      <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-4 flex-1" @dblclick="zoomFromTitlebar" />
       <button
         type="button"
         aria-label="Settings"
