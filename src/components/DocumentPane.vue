@@ -2,7 +2,7 @@
 /* eslint-disable vue/html-self-closing */
 import { Check as CheckIcon, ChevronDown as ChevronDownIcon } from "@lucide/vue";
 import { PopoverContent, PopoverRoot, PopoverTrigger } from "reka-ui";
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, reactive, ref, watch } from "vue";
 import type { DocumentMode } from "../domain/main-document";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
@@ -64,16 +64,24 @@ let highlightGeneration = 0;
 let loadedIdentity: string | null = null;
 
 /**
- * The grammar the source is read as: what the reader chose, or what the file's extension asks for.
- * The choice is one for the panel, not one per file — it follows the reader to the next file, and it
- * dies with the window rather than travelling to the database.
+ * What a file is read as, where the reader overrode what its extension said.
+ * The choice belongs to a file and not to the panel: the next file starts from its own extension,
+ * and the map dies with the window rather than travelling to the database.
  */
-const languageOverride = ref<string | null>(null);
+const languageOverrides = reactive(new Map<string, string>());
+const languageKey = computed(() => (props.path === null ? null : `${props.checkout?.id ?? ""}\0${props.path}`));
+const languageOverride = computed(() => {
+  const key = languageKey.value;
+  return key === null ? null : (languageOverrides.get(key) ?? null);
+});
 const languageOpen = ref(false);
 const languageSearch = ref("");
 const languageQuery = computed(() => languageSearch.value.trim().toLowerCase());
 const detectedLanguage = computed(() => (props.path === null ? null : (detectedLanguageName(props.path) ?? null)));
 const effectiveLanguage = computed(() => languageOverride.value ?? detectedLanguage.value);
+
+// A Markdown preview renders its own fences, so in View mode there is no grammar left to choose.
+const showsSource = computed(() => !(props.mode === "view" && isMarkdown.value));
 
 // The button says what is happening now: in Auto that is the detected grammar, and a file whose
 // extension names none is worth saying out loud rather than showing a language that is not applied.
@@ -128,7 +136,10 @@ function moveLanguageRow(step: number) {
 }
 
 function chooseLanguage(row: LanguageRow) {
-  languageOverride.value = row.name;
+  const key = languageKey.value;
+  if (key === null) return;
+  if (row.name === null) languageOverrides.delete(key);
+  else languageOverrides.set(key, row.name);
   languageOpen.value = false;
 }
 
@@ -350,7 +361,7 @@ watch(
 // Choosing a grammar is the one thing about a reading that changes without the file or the mode
 // changing, so the source is read again. The Markdown preview owns its own fences and ignores this.
 watch(effectiveLanguage, () => {
-  if (contentState.value === "ready" && !(props.mode === "view" && isMarkdown.value)) {
+  if (contentState.value === "ready" && showsSource.value) {
     startHighlight(identity.value!, content.value);
   }
 });
@@ -399,7 +410,12 @@ function onMarkdownLink(event: MouseEvent) {
       <div class="flex shrink-0 items-center gap-1.5">
         <!-- The pill is a plain div and not the PopoverRoot: reka's PopperRoot renders only its
              slot with inheritAttrs off, so a label and a surface set on it are dropped. -->
-        <div role="group" aria-label="Highlight language" class="document-mode-control flex shrink-0 items-center">
+        <div
+          v-if="showsSource"
+          role="group"
+          aria-label="Highlight language"
+          class="document-mode-control flex shrink-0 items-center"
+        >
           <PopoverRoot v-model:open="languageOpen">
             <PopoverTrigger
               data-testid="language-trigger"
