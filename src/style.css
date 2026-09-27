@@ -219,6 +219,18 @@ body {
   background: rgb(124 158 255 / 30%);
 }
 
+/* Every scrollbar in the app, the editor's and the terminal's included, is that one grey. The
+   track is nothing, so a scrollbar leaves no gutter of its own behind. The width is declared for
+   the same reason the colour is: macOS will not honour either on a native overlay scrollbar, and
+   ignores both until the scrollbar is the author's to draw — which is what naming a width says.
+   The cost of that is the whole trade: it stops floating, so it is always there and every
+   scrolling box keeps a gutter it did not have. `thin` is the narrower of the two widths macOS
+   offers, and it is not animated: WebKit flickers the scrollbar when scrollbar-color changes. */
+* {
+  scrollbar-color: var(--marvis-scrollbar) transparent;
+  scrollbar-width: thin;
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,

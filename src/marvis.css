@@ -23,6 +23,7 @@
   --marvis-accent: #7c9eff;
   --marvis-green: #7fd88f;
   --marvis-red: #e08585;
+  --marvis-scrollbar: #5d5f70;
   --marvis-radius: 6px;
   /* Named families first, generic last: `ui-monospace` always resolves to the system UI
      monospace, so leading with it meant "JetBrains Mono" was never reached. */
