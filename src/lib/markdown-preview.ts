@@ -1,6 +1,7 @@
 import DOMPurify from "dompurify";
 import MarkdownIt from "markdown-it";
 import taskLists from "markdown-it-task-lists";
+import { withoutFrontMatter } from "./front-matter";
 import { highlightCodeBlock, languageForFenceInfo } from "./source-highlighter";
 
 export interface MarkdownImageReference {
@@ -25,163 +26,10 @@ const MAX_HIGHLIGHTED_LANGUAGES = 8;
 const MAX_HIGHLIGHTED_BLOCKS = 80;
 const MAX_HIGHLIGHTED_BLOCK_LINES = 500;
 const MAX_HIGHLIGHTED_LINES = 5000;
-// Metadata is a header, not the document: past these it stops being a summary of the file and
-// starts being the file's second half.
-const MAX_FRONTMATTER_KEYS = 32;
-const MAX_FRONTMATTER_VALUE_LENGTH = 300;
 
 export function isMarkdownPath(path: string): boolean {
   const extension = path.split(".").pop()?.toLowerCase();
   return extension !== undefined && markdownExtensions.has(extension);
-}
-
-/** One key of the metadata block, already flattened to what the page shows beside it. */
-interface FrontMatterEntry {
-  key: string;
-  value: string;
-}
-
-/**
- * The `---` fenced block the document opens with and the body behind it, or null when the document
- * opens with something else.
- *
- * The shape of the file decides this, before anything is read out of it. A document that merely
- * *starts* with a rule is not front matter, and a reader left to guess takes the rest of the file
- * for metadata and hands back an empty page: the heading the file opens with is one of its values.
- * Cutting the body here is what keeps the fence and what is read out of it from disagreeing.
- */
-function frontMatterBlock(source: string): { block: string[]; body: string } | null {
-  const lines = source.split(/\r?\n/);
-  if (lines[0]?.trim() !== "---") return null;
-  const closing = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
-  if (closing < 0) return null;
-  return { block: lines.slice(1, closing), body: lines.slice(closing + 1).join("\n") };
-}
-
-/** The text a scalar carries, without the quotes it may be written in. */
-function unquote(value: string): string {
-  const text = value.trim();
-  const quote = text[0];
-  if ((quote === '"' || quote === "'") && text.length > 1 && text.endsWith(quote)) {
-    return text.slice(1, -1).replace(/\\(["'\\])/g, "$1");
-  }
-  return text;
-}
-
-/** `[a, b]` is the one sequence YAML writes on one line; anything else is left as it was written. */
-function inlineList(value: string): string {
-  const inner = value.trim();
-  if (!inner.startsWith("[") || !inner.endsWith("]")) return unquote(inner);
-  return inner
-    .slice(1, -1)
-    .split(",")
-    .map((item) => unquote(item))
-    .filter(Boolean)
-    .join(", ");
-}
-
-/** `|` and `>` are the two ways a value is written across the lines under it. */
-const BLOCK_SCALAR = /^[|>][-+]?$/;
-
-/** The indentation that makes a line part of the key above it rather than a key of its own. */
-function indentOf(line: string): number {
-  return line.length - line.trimStart().length;
-}
-
-/**
- * Every key of the block, with the value beside it as one line of text.
- *
- * The nesting is flattened into the key (`permission.task.*`) rather than parsed, because what this
- * is for is a header the reader reads, not a value they can look up. A block with no key in it is
- * not metadata and returns null, so the document is rendered whole.
- */
-function readFrontMatter(block: readonly string[]): FrontMatterEntry[] | null {
-  const entries: FrontMatterEntry[] = [];
-  const parents: { indent: number; key: string }[] = [];
-  let foundKey = false;
-
-  for (let index = 0; index < block.length; index += 1) {
-    const line = block[index];
-    if (line.trim() === "" || line.trimStart().startsWith("#")) continue;
-    const indent = indentOf(line);
-    const text = line.trim();
-
-    // A sequence item belongs to the key above it, and joins whatever that key already says.
-    if (text.startsWith("- ") || text === "-") {
-      const owner = [...parents].reverse().find((parent) => parent.indent < indent);
-      const item = unquote(text.slice(1));
-      if (!owner || !item) continue;
-      const entry = entries.find((candidate) => candidate.key === owner.key);
-      if (!entry) continue;
-      entry.value = entry.value ? `${entry.value}, ${item}` : item;
-      continue;
-    }
-
-    const separator = text.indexOf(":");
-    if (separator < 1) {
-      // A line that is neither a key nor a sequence item belongs to a value written across lines.
-      const owner = [...parents].reverse().find((parent) => parent.indent < indent);
-      const entry = owner ? entries.find((candidate) => candidate.key === owner.key) : undefined;
-      if (entry?.value) {
-        entry.value = BLOCK_SCALAR.test(entry.value) ? text : `${entry.value} ${text}`;
-        continue;
-      }
-      // Nothing above it wanted it, so this line is not part of a mapping.
-      if (indent === 0) return null;
-      continue;
-    }
-
-    const name = unquote(text.slice(0, separator));
-    if (name === "") {
-      if (indent === 0) return null;
-      continue;
-    }
-    while (parents.length > 0 && parents[parents.length - 1].indent >= indent) parents.pop();
-    // The nearest enclosing key already spells out the ones above it, so it is the only prefix.
-    const key = parents.length > 0 ? `${parents[parents.length - 1].key}.${name}` : name;
-    parents.push({ indent, key });
-    foundKey = true;
-    // A key written twice is one key, and the second one is what it says: a header that showed the
-    // same key twice would say the file has two values where it has one.
-    const value = inlineList(text.slice(separator + 1));
-    const existing = entries.find((candidate) => candidate.key === key);
-    if (existing) existing.value = value;
-    else entries.push({ key, value });
-  }
-
-  if (!foundKey || entries.length === 0) return null;
-  // A key that is only there to hold others has nothing of its own to show, and the children
-  // already carry its name. A key with no value and no children does show: that it is set to
-  // nothing is part of what the file says.
-  const holders = new Set<string>();
-  for (const entry of entries) {
-    const parts = entry.key.split(".");
-    for (let part = 1; part < parts.length; part += 1) holders.add(parts.slice(0, part).join("."));
-  }
-  return entries.filter((entry) => !(holders.has(entry.key) && entry.value === "")).slice(0, MAX_FRONTMATTER_KEYS);
-}
-
-/** What one value says on the page: one line, and no longer than a header can carry. */
-function frontMatterLine(value: string): string {
-  const text = value.replace(/\s+/g, " ").trim();
-  return text.length > MAX_FRONTMATTER_VALUE_LENGTH ? `${text.slice(0, MAX_FRONTMATTER_VALUE_LENGTH)}…` : text;
-}
-
-/**
- * The metadata block GitHub puts above a document that carries some, as the key/value pairs it is.
- * It is built here rather than parsed out of a rendered string so every value reaches the page
- * escaped, and it goes through the same sanitizer as the document it precedes.
- *
- * Exported for the one thing no other test can see: the class the layout in DocumentPane.vue hangs
- * on. A sanitizer is free to drop the attributes of the element it is handed, and the test DOM does
- * exactly that, so this is asserted on the markup before the sanitizer rather than after it.
- */
-export function frontMatterList(entries: readonly FrontMatterEntry[], escape: (text: string) => string): string {
-  if (entries.length === 0) return "";
-  const pairs = entries
-    .map((entry) => `<dt>${escape(entry.key)}</dt><dd>${escape(frontMatterLine(entry.value))}</dd>`)
-    .join("");
-  return `<dl class="markdown-frontmatter">${pairs}</dl>`;
 }
 
 function safeRelativeImagePath(markdownPath: string, source: string): string | null {
@@ -358,30 +206,15 @@ export async function renderMarkdownPreview(source: string, markdownPath: string
     return renderer.renderToken(tokens, index, options);
   };
 
-  // Metadata only counts when the file really opens with a fenced block, and only when what is
-  // inside it is a mapping: anything else was never metadata, so the document is rendered whole
-  // rather than half-there, which is what a failed read would leave behind.
-  let body = source;
-  let frontMatter = "";
-  const fenced = frontMatterBlock(source);
-  if (fenced) {
-    const entries = readFrontMatter(fenced.block);
-    if (entries) {
-      frontMatter = frontMatterList(entries, markdown.utils.escapeHtml);
-      if (frontMatter) body = fenced.body;
-    }
-  }
-
-  const sanitized = DOMPurify.sanitize(frontMatter + markdown.render(body), {
+  // A page of metadata is not the document: the block is dropped whole, fences and all, so nothing
+  // is left of it — not a rule, not a heading, not a table. The source view is where it is read.
+  const sanitized = DOMPurify.sanitize(markdown.render(withoutFrontMatter(source)), {
     ALLOWED_TAGS: [
       "a",
       "blockquote",
       "br",
       "code",
-      "dd",
       "del",
-      "dl",
-      "dt",
       "em",
       "h1",
       "h2",

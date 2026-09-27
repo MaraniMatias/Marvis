@@ -87,6 +87,49 @@ describe("code editor", () => {
     view.destroy();
   });
 
+  it("reads the metadata a Markdown document opens with as the YAML it is", () => {
+    const view = mount(
+      "markdown",
+      ["---", "name: tamis", 'color: "#F2B84B"', "# a note", "---", "", "# Tamis", "", "Body."].join("\n"),
+    );
+
+    // A key and its value are YAML, so they take the colors YAML gives them rather than the flat
+    // text the Markdown grammar would leave the block as. The comment is YAML's too.
+    expect(colorPaintedOn(view, "name")).toBe("#79c0ff");
+    expect(colorPaintedOn(view, "# a note")).toBe("#8b949e");
+
+    // The document behind the block is still read as Markdown: a heading is still a heading.
+    expect(nodeNames(view)).toContain("ATXHeading1");
+
+    view.destroy();
+  });
+
+  it("leaves a document that only opens with a rule alone", () => {
+    // A rule with nothing to close it is not metadata, so nothing in it is read as YAML: the words
+    // stay the flat text the Markdown grammar leaves them, and the rule is a rule.
+    const view = mount("markdown", "---\nname: thing\n\n# Heading");
+
+    expect(colorPaintedOn(view, "name")).toBeUndefined();
+    expect(nodeNames(view)).toContain("HorizontalRule");
+    expect(nodeNames(view)).toContain("ATXHeading1");
+
+    view.destroy();
+  });
+
+  it("paints tokens in the dark palette the read-only preview already uses", () => {
+    const view = mount("typescript", "const answer: number = 42;\n// note");
+
+    // `defaultHighlightStyle` is a light palette — dark red keywords, mid-blue strings — that was
+    // laid over Marvis' `#17191f` editor background, where the darker half is barely readable.
+    expect(colorPaintedOn(view, "const")).toBe("#ff7b72");
+    expect(colorPaintedOn(view, "answer")).toBe("#ffa657");
+    expect(colorPaintedOn(view, "number")).toBe("#7ee787");
+    expect(colorPaintedOn(view, "42")).toBe("#79c0ff");
+    expect(colorPaintedOn(view, "// note")).toBe("#8b949e");
+
+    view.destroy();
+  });
+
   it("paints no token in the light palette, which is the one it no longer carries", () => {
     // Nothing injects `defaultHighlightStyle` as a fallback any more, so this list is the only
     // palette in play. A token still painted from the light one is a dark red keyword on `#17191f`,

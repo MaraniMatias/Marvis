@@ -1,7 +1,6 @@
 // @vitest-environment happy-dom
-import MarkdownIt from "markdown-it";
 import { describe, expect, it } from "vitest";
-import { attachMarkdownImages, frontMatterList, renderMarkdownPreview } from "./markdown-preview";
+import { attachMarkdownImages, renderMarkdownPreview } from "./markdown-preview";
 
 describe("Markdown preview", () => {
   it("renders GFM tables, task lists, and fenced code", async () => {
@@ -172,14 +171,11 @@ describe("Markdown preview", () => {
     expect(preview.html).not.toContain("<script>");
   });
 
-  it("shows YAML front matter as the key/value pairs above a document", async () => {
+  it("leaves nothing of a metadata block on the page", async () => {
     const preview = await renderMarkdownPreview(
       [
         "---",
         "title: Add the export",
-        "draft: false",
-        "reviewer:",
-        "empty:",
         "tags: [api, docs]",
         "---",
         "",
@@ -195,136 +191,40 @@ describe("Markdown preview", () => {
       ].join("\n"),
       "docs/readme.md",
     );
-    const document = new DOMParser().parseFromString(preview.html, "text/html");
-    // Asserted through `dt, dd` rather than through the `dl` that holds them: happy-dom's
-    // sanitizer drops the tags and the attributes of the first element it sees, so the wrapper the
-    // layout hangs on is only observable in a real browser, and it is checked there instead.
-    const pairs = [...document.querySelectorAll("dt, dd")];
 
-    // One pair per key, in the order the block writes them.
-    expect(pairs.map((node) => `${node.tagName}:${node.textContent}`)).toEqual([
-      "DT:title",
-      "DD:Add the export",
-      "DT:draft",
-      "DD:false",
-      "DT:reviewer",
-      "DD:",
-      "DT:empty",
-      "DD:",
-      "DT:tags",
-      "DD:api, docs",
-    ]);
-    // The document behind the metadata is rendered whole: a table, a task list and a heading.
+    // The block is dropped whole: not a key/value table, and not the rule and the setext heading
+    // that markdown-it would otherwise make out of it. The document behind it is rendered whole.
+    expect(preview.html).not.toContain("<dl");
+    expect(preview.html).not.toContain("<th>title");
+    expect(preview.html).not.toContain("<hr");
+    expect(preview.html).not.toContain("Add the export");
     expect(preview.html).toContain("<h1>What this does</h1>");
     expect(preview.html).toContain('type="checkbox"');
     expect(preview.html).toContain("<th>a</th>");
   });
 
-  it("flattens the nesting of a key into the key itself", async () => {
-    const preview = await renderMarkdownPreview(
-      [
-        "---",
-        "permission:",
-        "  edit: deny",
-        "  task:",
-        '    "*": deny',
-        "tags:",
-        "  - one",
-        "  - two",
-        'quoted: "a: b"',
-        "---",
-        "",
-        "Body.",
-      ].join("\n"),
-      "readme.md",
-    );
-    const document = new DOMParser().parseFromString(preview.html, "text/html");
-    const pairs = [...document.querySelectorAll("dt, dd")];
-
-    expect(pairs.map((node) => `${node.tagName}:${node.textContent}`)).toEqual([
-      "DT:permission.edit",
-      "DD:deny",
-      "DT:permission.task.*",
-      "DD:deny",
-      "DT:tags",
-      "DD:one, two",
-      "DT:quoted",
-      "DD:a: b",
-    ]);
-    expect(preview.html).toContain("Body.");
-  });
-
-  it("keeps a key the reader does not understand as the text it was written in", async () => {
-    const preview = await renderMarkdownPreview(
-      "---\ndescription: |\n  first line\n  second line\nanchor: &a value\n---\n\nBody.",
-      "readme.md",
-    );
-    const document = new DOMParser().parseFromString(preview.html, "text/html");
-
-    // A value written across lines is the lines, and a construct with no reading of its own is
-    // shown as it was written: both are more honest than leaving the key out.
-    expect([...document.querySelectorAll("dt, dd")].map((node) => node.textContent)).toContain(
-      "first line second line",
-    );
-    expect(preview.html).toContain("&amp;a value");
-    expect(preview.html).toContain("Body.");
-  });
-
-  it("writes the metadata as the class the layout in DocumentPane.vue hangs on", () => {
-    // Asserted here, on the markup before the sanitizer, because the test DOM drops the class off
-    // whatever element it is handed first. A browser keeps it, which is the only place it matters.
-    const markup = frontMatterList(
-      [
-        { key: "name", value: "tamis" },
-        { key: "tags", value: "a, b" },
-        { key: "long", value: "x".repeat(400) },
-        { key: "markup", value: '<img src=x onerror="alert(1)">' },
-      ],
-      new MarkdownIt().utils.escapeHtml,
-    );
-
-    expect(markup).toContain('<dl class="markdown-frontmatter">');
-    expect(markup).toContain("<dt>name</dt><dd>tamis</dd><dt>tags</dt><dd>a, b</dd>");
-    // A value that runs long is cut, and one that carries markup arrives as text.
-    expect(markup).toContain("…</dd>");
-    expect(markup).toContain("&lt;img src=x onerror=&quot;alert(1)&quot;&gt;");
-    expect(frontMatterList([], new MarkdownIt().utils.escapeHtml)).toBe("");
-  });
-
-  it("shows a key written twice once, with what it says the second time", async () => {
-    const preview = await renderMarkdownPreview("---\nname: one\nname: two\n---\n\nBody.", "readme.md");
-    const document = new DOMParser().parseFromString(preview.html, "text/html");
-
-    expect([...document.querySelectorAll("dt, dd")].map((node) => node.textContent)).toEqual(["name", "two"]);
-  });
-
   it("leaves a document that only opens with a rule alone", async () => {
-    // The rule is not front matter, and reading the rest of the file as a YAML mapping would take
-    // the heading with it: `body` parses as a scalar, and the page would come back empty.
+    // The rule is not metadata: it has no second fence to close it, so the document is rendered
+    // whole. The rule itself is the first element of the page, and this test DOM drops the tags off
+    // whatever comes first, so what is asserted here is the document behind it.
     const preview = await renderMarkdownPreview("---\n\n# Heading\n\nbody", "readme.md");
 
-    expect(preview.html).not.toContain("<th>");
-    expect(preview.html).not.toContain("<th>");
     expect(preview.html).toContain("Heading");
     expect(preview.html).toContain("body");
   });
 
-  it("leaves the document alone when its front matter is not YAML", async () => {
-    const preview = await renderMarkdownPreview("---\ntitle: [unclosed\n---\n\ntext after", "readme.md");
-
-    expect(preview.html).not.toContain("<th>");
-    expect(preview.html).toContain("text after");
-  });
-
-  it("SEC-08 never lets a front-matter value carry markup onto the page", async () => {
+  it("SEC-08 never lets a metadata value reach the page as markup", async () => {
     const preview = await renderMarkdownPreview(
       "---\ntitle: <img src=x onerror=alert(1)>\nbody: <script>alert(2)</script>\n---\n\ntext",
       "readme.md",
     );
     const document = new DOMParser().parseFromString(preview.html, "text/html");
 
+    // The block is not rendered at all, so nothing of it survives to be sanitized: what matters is
+    // that the document behind it is untouched and the value never became markup.
     expect(document.querySelector("script, img")).toBeNull();
     expect(preview.html).not.toContain("<script>");
-    expect(preview.html).toContain("&lt;script&gt;");
+    expect(preview.html).not.toContain("onerror");
+    expect(preview.html).toContain("text");
   });
 });

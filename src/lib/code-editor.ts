@@ -20,10 +20,11 @@ import {
   bracketMatching,
   type StringStream,
 } from "@codemirror/language";
-import { EditorState, type Extension } from "@codemirror/state";
+import { EditorState, RangeSetBuilder, StateField, type Extension } from "@codemirror/state";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { history, defaultKeymap, historyKeymap } from "@codemirror/commands";
 import {
+  Decoration,
   EditorView,
   crosshairCursor,
   drawSelection,
@@ -34,7 +35,9 @@ import {
   keymap,
   lineNumbers,
   rectangularSelection,
+  type DecorationSet,
 } from "@codemirror/view";
+import { highlightTree } from "@lezer/highlight";
 import { tags } from "@lezer/highlight";
 import { csharp, kotlin, objectiveC } from "@codemirror/legacy-modes/mode/clike";
 import { diff } from "@codemirror/legacy-modes/mode/diff";
@@ -51,6 +54,7 @@ import { ruby } from "@codemirror/legacy-modes/mode/ruby";
 import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { swift } from "@codemirror/legacy-modes/mode/swift";
 import { toml } from "@codemirror/legacy-modes/mode/toml";
+import { frontMatterLineCount } from "./front-matter";
 
 export interface CodeEditorOptions {
   parent: HTMLElement;
@@ -209,6 +213,50 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
   return view;
 }
 
+/**
+ * The metadata a Markdown document opens with, read as the YAML it is.
+ *
+ * The Markdown grammar has no front matter of its own — it sees a rule, a paragraph and another rule
+ * — so the block is parsed with the YAML grammar over its own range and the result is laid over the
+ * document as decorations. A grammar extension would have to be written into the Markdown parser,
+ * which is where a mistake stops being a cosmetic one and starts being a broken editor; this cannot
+ * do that, and it costs one parse of a handful of lines per edit.
+ */
+function frontMatterYaml(): Extension {
+  return StateField.define<DecorationSet>({
+    // Built here as well as on every edit: the field is created with the state, so a document that is
+    // never typed into would otherwise never be read at all.
+    create: (state) => frontMatterDecorations(state.doc.toString()),
+    update(decorations, transaction) {
+      if (!transaction.docChanged) return decorations;
+      return frontMatterDecorations(transaction.state.doc.toString());
+    },
+    provide: (field) => EditorView.decorations.from(field),
+  });
+}
+
+function frontMatterDecorations(source: string): DecorationSet {
+  const lineCount = frontMatterLineCount(source);
+  if (lineCount === 0) return Decoration.none;
+  // The block opens the document, so it starts at zero and ends at the end of its closing fence.
+  // Splitting on "\\n" keeps this right for CRLF too: the count is the same either way, and the
+  // carriage return the YAML parser then sees is whitespace to it.
+  const block = source.split("\n").slice(0, lineCount).join("\n");
+  const tree = yaml().language.parser.parse(block);
+  const builder = new RangeSetBuilder<Decoration>();
+  highlightTree(
+    tree,
+    marvisHighlightStyle,
+    (from, to, classes) => {
+      if (!classes) return;
+      builder.add(from, to, Decoration.mark({ class: classes }));
+    },
+    0,
+    block.length,
+  );
+  return builder.finish();
+}
+
 function languageExtension(language: string | null): Extension {
   switch (language) {
     case "c":
@@ -255,7 +303,7 @@ function languageExtension(language: string | null): Extension {
     case "lua":
       return StreamLanguage.define(lua);
     case "markdown":
-      return markdown();
+      return [markdown(), frontMatterYaml()];
     case "objective-c":
       return StreamLanguage.define(objectiveC);
     case "powershell":
