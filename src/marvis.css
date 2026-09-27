@@ -105,23 +105,24 @@
   opacity: 0.6;
 }
 
-/* A crumb that opens a menu is text, not a button: no surface at rest, none under the pointer
-   and none while the menu is open, which is what the chip on the last crumb used to be. The
-   cursor is the whole affordance and the text clears a step under it, the way the file list
-   does. The crumbs read as one line of type: the workdir is the brightest, because it is the
-   one that says where you are, and everything after it is a step back. */
-.crumb-control {
+/* A control that is nothing but its own name with a list of things behind it: no surface at
+   rest, none under the pointer and none while the list is open, which is what the chip on the
+   last crumb used to be. The cursor is the whole affordance and the text clears a step under
+   it, the way the file list does. Two things in the app are this and nothing else: the crumbs,
+   which read as one line of type, and the document toolbar's grammar picker. It carries the
+   resting colour instead of inheriting one, so a name reads the same wherever it is put. */
+.text-menu-control {
   display: inline-flex;
   align-items: center;
   padding: 0;
   background: transparent;
   border: none;
   font: inherit;
-  color: inherit;
+  color: var(--marvis-text-secondary);
   cursor: pointer;
   transition: color 120ms ease;
 }
-.crumb-control:hover {
+.text-menu-control:hover {
   color: var(--marvis-text);
 }
 
@@ -129,7 +130,9 @@
    when the line runs out of room. The ends keep their text — the workdir says where you are and
    the item says what is open — so the branch is the one that absorbs the squeeze, and its full
    name is one click away in its own menu. The workdir is the last thing to be cut, and only
-   when there is nothing left to cut. */
+   when there is nothing left to cut. The brightness each one sets outranks the colour it
+   inherits from the rule above by being written after it, which is why it is here and not
+   beside the control it belongs to. */
 .crumb-workdir {
   flex: 0 0 auto;
   color: var(--marvis-text);
@@ -175,13 +178,12 @@
   transition: color 120ms ease;
 }
 
-/* A crumb menu: one fixed column, roomy rows, and a shadow so it reads as floating over the
-   app. Global because reka-ui portals it out of the shell, which is also why the shell's own
-   "no focus ring" rule has to be repeated here. */
-.titlebar-menu {
-  width: 18rem;
-  max-height: 60vh;
-  overflow-y: auto;
+/* A menu over the app: roomy type and a shadow, so it reads as floating rather than as a
+   surface of the pane it opened over. Global because reka-ui portals it out of the shell, which
+   is also why the shell's own "no focus ring" rule has to be repeated here. The column it
+   stands in is not part of it: the crumb menu is the wider of the two, because a branch name is
+   a long one and "C" is not. */
+.marvis-menu {
   padding: 4px;
   font-size: 13px;
   line-height: 18px;
@@ -189,12 +191,19 @@
   box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
 }
 
-.titlebar-menu :focus {
+/* A list short enough to scroll as one piece with the field that filters it. A longer one
+   scrolls on its own, so the search stays under the pointer while the rows move. */
+.marvis-menu-scroll {
+  max-height: 60vh;
+  overflow-y: auto;
+}
+
+.marvis-menu :focus {
   outline: none;
 }
 
 /* The search sits on the surface and rules the list off. */
-.titlebar-menu-search {
+.marvis-menu-search {
   display: block;
   width: 100%;
   margin-bottom: 4px;
@@ -205,7 +214,7 @@
   color: var(--marvis-text);
   font: inherit;
 }
-.titlebar-menu-search::placeholder {
+.marvis-menu-search::placeholder {
   color: var(--marvis-text-faint);
 }
 

@@ -24,7 +24,7 @@ vi.mock("reka-ui", async () => {
     setup(props, { emit }) {
       return () =>
         h("input", {
-          class: "titlebar-menu-search",
+          class: "marvis-menu-search",
           placeholder: props.placeholder,
           value: props.modelValue,
           onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),

@@ -699,7 +699,7 @@ describe("App UI integration", () => {
       expect(crumb.text()).toBe("src/lib/one.ts");
       expect(crumb.attributes("title")).toBe("src/lib/one.ts");
       expect(crumb.findAll("span[aria-hidden='true']").map((el) => el.text())).toEqual(["/", "/"]);
-      expect(crumb.classes()).not.toContain("crumb-control");
+      expect(crumb.classes()).not.toContain("text-menu-control");
       wrapper.unmount();
     });
 
@@ -791,7 +791,7 @@ describe("App UI integration", () => {
 
       for (const testid of ["repo-crumb", "worktree-crumb", "item-crumb"]) {
         const crumb = wrapper.get(`[data-testid="${testid}"]`);
-        expect(crumb.classes()).toContain("crumb-control");
+        expect(crumb.classes()).toContain("text-menu-control");
         expect(crumb.classes()).not.toContain("marvis-control");
       }
       // The workdir is the one that says where you are, so it is the only crumb set forward, and
@@ -1134,7 +1134,7 @@ describe("App UI integration", () => {
 
     // Back to the terminal from the sidebar: the last crumb's menu only exists while a terminal
     // is what the panel is showing, so a file leaves it as plain text with nothing to open.
-    expect(wrapper.get('[data-testid="item-crumb"]').classes()).not.toContain("crumb-control");
+    expect(wrapper.get('[data-testid="item-crumb"]').classes()).not.toContain("text-menu-control");
     expect(wrapper.findAll('[data-testid^="menu-item-session:"]')).toHaveLength(0);
     await wrapper.get('[data-testid="select-session-one"]').trigger("click");
     await flushPromises();

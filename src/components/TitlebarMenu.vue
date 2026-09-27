@@ -62,7 +62,7 @@ function onOpenChange(open: boolean) {
 <template>
   <DropdownMenuRoot :open="open" @update:open="onOpenChange">
     <DropdownMenuTrigger
-      class="crumb-control select-none"
+      class="text-menu-control select-none"
       :class="`crumb-${crumb}`"
       :data-testid="testid"
       :title="label"
@@ -70,13 +70,18 @@ function onOpenChange(open: boolean) {
       <span class="truncate">{{ label }}</span>
     </DropdownMenuTrigger>
     <DropdownMenuPortal>
-      <DropdownMenuContent side="bottom" :align="align" :side-offset="4" class="surface-popover titlebar-menu">
+      <DropdownMenuContent
+        side="bottom"
+        :align="align"
+        :side-offset="4"
+        class="surface-popover marvis-menu marvis-menu-scroll w-72"
+      >
         <DropdownMenuFilter
           v-if="searchPlaceholder"
           v-model="query"
           :placeholder="searchPlaceholder"
           :auto-focus="true"
-          class="titlebar-menu-search"
+          class="marvis-menu-search"
         />
         <template v-for="(section, index) in sections" :key="index">
           <DropdownMenuSeparator v-if="section.kind === 'separator'" class="menu-separator" />
