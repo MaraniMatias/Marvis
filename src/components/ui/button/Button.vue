@@ -1,13 +1,20 @@
 <script setup lang="ts">
+/**
+ * A quiet action, in the mockup's own vocabulary.
+ *
+ * There is no filled accent button in the mockup: `--marvis-accent` only ever paints a
+ * selection bar, an active icon, the prompt or a focus ring. An accent-filled button with
+ * dark text reads as a different product, so the accent stays out of the surface and the
+ * action sits on the background until it is hovered.
+ */
 defineOptions({ name: "UiButton" });
 
 withDefaults(
   defineProps<{
-    variant?: "primary" | "quiet";
     disabled?: boolean;
     type?: "button" | "submit";
   }>(),
-  { variant: "primary", disabled: false, type: "button" },
+  { disabled: false, type: "button" },
 );
 </script>
 
@@ -15,12 +22,7 @@ withDefaults(
   <button
     :type="type"
     :disabled="disabled"
-    class="inline-flex h-8 items-center justify-center gap-2 rounded-[var(--marvis-radius)] px-3 text-sm font-medium transition-colors disabled:cursor-wait disabled:opacity-60"
-    :class="
-      variant === 'primary'
-        ? 'bg-(--marvis-accent) text-(--marvis-bg-0) hover:brightness-110'
-        : 'text-(--marvis-text-secondary) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text)'
-    "
+    class="inline-flex h-7 items-center justify-center gap-2 rounded-[var(--marvis-radius)] px-2.5 text-xs text-(--marvis-text-dim) transition-colors hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-wait disabled:opacity-60"
   >
     <slot />
   </button>

@@ -14,7 +14,9 @@
   --marvis-green: #7fd88f;
   --marvis-red: #e08585;
   --marvis-radius: 6px;
-  --marvis-font: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+  /* Named families first, generic last: `ui-monospace` always resolves to the system UI
+     monospace, so leading with it meant "JetBrains Mono" was never reached. */
+  --marvis-font: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
 /* Focus: keyboard only, so a click leaves no ring behind. Global because the

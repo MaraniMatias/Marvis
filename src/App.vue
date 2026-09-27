@@ -11,7 +11,12 @@ import {
   SplitterPanel,
   SplitterResizeHandle,
 } from "reka-ui";
-import { ChevronDown as ChevronDownIcon, GitFork as GitForkIcon, Settings as SettingsIcon } from "@lucide/vue";
+import {
+  ChevronDown as ChevronDownIcon,
+  GitFork as GitForkIcon,
+  Search as SearchIcon,
+  Settings as SettingsIcon,
+} from "@lucide/vue";
 import type { Checkout } from "./domain/workspace";
 import { parseEditorPosition } from "./domain/editor";
 import type { EditorPosition } from "./domain/editor";
@@ -636,16 +641,19 @@ function reportWarning(message: string) {
     :style="{ '--inspector-width': `${appLayout.inspectorWidth}px` }"
   >
     <header class="window-header flex h-12 shrink-0 items-center gap-4 border-b pl-[78px] pr-4">
-      <!-- The native traffic lights own the first 78px; the inset leaves them room to breathe. -->
-      <input
-        ref="searchField"
-        type="search"
-        data-testid="search-field"
-        aria-label="Search files and commands"
-        placeholder="Search..."
-        class="window-search h-7 w-[min(300px,34vw)] shrink-0 appearance-none rounded border border-transparent px-2.5 text-xs placeholder:text-(--marvis-text-faint)"
-        @keydown.esc="blurSearchField"
-      />
+      <!-- The mockup's field is icon + placeholder on one flat surface, not a bordered box. -->
+      <div class="flex w-[min(300px,34vw)] min-w-[220px] shrink-0 items-center gap-2 bg-(--marvis-bg-2) px-2.5 py-1.5">
+        <SearchIcon class="icon-sm shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
+        <input
+          ref="searchField"
+          type="search"
+          data-testid="search-field"
+          aria-label="Search files and commands"
+          placeholder="Search..."
+          class="window-search min-w-0 flex-1 appearance-none bg-transparent p-0 text-xs text-(--marvis-text-secondary) outline-none placeholder:text-(--marvis-text-faint)"
+          @keydown.esc="blurSearchField"
+        />
+      </div>
       <!-- Keep native dragging and double-click zoom on this empty spacer, clear of controls. -->
       <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-4 flex-1" @dblclick="zoomFromTitlebar" />
       <nav

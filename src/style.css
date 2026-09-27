@@ -27,8 +27,11 @@ body {
   background: var(--marvis-bg-0);
 }
 
+/* The mockup's shell is 14px. Without this the body inherits the browser's 16px, and every
+   element that does not set its own size reads at a size the mockup never has. */
 .app-shell {
   background: var(--marvis-bg-0);
+  font-size: 14px;
 }
 
 .window-header {
@@ -36,18 +39,17 @@ body {
   border-color: var(--marvis-border);
 }
 
+/* The mockup's search box is a flat `--marvis-bg-2` surface: no border, no radius. */
 .window-search {
-  border-color: var(--marvis-border);
   background: var(--marvis-bg-2);
   transition:
     background-color 120ms ease,
-    border-color 120ms ease,
     color 120ms ease;
 }
 
 .window-search:hover,
 .window-search:focus-visible {
-  border-color: var(--marvis-accent);
+  background: var(--marvis-border);
   color: var(--marvis-text);
 }
 
