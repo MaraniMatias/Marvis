@@ -11,6 +11,7 @@ import type { ReviewNote } from "../domain/review";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { useToasts } from "../presentation/toasts";
+import { isMarkdownPath } from "../presentation/markdown-preview";
 import DocumentPane from "./DocumentPane.vue";
 import FileDiff from "./FileDiff.vue";
 import InspectorPane from "./InspectorPane.vue";
@@ -710,6 +711,66 @@ describe("DocumentPane", () => {
     await flushPromises();
     expect(mocks.readCheckoutFile).not.toHaveBeenCalled();
     expect(wrapper.text()).toContain("This file was deleted");
+    wrapper.unmount();
+  });
+
+  it("REPRO shows a readable file after an unreadable one", async () => {
+    const view = ref<MainView>({ kind: "document", path: ".gitignore", mode: "code" });
+    const currentCheckout = checkout("checkout:one");
+    const gitSnapshot = snapshot(currentCheckout.id);
+    mocks.listCheckoutFiles.mockResolvedValue({
+      entries: [
+        { name: ".DS_Store", path: ".DS_Store", kind: "file" },
+        { name: ".gitignore", path: ".gitignore", kind: "file" },
+        { name: "notes.md", path: "notes.md", kind: "file" },
+      ],
+      truncated: false,
+    });
+    mocks.readCheckoutFile.mockImplementation(async (_checkoutId: string, path: string) => {
+      if (path === ".DS_Store") throw { code: "binary_file", message: "not utf-8" };
+      return { path, content: `contents of ${path}\n` };
+    });
+    const harness = defineComponent({
+      components: { InspectorPane, MainPane },
+      setup() {
+        function openFile(file: { checkoutId: string; path: string }) {
+          view.value = { kind: "document", path: file.path, mode: isMarkdownPath(file.path) ? "view" : "code" };
+        }
+        return { view, currentCheckout, gitSnapshot, review: reviewApi(), openFile };
+      },
+      data: () => ({ repo }),
+      template: `<div>
+        <InspectorPane :checkout="currentCheckout" :repo="repo" :git-snapshot="gitSnapshot" @open-file="openFile" />
+        <MainPane
+          :checkout="currentCheckout"
+          :view="view"
+          :ready="true"
+          :git-snapshot="gitSnapshot"
+          :review="review"
+          :active-session-id="null"
+          :is-opening="false"
+        />
+      </div>`,
+    });
+    const wrapper = mount(harness, { global: { stubs: { SessionPane: true } } });
+    await flushPromises();
+    expect(wrapper.text()).toContain("contents of .gitignore");
+
+    const fileRows = () => wrapper.get('[aria-label="Checkout files"]').findAll("button");
+    await fileRows()[0].trigger("click");
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toBe("This file is binary or is not valid UTF-8.");
+
+    // Back to the file that was already open before the unreadable one.
+    await fileRows()[1].trigger("click");
+    await flushPromises();
+    // eslint-disable-next-line no-console
+    console.log(
+      "REPRO back to gitignore:",
+      JSON.stringify(view.value),
+      mocks.readCheckoutFile.mock.calls.map((call) => call[1]),
+    );
+    expect(wrapper.text()).toContain("contents of .gitignore");
     wrapper.unmount();
   });
 
