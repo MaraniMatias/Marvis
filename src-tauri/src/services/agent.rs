@@ -23,7 +23,7 @@ use serde::Deserialize;
 
 use crate::{
     domain::{
-        agent::{agent_event_kind, AgentSession},
+        agent::{agent_event_kind, AgentAgent, AgentSession},
         ipc::{IpcError, IpcErrorCode},
     },
     services::executable,
@@ -70,6 +70,52 @@ struct ApiSession {
     /// Present inside the session object, unlike the envelope-level `location`.
     #[serde(default)]
     location: Option<ApiLocation>,
+    #[serde(default)]
+    agent: Option<String>,
+    #[serde(default)]
+    parent_id: Option<String>,
+    #[serde(default)]
+    outcome: Option<String>,
+    #[serde(default)]
+    model: Option<ApiModel>,
+}
+
+#[derive(Debug, Deserialize)]
+struct ApiModel {
+    #[serde(default)]
+    provider_id: String,
+    id: String,
+    #[serde(default)]
+    variant: Option<String>,
+}
+
+impl ApiModel {
+    /// The model as one string, in the `provider/id#variant` form OpenCode writes in config.
+    fn label(&self) -> String {
+        let base = if self.provider_id.is_empty() {
+            self.id.clone()
+        } else {
+            format!("{}/{}", self.provider_id, self.id)
+        };
+        match &self.variant {
+            Some(variant) => format!("{base}#{variant}"),
+            None => base,
+        }
+    }
+}
+
+/// One entry of `GET /api/agent`, which is where the color an agent is painted with lives.
+#[derive(Debug, Deserialize)]
+struct ApiAgent {
+    id: String,
+    #[serde(default)]
+    name: String,
+    #[serde(default)]
+    mode: String,
+    #[serde(default)]
+    color: Option<String>,
+    #[serde(default)]
+    hidden: bool,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -276,6 +322,10 @@ impl AgentBridge {
             },
             idle_at: raw.time.idle,
             blocked_on_permission: false,
+            agent: raw.agent.clone(),
+            model: raw.model.as_ref().map(ApiModel::label),
+            parent_id: raw.parent_id.clone(),
+            outcome: raw.outcome.clone(),
             created_at: raw.time.created,
             updated_at: raw.time.updated,
         }
@@ -430,12 +480,23 @@ fn agent_program() -> Option<PathBuf> {
     executable::find_executable(AGENT_PROGRAM)
 }
 
-/// Reserves a port by binding it, then releases it for the child. A collision is retried a
-/// bounded number of times; giving up is better than serving on someone else's port.
+/// The window of ports a bridge may take, starting at `PORT_RANGE_START`.
+///
+/// It is wide on purpose. A bridge that is killed with its parent cannot run its own cleanup,
+/// so the port it was given stays taken by a process nobody manages, and a narrow window fills
+/// up after a few crashes and leaves the next bridge with nowhere to start. A few hundred
+/// ports costs nothing and makes that recoverable without touching the leftovers.
+const PORT_RANGE_START: u16 = 46000;
+const PORT_RANGE_LEN: u16 = 512;
+
+/// Reserves a port by binding it, then releases it for the child. A collision is retried across
+/// the whole window; giving up is better than serving on someone else's port.
 fn free_port() -> Result<u16, BridgeError> {
-    for attempt in 0..8u32 {
+    for attempt in 0..PORT_RANGE_LEN {
+        // The counter moves every call so two bridges started at once do not both aim at the
+        // first port, and the attempt walks the window from wherever that left off.
         let offset = NEXT_PORT_ATTEMPT.fetch_add(1, Ordering::Relaxed) as u16;
-        let candidate = 46000u16.wrapping_add(offset).wrapping_add(attempt as u16);
+        let candidate = PORT_RANGE_START.wrapping_add(offset).wrapping_add(attempt);
         if TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
             return Ok(candidate);
         }
@@ -483,6 +544,13 @@ fn read_credentials(
 
 /// Confirms the server is really up on the port we asked for, and really scoped to this
 /// checkout, before the bridge is handed out.
+///
+/// Ready means "the agent catalog has something in it", not merely "a route answered":
+/// `/api/agent` is empty for the first moments after the password is printed, while the
+/// server is still loading its configuration. A bridge that returned from that window would
+/// tell every later reader that the project has no agents at all, and the colors the sidebar
+/// paints come from that list. Waiting here costs about a second of boot, once per checkout,
+/// and no later call has to wonder.
 fn finish_credentials(credentials: ServerCredentials) -> Result<ServerCredentials, BridgeError> {
     let probe = AgentBridge {
         checkout_id: String::new(),
@@ -491,9 +559,18 @@ fn finish_credentials(credentials: ServerCredentials) -> Result<ServerCredential
         reader: Mutex::new(None),
         stopped: std::sync::atomic::AtomicBool::new(false),
     };
-    // /api/agent is cheap and confirms both reachability and directory scoping.
-    let _: Vec<serde_json::Value> = probe.get_json("/api/agent")?;
-    Ok(credentials)
+    let deadline = Instant::now() + SERVER_BOOT_TIMEOUT;
+    loop {
+        // /api/agent is cheap and confirms reachability, directory scoping and readiness at
+        // once, which is why this route and not another.
+        let catalog: Vec<serde_json::Value> = probe.get_json("/api/agent")?;
+        if !catalog.is_empty() || Instant::now() >= deadline {
+            // A catalog that never fills is still a usable server: the bridge works, and a row
+            // with no color of its own falls back rather than failing.
+            return Ok(credentials);
+        }
+        sleep(Duration::from_millis(50));
+    }
 }
 
 /// Parses the `{data: …}` envelope every route replies with.
@@ -602,6 +679,29 @@ impl AgentService {
         Ok(sessions)
     }
 
+    /// Every agent the checkout's server offers, with the color OpenCode paints it with.
+    ///
+    /// The list is the same for every session in the checkout, so this is one call behind a
+    /// cache rather than one per session.
+    pub fn agents(
+        &self,
+        checkout_id: &str,
+        directory: &Path,
+    ) -> Result<Vec<AgentAgent>, BridgeError> {
+        let bridge = self.bridge(checkout_id, directory)?;
+        let listed: Vec<ApiAgent> = bridge.get_json("/api/agent")?;
+        Ok(listed
+            .into_iter()
+            .map(|raw| AgentAgent {
+                id: raw.id,
+                name: raw.name,
+                mode: raw.mode,
+                color: raw.color,
+                hidden: raw.hidden,
+            })
+            .collect())
+    }
+
     /// Resolves a session inside `checkout_id` only. A session belonging to another
     /// checkout cannot be addressed here: it does not exist in this server.
     pub fn owned_session(
@@ -703,6 +803,7 @@ pub fn map_error(error: BridgeError) -> IpcError {
 #[cfg(test)]
 mod tests {
     use std::{
+        net::TcpListener,
         path::{Path, PathBuf},
         sync::{Arc, Mutex},
         thread::sleep,
@@ -715,8 +816,8 @@ mod tests {
     };
 
     use super::{
-        agent_program, basic_credentials, same_directory, validate_session_id, AgentEvent,
-        AgentService, BridgeError, MAX_PROMPT_BYTES,
+        agent_program, basic_credentials, free_port, same_directory, validate_session_id,
+        AgentEvent, AgentService, BridgeError, MAX_PROMPT_BYTES, PORT_RANGE_START,
     };
 
     #[test]
@@ -762,6 +863,20 @@ mod tests {
             &directory,
             Path::new("/definitely/not/here")
         ));
+    }
+
+    #[test]
+    fn a_port_range_full_of_leftovers_still_leaves_room_to_start() {
+        // Every bridge killed with its parent leaves the port it was given taken by a process
+        // nobody manages. Filling the front of the window must not be what stops the next one.
+        let held: Vec<TcpListener> = (0..24)
+            .map(|offset| TcpListener::bind(("127.0.0.1", PORT_RANGE_START + offset)).unwrap())
+            .collect();
+        assert!(held.len() == 24, "the window was not filled");
+        assert!(
+            free_port().is_ok(),
+            "a partly filled window is enough to wedge"
+        );
     }
 
     #[test]
@@ -892,6 +1007,66 @@ mod tests {
             sleep(Duration::from_millis(400));
         }
         agents.stop("checkout:turn");
+    }
+
+    /// Proves that the fields Marvis renders a row from are really on the wire.
+    ///
+    /// The agent name, the model, the parent of a subagent and the color OpenCode paints an
+    /// agent with are all read off routes that exist in 2.0.18, and this is the only thing that
+    /// says they still are.
+    ///
+    /// `MARVIS_AGENT_BRIDGE=1 cargo test the_agent_catalog_is_readable_from_a_real_server -- --nocapture`
+    #[test]
+    fn the_agent_catalog_is_readable_from_a_real_server() {
+        if std::env::var("MARVIS_AGENT_BRIDGE").as_deref() != Ok("1") {
+            eprintln!("skipped: set MARVIS_AGENT_BRIDGE=1 to exercise a real agent server");
+            return;
+        }
+        let directory = PathBuf::from(
+            std::env::var("MARVIS_AGENT_BRIDGE_DIR").expect("MARVIS_AGENT_BRIDGE_DIR"),
+        );
+        let agents = AgentService::new();
+        let agents_for_catalog = agents
+            .agents("checkout:catalog", &directory)
+            .expect("read the agent catalog");
+
+        // A server with nothing configured still offers its built-in agents, which is what
+        // makes a fallback for the missing color reachable at all.
+        assert!(
+            !agents_for_catalog.is_empty(),
+            "the catalog came back empty"
+        );
+        for agent in &agents_for_catalog {
+            assert!(!agent.id.is_empty(), "an agent with no id: {agent:?}");
+            assert!(
+                ["primary", "subagent", "all", ""].contains(&agent.mode.as_str()),
+                "an agent with an unknown mode: {agent:?}"
+            );
+            // A color, where there is one, is something a stylesheet can take.
+            if let Some(color) = &agent.color {
+                assert!(
+                    color.starts_with('#') && color.len() > 3,
+                    "a color that is not a hex: {agent:?}"
+                );
+            }
+        }
+
+        // The session carries the agent and the model the row paints.
+        let created = agents
+            .create_session("checkout:catalog", &directory, "catalog probe")
+            .expect("create a session on the real server");
+        let resolved = agents
+            .owned_session("checkout:catalog", &directory, &created.id)
+            .expect("read the session back");
+        assert_eq!(resolved.id, created.id);
+        // A session nobody has prompted has run no turn, so both are absent: that absence is
+        // what the row has to render as "nothing to say" rather than as a value.
+        assert_eq!(resolved.idle_at, None);
+        assert!(
+            resolved.outcome.is_none() || resolved.outcome.as_deref() == Some("succeeded"),
+            "a session that never ran reported an outcome: {resolved:?}"
+        );
+        agents.stop("checkout:catalog");
     }
 
     /// Talks to a real `opencode serve`. Gated so it never runs in CI, because it needs

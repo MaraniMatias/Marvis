@@ -81,6 +81,12 @@ pub struct TerminalSessionStatus {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub exit_code: Option<u32>,
     pub foreground_process: bool,
+    /// The program in front of the shell, by name: `opencode`, `nvim`.
+    ///
+    /// Absent when the shell itself is in front, which is the resting state and needs no
+    /// naming, and when the foreground group is gone or belongs to another user.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub foreground_app: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

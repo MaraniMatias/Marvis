@@ -158,6 +158,22 @@ pub async fn terminal_close(
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+pub async fn terminal_rename(
+    checkout_id: String,
+    session_id: String,
+    name: String,
+    database: State<'_, Database>,
+) -> Result<WorkspaceState, String> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_session_owner(&database, &session_id, &checkout_id)?;
+        terminal::rename(&database, &session_id, &name)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn validate_session_owner(
     database: &Database,
     session_id: &str,

@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::{
     domain::{
-        agent::AgentSession,
+        agent::{AgentAgent, AgentSession},
         ipc::{IpcError, IpcErrorCode},
     },
     persistence::Database,
@@ -35,6 +35,24 @@ pub async fn agent_sessions(
         let directory = checkout_directory(&database, &checkout_id)?;
         agents
             .sessions(&checkout_id, &directory)
+            .map_err(agent::map_error)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+#[tauri::command]
+pub async fn agent_agents(
+    checkout_id: String,
+    database: State<'_, Database>,
+    agents: State<'_, Arc<AgentService>>,
+) -> Result<Vec<AgentAgent>, IpcError> {
+    let database = database.inner().clone();
+    let agents: Arc<AgentService> = Arc::clone(agents.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = checkout_directory(&database, &checkout_id)?;
+        agents
+            .agents(&checkout_id, &directory)
             .map_err(agent::map_error)
     })
     .await

@@ -8,7 +8,7 @@ import type { RecentPath, Session, TerminalSessionStatus, WorkspaceState } from 
 import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalInfo } from "../domain/worktree";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { AppLayoutState, CheckoutUiState } from "../domain/ui-state";
-import type { AgentSession } from "../domain/agent";
+import type { AgentAgent, AgentSession } from "../domain/agent";
 
 export interface CreatedTerminal {
   session: Session;
@@ -171,6 +171,11 @@ export function listAgentSessions(checkoutId: string): Promise<AgentSession[]> {
   return invoke<AgentSession[]>("agent_sessions", { checkoutId });
 }
 
+/** Every agent the checkout's server offers, with the color OpenCode paints it with. */
+export function listAgentAgents(checkoutId: string): Promise<AgentAgent[]> {
+  return invoke<AgentAgent[]>("agent_agents", { checkoutId });
+}
+
 export function createAgentSession(checkoutId: string, title: string): Promise<AgentSession> {
   return invoke<AgentSession>("agent_session_create", { checkoutId, title });
 }
@@ -243,6 +248,11 @@ export function getTerminalStatus(checkoutId: string, sessionId: string): Promis
 
 export function closeTerminal(checkoutId: string, sessionId: string): Promise<WorkspaceState> {
   return invoke<WorkspaceState>("terminal_close", { checkoutId, sessionId });
+}
+
+/** Names a session. The name is a label: it is trimmed, length-checked and never run. */
+export function renameTerminal(checkoutId: string, sessionId: string, name: string): Promise<WorkspaceState> {
+  return invoke<WorkspaceState>("terminal_rename", { checkoutId, sessionId, name });
 }
 
 export function loadTerminalLayout(checkoutId: string): Promise<CheckoutTerminalLayout | null> {

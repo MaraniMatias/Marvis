@@ -1119,6 +1119,31 @@ impl Database {
         self.load_workspace()
     }
 
+    /// Renames a session in place.
+    ///
+    /// The row is already there and the name is a plain label, so this is one `UPDATE`: no new
+    /// column and no new table, which matters because the schema is written once and never
+    /// migrated. The workspace comes back so the caller paints the name the database now holds
+    /// rather than the one it asked for.
+    pub fn rename_terminal_session(
+        &self,
+        session_id: &str,
+        name: &str,
+    ) -> Result<WorkspaceState, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let renamed = connection
+            .execute(
+                "UPDATE sessions SET name = ?2 WHERE id = ?1",
+                rusqlite::params![session_id, name],
+            )
+            .map_err(db_error)?;
+        if renamed == 0 {
+            return Err("session does not exist".into());
+        }
+        drop(connection);
+        self.load_workspace()
+    }
+
     pub fn load_workspace(&self) -> Result<WorkspaceState, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         load_workspace(&connection)

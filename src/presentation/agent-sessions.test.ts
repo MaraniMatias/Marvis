@@ -6,6 +6,7 @@ import type { Checkout, Repo } from "../domain/workspace";
 
 const mocks = vi.hoisted(() => ({
   listAgentSessions: vi.fn(),
+  listAgentAgents: vi.fn(),
   createAgentSession: vi.fn(),
   stopAgent: vi.fn(),
   listen: vi.fn(),
@@ -14,6 +15,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("../lib/ipc", () => ({
   listAgentSessions: mocks.listAgentSessions,
+  listAgentAgents: mocks.listAgentAgents,
   createAgentSession: mocks.createAgentSession,
   stopAgent: mocks.stopAgent,
 }));
@@ -28,6 +30,10 @@ function session(overrides: Partial<AgentSession> = {}): AgentSession {
     busy: false,
     idleAt: 1,
     blockedOnPermission: false,
+    agent: null,
+    model: null,
+    parentId: null,
+    outcome: null,
     createdAt: 1,
     updatedAt: 1,
     ...overrides,
@@ -95,6 +101,8 @@ describe("useAgentSessions", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.listAgentSessions.mockResolvedValue([]);
+    // An empty catalog is the common case: a row with no color of its own falls back.
+    mocks.listAgentAgents.mockResolvedValue([]);
   });
 
   it("defaults the target to the most recently updated session", async () => {
@@ -271,5 +279,54 @@ describe("useAgentSessions", () => {
 
     expect(state.checkoutId).toBe("checkout:second");
     expect(state.sessions.map((item) => item.id)).toEqual(["ses_second"]);
+  });
+
+  it("re-reads a catalog that is still filling in, and stops asking once it is whole", async () => {
+    // What the server really does: it hands over its built-in agents first and the user's own
+    // agents a moment later. A catalog read once per checkout would leave that row without its
+    // colour for the rest of the session.
+    mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_coder", agent: "coder" })]);
+    mocks.listAgentAgents.mockResolvedValue([
+      { id: "build", name: "Build", mode: "primary", color: null, hidden: false },
+    ]);
+
+    const state = useAgentSessions(
+      computed(() => checkout),
+      computed(() => gitRepo),
+    );
+    await settle();
+
+    // The first read is behind, and the row is drawn in the accent it falls back to.
+    expect(state.headline).toEqual({ label: "coder", color: null, attention: "none" });
+
+    // The agent turns up in the catalog, so it is read again and the row follows it.
+    mocks.listAgentAgents.mockResolvedValue([
+      { id: "build", name: "Build", mode: "primary", color: null, hidden: false },
+      { id: "coder", name: "coder", mode: "all", color: "#4ed6bf", hidden: false },
+    ]);
+    mocks.listAgentAgents.mockClear();
+    await state.reload();
+    expect(mocks.listAgentAgents).toHaveBeenCalledTimes(1);
+    expect(state.headline).toEqual({ label: "coder", color: "#4ed6bf", attention: "none" });
+
+    // Whole now: a reload that changes nothing does not ask again.
+    await state.reload();
+    expect(mocks.listAgentAgents).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a row on the accent when the catalog cannot be read at all", async () => {
+    mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_one", agent: "plan" })]);
+    mocks.listAgentAgents.mockRejectedValue(new Error("no such route"));
+
+    const state = useAgentSessions(
+      computed(() => checkout),
+      computed(() => gitRepo),
+    );
+    await settle();
+    await state.reload();
+
+    // A catalog that cannot be read is not an error: the session is still listed and named.
+    expect(state.state).toBe("ready");
+    expect(state.headline).toEqual({ label: "plan", color: null, attention: "none" });
   });
 });

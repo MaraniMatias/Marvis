@@ -10,6 +10,8 @@ export interface TerminalSessionStatus {
   state: TerminalProcessState;
   exitCode?: number;
   foregroundProcess?: boolean;
+  /** The program in front of the shell, by name: `opencode`, `nvim`. Absent when it is idle. */
+  foregroundApp?: string;
 }
 
 export interface Repo {

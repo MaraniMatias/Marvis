@@ -12,6 +12,10 @@ use crate::{
 
 static NEXT_SESSION_ID: AtomicU64 = AtomicU64::new(1);
 
+/// Long enough for a branch-like name, short enough that a sidebar row never has to scroll
+/// to show what a terminal is.
+const MAX_NAME_CHARS: usize = 60;
+
 pub struct CreatedTerminal {
     pub session: Session,
     pub workspace: WorkspaceState,
@@ -94,6 +98,28 @@ pub fn create_with_options(
     }
 }
 
+/// Renames a session, so a row the user cannot tell apart from its neighbours gets a name.
+///
+/// The name is a label and nothing more: it is never a path, an argument or a command, so the
+/// only rules are that it is something to read and short enough for a sidebar row.
+pub fn rename(database: &Database, session_id: &str, name: &str) -> Result<WorkspaceState, String> {
+    let name = name.trim();
+    if name.is_empty() {
+        return Err("a session needs a name".into());
+    }
+    if name.chars().count() > MAX_NAME_CHARS {
+        return Err(format!(
+            "a session name is at most {MAX_NAME_CHARS} characters"
+        ));
+    }
+    // Control characters would break the row they are drawn in, and a newline would draw a
+    // second one. Neither is a name anyone means to type.
+    if name.chars().any(char::is_control) {
+        return Err("a session name cannot contain control characters".into());
+    }
+    database.rename_terminal_session(session_id, name)
+}
+
 pub fn close(
     database: &Database,
     backend: &TerminalBackend,
@@ -136,7 +162,7 @@ mod tests {
         terminal::{OutputSink, TerminalBackend},
     };
 
-    use super::{create, create_with_options, TerminalOptions};
+    use super::{create, create_with_options, rename, TerminalOptions};
 
     fn plain_repo(path: &Path) -> Repo {
         Repo::plain(path, "now").unwrap()
@@ -231,6 +257,39 @@ mod tests {
         let restored_other = restored_other_repo.checkouts.first().unwrap();
         assert_eq!(restored_other.id, other_repo.checkouts[0].id);
         assert!(restored_other.sessions.is_empty());
+    }
+
+    #[test]
+    fn a_rename_is_a_label_and_nothing_else() {
+        let directory = tempdir().unwrap();
+        let checkout = directory.path().join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        let database = Database::open(directory.path().join("workspace.sqlite3")).unwrap();
+        let repo = plain_repo(&checkout);
+        database.register_plain_repo(repo.clone()).unwrap();
+        let session = crate::domain::workspace::Session {
+            id: "session:rename".into(),
+            session_type: crate::domain::workspace::SessionType::Shell,
+            checkout_id: repo.checkouts[0].id.clone(),
+            name: "zsh".into(),
+            created_at: "now".into(),
+            status: crate::domain::workspace::SessionStatus::Active,
+        };
+        database.add_terminal_session(&session).unwrap();
+
+        // What the user typed around a name is not part of it.
+        let renamed = rename(&database, &session.id, "  build logs \n").unwrap();
+        assert_eq!(renamed.repos[0].checkouts[0].sessions[0].name, "build logs");
+
+        // An empty name would leave a row with nothing on it to click.
+        assert!(rename(&database, &session.id, "   ").is_err());
+        // A newline would draw a second row inside the first.
+        assert!(rename(&database, &session.id, "logs\nrm -rf /").is_err());
+        // A name long enough to be a payload is refused, not truncated.
+        assert!(rename(&database, &session.id, &"x".repeat(61)).is_err());
+        assert!(rename(&database, &session.id, &"x".repeat(60)).is_ok());
+        // A session the database does not hold is not renamed, whatever it is called.
+        assert!(rename(&database, "session:unknown", "anything").is_err());
     }
 
     #[test]

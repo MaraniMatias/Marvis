@@ -9,6 +9,8 @@ use std::{
 
 use crate::domain::workspace::{TerminalProcessState, TerminalSessionStatus};
 
+mod process;
+
 pub type OutputSink = Box<dyn FnMut(&[u8]) -> Result<(), String> + Send + 'static>;
 
 pub struct SpawnOptions {
@@ -170,11 +172,13 @@ impl TerminalBackend {
                 state: TerminalProcessState::Exited,
                 exit_code: Some(exit_code),
                 foreground_process: false,
+                foreground_app: None,
             },
             None => TerminalSessionStatus {
                 state: TerminalProcessState::Running,
                 exit_code: None,
                 foreground_process: session.foreground_process(),
+                foreground_app: session.foreground_app(),
             },
         })
     }
@@ -216,17 +220,27 @@ impl TerminalBackend {
 
 impl Session {
     fn foreground_process(&self) -> bool {
-        #[cfg(unix)]
-        {
-            self.master
-                .process_group_leader()
-                .zip(self.process_id)
-                .is_some_and(|(foreground, shell)| foreground as u32 != shell)
-        }
-        #[cfg(not(unix))]
-        {
-            false
-        }
+        self.foreground_group()
+            .zip(self.process_id)
+            .is_some_and(|(group, shell)| group != shell)
+    }
+
+    /// The program the foreground group is running, when that group is not the shell itself.
+    ///
+    /// A job-control shell gives every job its own group led by the job's first process, so
+    /// the group's id *is* that process's pid and the OS can name it. Resolving the group
+    /// rather than a fixed pid is what keeps the answer right after a job is replaced.
+    fn foreground_app(&self) -> Option<String> {
+        let (group, shell) = self.foreground_group().zip(self.process_id)?;
+        (group != shell)
+            .then(|| process::executable_name(group))
+            .flatten()
+    }
+
+    fn foreground_group(&self) -> Option<u32> {
+        self.master
+            .process_group_leader()
+            .and_then(|group| u32::try_from(group).ok())
     }
 }
 
@@ -415,7 +429,10 @@ mod tests {
         let backend = TerminalBackend::default();
         let (output, _receiver) = sink();
         spawn(&backend, "foreground", "/bin/sh", &["-i"], output);
-        assert!(!backend.status("foreground").unwrap().foreground_process);
+        let resting = backend.status("foreground").unwrap();
+        assert!(!resting.foreground_process);
+        // A shell in front of itself is the resting state and has nothing to name.
+        assert_eq!(resting.foreground_app, None);
 
         backend.write("foreground", b"sleep 10\n").unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -426,6 +443,15 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+        // The row in the sidebar shows this, so it has to be the job's own name.
+        assert_eq!(
+            backend
+                .status("foreground")
+                .unwrap()
+                .foreground_app
+                .as_deref(),
+            Some("sleep")
+        );
 
         backend.write("foreground", b"\x03").unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
@@ -436,6 +462,7 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
+        assert_eq!(backend.status("foreground").unwrap().foreground_app, None);
         backend.close("foreground").unwrap();
     }
 

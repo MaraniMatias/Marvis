@@ -1,18 +1,36 @@
 import { listen } from "@tauri-apps/api/event";
 import { onScopeDispose, reactive, watch } from "vue";
 import type { ComputedRef } from "vue";
-import type { AgentEvent, AgentSession } from "../domain/agent";
-import { defaultAgentSession, isTurnEvent } from "../domain/agent";
+import type { AgentAttention, AgentAgent, AgentEvent, AgentSession } from "../domain/agent";
+import {
+  agentAttention,
+  agentColor,
+  agentLabel,
+  defaultAgentSession,
+  headlineSession,
+  isTurnEvent,
+} from "../domain/agent";
 import { isIpcError } from "../domain/ipc";
 import type { Checkout, Repo } from "../domain/workspace";
-import { createAgentSession, listAgentSessions, stopAgent } from "../lib/ipc";
+import { createAgentSession, listAgentAgents, listAgentSessions, stopAgent } from "../lib/ipc";
 
 /** Name of the Tauri event the bridge emits normalized agent events on. */
 export const AGENT_EVENT = "marvis://agent-event";
 
+/** What a row says about the agent: which one, in OpenCode's color, and how loudly. */
+export interface AgentHeadline {
+  label: string;
+  color: string | null;
+  attention: AgentAttention;
+}
+
 export interface ActiveAgentSessions {
   checkoutId: string | null;
   sessions: AgentSession[];
+  /** Every agent the checkout's server offers, for the colors and names above. */
+  agents: AgentAgent[];
+  /** The one session a row would speak for, already resolved to a name and a color. */
+  headline: AgentHeadline | null;
   /** The session a review round goes to unless the user picks another. */
   targetId: string | null;
   state: "loading" | "ready" | "error";
@@ -94,6 +112,8 @@ export function useAgentSessions(
   const state = reactive<Omit<ActiveAgentSessions, "reload" | "createSession" | "selectTarget" | "stop">>({
     checkoutId: null,
     sessions: [],
+    agents: [],
+    headline: null,
     targetId: null,
     state: "ready",
     error: "",
@@ -101,10 +121,49 @@ export function useAgentSessions(
     turnsCompleted: 0,
   });
 
+  /**
+   * Resolves the row's line from the session list and the catalog together.
+   *
+   * It is a watch rather than a computed because the whole of `state` is reactive already, and
+   * the row must not be able to disagree with the list it was drawn from.
+   */
+  function syncHeadline() {
+    const session = headlineSession(state.sessions, state.targetId);
+    const label = agentLabel(state.agents, session?.agent);
+    state.headline =
+      session && label
+        ? { label, color: agentColor(state.agents, session.agent), attention: agentAttention(session) }
+        : null;
+  }
+
+  watch(() => [state.sessions, state.agents, state.targetId], syncHeadline);
+
   function fail(cause: unknown): false {
     state.error = errorText(cause);
     state.state = "error";
     return false;
+  }
+
+  /**
+   * Re-reads the catalog when a session names an agent it does not have.
+   *
+   * The server fills that list in stages: right after boot it holds its own built-in agents and
+   * the ones from the project, and the ones from the user's agent directory arrive later. Read
+   * once per checkout that would leave a row without its color for the rest of the session, so
+   * the gap is what triggers the read. In the steady state this asks for nothing.
+   */
+  async function refreshAgentsBehind(sessions: AgentSession[]) {
+    const checkoutId = state.checkoutId;
+    if (!checkoutId) return;
+    const known = new Set(state.agents.map((agent) => agent.id));
+    if (!sessions.some((session) => session.agent && !known.has(session.agent))) return;
+    try {
+      const agents = await listAgentAgents(checkoutId);
+      // A newer checkout may have taken over while this was in flight.
+      if (state.checkoutId === checkoutId) state.agents = agents;
+    } catch {
+      // A catalog that cannot be read leaves the row with the accent, which it already had.
+    }
   }
 
   async function reload() {
@@ -125,6 +184,7 @@ export function useAgentSessions(
       }
       state.state = "ready";
       state.error = "";
+      await refreshAgentsBehind(sessions);
       return true;
     } catch (cause) {
       return state.checkoutId === checkoutId ? fail(cause) : false;
@@ -174,6 +234,9 @@ export function useAgentSessions(
       });
       state.checkoutId = checkoutId ?? null;
       state.sessions = [];
+      // The catalog is the same for every session in a checkout, so it is read once per
+      // checkout and left alone: a name or a color that changed on disk is not worth a poll.
+      state.agents = [];
       state.targetId = null;
       state.events = [];
       startedTurns.clear();
@@ -183,11 +246,17 @@ export function useAgentSessions(
 
       state.state = "loading";
       try {
-        const sessions = await listAgentSessions(checkoutId);
+        // Best effort: an agent with no catalog is a row without a color, not a row in error.
+        const [sessions, agents] = await Promise.all([
+          listAgentSessions(checkoutId),
+          listAgentAgents(checkoutId).catch(() => [] as AgentAgent[]),
+        ]);
         if (!current || requestGeneration !== generation) return;
+        state.agents = agents;
         state.sessions = sessions;
         state.targetId = defaultAgentSession(sessions)?.id ?? null;
         state.state = "ready";
+        await refreshAgentsBehind(sessions);
       } catch (cause) {
         if (!current || requestGeneration !== generation) return;
         state.sessions = [];

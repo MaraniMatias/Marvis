@@ -102,6 +102,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::agent::agent_sessions,
+            commands::agent::agent_agents,
             commands::agent::agent_session_create,
             commands::agent::agent_prompt,
             commands::agent::agent_stop,
@@ -151,6 +152,7 @@ fn main() {
             commands::terminal::terminal_resize,
             commands::terminal::terminal_status,
             commands::terminal::terminal_close,
+            commands::terminal::terminal_rename,
             commands::terminal::terminal_layout_load,
             commands::terminal::terminal_layout_save,
             commands::ui_state::ui_layout_load,

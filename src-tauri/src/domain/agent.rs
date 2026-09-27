@@ -16,8 +16,34 @@ pub struct AgentSession {
     pub idle_at: Option<i64>,
     /// Set when a permission request arrived and Marvis could not answer it.
     pub blocked_on_permission: bool,
+    /// The agent running this session, and therefore the mode it is in: OpenCode spells
+    /// `build`/`plan` as agents, so one name answers both questions.
+    pub agent: Option<String>,
+    /// The model behind it, as `provider/id#variant`.
+    pub model: Option<String>,
+    /// The session this one was spawned from, which is how a subagent is tied to its parent.
+    pub parent_id: Option<String>,
+    /// How the last turn ended: `succeeded`, `failed` or `interrupted`.
+    pub outcome: Option<String>,
     pub created_at: i64,
     pub updated_at: i64,
+}
+
+/// One agent a checkout's server offers, as OpenCode describes it.
+///
+/// The color is OpenCode's own, so a row painted with it matches what the user sees in the
+/// TUI for the same agent.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentAgent {
+    pub id: String,
+    pub name: String,
+    /// `primary` is a mode a person picks, `subagent` is one a parent spawns, `all` is both.
+    pub mode: String,
+    /// The hex OpenCode paints this agent with, absent when it has no color of its own.
+    pub color: Option<String>,
+    /// Internal agents: real, and not something to offer as a choice.
+    pub hidden: bool,
 }
 
 /// A normalized event from the checkout's server, with the server's own payload
