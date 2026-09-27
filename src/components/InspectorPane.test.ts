@@ -166,6 +166,49 @@ describe("InspectorPane", () => {
     wrapper.unmount();
   });
 
+  it("quietens a dotfile once and a Git-ignored file twice, on the icon and the name together", async () => {
+    mocks.listCheckoutFiles.mockResolvedValueOnce({
+      entries: [
+        { name: "index.ts", path: "index.ts", kind: "file" as const },
+        { name: ".gitignore", path: ".gitignore", kind: "file" as const },
+        { name: ".env", path: ".env", kind: "file" as const, ignored: true },
+        { name: "build.log", path: "build.log", kind: "file" as const, ignored: true },
+        { name: "dist", path: "dist", kind: "directory" as const, ignored: true },
+      ],
+      truncated: false,
+    });
+    const wrapper = mountInspector({ checkout: checkout("ramp") });
+    await flushPromises();
+
+    /** One row's two halves: the icon it draws with, and the name it writes beside it. */
+    const row = (name: string) => {
+      const found = wrapper.findAll(".file-row").find((candidate) => candidate.text().includes(name));
+      if (!found) throw new Error(`no row for ${name}`);
+      return {
+        icon: found.get(".file-icon").classes(),
+        label: found.get(".file-name").classes(),
+      };
+    };
+
+    // The icon and the name step together, so a row is never quiet in only one of the two.
+    expect(row("index.ts").icon).toContain("file-icon-normal");
+    expect(row("index.ts").label).toContain("file-name-normal");
+    expect(row(".gitignore").icon).toContain("file-icon-hidden");
+    expect(row(".gitignore").label).toContain("file-name-hidden");
+    expect(row("build.log").icon).toContain("file-icon-ignored");
+    expect(row("build.log").label).toContain("file-name-ignored");
+
+    // Being both a dotfile and ignored is one step down, not two: the ramp has three rungs and no
+    // fourth, so the flag from the backend wins over the dot in the name.
+    expect(row(".env").icon).toContain("file-icon-ignored");
+    expect(row(".env").icon).not.toContain("file-icon-hidden");
+
+    // A directory carries the ramp as well, which is what makes a build output read as present
+    // but uninteresting instead of competing with the source next to it.
+    expect(row("dist").icon).toContain("file-icon-ignored");
+    wrapper.unmount();
+  });
+
   it("keeps a folder that will not list on its own row", async () => {
     mocks.listCheckoutFiles.mockImplementation(async (_checkoutId: string, path: string) => {
       if (path === ".")
