@@ -290,8 +290,9 @@ describe("DocumentPane", () => {
       .findAll("button")
       .find((button) => button.text() === "Code")!
       .trigger("click");
-    await vi.waitFor(() => expect(wrapper.find('[aria-label="Source code"]').exists()).toBe(true));
-    expect(wrapper.get('[aria-label="Source code"]').text()).toContain("# Marvis");
+    // Code is the editor, so the Code view only has its text once CodeMirror is mounted.
+    await vi.waitFor(() => expect(wrapper.find(".cm-line").exists()).toBe(true));
+    expect(wrapper.get(".cm-content").text()).toContain("# Marvis");
 
     await wrapper.get('[aria-label="Inspector sections"]').findAll("button")[1].trigger("click");
     expect(wrapper.text()).toContain("docs/readme.md");
@@ -437,7 +438,7 @@ describe("DocumentPane", () => {
 
     // Nothing is applied yet, and the toolbar says so instead of naming a grammar that is not on.
     expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Auto (sin resaltado)");
-    expect(wrapper.find(".shiki").exists()).toBe(false);
+    expect(wrapper.get('[aria-label="Source code"]').attributes("data-language")).toBe("plaintext");
 
     const search = wrapper.get('input[aria-label="Search highlight languages"]');
     // A search reads the label, the grammar name, or the suffix a file wears.
@@ -448,7 +449,9 @@ describe("DocumentPane", () => {
     await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.down");
     await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.down");
     await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.enter");
-    await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(2));
+    await vi.waitFor(() =>
+      expect(wrapper.get('[aria-label="Source code"]').attributes("data-language")).toBe("python"),
+    );
     expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Python");
 
     await search.setValue("zzz");
@@ -460,16 +463,18 @@ describe("DocumentPane", () => {
 
   it("reads Auto as the extension says and can be put back to plain text", async () => {
     mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const answer: number = 42;" });
-    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
-    await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(1));
-
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps("src/app.ts", "code"),
+    });
+    const editor = () => wrapper.get('[aria-label="Source code"]').attributes("data-language");
+    await vi.waitFor(() => expect(editor()).toBe("typescript"));
     await pickLanguage(wrapper, "Texto plano");
     await flushPromises();
-    expect(wrapper.find(".shiki").exists()).toBe(false);
+    expect(editor()).toBe("plaintext");
     expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Texto plano");
 
     await pickLanguage(wrapper, "Auto");
-    await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(1));
+    await vi.waitFor(() => expect(editor()).toBe("typescript"));
     expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("TypeScript");
     wrapper.unmount();
   });
@@ -482,28 +487,29 @@ describe("DocumentPane", () => {
     const wrapper = mount(DocumentPane, { props: documentPaneProps("notes.txt") });
     await flushPromises();
     await pickLanguage(wrapper, "Python");
-    await vi.waitFor(() => expect(wrapper.find(".shiki .line").text()).toContain("def answer"));
+    const editor = () => wrapper.get('[aria-label="Source code"]').attributes("data-language");
+    await vi.waitFor(() => expect(editor()).toBe("python"));
 
     // The next file starts from its own extension, not from the last choice.
     await wrapper.setProps({ path: "src/app.ts" });
     await flushPromises();
     expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("TypeScript");
-    await vi.waitFor(() => expect(wrapper.find(".shiki .line").text()).toContain("const answer"));
+    await vi.waitFor(() => expect(editor()).toBe("typescript"));
 
     // And the file that was forced keeps its grammar for as long as the window lives.
     await wrapper.setProps({ path: "notes.txt" });
     await flushPromises();
     expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Python");
-    await vi.waitFor(() => expect(wrapper.find(".shiki .line").text()).toContain("def answer"));
+    await vi.waitFor(() => expect(editor()).toBe("python"));
     wrapper.unmount();
   });
 
-  it("highlights multiline source with Shiki and displays line numbers", async () => {
+  it("highlights the read view with Shiki and displays line numbers", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "src/example.ts",
       content: "const answer: number = 42;\nreturn answer;",
     });
-    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/example.ts") });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/example.ts", "view") });
     await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(2));
     const source = wrapper.get('[aria-label="Source code"]');
     expect(source.findAll(".shiki .line").map((line) => line.text())).toEqual([
@@ -515,9 +521,25 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("gives the Code view to the editor, with its lines and its gutter", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "src/example.ts",
+      content: "const answer: number = 42;\nreturn answer;",
+    });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/example.ts", "code") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+    const source = wrapper.get(".code-editor-host");
+    // One renderer for the Code view: Shiki draws nothing behind the editor.
+    expect(wrapper.find(".shiki").exists()).toBe(false);
+    expect(wrapper.findAll(".cm-line").length).toBeGreaterThan(0);
+    expect(source.get(".cm-content").text()).toContain("const answer: number = 42;");
+    expect(source.get(".cm-lineNumbers").text()).toContain("1");
+    wrapper.unmount();
+  });
+
   it("uses compact source rendering above the line bound", async () => {
     mocks.readCheckoutFile.mockResolvedValue({ path: "logs/output.txt", content: Array(5001).fill("line").join("\n") });
-    const wrapper = mount(DocumentPane, { props: documentPaneProps("logs/output.txt") });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("logs/output.txt", "view") });
     await flushPromises();
     const source = wrapper.get('[aria-label="Source code"]');
     expect(source.findAll(".source-line-number")).toHaveLength(1);

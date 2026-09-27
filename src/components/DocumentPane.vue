@@ -9,6 +9,7 @@ import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { useMarkdownPreview } from "../presentation/markdown-preview";
 import { isIpcError } from "../domain/ipc";
+import { absoluteFilePath } from "../domain/files";
 import { readCheckoutFile, writeCheckoutFile } from "../lib/ipc";
 import type { SourceLanguageOption } from "../lib/source-languages";
 import {
@@ -49,6 +50,7 @@ const contentIdentity = ref<string | null>(null);
 const fileViewport = ref<HTMLElement | null>(null);
 const editorHost = ref<HTMLElement | null>(null);
 const editorLoading = ref(false);
+const editorError = ref("");
 const saving = ref(false);
 let editorView: EditorView | null = null;
 let editorIdentity: string | null = null;
@@ -230,18 +232,12 @@ function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function absoluteFilePath() {
+async function copyFilePath() {
   const checkoutPath = props.checkout?.canonicalPath;
   const path = props.path;
-  if (!checkoutPath || path === null) return null;
-  return `${checkoutPath.replace(/[\\/]+$/, "")}/${path}`;
-}
-
-async function copyFilePath() {
-  const path = absoluteFilePath();
-  if (path === null) return;
+  if (!checkoutPath || path === null) return;
   try {
-    await writeText(path);
+    await writeText(absoluteFilePath(checkoutPath, path));
     pushToast("File path copied.", "info");
   } catch (error) {
     reportCause(error);
@@ -304,6 +300,7 @@ async function ensureEditor(fileIdentity: string) {
   disposeEditor();
   const generation = editorGeneration;
   editorLoading.value = true;
+  editorError.value = "";
   let editorInitializing = true;
   try {
     const { createCodeEditor } = await import("../lib/code-editor");
@@ -335,7 +332,12 @@ async function ensureEditor(fileIdentity: string) {
       if (generation === editorGeneration) editorInitializing = false;
     }, 0);
   } catch (error) {
-    if (generation === editorGeneration && identity.value === fileIdentity) reportCause(error);
+    // The editor is the whole Code view, so a chunk that will not load is not a degraded reader:
+    // the pane says so instead of showing an empty box the reader has to guess about.
+    if (generation === editorGeneration && identity.value === fileIdentity) {
+      editorError.value = errorText(error);
+      reportCause(error);
+    }
   } finally {
     if (generation === editorGeneration) editorLoading.value = false;
   }
@@ -448,9 +450,8 @@ async function loadFile(preservePosition = false) {
     if (props.mode === "view" && isMarkdown.value) {
       invalidateHighlight();
     } else if (props.mode === "code") {
-      // Keep the existing sanitized source render available as a fallback while the editor chunk
-      // loads. CodeMirror owns the visible Code view once it is ready.
-      startHighlight(fileIdentity, content.value);
+      // CodeMirror is the Code view; Shiki renders nothing behind it.
+      invalidateHighlight();
     } else {
       startHighlight(fileIdentity, content.value);
     }
@@ -563,7 +564,7 @@ watch(
         await restoreMarkdownReadingPosition(position, request, fileIdentity, checkoutId);
       }
     } else if (mode === "code") {
-      if (contentState.value === "ready") startHighlight(fileIdentity, content.value);
+      invalidateHighlight();
       clear();
       if (contentState.value === "ready") void ensureEditor(fileIdentity);
     } else {
@@ -599,7 +600,7 @@ watch(
 watch(effectiveLanguage, () => {
   if (contentState.value !== "ready" || identity.value === null) return;
   if (props.mode === "code") {
-    startHighlight(identity.value, content.value);
+    invalidateHighlight();
     void ensureEditor(identity.value);
   } else if (showsSource.value) startHighlight(identity.value, content.value);
 });
@@ -663,7 +664,7 @@ function onMarkdownLink(event: MouseEvent) {
 </script>
 
 <template>
-  <main class="document-pane relative flex min-h-0 flex-1 flex-col">
+  <main class="document-pane flex min-h-0 flex-1 flex-col">
     <header class="document-toolbar flex h-10 shrink-0 items-center justify-between gap-3 border-b px-3">
       <div class="flex min-w-0 items-center gap-1.5">
         <span class="min-w-0 truncate text-[11px] text-(--marvis-text-dim)" :title="path ?? undefined">{{
@@ -785,7 +786,7 @@ function onMarkdownLink(event: MouseEvent) {
       >
         This file is empty.
       </p>
-      <p v-else-if="highlighting && mode !== 'code'" role="status" class="pane-state text-sm">Highlighting source…</p>
+      <p v-else-if="highlighting" role="status" class="pane-state text-sm">Highlighting source…</p>
       <template v-else-if="contentState === 'ready' || (contentState === 'loading' && contentIdentity === identity)">
         <template v-if="mode === 'view' && isMarkdown">
           <p
@@ -807,28 +808,19 @@ function onMarkdownLink(event: MouseEvent) {
           />
           <!-- eslint-enable vue/no-v-html -->
         </template>
-        <div v-else-if="mode === 'code'" ref="editorHost" class="code-editor-host" aria-label="Source code">
+        <div
+          v-else-if="mode === 'code'"
+          ref="editorHost"
+          class="code-editor-host"
+          :data-language="effectiveLanguage ?? 'plaintext'"
+          aria-label="Source code"
+        >
           <p v-if="editorLoading" role="status" class="pane-state text-sm">Loading editor…</p>
-          <!-- Keep the existing Shiki output available as a read-only fallback while CM6 loads and
-               for the same source rendering used by the preview's language cache. -->
-          <pre v-if="compactSource" class="source-line-number source-compatibility">{{ sourceLineNumbers }}</pre>
-          <template v-else>
-            <span v-for="index in sourceLines.length" :key="index" class="source-line-number source-compatibility">{{
-              index
-            }}</span>
-          </template>
-          <!-- eslint-disable vue/no-v-html -- Shiki output is DOMPurify-sanitized. -->
-          <code
-            v-if="highlightedLines !== null"
-            class="shiki source-compatibility"
-            v-html="highlightedLines.join('\n')"
-          />
-          <!-- eslint-enable vue/no-v-html -->
-          <code v-else class="source-compatibility">{{ content }}</code>
+          <p v-else-if="editorError" role="alert" class="pane-state text-sm">{{ editorError }}</p>
         </div>
         <div
           v-else-if="compactSource"
-          class="flex py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
+          class="source-read flex py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
           aria-label="Source code"
         >
           <pre class="source-line-number" aria-hidden="true">{{ sourceLineNumbers }}</pre>
@@ -841,7 +833,7 @@ function onMarkdownLink(event: MouseEvent) {
         </div>
         <div
           v-else
-          class="min-w-max py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
+          class="source-read min-w-max py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
           aria-label="Source code"
         >
           <div v-for="(line, index) in sourceLines" :key="index" class="flex min-h-5 whitespace-pre">
@@ -853,31 +845,31 @@ function onMarkdownLink(event: MouseEvent) {
           </div>
         </div>
       </template>
-      <div
-        v-if="isDirty && mode === 'code'"
-        class="absolute bottom-4 right-4 z-10 flex items-center gap-2 rounded border border-(--marvis-border) bg-(--marvis-bg-1) p-1.5 shadow-lg"
-        aria-label="Unsaved changes"
-      >
-        <button
-          type="button"
-          aria-label="Cancel"
-          class="document-action-button"
-          :disabled="saving"
-          @click="cancelDraft"
-        >
-          Cancel
-        </button>
-        <button
-          type="button"
-          aria-label="Save"
-          class="document-action-button document-action-primary"
-          :disabled="saving"
-          @click="saveDraft"
-        >
-          {{ saving ? "Saving…" : "Save" }}
-        </button>
-      </div>
     </section>
+    <!-- The save bar is the pane's last row and not a floating box over the source: anchored to
+         the scrolling viewport it sat wherever the reader had reached, and the one thing a control
+         that writes the file must never do is move away from where they are looking. It cannot be
+         positioned against the pane either: `relative` here outranks the `absolute inset-0` the
+         main pane hands this component, and the pane would end up sized by its content — the
+         editor would grow with the file instead of scrolling it. -->
+    <footer
+      v-if="isDirty && mode === 'code'"
+      class="flex shrink-0 items-center justify-end gap-2 px-3 py-2"
+      aria-label="Unsaved changes"
+    >
+      <button type="button" aria-label="Cancel" class="document-action-button" :disabled="saving" @click="cancelDraft">
+        Cancel
+      </button>
+      <button
+        type="button"
+        aria-label="Save"
+        class="document-action-button document-action-primary"
+        :disabled="saving"
+        @click="saveDraft"
+      >
+        {{ saving ? "Saving…" : "Save" }}
+      </button>
+    </footer>
   </main>
 </template>
 
@@ -948,36 +940,6 @@ function onMarkdownLink(event: MouseEvent) {
   text-align: left;
 }
 
-/* The metadata a document opens with, as the key/value pairs it is. Two columns and a rule under
-   each pair, so it reads as a header over the document rather than as part of it. A `dl` rather
-   than a table because that is what a key and its value are, and because its children are already
-   the grid items: no row has to be dissolved to get them on the same line. */
-.markdown-preview :deep(dl.markdown-frontmatter) {
-  display: grid;
-  grid-template-columns: minmax(4rem, 10rem) 1fr;
-  margin: 0 0 1.5rem;
-  border: 1px solid var(--marvis-border);
-  border-radius: var(--marvis-radius);
-  padding: 0.15rem 0;
-}
-
-.markdown-preview :deep(dl.markdown-frontmatter dt) {
-  padding: 0.35rem 0.6rem;
-  color: var(--marvis-text-secondary);
-  font-size: 0.85em;
-}
-
-.markdown-preview :deep(dl.markdown-frontmatter dd) {
-  padding: 0.35rem 0.6rem;
-  border-left: 1px solid var(--marvis-border);
-  overflow-wrap: anywhere;
-}
-
-/* A key with nothing to say still holds its column, or every value below it shifts sideways. */
-.markdown-preview :deep(dl.markdown-frontmatter dd:empty) {
-  border-left-color: var(--marvis-border);
-}
-
 .markdown-preview :deep(pre) {
   overflow: auto;
   margin: 1.1rem 0;
@@ -1030,13 +992,13 @@ function onMarkdownLink(event: MouseEvent) {
   padding-left: 0.75rem;
 }
 
-.source-compatibility {
-  display: none;
-}
-
 .code-editor-host {
-  min-height: 100%;
   height: 100%;
+  /* The editor scrolls its own document, so this box is a window onto it and never grows: the
+     `min-h-0` is what lets a flex child shrink below its content, and the `overflow: hidden` is
+     what keeps a document taller than the pane from pushing the pane taller with it. */
+  min-height: 0;
+  overflow: hidden;
 }
 
 .code-editor-host :deep(.cm-editor) {
@@ -1048,6 +1010,31 @@ function onMarkdownLink(event: MouseEvent) {
   font-size: 13px;
 }
 
+/* CodeMirror paints the selection on its own layer, which the shell's `::selection` cannot reach,
+   and it paints that layer and the caret for a light page: a lavender band and a black caret, both
+   unreadable on `#17191f`. Its base theme owns these selectors with more specificity than a theme
+   module of ours could match, and it is injected after this stylesheet, so these have to be
+   *longer* than the ones they beat — a tie would go to CodeMirror. The lavender band is the thing
+   to look for if a CodeMirror upgrade renames that layer. */
+.code-editor-host :deep(.cm-selectionBackground),
+.code-editor-host :deep(.cm-focused .cm-scroller .cm-selectionLayer .cm-selectionBackground) {
+  background-color: var(--marvis-selection);
+}
+
+.code-editor-host :deep(.cm-cursor),
+.code-editor-host :deep(.cm-dropCursor) {
+  border-left-color: var(--marvis-accent);
+}
+
+/* The editor is the one focusable surface that gets no ring. CodeMirror is a contenteditable, so
+   the shell's `:focus-visible` rule would ring it like any other control, and a frame around the
+   whole pane is not what a keyboard user needs to find there: the caret, the active line and the
+   active gutter already say it, and they say it while the editor is being read rather than only
+   when it is tabbed into. */
+.code-editor-host :deep(.cm-content:focus-visible) {
+  outline: none;
+}
+
 .code-editor-host :deep(.cm-scroller) {
   font-family: var(--marvis-font);
   line-height: 1.55;
@@ -1057,6 +1044,16 @@ function onMarkdownLink(event: MouseEvent) {
   background: var(--marvis-bg-0);
   border-right: 1px solid var(--marvis-border);
   color: var(--marvis-text-faint);
+}
+
+/* The right padding is the vertical scrollbar's and the bottom one is the horizontal's, the same
+   reason the inspector and the sidebar leave room: macOS draws its scrollbar on top of the content,
+   so a long line that ends flush against the edge is read through it, and the last line of the file
+   sits under the one that crosses the bottom. Both are inside the scrollable area, so the end of a
+   long line can still be scrolled clear instead of being lost to the scrollbar. */
+.code-editor-host :deep(.cm-content) {
+  padding-right: 10px;
+  padding-bottom: 8px;
 }
 
 .code-editor-host :deep(.cm-activeLineGutter),
