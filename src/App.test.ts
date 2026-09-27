@@ -20,6 +20,7 @@ const mocks = vi.hoisted(() => ({
   loadAppLayout: vi.fn(),
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
+  closeCheckout: vi.fn(),
   closeMissingCheckout: vi.fn(),
   renameTerminal: vi.fn(),
   listRecentPaths: vi.fn(),
@@ -144,6 +145,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./lib/ipc", () => ({
+  closeCheckout: mocks.closeCheckout,
   closeMissingCheckout: mocks.closeMissingCheckout,
   listRecentPaths: mocks.listRecentPaths,
   loadAppLayout: mocks.loadAppLayout,
@@ -261,13 +263,15 @@ import App from "./App.vue";
 
 const SidebarStub = defineComponent({
   name: "SidebarStub",
-  emits: ["selectCheckout", "selectSession", "closeMissing", "renameSession"],
+  emits: ["selectCheckout", "selectSession", "closeWorkdir", "closeMissing", "renameSession"],
   setup(_, { emit }) {
     return () =>
       h("div", [
         h("button", { "data-testid": "select-checkout-two", onClick: () => emit("selectCheckout", "checkout:two") }),
         h("button", { "data-testid": "select-session-one", onClick: () => emit("selectSession", "session:one") }),
         h("button", { "data-testid": "select-session-two", onClick: () => emit("selectSession", "session:two") }),
+        h("button", { "data-testid": "close-workdir-base", onClick: () => emit("closeWorkdir", "checkout:one") }),
+        h("button", { "data-testid": "close-workdir-worktree", onClick: () => emit("closeWorkdir", "checkout:two") }),
         h("button", { "data-testid": "close-missing-base", onClick: () => emit("closeMissing", "checkout:one") }),
         h("button", { "data-testid": "close-missing-worktree", onClick: () => emit("closeMissing", "checkout:two") }),
         h("button", {
@@ -928,6 +932,48 @@ describe("App UI integration", () => {
 
       expect(confirm).toHaveBeenCalledWith("Close “/notes” and its checkout list in Marvis? No files will be deleted.");
       expect(mocks.closeMissingCheckout).toHaveBeenCalledWith("checkout:one");
+      wrapper.unmount();
+      confirm.mockRestore();
+    });
+  });
+
+  describe("a workdir with its directory still there", () => {
+    it("asks first, names the scope, and only then takes the row off the list", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two")));
+
+      // The repo root is the head of a list, so its row's close reaches the worktrees with it.
+      await wrapper.get('[data-testid="close-workdir-base"]').trigger("click");
+      expect(confirm).toHaveBeenLastCalledWith(
+        "Remove “/checkout:one” and its checkout list from Marvis? No files will be deleted, and opening the folder again brings it back.",
+      );
+      // A worktree is one entry, and nothing is closed while the question is unanswered.
+      await wrapper.get('[data-testid="close-workdir-worktree"]').trigger("click");
+      expect(confirm).toHaveBeenLastCalledWith(
+        "Remove “/checkout:two” from Marvis? No files will be deleted, and opening the folder again brings it back.",
+      );
+      expect(mocks.closeCheckout).not.toHaveBeenCalled();
+
+      confirm.mockReturnValue(true);
+      mocks.closeCheckout.mockResolvedValue({ repos: [], activeCheckoutId: null, activeSessionId: null });
+      await wrapper.get('[data-testid="close-workdir-worktree"]').trigger("click");
+      await flushPromises();
+
+      expect(mocks.closeCheckout).toHaveBeenCalledWith("checkout:two");
+      expect(mocks.workspaceRef?.value.repos).toEqual([]);
+      wrapper.unmount();
+      confirm.mockRestore();
+    });
+
+    it("never reaches the missing-checkout command, which prunes what a live workdir still needs", async () => {
+      const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+      mocks.closeCheckout.mockResolvedValue({ repos: [], activeCheckoutId: null, activeSessionId: null });
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two")));
+
+      await wrapper.get('[data-testid="close-workdir-base"]').trigger("click");
+      await flushPromises();
+
+      expect(mocks.closeMissingCheckout).not.toHaveBeenCalled();
       wrapper.unmount();
       confirm.mockRestore();
     });

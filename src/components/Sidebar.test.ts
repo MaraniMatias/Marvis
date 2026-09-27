@@ -189,7 +189,9 @@ describe("Sidebar workdir rows", () => {
       },
     });
 
-    expect(wrapper.find(".workdir-actions button").exists()).toBe(false);
+    // A plain folder is one checkout of its own, so it can be taken off the panel; what it
+    // never has is a worktree action, which belongs to Git alone.
+    expect(wrapper.get(".workdir-actions button").attributes("aria-label")).toBe("Remove from list: Base");
     expect(wrapper.find("button[aria-label^='Add worktree']").exists()).toBe(false);
     expect(wrapper.find("button[aria-label^='Remove worktree']").exists()).toBe(false);
     expect(wrapper.find("button[aria-label='New terminal for Base']").exists()).toBe(true);
@@ -850,20 +852,25 @@ describe("Sidebar workdir rows", () => {
     expect(
       wrapper.findAll('button[aria-label^="New terminal for"]').map((row) => row.attributes("aria-label")),
     ).toEqual(["New terminal for feature"]);
-    // A live worktree keeps the action that deletes it from disk, and no closing one.
+    // A live worktree keeps both actions, and they say different things: the cross takes the
+    // row off the list, the trash is what deletes the worktree from disk.
+    expect(wrapper.find('button[aria-label="Remove from list: feature"]').exists()).toBe(true);
     expect(wrapper.find('button[aria-label="Remove worktree feature"]').exists()).toBe(true);
     expect(wrapper.find('button[aria-label="Remove worktree temporary"]').exists()).toBe(false);
-    // One action per workdir row: the trash of the live worktree, and the missing one's close.
-    expect(wrapper.findAll(".workdir-group > .workdir-item .workdir-actions button")).toHaveLength(2);
+    // One cross per workdir row: the live worktree's own, and the missing one's close.
+    expect(wrapper.findAll(".workdir-group > .workdir-item .workdir-actions button")).toHaveLength(3);
+    expect(wrapper.get('button[aria-label="Remove from list: feature"]').attributes("title")).toBe("Remove from panel");
     const close = wrapper.get('button[aria-label="Close missing checkout: temporary"]');
     expect(close.attributes("title")).toBe("Remove from list");
 
     await gone!.trigger("click");
     await live!.trigger("click");
     await close.trigger("click");
+    await wrapper.get('button[aria-label="Remove from list: feature"]').trigger("click");
 
     expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature", false]]);
     expect(wrapper.emitted("closeMissing")).toEqual([["checkout:gone"]]);
+    expect(wrapper.emitted("closeWorkdir")).toEqual([["checkout:feature"]]);
     wrapper.unmount();
   });
 });

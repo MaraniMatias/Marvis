@@ -775,7 +775,29 @@ impl Database {
         Ok(())
     }
 
+    /// Drops the registration of a checkout whose directory is still on disk, and nothing else.
+    ///
+    /// This is what takes a workdir off the panel while its files stay where they are: the row
+    /// and everything that hangs off it go, the directory does not, so opening the folder again
+    /// brings the workdir back.
+    pub fn close_checkout(&self, checkout_id: &str) -> Result<WorkspaceState, String> {
+        self.forget_checkout(checkout_id, false)
+    }
+
+    /// Drops a checkout that cannot be opened, and nothing else. A live one is refused, so that
+    /// the only way to forget it is [`Database::close_checkout`], which asks for it on purpose.
     pub fn close_missing_checkout(&self, checkout_id: &str) -> Result<WorkspaceState, String> {
+        self.forget_checkout(checkout_id, true)
+    }
+
+    /// The one routine behind both closes. `require_missing` is the whole difference: a checkout
+    /// whose directory is gone has nothing left on disk to speak for, so it can be dropped on
+    /// sight, while a live one is only dropped when the caller meant it.
+    fn forget_checkout(
+        &self,
+        checkout_id: &str,
+        require_missing: bool,
+    ) -> Result<WorkspaceState, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.unchecked_transaction().map_err(db_error)?;
         let (repo_id, is_primary, stored_missing, kind, path) = transaction
@@ -797,7 +819,7 @@ impl Database {
             .map_err(db_error)?
             .ok_or_else(|| "checkout is no longer registered".to_string())?;
         let is_missing = stored_missing || !Path::new(&path).is_dir();
-        if !is_missing {
+        if require_missing && !is_missing {
             return Err("only a missing checkout can be closed".into());
         }
         let affected_id = if is_primary || kind == "plain" {
@@ -817,9 +839,12 @@ impl Database {
             )
             .map_err(db_error)?;
         if has_active_sessions {
-            return Err(
-                "close active terminal sessions before closing this missing location".into(),
-            );
+            // A terminal still attached to the directory would outlive the row that names it.
+            return Err(if is_missing {
+                "close active terminal sessions before closing this missing location".into()
+            } else {
+                "close active terminal sessions before closing this checkout".into()
+            });
         }
         let current_checkout_id = get_preference(&transaction, ACTIVE_CHECKOUT)?;
         if is_primary || kind == "plain" {
@@ -3085,6 +3110,59 @@ mod tests {
 
         assert!(error.contains("only a missing checkout can be closed"));
         assert_eq!(database.load_workspace().unwrap().repos.len(), 1);
+    }
+
+    #[test]
+    fn closing_a_live_worktree_drops_its_registration_and_leaves_its_directory() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(root.join("tracked.txt"), "kept\n").unwrap();
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        let registered = database.register_git_repo(repo, &worktree_id).unwrap();
+
+        let closed = database.close_checkout(&worktree_id).unwrap();
+
+        // Only the row goes: the directory and everything Git wrote in it stay, which is what
+        // makes this the reverse of opening the folder again.
+        assert_eq!(closed.repos[0].checkouts.len(), 1);
+        assert_eq!(
+            closed.active_checkout_id.as_deref(),
+            Some(registered.repos[0].checkouts[0].id.as_str())
+        );
+        assert_eq!(closed.active_session_id, None);
+        assert!(worktree.is_dir());
+        assert!(root.join("tracked.txt").exists());
+    }
+
+    #[test]
+    fn closing_a_live_checkout_is_refused_while_one_of_its_sessions_runs() {
+        let temp = tempdir().expect("temporary directory");
+        let folder = temp.path().join("plain");
+        fs::create_dir(&folder).unwrap();
+        let repo = plain_repo(&folder, "1");
+        let checkout_id = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_plain_repo(repo).unwrap();
+        database
+            .add_terminal_session(&Session {
+                id: "session:live".into(),
+                session_type: SessionType::Shell,
+                checkout_id: checkout_id.clone(),
+                name: "shell".into(),
+                created_at: "now".into(),
+                status: SessionStatus::Active,
+            })
+            .unwrap();
+
+        let error = database.close_checkout(&checkout_id).unwrap_err();
+
+        assert!(error.contains("close active terminal sessions"));
+        assert_eq!(database.load_workspace().unwrap().repos.len(), 1);
+        assert!(folder.is_dir());
     }
 
     #[test]

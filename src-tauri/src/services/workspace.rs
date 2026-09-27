@@ -201,6 +201,32 @@ fn git_common_dir(path: &Path) -> Result<std::path::PathBuf, IpcError> {
     })
 }
 
+/// Takes a workdir off the panel, and leaves the disk exactly as it was.
+///
+/// A workdir that is still there loses its registration and nothing else: the branch, the
+/// commits and the files are untouched, so opening the folder again brings it back. A workdir
+/// whose directory is gone has nothing left to keep, so it goes through
+/// [`close_missing_checkout`], which also prunes the Git worktree that pointed at the
+/// directory that is no longer there.
+pub fn close_checkout(
+    database: &Database,
+    backend: &crate::terminal::TerminalBackend,
+    checkout_id: &str,
+) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
+    let state = database.load_workspace().map_err(operation_error)?;
+    let (_, checkout) = crate::services::checkout::registered_checkout(
+        &state.repos,
+        checkout_id,
+        "checkout ID is not registered",
+    )?;
+    if checkout.is_missing {
+        return close_missing_checkout(database, backend, checkout_id);
+    }
+    database
+        .close_checkout(checkout_id)
+        .map_err(operation_error)
+}
+
 pub fn close_missing_checkout(
     database: &Database,
     backend: &crate::terminal::TerminalBackend,
@@ -350,7 +376,7 @@ mod tests {
     };
 
     use super::{
-        close_missing_checkout, locate_missing_checkout, register_folder, restore,
+        close_checkout, close_missing_checkout, locate_missing_checkout, register_folder, restore,
         set_default_branch,
     };
 
@@ -947,6 +973,148 @@ mod tests {
             .message
             .contains("only a missing checkout can be closed"));
         assert_eq!(database.load_workspace().unwrap().repos.len(), 1);
+    }
+
+    #[test]
+    fn closing_a_live_worktree_takes_the_entry_off_the_list_and_nothing_else() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let linked = temp.path().join("feature");
+        init_repo(&primary);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "temporary",
+                linked.to_str().unwrap(),
+            ],
+        );
+        fs::write(linked.join("work-in-progress.txt"), "uncommitted\n").unwrap();
+        let database = database(temp.path());
+        let registered = register_folder(&database, &primary).unwrap();
+        let primary_id = registered.repos[0].checkouts[0].id.clone();
+        let linked_id = register_folder(&database, &linked)
+            .unwrap()
+            .active_checkout_id
+            .expect("opening the worktree selects it");
+        let backend = crate::terminal::TerminalBackend::default();
+
+        let closed = close_checkout(&database, &backend, &linked_id).unwrap();
+
+        // The row is gone and everything it pointed at is still there, uncommitted work
+        // included: opening the folder again is what brings the workdir back.
+        assert_eq!(closed.repos[0].checkouts.len(), 1);
+        assert_eq!(closed.repos[0].checkouts[0].id, primary_id);
+        assert_eq!(
+            closed.active_checkout_id.as_deref(),
+            Some(closed.repos[0].checkouts[0].id.as_str())
+        );
+        assert!(linked.join("work-in-progress.txt").exists());
+        // Git still knows the worktree, because Marvis only forgot it: `git worktree list` goes
+        // on naming the directory, and so does the branch.
+        let listed = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&primary)
+            .output()
+            .expect("Git is installed");
+        assert!(String::from_utf8_lossy(&listed.stdout).contains(linked.to_str().unwrap()));
+        git(
+            &primary,
+            &["show-ref", "--verify", "--quiet", "refs/heads/temporary"],
+        );
+    }
+
+    #[test]
+    fn closing_a_live_worktree_is_refused_while_its_session_is_active() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let linked = temp.path().join("feature");
+        init_repo(&primary);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "temporary",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let database = database(temp.path());
+        register_folder(&database, &primary).unwrap();
+        let linked_id = register_folder(&database, &linked)
+            .unwrap()
+            .active_checkout_id
+            .expect("opening the worktree selects it");
+        database
+            .add_active_session(&Session {
+                id: "session:live".into(),
+                session_type: SessionType::Shell,
+                checkout_id: linked_id.clone(),
+                name: "shell".into(),
+                created_at: "now".into(),
+                status: SessionStatus::Active,
+            })
+            .unwrap();
+
+        let refused = close_checkout(
+            &database,
+            &crate::terminal::TerminalBackend::default(),
+            &linked_id,
+        )
+        .unwrap_err();
+
+        // A terminal still attached to the directory would outlive the row that names it.
+        assert!(refused.message.contains("active terminal sessions"));
+        assert_eq!(
+            database.load_workspace().unwrap().repos[0].checkouts.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn closing_a_location_that_is_gone_still_prunes_the_worktree_pointing_at_it() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let linked = temp.path().join("gone");
+        init_repo(&primary);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "temporary",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let database = database(temp.path());
+        register_folder(&database, &primary).unwrap();
+        let linked_id = register_folder(&database, &linked)
+            .unwrap()
+            .active_checkout_id
+            .expect("opening the worktree selects it");
+        fs::remove_dir_all(&linked).unwrap();
+
+        // The same row closes both ways, so the one command cannot skip the prune a directory
+        // that is gone would otherwise leave behind in the repository's worktree list.
+        let closed = close_checkout(
+            &database,
+            &crate::terminal::TerminalBackend::default(),
+            &linked_id,
+        )
+        .unwrap();
+
+        assert_eq!(closed.repos[0].checkouts.len(), 1);
+        let listed = Command::new("git")
+            .args(["worktree", "list", "--porcelain"])
+            .current_dir(&primary)
+            .output()
+            .expect("Git is installed");
+        let listed = String::from_utf8_lossy(&listed.stdout);
+        assert!(!listed.contains(linked.to_str().unwrap()));
     }
 
     #[test]

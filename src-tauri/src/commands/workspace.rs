@@ -55,6 +55,21 @@ pub async fn locate_missing_checkout(
 }
 
 #[tauri::command]
+pub async fn close_checkout(
+    checkout_id: String,
+    database: State<'_, Database>,
+    backend: State<'_, std::sync::Arc<crate::terminal::TerminalBackend>>,
+) -> Result<WorkspaceState, IpcError> {
+    let database = database.inner().clone();
+    let backend = backend.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        services::workspace::close_checkout(&database, &backend, &checkout_id)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+#[tauri::command]
 pub async fn close_missing_checkout(
     checkout_id: String,
     database: State<'_, Database>,

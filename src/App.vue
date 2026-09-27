@@ -18,6 +18,7 @@ import WorktreeDialog from "./components/WorktreeDialog.vue";
 import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
 import { workdirTitle } from "./domain/workspace";
 import {
+  closeCheckout as persistCheckoutClose,
   closeMissingCheckout as persistMissingCheckoutClose,
   renameTerminal,
   selectCheckout as persistCheckoutSelection,
@@ -660,6 +661,27 @@ async function closeMissingCheckout(checkoutId: string) {
   }
 }
 
+/**
+ * Takes a workdir off the panel, and leaves the disk alone.
+ *
+ * This is the row's own action, so the confirmation has to say what the row cannot: nothing is
+ * deleted, and the directory is still there to open. A repo root — the primary checkout of a
+ * Git repository, and the only checkout of a plain folder — is registered as the head of a
+ * list, so closing one takes that list with it, exactly as closing a missing checkout does.
+ */
+async function closeWorkdir(checkoutId: string) {
+  const checkout = allCheckouts.value.find((item) => item.id === checkoutId);
+  if (!checkout) return;
+  const scope = checkout.isPrimary ? " and its checkout list" : "";
+  const question = `Remove “${checkout.path}”${scope} from Marvis? No files will be deleted, and opening the folder again brings it back.`;
+  if (!window.confirm(question)) return;
+  try {
+    applyWorkspace(await persistCheckoutClose(checkoutId));
+  } catch (cause) {
+    reportCause(cause);
+  }
+}
+
 async function requestShell(checkoutId: string) {
   showView(checkoutId, { kind: "terminal", sessionId: null });
   try {
@@ -917,6 +939,7 @@ function reportWarning(message: string) {
           @create-worktree="openWorktreeDialog('create', $event)"
           @new-terminal="requestShell"
           @remove-worktree="openWorktreeDialog('remove', $event)"
+          @close-workdir="closeWorkdir"
           @close-missing="closeMissingCheckout"
           @close-session="closeTerminalSession"
           @rename-session="renameTerminalSession"

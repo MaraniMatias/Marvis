@@ -50,6 +50,7 @@ const emit = defineEmits<{
   createWorktree: [checkoutId: string];
   newTerminal: [checkoutId: string];
   removeWorktree: [checkoutId: string];
+  closeWorkdir: [checkoutId: string];
   closeMissing: [checkoutId: string];
   closeSession: [sessionId: string];
   renameSession: [sessionId: string, name: string];
@@ -289,6 +290,20 @@ const agentTitle = computed(() =>
               </button>
 
               <div class="workdir-actions">
+                <!-- Taking a workdir off the list is not the same as deleting it: the directory,
+                     its branch and its files stay exactly where they are, and opening the folder
+                     again brings the row back. The worktree action beside it is the one that
+                     removes files, and it keeps the trash for that reason. -->
+                <button
+                  v-if="!workdir.missing"
+                  type="button"
+                  class="workdir-action"
+                  :aria-label="`Remove from list: ${workdir.title}`"
+                  title="Remove from panel"
+                  @click="emit('closeWorkdir', workdir.checkout.id)"
+                >
+                  <XIcon class="icon-xs" aria-hidden="true" />
+                </button>
                 <!-- A missing directory has nothing to remove from disk, so the row offers
                      the one thing left to do with it: take it off the list. -->
                 <button

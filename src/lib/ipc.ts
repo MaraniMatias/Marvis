@@ -209,6 +209,12 @@ export function setDefaultBranch(repoId: string, branch: string): Promise<Worksp
   return invoke<WorkspaceState>("set_default_branch", { repoId, branch });
 }
 
+/** Takes a workdir off the panel, and only off the panel: the directory, its branch and its
+ *  files are all left where they are, so opening the folder again brings the workdir back. */
+export function closeCheckout(checkoutId: string): Promise<WorkspaceState> {
+  return invoke<WorkspaceState>("close_checkout", { checkoutId });
+}
+
 /** Removes a checkout whose directory is gone from Marvis alone: nothing on disk is deleted. */
 export function closeMissingCheckout(checkoutId: string): Promise<WorkspaceState> {
   return invoke<WorkspaceState>("close_missing_checkout", { checkoutId });

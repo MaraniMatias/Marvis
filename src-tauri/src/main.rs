@@ -134,6 +134,7 @@ fn main() {
             commands::workspace::list_recent_paths,
             commands::workspace::locate_missing_checkout,
             commands::workspace::close_missing_checkout,
+            commands::workspace::close_checkout,
             commands::workspace::set_default_branch,
             commands::workspace::select_checkout,
             commands::workspace::select_session,
