@@ -388,8 +388,6 @@ function unavailableText() {
 }
 
 async function loadFile(preservePosition = false) {
-  // eslint-disable-next-line no-console
-  console.log("LOADFILE", props.path, new Error().stack?.split("\n").slice(1, 6).join(" | "));
   const checkoutId = props.checkout?.id;
   const path = props.path;
   const fileIdentity = identity.value;
@@ -519,8 +517,6 @@ async function restoreMarkdownReadingPosition(
 watch(
   () => [identity.value, props.mode, available.value] as const,
   async ([fileIdentity, mode, isAvailable]) => {
-    // eslint-disable-next-line no-console
-    console.log("WATCHER", fileIdentity, "loaded:", loadedIdentity, "state:", contentState.value);
     // Another view owns the main panel: what is loaded here stays loaded, and E.3 does not
     // apply because nothing is being selected.
     if (fileIdentity === null) return;
