@@ -147,6 +147,25 @@ describe("InspectorPane", () => {
     wrapper.unmount();
   });
 
+  it("says nothing under a folder that turned out to be empty", async () => {
+    mocks.listCheckoutFiles.mockImplementation(async (_checkoutId: string, path: string) => {
+      if (path === ".")
+        return { entries: [{ name: "src", path: "src", kind: "directory" as const }], truncated: false };
+      return { entries: [], truncated: false };
+    });
+    const wrapper = mountInspector({ checkout: checkout("hollow") });
+    await flushPromises();
+
+    await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
+    await flushPromises();
+
+    // The folder stays and says nothing more, the way VSCode and Zed show an empty directory.
+    // A line of prose under every one of them is noise on a real tree.
+    expect(wrapper.get('[aria-label="Checkout files"]').text()).not.toContain("Empty folder");
+    expect(wrapper.findAll('[aria-label="Checkout files"] .file-row')).toHaveLength(1);
+    wrapper.unmount();
+  });
+
   it("keeps a folder that will not list on its own row", async () => {
     mocks.listCheckoutFiles.mockImplementation(async (_checkoutId: string, path: string) => {
       if (path === ".")

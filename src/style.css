@@ -39,28 +39,38 @@ body {
   border-color: var(--marvis-border);
 }
 
-/* The mockup's search box is a flat `--marvis-bg-2` surface: no border, no radius. */
+/* The mockup's search box is a flat `--marvis-bg-2` surface: no border, no radius. The input
+   itself stays transparent and the field lifts as one piece — lifting the input drew a
+   brighter rectangle inside the field, which is what read as broken. The global focus ring is
+   dropped for the same reason. */
 .window-search {
-  background: var(--marvis-bg-2);
-  transition:
-    background-color 120ms ease,
-    color 120ms ease;
+  background: transparent;
+  transition: color 120ms ease;
 }
 
-/* The field shows focus by lifting its own surface. The global ring is not wanted here: the
-   input is a transparent child of a padded field, so it would draw a bright rectangle inside
-   the field instead of around it. */
+.window-search::placeholder {
+  color: var(--marvis-text-faint);
+}
+
 .window-search:hover,
 .window-search:focus-visible {
-  background: var(--marvis-border);
   color: var(--marvis-text);
   outline: none;
+}
+
+/* The wrapper carries the surface, so the field lifts as one piece on hover or focus. */
+.search-field {
+  transition: background-color 120ms ease;
+}
+
+.search-field:hover,
+.search-field:focus-within {
+  background: var(--marvis-border);
 }
 
 .window-breadcrumb {
   color: var(--marvis-text-secondary);
 }
-
 .app-sidebar,
 .app-inspector {
   background: var(--marvis-bg-1);
@@ -136,8 +146,20 @@ body {
   padding: 0.125rem;
 }
 
+/* Segments of the mode group, so the same rule as the inspector tabs: transparent rest,
+   hover and pressed feedback, and the pressed state is what marks the chosen one. */
 .document-mode-button {
   white-space: nowrap;
+  cursor: pointer;
+  transition: background-color 120ms ease;
+}
+
+.document-mode-button:hover {
+  background: var(--marvis-bg-2);
+}
+
+.document-mode-button:active {
+  background: var(--marvis-border);
 }
 
 .document-mode-button[aria-pressed="true"] {

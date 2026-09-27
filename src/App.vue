@@ -216,9 +216,16 @@ function setDocumentMode(mode: DocumentMode) {
   showView(checkoutId, { ...view, mode });
 }
 
-function activateCheckoutTerminal(checkoutId: string) {
-  // Selecting a checkout restores its saved main view. Only explicit terminal actions switch views.
-  void selectCheckout(checkoutId);
+async function activateCheckoutTerminal(checkoutId: string, hasChanges = false) {
+  // A row that shows `+N -N` is advertising a diff, so picking it opens the whole change set
+  // for that workdir rather than whatever view it had saved. A row with nothing changed keeps
+  // restoring its saved view, and no terminal is started either way.
+  if (!hasChanges) {
+    void selectCheckout(checkoutId);
+    return;
+  }
+  await selectCheckout(checkoutId);
+  showView(checkoutId, { kind: "diff", path: null });
 }
 
 async function activateTerminalSession(sessionId: string) {
@@ -641,8 +648,12 @@ function reportWarning(message: string) {
     :style="{ '--inspector-width': `${appLayout.inspectorWidth}px` }"
   >
     <header class="window-header flex h-8 shrink-0 items-center gap-4 border-b pl-[78px] pr-4">
-      <!-- The mockup's field is icon + placeholder on one flat surface, not a bordered box. -->
-      <div class="flex w-[min(300px,34vw)] min-w-[220px] shrink-0 items-center gap-2 bg-(--marvis-bg-2) px-2.5 py-1.5">
+      <!-- The mockup's field is icon + placeholder on one flat surface, not a bordered box.
+           The surface and its lift live here; the input inside stays transparent, so the whole
+           field rises as one piece instead of drawing a rectangle within itself. -->
+      <div
+        class="search-field flex w-[min(300px,34vw)] min-w-[220px] shrink-0 items-center gap-2 bg-(--marvis-bg-2) px-2.5 py-1.5"
+      >
         <SearchIcon class="icon-sm shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
         <input
           ref="searchField"
@@ -656,19 +667,22 @@ function reportWarning(message: string) {
       </div>
       <!-- The mockup packs the field and the crumbs against the left, with the empty space and
            the gear at the far end. Dragging lives on that empty space, so the crumbs keep their
-           place instead of being pushed to the opposite edge. -->
+           place instead of being pushed to the opposite edge. The nav grows into the room the
+           mockup gives it and only truncates when it runs out, rather than capping each crumb. -->
       <nav
         aria-label="Repository location"
-        class="window-breadcrumb flex h-full min-w-0 shrink items-center gap-1.5 text-xs"
+        class="window-breadcrumb flex h-full min-w-0 max-w-[70%] shrink items-center gap-1.5 text-xs"
       >
         <template v-if="activeCheckout">
-          <span data-testid="repo-crumb" class="max-w-40 truncate text-(--marvis-text)">
+          <span data-testid="repo-crumb" class="max-w-48 shrink truncate text-(--marvis-text)">
             {{ activeRepo?.name ?? activeCheckout.path.split(/[\\/]/).at(-1) }}
           </span>
           <template v-if="activeRepo?.kind === 'git'">
             <span aria-hidden="true" class="text-(--marvis-text-faint)">/</span>
             <GitForkIcon class="icon-xs shrink-0" aria-hidden="true" />
-            <span class="max-w-32 truncate text-(--marvis-text-secondary)">
+            <!-- A branch is the longest crumb by far, so it gets the room: only the icon and the
+                 separators are fixed, and this is what the flexbox truncates when it has to. -->
+            <span class="min-w-0 shrink truncate text-(--marvis-text-secondary)">
               {{ activeCheckout.branch || "Detached" }}
             </span>
           </template>
@@ -712,12 +726,12 @@ function reportWarning(message: string) {
       </nav>
       <!-- Native dragging and double-click zoom live on the empty space the mockup leaves at
            the far end, so they cannot swallow a click on a crumb or the gear. -->
-      <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-4 flex-1" @dblclick="zoomFromTitlebar" />
+      <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-8 flex-1" @dblclick="zoomFromTitlebar" />
       <button
         type="button"
         aria-label="Settings"
         data-testid="settings-button"
-        class="shrink-0 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+        class="marvis-control shrink-0 p-1.5 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
       >
         <SettingsIcon class="icon-xs" aria-hidden="true" />
       </button>

@@ -172,7 +172,7 @@ function messageOf(cause: unknown): string {
         </div>
         <button
           aria-label="Close"
-          class="rounded px-2 py-1 text-(--marvis-text-secondary) hover:bg-(--marvis-border)"
+          class="marvis-control px-2 py-1 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
           @click="$emit('close')"
         >
           ×
@@ -216,15 +216,17 @@ function messageOf(cause: unknown): string {
         <footer class="flex justify-end gap-2 pt-1">
           <button
             type="button"
-            class="rounded px-3 py-2 text-xs text-(--marvis-text-secondary) hover:bg-(--marvis-border)"
+            class="marvis-control px-3 py-2 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
             @click="$emit('close')"
           >
             Cancel
           </button>
+          <!-- The confirm is not filled: the accent never paints a surface, so the button that
+               matters is the one with text, not the one with a block behind it. -->
           <button
             type="submit"
             :disabled="isBusy || !defaultBranch"
-            class="rounded bg-(--marvis-accent) px-3 py-2 text-xs font-semibold text-(--marvis-bg-0) disabled:opacity-50"
+            class="marvis-control px-3 py-2 text-xs text-(--marvis-text) hover:text-(--marvis-text)"
           >
             {{ isBusy ? "Creating…" : "Create and open shell" }}
           </button>
@@ -310,7 +312,7 @@ function messageOf(cause: unknown): string {
         <footer class="flex justify-end gap-2 pt-1">
           <button
             type="button"
-            class="rounded px-3 py-2 text-xs text-(--marvis-text-secondary) hover:bg-(--marvis-border)"
+            class="marvis-control px-3 py-2 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
             @click="$emit('close')"
           >
             Cancel
@@ -318,7 +320,7 @@ function messageOf(cause: unknown): string {
           <button
             type="button"
             :disabled="isBusy || !canRemove"
-            class="rounded bg-(--marvis-red) px-3 py-2 text-xs font-semibold text-(--marvis-bg-0) disabled:opacity-50"
+            class="marvis-control px-3 py-2 text-xs text-(--marvis-red)"
             @click="submitRemove"
           >
             {{ isBusy ? "Removing…" : "Remove worktree" }}

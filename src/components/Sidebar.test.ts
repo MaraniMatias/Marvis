@@ -134,7 +134,7 @@ describe("Sidebar workdir rows", () => {
     await wrapper.get('button[aria-label="Remove worktree feature"]').trigger("click");
     await wrapper.get('button[aria-label="New terminal for Base"]').trigger("click");
 
-    expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature"]]);
+    expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature", false]]);
     expect(wrapper.emitted("createWorktree")).toEqual([["checkout:primary"]]);
     expect(wrapper.emitted("removeWorktree")).toEqual([["checkout:feature"]]);
     expect(wrapper.emitted("newTerminal")).toEqual([["checkout:primary"]]);
@@ -220,6 +220,49 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
   });
 
+  it("says in the click whether the row is advertising changes, so the panel can open the diff", async () => {
+    mocks.getGitCheckoutDiffStats.mockResolvedValue({
+      "checkout:changed": { additions: 12, deletions: 4 },
+      "checkout:clean": { additions: 0, deletions: 0 },
+    });
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              { ...checkout({ id: "checkout:changed", isPrimary: true, branch: "main" }) },
+              {
+                ...checkout({
+                  id: "checkout:clean",
+                  path: "/test-clean",
+                  canonicalPath: "/test-clean",
+                  isPrimary: false,
+                  branch: "clean",
+                }),
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    await flushPromises();
+
+    const rows = wrapper.findAll(".workdir-group > .workdir-item > .workdir-row > .workdir-select");
+    await rows[0]!.trigger("click");
+    await rows[1]!.trigger("click");
+
+    // The flag travels with the click, taken from the same counts the row paints, so the panel
+    // opens the change set exactly when the row is advertising one.
+    expect(wrapper.emitted("selectCheckout")).toEqual([
+      ["checkout:changed", true],
+      ["checkout:clean", false],
+    ]);
+    wrapper.unmount();
+  });
+
   it("lists every terminal child, marks the active one and offers a close", async () => {
     const wrapper = mount(Sidebar, {
       props: {
@@ -283,9 +326,13 @@ describe("Sidebar workdir rows", () => {
       "Terminal session: Unknown",
     ]);
     expect(sessions[1].attributes("aria-current")).toBe("page");
-    // The active item takes the accent icon, a live one a step brighter than an exited one.
+    // The mockup gives the icons exactly two colours: faint for everything, and the accent for
+    // the active item. A third one for "live but not active" was a deviation and is gone, so the
+    // only thing that sets an icon apart is whether its own row is the active one.
+    expect(sessions.every((session) => !session.get(".workdir-status-icon").classes().includes("is-running"))).toBe(
+      true,
+    );
     expect(sessions[1].get(".workdir-status-icon").classes()).not.toContain("is-running");
-    expect(sessions[2].get(".workdir-status-icon").classes()).toContain("is-running");
     expect(wrapper.find('[role="img"]').exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Concurrent");
     expect(wrapper.get(".workdir-item.has-active").get(".workdir-name").text()).toBe("Base");
@@ -495,7 +542,7 @@ describe("Sidebar workdir rows", () => {
     await live!.trigger("click");
     await close.trigger("click");
 
-    expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature"]]);
+    expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature", false]]);
     expect(wrapper.emitted("closeMissing")).toEqual([["checkout:gone"]]);
     wrapper.unmount();
   });

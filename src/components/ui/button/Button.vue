@@ -22,7 +22,7 @@ withDefaults(
   <button
     :type="type"
     :disabled="disabled"
-    class="marvis-control h-7 justify-center px-2.5 text-xs text-(--marvis-text-dim) hover:text-(--marvis-text) disabled:cursor-wait disabled:opacity-60"
+    class="marvis-control h-7 justify-center px-2.5 text-xs text-(--marvis-text-dim) hover:text-(--marvis-text) disabled:opacity-60"
   >
     <slot />
   </button>

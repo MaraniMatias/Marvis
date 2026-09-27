@@ -30,7 +30,7 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   openFolder: [];
-  selectCheckout: [checkoutId: string];
+  selectCheckout: [checkoutId: string, hasChanges: boolean];
   selectSession: [sessionId: string];
   createWorktree: [checkoutId: string];
   newTerminal: [checkoutId: string];
@@ -90,6 +90,14 @@ const groups = computed(() =>
   })),
 );
 
+/**
+ * Whether the row is advertising changes, which is what makes clicking it open the full diff.
+ * The counts are the same ones the row paints, so the click and the numbers cannot disagree.
+ */
+function hasChanges(workdir: Workdir): boolean {
+  return Boolean(workdir.additions || workdir.deletions);
+}
+
 function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
   const isGit = repo.kind === "git";
   const counts = isGit ? diffStats.checkoutTotals[checkout.id] : undefined;
@@ -139,7 +147,7 @@ function sessionState(session: Session) {
                 :aria-current="workdir.active ? 'page' : undefined"
                 :aria-disabled="workdir.missing || undefined"
                 :title="workdir.checkout.path"
-                @click="!workdir.missing && emit('selectCheckout', workdir.checkout.id)"
+                @click="!workdir.missing && emit('selectCheckout', workdir.checkout.id, hasChanges(workdir))"
               >
                 <component :is="icons[workdir.kind]" class="workdir-status-icon" aria-hidden="true" />
                 <div class="workdir-main">
@@ -222,12 +230,7 @@ function sessionState(session: Session) {
                   :title="item.session.name"
                   @click="emit('selectSession', item.session.id)"
                 >
-                  <component
-                    :is="icons.terminal"
-                    class="workdir-status-icon"
-                    :class="{ 'is-running': !item.active && !item.exited }"
-                    aria-hidden="true"
-                  />
+                  <component :is="icons.terminal" class="workdir-status-icon" aria-hidden="true" />
                   <div class="workdir-main">
                     <div class="workdir-title">
                       <span class="workdir-name">{{ item.session.name }}</span>
@@ -366,7 +369,7 @@ function sessionState(session: Session) {
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 6px;
   padding: 0;
   background: transparent;
   border: none;
@@ -387,6 +390,13 @@ function sessionState(session: Session) {
 .workdir-select.new-item .workdir-name {
   color: var(--marvis-text-dim);
   font-size: 12px;
+}
+
+/* A ".new-item" label is 12px, so its icon drops to match. At 14px the glyph outweighed its
+   own text and the pair read as detached. */
+.workdir-select.new-item .workdir-status-icon {
+  width: 12px;
+  height: 12px;
 }
 
 /* Row actions: hover only, never on the selected row. Out of flow, so a resting
@@ -445,11 +455,6 @@ function sessionState(session: Session) {
   height: 14px;
   color: var(--marvis-text-faint);
   flex-shrink: 0;
-}
-
-/* A live session is one step brighter than an exited one */
-.workdir-status-icon.is-running {
-  color: var(--marvis-text-secondary);
 }
 
 .workdir-main {
