@@ -25,9 +25,6 @@ pub fn find_executable(name: &str) -> Option<PathBuf> {
                 .map(|directory| Path::new(&home).join(directory).join(name)),
         );
     }
-    if name == "zed" {
-        candidates.push(PathBuf::from("/Applications/Zed.app/Contents/MacOS/zed"));
-    }
     candidates.into_iter().find(|path| is_executable(path))
 }
 
