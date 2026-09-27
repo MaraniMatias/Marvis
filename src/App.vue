@@ -231,9 +231,9 @@ watch(
  * The three crumb menus: the workdir line of the titlebar is the sidebar read sideways.
  *
  * Each crumb names one level of it — the workdir, its branch or worktree, and the item open
- * inside it — and each opens the list of the level it names, the way Zed's project pill opens
- * the projects. What is not in this window is a matter of record, not of guessing, so a
- * workdir whose directory is gone is listed dimmed and cannot be picked.
+ * inside it — and each opens the list of the level it names. What is not in this window is a
+ * matter of record, not of guessing, so a workdir whose directory is gone is listed dimmed
+ * and cannot be picked.
  */
 const workdirMenu = computed<TitlebarMenuSection[]>(() => {
   const open = allCheckouts.value;

@@ -175,9 +175,9 @@
   transition: color 120ms ease;
 }
 
-/* A crumb menu, in Zed's proportions: one fixed column, roomy rows, and a shadow so it reads
-   as floating over the app. Global because reka-ui portals it out of the shell, which is also
-   why the shell's own "no focus ring" rule has to be repeated here. */
+/* A crumb menu: one fixed column, roomy rows, and a shadow so it reads as floating over the
+   app. Global because reka-ui portals it out of the shell, which is also why the shell's own
+   "no focus ring" rule has to be repeated here. */
 .titlebar-menu {
   width: 18rem;
   max-height: 60vh;
@@ -193,7 +193,7 @@
   outline: none;
 }
 
-/* The search sits on the surface and rules the list off, as it does in Zed. */
+/* The search sits on the surface and rules the list off. */
 .titlebar-menu-search {
   display: block;
   width: 100%;

@@ -350,8 +350,8 @@ const visibleEntries = computed<VisibleEntry[]>(() => {
       if (state === "loading") result.push({ depth: depth + 1, message: "Loading folder…" });
       else if (state === "error")
         result.push({ depth: depth + 1, message: folderError.value || "Could not load folder." });
-      // An empty folder says nothing. VSCode and Zed both show the folder and stop there, and a
-      // line of prose under every empty directory is noise on a real tree.
+      // An empty folder says nothing. VSCode shows the folder and stops there, and a line of
+      // prose under every empty directory is noise on a real tree.
       else {
         if (state === "truncated")
           result.push({ depth: depth + 1, message: "Some entries omitted (folder is large)." });

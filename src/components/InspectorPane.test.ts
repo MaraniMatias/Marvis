@@ -159,7 +159,7 @@ describe("InspectorPane", () => {
     await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
     await flushPromises();
 
-    // The folder stays and says nothing more, the way VSCode and Zed show an empty directory.
+    // The folder stays and says nothing more, the way VSCode shows an empty directory.
     // A line of prose under every one of them is noise on a real tree.
     expect(wrapper.get('[aria-label="Checkout files"]').text()).not.toContain("Empty folder");
     expect(wrapper.findAll('[aria-label="Checkout files"] .file-row')).toHaveLength(1);

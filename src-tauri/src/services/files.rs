@@ -95,8 +95,8 @@ pub fn list(
 
     if repo.kind == RepoKind::Git {
         // Gitignored files are listed and marked, not dropped: the tree shows them a step
-        // quieter, the way Zed does, so a build directory reads as present but uninteresting. `.git` is
-        // the exception — `check-ignore` always reports it ignored because it is Git's own
+        // quieter, so a build directory reads as present but uninteresting. `.git` is the
+        // exception — `check-ignore` always reports it ignored because it is Git's own
         // bookkeeping, not something the project ignores, so it stays out of the tree
         // entirely, matched by name.
         let ignored = ignored_paths(root, &collected)?;

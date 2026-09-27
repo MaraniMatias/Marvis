@@ -1,9 +1,8 @@
 /**
  * What a titlebar crumb opens: the list of workdirs, worktrees or sessions it names.
  *
- * The shape is Zed's project switcher, which is also the shape of the sidebar this line
- * mirrors: a search field, groups of rows with the current one checked, a rule, and the
- * actions at the foot. The rows carry what they do instead of an event name, so a caller
+ * The shape is the sidebar this line mirrors, read sideways: a search field, groups of rows
+ * with the current one checked, a rule, and the actions at the foot. The rows carry what they do instead of an event name, so a caller
  * builds a menu by describing it and the component only has to draw it.
  */
 
@@ -15,7 +14,7 @@ export interface TitlebarMenuItem {
   hint?: string;
   /** The whole name, for a row whose label is truncated. */
   title?: string;
-  /** The one that is current, marked with a check like Zed's active project. */
+  /** The one that is current, marked with a check. */
   checked?: boolean;
   /** A workdir whose directory is gone: listed so it says so, and not selectable. */
   disabled?: boolean;
