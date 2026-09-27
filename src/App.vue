@@ -581,10 +581,14 @@ function reportWarning(message: string) {
     <header class="window-header flex h-8 shrink-0 items-center gap-4 border-b pl-[78px] pr-4">
       <!-- The mockup's field is icon + placeholder on one flat surface, not a bordered box.
            The surface and its lift live here; the input inside stays transparent, so the whole
-           field rises as one piece instead of drawing a rectangle within itself. -->
-      <div
-        class="search-field flex w-[min(300px,34vw)] min-w-[220px] shrink-0 items-center gap-2 bg-(--marvis-bg-2) px-2.5 py-1.5"
-      >
+           field rises as one piece instead of drawing a rectangle within itself.
+           It stretches instead of carrying vertical padding, because it has to fill the header's
+           31px and sit flush on the border: padding left the field 3px short and centering
+           stranded a 1.5px band of header between it and the panels. Stretching keeps the
+           flush whatever the line box measures, and the mockup's own 5px then falls out of the
+           centering at the shell's 14px base size. The width is the mockup's flat 220px rather
+           than a fluid one, so the field does not drift wider as the window grows. -->
+      <div class="search-field flex w-[220px] shrink-0 items-center gap-2 self-stretch bg-(--marvis-bg-2) px-2.5">
         <SearchIcon class="icon-sm shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
         <input
           ref="searchField"
@@ -592,7 +596,7 @@ function reportWarning(message: string) {
           data-testid="search-field"
           aria-label="Search files and commands"
           placeholder="Search..."
-          class="window-search min-w-0 flex-1 appearance-none bg-transparent p-0 text-xs text-(--marvis-text-secondary) placeholder:text-(--marvis-text-faint)"
+          class="window-search min-w-0 flex-1 appearance-none bg-transparent p-0 text-(--marvis-text-secondary) placeholder:text-(--marvis-text-faint)"
           @keydown.esc="blurSearchField"
         />
       </div>
@@ -602,7 +606,7 @@ function reportWarning(message: string) {
            mockup gives it and only truncates when it runs out, rather than capping each crumb. -->
       <nav
         aria-label="Repository location"
-        class="window-breadcrumb flex h-full min-w-0 max-w-[70%] shrink items-center gap-1.5 text-xs"
+        class="window-breadcrumb flex h-full min-w-0 max-w-[70%] shrink items-center gap-1.5"
       >
         <template v-if="activeCheckout">
           <span data-testid="repo-crumb" class="max-w-48 shrink truncate text-(--marvis-text)">
@@ -624,7 +628,7 @@ function reportWarning(message: string) {
           <PopoverRoot v-if="activeMainView.kind === 'terminal'">
             <PopoverTrigger
               data-testid="item-crumb"
-              class="marvis-control min-w-0 text-xs text-(--marvis-text) hover:text-(--marvis-text)"
+              class="marvis-control min-w-0 text-(--marvis-text) hover:text-(--marvis-text)"
               :title="activeViewLabel"
             >
               <span class="truncate">{{ activeViewLabel }}</span>
