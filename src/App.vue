@@ -2,7 +2,7 @@
 /* eslint-disable vue/html-self-closing */
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import {
   PopoverContent,
   PopoverRoot,
@@ -27,7 +27,8 @@ import { getEditorAvailability, openInZed, selectCheckout as persistCheckoutSele
 import type { EditorAvailability } from "./lib/ipc";
 import { useWorkspaceState } from "./presentation/workspace";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
-import { useReviewNotes } from "./presentation/review-notes";
+import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
+import type { ReviewSender } from "./presentation/review-notes";
 import { useAgentSessions } from "./presentation/agent-sessions";
 import { useToasts } from "./presentation/toasts";
 import { defaultAgentSession } from "./domain/agent";
@@ -554,6 +555,28 @@ async function resolveAgentTarget(): Promise<string | null> {
   return created?.id ?? null;
 }
 
+/**
+ * The send, as the diff sees it.
+ *
+ * `acked` is the only round whose turn is known to be over, so anything else is what the
+ * "not finished" count is counting. The target keeps following the newest live session until
+ * the user picks one, which `selectTarget` does.
+ */
+const reviewSender: ReviewSender = {
+  get sessions() {
+    return agent.sessions;
+  },
+  get targetId() {
+    return agent.targetId;
+  },
+  get unfinishedRounds() {
+    return review.rounds.filter((round) => round.status !== "acked").length;
+  },
+  selectTarget: (sessionId) => agent.selectTarget(sessionId),
+  send: sendReviewToAgent,
+};
+provide(REVIEW_SENDER, reviewSender);
+
 function promptEditorPosition(): EditorPosition | null {
   const value = window.prompt("Open selected file at line[:column]:", "1");
   if (value === null) return null;
@@ -751,22 +774,17 @@ function reportWarning(message: string) {
         size-unit="px"
         class="inspector-splitter-panel relative min-h-0 shrink-0 overflow-visible"
       >
-        <!-- Phase 6 gives the diff its "Send to opencode" button, which is what the review, the
-             agent list and its target are still bound here for. -->
+        <!-- The review, the agent list and the send itself belong to the diff (F.5): this panel
+             is the file tree and the change set, and nothing more. -->
         <InspectorPane
           :class="{ 'right-inspector-drawer': isNarrow }"
           :checkout="checkoutUiReady ? activeCheckout : null"
           :repo="checkoutUiReady ? activeRepo : null"
           :git-snapshot="gitSnapshot"
-          :review="review"
-          :agent-sessions="agent.sessions"
-          :agent-target-id="agent.targetId"
           :saved-state="activeCheckout ? checkoutUiStates[activeCheckout.id] : null"
           @open-file="openFileDocument"
           @open-change="openChangedDocument"
           @open-all-changes="openAllChanges"
-          @select-agent-target="agent.selectTarget"
-          @send-review="sendReviewToAgent"
           @update-ui-state="activeCheckout && updateInspectorUiState(activeCheckout.id, $event)"
         />
       </SplitterPanel>

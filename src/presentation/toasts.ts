@@ -2,7 +2,7 @@ import { ref } from "vue";
 import { isIpcError } from "../domain/ipc";
 
 /** How loud a message is. The level drives the accent color and how long the toast lives. */
-export type ToastLevel = "error" | "info" | "success";
+export type ToastLevel = "error" | "info";
 
 export interface Toast {
   id: number;
@@ -10,8 +10,8 @@ export interface Toast {
   message: string;
 }
 
-/** An error has to be read and acted on; the other two are a note in passing. */
-const LIFETIME_MS: Record<ToastLevel, number> = { error: 6000, info: 3000, success: 3000 };
+/** An error has to be read and acted on; the other is a note in passing. */
+const LIFETIME_MS: Record<ToastLevel, number> = { error: 6000, info: 3000 };
 /** A burst of failures must not take the panel over: once the stack is full the oldest goes. */
 const MAX_TOASTS = 3;
 

@@ -1,17 +1,18 @@
 <script setup lang="ts">
-/* eslint-disable vue/html-indent, vue/html-closing-bracket-newline */
+/* eslint-disable vue/html-indent, vue/html-closing-bracket-newline, vue/html-self-closing */
 import { DiffFile, DiffModeEnum, DiffView } from "@git-diff-view/vue";
 import "@git-diff-view/vue/styles/diff-view-pure.css";
-import { computed, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
+import { computed, inject, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
 import type { GitFileDiff, GitDiffPageLine } from "../domain/git";
 import { ALL_CHANGES_LABEL } from "../domain/main-document";
 import { isIpcError } from "../domain/ipc";
-import { buildDiffLineTexts, diffLineText, reviewRangeCode } from "../domain/review";
+import { agentAttention } from "../domain/agent";
+import { buildDiffLineTexts, diffLineText, isReviewableNote, reviewRangeCode } from "../domain/review";
 import type { AnchorOutcome, ReviewNote, ReviewSide } from "../domain/review";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
-import { useToasts } from "../presentation/toasts";
+import { REVIEW_SENDER } from "../presentation/review-notes";
 import type { ReviewAnchorCheck } from "../lib/ipc";
 import { getGitDiff } from "../lib/ipc";
 import { DIFF_ROW_HEIGHT, useLargeDiff } from "./use-large-diff";
@@ -32,8 +33,10 @@ const props = withDefaults(
     scrollTop: number;
     zedAvailable?: boolean;
     neovimAvailable?: boolean;
+    /** Nested in the change-set stack, where the row above already names the file. */
+    embedded?: boolean;
   }>(),
-  { zedAvailable: false, neovimAvailable: false },
+  { zedAvailable: false, neovimAvailable: false, embedded: false },
 );
 const emit = defineEmits<{
   ready: [path: string];
@@ -46,7 +49,8 @@ const diff = shallowRef<GitFileDiff | null>(null);
 const diffHunks = shallowRef<Array<{ title: string; file: DiffFile }>>([]);
 const collapsedHunks = ref<number[]>([]);
 const diffState = ref<"idle" | "loading" | "ready" | "error">("idle");
-const { push: pushToast } = useToasts();
+/** Why the diff is not on screen. It is the panel's whole content, so it is drawn here. */
+const diffError = ref("");
 const hasTextHunks = computed(() => Boolean(diff.value?.patch.includes("@@") || diff.value?.totalLines));
 const showNoTextHunks = computed(
   () =>
@@ -136,6 +140,52 @@ const anchorOutcomes = computed(() => {
 const notesWithoutLine = computed(() =>
   fileNotes.value.filter((note) => note.status === "sent" && wholeFileInMemory.value && anchorText(note) === null),
 );
+
+// Sending to opencode. The diff is where a review is written, so it is also where it is handed
+// over. What this view owns is the choice of notes and the choice of when; the round itself
+// belongs to the store and the destination to the shell, which is why the send arrives by
+// injection rather than as a prop it cannot pass on.
+
+/** Absent when no shell is above this diff, which is the case in the diff's own tests. */
+const sender = inject(REVIEW_SENDER, null);
+const includeOutdated = ref(false);
+/** Open while the target is working and the user has not yet chosen what to do about it. */
+const busyChoiceOpen = ref(false);
+const sendableNotes = computed(() => {
+  const pending = props.review.notes.filter(isReviewableNote);
+  // An outdated note points at a line that has since changed, so it is held back unless the
+  // user says otherwise: that is the same rule the note's own card states.
+  return includeOutdated.value ? pending : pending.filter((note) => !note.outdated);
+});
+const draftCount = computed(() => sendableNotes.value.filter((note) => note.status === "draft").length);
+const outdatedCount = computed(() => props.review.notes.filter((note) => note.outdated).length);
+const targetSession = computed(() => sender?.sessions.find((session) => session.id === sender.targetId) ?? undefined);
+/** A blocked session is not working, so only a real turn makes the send a decision. */
+const targetBusy = computed(() => agentAttention(targetSession.value) === "busy");
+const showBusyChoice = computed(() => busyChoiceOpen.value && targetBusy.value);
+const canSend = computed(() => sendableNotes.value.length > 0);
+
+function sendNow(queue: boolean) {
+  busyChoiceOpen.value = false;
+  void sender?.send(
+    sendableNotes.value.map((note) => note.id),
+    queue,
+  );
+}
+
+/** A working agent cannot be interrupted, so the button asks instead of sending into a turn. */
+function requestSend() {
+  if (targetBusy.value) {
+    busyChoiceOpen.value = true;
+    return;
+  }
+  sendNow(false);
+}
+
+function chooseTarget(event: Event) {
+  sender?.selectTarget((event.target as HTMLSelectElement).value);
+}
+
 let diffGeneration = 0;
 let mounted = true;
 let markedViewedKey: string | null = null;
@@ -254,6 +304,7 @@ async function loadDiff(path: string, preservePosition = false) {
   }
   collapsedHunks.value = [];
   diffScrollTop.value = oldScrollTop;
+  diffError.value = "";
   diffState.value = "loading";
   try {
     const result = await getGitDiff(checkoutId, path);
@@ -285,8 +336,8 @@ async function loadDiff(path: string, preservePosition = false) {
     )
       return;
     // A diff that cannot be read leaves the panel with nothing to show, so the reason is
-    // announced rather than drawn where it would be the only thing on screen (A.6).
-    pushToast(errorText(error));
+    // drawn in it: a toast would expire and leave an empty panel unexplained.
+    diffError.value = errorText(error);
     diffState.value = "error";
   }
 }
@@ -341,8 +392,8 @@ watch(
       diff.value = null;
       diffHunks.value = [];
       diffScrollTop.value = 0;
+      diffError.value = "This file is no longer in the current Git changes.";
       diffState.value = "error";
-      pushToast("This file is no longer in the current Git changes.");
     }
   },
 );
@@ -408,32 +459,113 @@ onUnmounted(() => {
 
 <template>
   <section class="flex min-h-0 flex-1 flex-col" aria-label="File diff">
-    <header class="document-toolbar flex h-10 shrink-0 items-center justify-between gap-3 border-b px-3">
-      <div class="min-w-0">
-        <p class="truncate text-[11px] text-(--marvis-text-dim)" :title="title">{{ title }}</p>
-        <p v-if="!path && branch" class="truncate text-[11px] text-(--marvis-text-faint)">{{ branch }}</p>
+    <!-- A file of the change-set stack is headed by its own row, so it needs no header here. -->
+    <header v-if="!embedded" class="document-toolbar shrink-0 border-b px-3 py-2">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <p class="truncate text-[11px] text-(--marvis-text-dim)" :title="title">{{ title }}</p>
+          <p v-if="!path && branch" class="truncate text-[11px] text-(--marvis-text-faint)">{{ branch }}</p>
+        </div>
+        <div role="group" aria-label="Diff actions" class="document-mode-control flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            :disabled="!zedAvailable"
+            title="Open in Zed"
+            aria-label="Open file in Zed"
+            class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
+            @click="$emit('openInZed')"
+          >
+            ↗ Zed
+          </button>
+          <button
+            type="button"
+            :disabled="!neovimAvailable"
+            title="Open in Neovim"
+            aria-label="Open file in Neovim"
+            class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
+            @click="$emit('openInNeovim')"
+          >
+            ↗ Neovim
+          </button>
+        </div>
       </div>
-      <div role="group" aria-label="Diff actions" class="document-mode-control flex shrink-0 items-center gap-0.5">
-        <button
-          type="button"
-          :disabled="!zedAvailable"
-          title="Open in Zed"
-          aria-label="Open file in Zed"
-          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
-          @click="$emit('openInZed')"
+      <div v-if="sender" class="mt-2 flex flex-col items-end gap-1">
+        <div class="flex flex-wrap items-center justify-end gap-1.5">
+          <button
+            type="button"
+            data-testid="send-review"
+            :disabled="!canSend"
+            aria-label="Send to opencode"
+            class="diff-send-button rounded-sm border px-2 py-1 text-[11px]"
+            @click="requestSend"
+          >
+            Send to opencode
+          </button>
+          <!-- One session is the default target, so the picker only earns its place above one. -->
+          <select
+            v-if="sender.sessions.length > 1"
+            :value="sender.targetId ?? ''"
+            aria-label="Send review to"
+            class="max-w-44 rounded-sm border border-(--marvis-border) bg-(--marvis-bg-2) px-1 py-0.5 text-[11px] text-(--marvis-text)"
+            @change="chooseTarget"
+          >
+            <option v-for="session in sender.sessions" :key="session.id" :value="session.id">
+              {{ session.title }}
+            </option>
+          </select>
+          <span v-if="canSend" data-testid="send-count" class="text-[11px] text-(--marvis-text-faint)">
+            {{ sendableNotes.length }} {{ sendableNotes.length === 1 ? "note" : "notes" }}
+            <template v-if="draftCount">· {{ draftCount }} {{ draftCount === 1 ? "draft" : "drafts" }}</template>
+          </span>
+        </div>
+        <div v-if="showBusyChoice" data-testid="send-busy" class="flex flex-col items-end gap-1">
+          <p class="max-w-prose text-right text-[11px] text-(--marvis-text-secondary)">
+            “{{ targetSession?.title }}” is mid-task. Sending now lands inside its current turn; queueing waits for it
+            to finish. This OpenCode version cannot cancel a turn.
+          </p>
+          <div class="flex items-center gap-1.5">
+            <button
+              type="button"
+              data-testid="send-now"
+              class="rounded-sm border border-(--marvis-border) px-2 py-0.5 text-[11px] text-(--marvis-text) hover:bg-(--marvis-bg-2)"
+              @click="sendNow(false)"
+            >
+              Send now
+            </button>
+            <button
+              type="button"
+              data-testid="send-queue"
+              class="rounded-sm border border-(--marvis-border) px-2 py-0.5 text-[11px] text-(--marvis-text) hover:bg-(--marvis-bg-2)"
+              @click="sendNow(true)"
+            >
+              Queue
+            </button>
+            <button
+              type="button"
+              data-testid="send-not-now"
+              class="px-2 py-0.5 text-[11px] text-(--marvis-text-faint) hover:text-(--marvis-text)"
+              @click="busyChoiceOpen = false"
+            >
+              Not now
+            </button>
+          </div>
+        </div>
+        <p
+          v-if="sender.unfinishedRounds > 0"
+          data-testid="unfinished-rounds"
+          class="text-[11px] text-(--marvis-text-faint)"
         >
-          ↗ Zed
-        </button>
-        <button
-          type="button"
-          :disabled="!neovimAvailable"
-          title="Open in Neovim"
-          aria-label="Open file in Neovim"
-          class="document-mode-button rounded-sm px-2 py-1 text-[11px] text-(--marvis-text-faint) hover:bg-(--marvis-bg-2) hover:text-(--marvis-text) disabled:cursor-not-allowed disabled:opacity-40"
-          @click="$emit('openInNeovim')"
-        >
-          ↗ Neovim
-        </button>
+          {{ sender.unfinishedRounds }} {{ sender.unfinishedRounds === 1 ? "round" : "rounds" }} not finished
+        </p>
+        <label v-if="outdatedCount > 0" class="flex items-center gap-1.5 text-[11px] text-(--marvis-text-faint)">
+          <input
+            v-model="includeOutdated"
+            type="checkbox"
+            data-testid="include-outdated"
+            class="accent-(--marvis-accent)"
+          />
+          Include {{ outdatedCount }} outdated {{ outdatedCount === 1 ? "note" : "notes" }}
+        </label>
       </div>
     </header>
     <template v-if="path === null">
@@ -469,6 +601,7 @@ onUnmounted(() => {
               :scroll-top="0"
               :zed-available="zedAvailable"
               :neovim-available="neovimAvailable"
+              embedded
             />
           </section>
         </template>
@@ -476,6 +609,11 @@ onUnmounted(() => {
     </template>
     <template v-else>
       <p v-if="diffState === 'loading' && !diff" role="status" class="pane-state text-sm">Loading diff…</p>
+      <!-- A diff that will not load leaves nothing else to show, so the reason is drawn here
+           rather than left to a toast that expires over an empty panel. -->
+      <p v-else-if="diffState === 'error'" role="alert" class="pane-state text-sm">
+        {{ diffError || "This diff could not be read." }}
+      </p>
       <!-- A state of the file itself, not a failure: the panel's whole content is the reason,
            so it stays drawn here rather than expiring in a toast. Same for the three below. -->
       <p v-else-if="diff?.isBinary" role="status" class="pane-state text-sm">Binary file; text diff is unavailable.</p>
@@ -659,6 +797,63 @@ onUnmounted(() => {
 </template>
 
 <style scoped>
+/**
+ * The diff library paints itself with `--diff-*` custom properties on `.diff-style-root`, one
+ * pair per kind of line. That is the only seam it offers, so F.5 repaints those with the
+ * marvis palette instead of replacing its renderer. The selector is deliberately longer than
+ * the library's own `[data-theme="dark"]` rules: same-specificity rules would be settled by
+ * stylesheet order, which is not something a component can rely on.
+ */
+.diff-viewport :deep(.diff-tailwindcss-wrapper[data-theme="dark"] .diff-style-root) {
+  --diff-border--: var(--marvis-border);
+  --diff-plain-content--: var(--marvis-bg-0);
+  --diff-plain-lineNumber--: var(--marvis-bg-0);
+  --diff-expand-content--: var(--marvis-bg-1);
+  --diff-expand-lineNumber--: var(--marvis-bg-1);
+  --diff-empty-content--: var(--marvis-bg-0);
+  --diff-plain-lineNumber-color--: var(--marvis-text-faint);
+  --diff-expand-lineNumber-color--: var(--marvis-text-faint);
+  /* An added or removed line is the diff's green and red, the same ones the stats use. */
+  --diff-add-content--: color-mix(in srgb, var(--marvis-green) 14%, var(--marvis-bg-0));
+  --diff-del-content--: color-mix(in srgb, var(--marvis-red) 14%, var(--marvis-bg-0));
+  --diff-add-lineNumber--: color-mix(in srgb, var(--marvis-green) 22%, var(--marvis-bg-0));
+  --diff-del-lineNumber--: color-mix(in srgb, var(--marvis-red) 22%, var(--marvis-bg-0));
+  --diff-add-content-highlight--: color-mix(in srgb, var(--marvis-green) 24%, var(--marvis-bg-0));
+  --diff-del-content-highlight--: color-mix(in srgb, var(--marvis-red) 24%, var(--marvis-bg-0));
+  --diff-hunk-content--: var(--marvis-bg-1);
+  --diff-hunk-lineNumber--: var(--marvis-bg-1);
+  --diff-hunk-lineNumber-hover--: var(--marvis-accent);
+  --diff-hunk-content-color--: var(--marvis-text-secondary);
+  --diff-add-widget--: var(--marvis-accent);
+  --diff-add-widget-color--: var(--marvis-text);
+  --diff-multi-select-bg: var(--marvis-accent);
+  --diff-multi-select-border: var(--marvis-accent);
+}
+
+.diff-viewport :deep(.diff-tailwindcss-wrapper[data-theme="dark"] [data-state="diff"]),
+.diff-viewport :deep(.diff-tailwindcss-wrapper[data-theme="dark"] [data-state="plain"]),
+.diff-viewport :deep(.diff-tailwindcss-wrapper[data-theme="dark"] [data-state="hunk"]) {
+  color: var(--marvis-text);
+}
+
+/* The send is the one action of the header that means something, so it reads as a button
+   rather than as another mode of the diff. */
+.diff-send-button {
+  border-color: var(--marvis-border);
+  background: var(--marvis-bg-2);
+  color: var(--marvis-text);
+  font-family: inherit;
+}
+
+.diff-send-button:hover:not(:disabled) {
+  background: var(--marvis-border);
+}
+
+.diff-send-button:disabled {
+  color: var(--marvis-text-faint);
+  cursor: not-allowed;
+}
+
 /* Hunk headers sit on the change's own surface, as the mockup's group rows do. */
 .diff-hunk {
   background: var(--marvis-bg-1);

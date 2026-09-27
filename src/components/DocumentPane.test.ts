@@ -531,7 +531,7 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
-  it("announces a diff that cannot be read instead of drawing the reason in the panel", async () => {
+  it("draws a diff that cannot be read in the panel, where it does not expire", async () => {
     const checkoutId = "checkout:diff-error";
     mocks.getGitDiff.mockRejectedValueOnce(new Error("git is not available"));
     const wrapper = mount(FileDiff, {
@@ -546,8 +546,9 @@ describe("DocumentPane", () => {
     });
     await flushPromises();
 
-    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
-    expect(toasts.value.map((toast) => toast.message)).toContain("git is not available");
+    // Nothing else would be on screen, so the reason is drawn rather than left to a toast.
+    expect(wrapper.get('[role="alert"]').text()).toBe("git is not available");
+    expect(toasts.value).toHaveLength(0);
     wrapper.unmount();
   });
 

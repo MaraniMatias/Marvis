@@ -139,11 +139,10 @@ describe("InspectorPane", () => {
     mocks.listCheckoutFiles.mockRejectedValueOnce({ code: "permission_denied", message: "denied" });
     await wrapper.setProps({ checkout: checkout("denied") });
     await flushPromises();
-    // The root of the tree has no row of its own, so the reason is announced instead (A.6).
-    expect(wrapper.find('[role="alert"]').exists()).toBe(false);
-    expect(toasts.value.map((toast) => toast.message)).toContain(
-      "Permission denied while reading this folder or file.",
-    );
+    // The root of the tree has no row of its own, so the panel itself says what failed: a toast
+    // would expire and leave the tree empty with nothing to explain it.
+    expect(wrapper.get('[role="alert"]').text()).toBe("Permission denied while reading this folder or file.");
+    expect(toasts.value).toHaveLength(0);
 
     await wrapper.setProps({ checkout: checkout("gone", true) });
     expect(wrapper.text()).toContain("Checkout is missing.");

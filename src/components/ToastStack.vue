@@ -92,10 +92,6 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   background: var(--marvis-red);
 }
 
-.toast-success .toast-accent {
-  background: var(--marvis-green);
-}
-
 .toast-message {
   flex: 1;
   min-width: 0;

@@ -1,6 +1,7 @@
 import { reactive, watch } from "vue";
-import type { ComputedRef } from "vue";
+import type { ComputedRef, InjectionKey } from "vue";
 import { isIpcError } from "../domain/ipc";
+import type { AgentSession } from "../domain/agent";
 import type { ReviewNote, ReviewRound, ReviewSide } from "../domain/review";
 import type { Checkout, Repo } from "../domain/workspace";
 import { createReviewNote, deleteReviewNote, listReviewNotes, markReviewNotesSent, updateReviewNote } from "../lib/ipc";
@@ -67,6 +68,31 @@ export interface ActiveReviewNotes {
    */
   ackFinishedTurn(): Promise<ReviewRound | null>;
 }
+
+/**
+ * How the diff view hands its notes to an agent.
+ *
+ * The round is recorded by the store and the target comes from the session list, and the app
+ * shell is what owns both, so the send is the shell's work: the diff decides *which* notes and
+ * *whether* to queue, and nothing else. It travels by injection because the diff is reached
+ * through `MainPane`, which the shell does not otherwise need to know about.
+ *
+ * The three reads are getters, so a consumer tracks them by reading them the way it tracks any
+ * other reactive source.
+ */
+export interface ReviewSender {
+  /** The checkout's sessions, for the destination picker. */
+  readonly sessions: AgentSession[];
+  /** The session a review goes to, or null while the checkout has none. */
+  readonly targetId: string | null;
+  selectTarget(sessionId: string | null): void;
+  /** Rounds whose turn has not finished, which is what the count under the button reports. */
+  readonly unfinishedRounds: number;
+  /** Records one round with the chosen notes and delivers it to the target. */
+  send(ids: string[], queue: boolean): Promise<void>;
+}
+
+export const REVIEW_SENDER: InjectionKey<ReviewSender> = Symbol("marvis:review-sender");
 
 function errorText(cause: unknown): string {
   return isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);

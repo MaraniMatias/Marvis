@@ -3,10 +3,12 @@
 /* eslint-disable vue/one-component-per-file, vue/require-default-prop */
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { defineComponent, h, onMounted } from "vue";
+import { defineComponent, h, inject, onMounted } from "vue";
 import { DEFAULT_APP_LAYOUT, DEFAULT_CHECKOUT_UI_STATE } from "./domain/ui-state";
 import type { AppLayoutState } from "./domain/ui-state";
 import type { ReviewNote } from "./domain/review";
+import { REVIEW_SENDER } from "./presentation/review-notes";
+import type { ReviewSender } from "./presentation/review-notes";
 import type { Checkout, Repo, Session, WorkspaceState } from "./domain/workspace";
 
 const mocks = vi.hoisted(() => ({
@@ -173,9 +175,12 @@ vi.mock("./presentation/active-git-snapshot", () => ({
   }),
 }));
 vi.mock("./presentation/review-notes", () => ({
+  // The diff reaches the send through this key, so the real one has to be here.
+  REVIEW_SENDER: Symbol("marvis:review-sender"),
   useReviewNotes: () => ({
     checkoutId: "checkout:one",
     notes: mocks.reviewNotes,
+    rounds: [],
     state: "ready",
     error: "",
     addNote: vi.fn(),
@@ -248,18 +253,10 @@ const SessionPaneStub = defineComponent({
 const InspectorPaneStub = defineComponent({
   name: "InspectorPane",
   props: { checkout: Object },
-  emits: ["openFile", "openAllChanges", "updateUiState", "sendReview"],
+  emits: ["openFile", "openAllChanges", "updateUiState"],
   setup(props, { emit }) {
     return () =>
       h("div", [
-        h("button", {
-          "data-testid": "send-review",
-          onClick: () =>
-            emit(
-              "sendReview",
-              (mocks.reviewNotes as ReviewNote[]).map((note) => note.id),
-            ),
-        }),
         h("button", {
           "data-testid": "open-file",
           disabled: !props.checkout,
@@ -304,15 +301,26 @@ const DocumentPaneStub = defineComponent({
   },
 });
 
+// The diff is where the send lives, so the stub takes the shell's sender the same way the real
+// component does and asks it to hand over the notes, which is the wiring under test here.
 const FileDiffStub = defineComponent({
   name: "FileDiff",
   props: { path: String },
   emits: ["scrollPositionChanged"],
   setup(props, { emit }) {
+    const sender = inject<ReviewSender | null>(REVIEW_SENDER, null);
     return () =>
       h("div", [
         h("span", { "data-testid": "file-diff" }, props.path ?? "all"),
         h("button", { "data-testid": "diff-scroll", onClick: () => emit("scrollPositionChanged", 132) }),
+        h("button", {
+          "data-testid": "send-review",
+          onClick: () =>
+            void sender?.send(
+              (mocks.reviewNotes as ReviewNote[]).map((note) => note.id),
+              false,
+            ),
+        }),
       ]);
   },
 });
@@ -678,6 +686,9 @@ describe("App UI integration", () => {
     });
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
 
+    // The diff is the view that sends, so the review goes out from there.
+    await wrapper.get('[data-testid="open-all-changes"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="send-review"]').trigger("click");
     await flushPromises();
 
@@ -728,6 +739,8 @@ describe("App UI integration", () => {
     });
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
 
+    await wrapper.get('[data-testid="open-all-changes"]').trigger("click");
+    await flushPromises();
     await wrapper.get('[data-testid="send-review"]').trigger("click");
     await flushPromises();
 

@@ -42,14 +42,14 @@ function submit() {
 
 <template>
   <form
-    class="m-1 rounded-sm border border-sky-500/30 bg-[#151a22] p-2 text-xs"
+    class="m-1 rounded-sm border border-(--marvis-border) bg-(--marvis-bg-1) p-2 text-xs"
     aria-label="New review note"
     @submit.prevent="submit"
     @keydown.esc.stop.prevent="$emit('cancel')"
   >
-    <p class="mb-1 font-mono text-[10px] text-zinc-500">
+    <p class="mb-1 font-mono text-[10px] text-(--marvis-text-faint)">
       {{ label }}
-      <span v-if="code" class="ml-2 truncate text-zinc-400">{{ code }}</span>
+      <span v-if="code" class="ml-2 truncate text-(--marvis-text-secondary)">{{ code }}</span>
     </p>
     <textarea
       ref="input"
@@ -57,20 +57,24 @@ function submit() {
       rows="2"
       aria-label="Review note"
       placeholder="What should change here?"
-      class="w-full resize-y rounded-sm border border-white/10 bg-black/30 px-2 py-1 font-sans text-xs text-zinc-100 outline-none placeholder:text-zinc-600"
+      class="w-full resize-y rounded-sm border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none placeholder:text-(--marvis-text-faint)"
     />
-    <p v-if="isRange" class="mt-1 text-[10px] text-zinc-500">
+    <p v-if="isRange" class="mt-1 text-[10px] text-(--marvis-text-faint)">
       Click another line to widen the range, or cancel to start over.
     </p>
     <div class="mt-1 flex items-center gap-2">
       <button
         type="submit"
-        class="rounded-sm bg-sky-500/20 px-2 py-0.5 text-[11px] text-sky-200"
+        class="rounded-sm bg-(--marvis-border) px-2 py-0.5 text-[11px] text-(--marvis-text)"
         :disabled="!content.trim()"
       >
         Save note
       </button>
-      <button type="button" class="rounded-sm px-2 py-0.5 text-[11px] text-zinc-500" @click="$emit('cancel')">
+      <button
+        type="button"
+        class="rounded-sm px-2 py-0.5 text-[11px] text-(--marvis-text-faint) hover:text-(--marvis-text)"
+        @click="$emit('cancel')"
+      >
         Cancel
       </button>
     </div>

@@ -8,24 +8,16 @@ import {
 } from "@lucide/vue";
 import { isIpcError } from "../domain/ipc";
 import type { FileEntry } from "../domain/files";
-import type { AgentSession } from "../domain/agent";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { CheckoutUiState } from "../domain/ui-state";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
-import type { ActiveReviewNotes } from "../presentation/review-notes";
 import { useDiffStats } from "../presentation/diff-stats";
-import { useToasts } from "../presentation/toasts";
 import { listCheckoutFiles } from "../lib/ipc";
 
 const props = defineProps<{
   checkout: Checkout | null;
   repo?: Repo | null;
   gitSnapshot: ActiveGitSnapshot;
-  /** The review round moves to the diff view (phase 6). App.vue still binds these three, so
-   *  they stay declared and unused until it does. */
-  review?: Pick<ActiveReviewNotes, "notes" | "rounds" | "markSent">;
-  agentSessions?: AgentSession[];
-  agentTargetId?: string | null;
   savedState?: CheckoutUiState | null;
 }>();
 
@@ -34,9 +26,6 @@ const emit = defineEmits<{
   openChange: [value: { checkoutId: string; path: string }];
   /** Every changed file in one diff. App.vue binds it in phase 4, when main becomes a diff. */
   openAllChanges: [value: { checkoutId: string }];
-  /** Dead until phase 6 takes the send: kept declared so App.vue stays bound to it. */
-  sendReview: [ids: string[], queue: boolean];
-  selectAgentTarget: [sessionId: string];
   updateUiState: [
     value: Pick<
       CheckoutUiState,
@@ -76,12 +65,13 @@ const diffStats = useDiffStats(
   computed(() => (props.repo?.kind === "git" ? (props.checkout?.id ?? null) : null)),
 );
 
-const { push: pushToast } = useToasts();
-
 const directories = ref<Record<string, FileEntry[]>>({});
 const directoryStates = ref<Record<string, DirectoryState>>({});
 const expanded = ref<string[]>([]);
 const rootState = ref<"idle" | "loading" | "ready" | "error" | "missing">("idle");
+/** The last reason the tree's root could not be listed. It has no row of its own, so the
+ *  panel itself is where the reason stays: a toast expires and leaves the tree unexplained. */
+const rootError = ref("");
 /** The last reason a folder could not be listed, which its own row in the tree shows (E.2). */
 const folderError = ref("");
 const selectedPaths = ref<Record<string, string | null>>({});
@@ -172,9 +162,15 @@ async function loadDirectory(checkoutId: string, path: string, requestGeneration
     if (requestGeneration !== generation || hasCachedEntries) return;
     const message = errorText(error);
     if (path === ".") {
-      // The root has no row of its own to hold the reason, so the toast is where it goes (A.6).
-      rootState.value = isIpcError(error) && error.code === "folder_missing" ? "missing" : "error";
-      if (rootState.value === "error") pushToast(message);
+      // The root has no row of its own to hold the reason, so the panel says it: a toast
+      // expires and would leave the tree empty with nothing to explain it.
+      if (isIpcError(error) && error.code === "folder_missing") {
+        rootState.value = "missing";
+        rootError.value = "";
+      } else {
+        rootState.value = "error";
+        rootError.value = message;
+      }
     } else {
       // A folder keeps it on its own row, where it lasts as long as the row does.
       directoryStates.value = { ...directoryStates.value, [path]: "error" };
@@ -200,6 +196,7 @@ watch(
     if (checkoutId && saved?.selectedChangePath)
       selectedChangedPaths.value = { ...selectedChangedPaths.value, [checkoutId]: saved.selectedChangePath };
     folderError.value = "";
+    rootError.value = "";
     if (!checkoutId) {
       rootState.value = "idle";
       return;
@@ -538,6 +535,11 @@ const matchedSearchEntries = searchEntries.value
       <div ref="treeViewport" class="details-scroll" aria-label="Checkout files" @scroll="onTreeScroll">
         <p v-if="rootState === 'idle'" class="pane-state">Open a checkout to browse files.</p>
         <p v-else-if="rootState === 'loading'" role="status" class="pane-state">Loading files…</p>
+        <!-- The root's own failure is the panel's whole content, so it is drawn here instead of
+             expiring in a toast over an empty tree. -->
+        <p v-else-if="rootState === 'error'" role="alert" class="pane-state">
+          {{ rootError || "Could not list this checkout." }}
+        </p>
         <p v-else-if="rootState === 'missing'" role="status" class="pane-state">Checkout is missing.</p>
         <p
           v-else-if="directories['.']?.length === 0 && directoryStates['.'] !== 'truncated'"

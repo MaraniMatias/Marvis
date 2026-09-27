@@ -47,22 +47,28 @@ function canResolve(note: ReviewNote): boolean {
 
 <template>
   <ul class="m-0 list-none space-y-1 p-1">
+    <!-- The palette has no warning hue, so a note reads the diff's own: red is a line that
+         changed or is gone, green is a note the agent has settled, and everything else that is
+         merely a fact is text. The card itself only carries the border, because the chip and the
+         line below it already say which state the note is in. -->
     <li
       v-for="note in props.notes"
       :key="note.id"
       class="rounded-sm border px-2 py-1 text-xs"
-      :class="note.outdated ? 'border-amber-500/50 bg-amber-500/10' : 'border-amber-500/25 bg-amber-500/5'"
+      :class="
+        note.outdated ? 'border-(--marvis-border) bg-(--marvis-bg-1)' : 'border-(--marvis-border) bg-(--marvis-bg-0)'
+      "
     >
-      <p class="flex items-center gap-2 font-mono text-[10px] text-zinc-500">
+      <p class="flex items-center gap-2 font-mono text-[10px] text-(--marvis-text-faint)">
         <span>{{ note.side }}:{{ reviewLineRange(note) }}</span>
-        <span v-if="note.status === 'sent'" class="text-sky-400">sent</span>
-        <span v-if="note.status === 'resolved'" class="text-emerald-400">resolved</span>
-        <span v-if="note.outdated" class="text-amber-400">outdated</span>
+        <span v-if="note.status === 'sent'" class="text-(--marvis-text-secondary)">sent</span>
+        <span v-if="note.status === 'resolved'" class="text-(--marvis-green)">resolved</span>
+        <span v-if="note.outdated" class="text-(--marvis-red)">outdated</span>
         <span class="ml-auto flex gap-2">
           <button
             v-if="note.status === 'sent' && !note.outdated && canResolve(note)"
             type="button"
-            class="text-emerald-300 hover:text-emerald-100"
+            class="text-(--marvis-green) hover:text-(--marvis-text)"
             :aria-label="`Mark note on line ${note.lineStart} as resolved`"
             @click="$emit('resolveNote', note.id)"
           >
@@ -71,7 +77,7 @@ function canResolve(note: ReviewNote): boolean {
           <button
             v-if="note.outdated"
             type="button"
-            class="text-amber-300 hover:text-amber-100"
+            class="text-(--marvis-text-secondary) hover:text-(--marvis-text)"
             :aria-label="`Accept note on line ${note.lineStart} even though the line changed`"
             @click="$emit('clearOutdated', note.id)"
           >
@@ -79,7 +85,7 @@ function canResolve(note: ReviewNote): boolean {
           </button>
           <button
             type="button"
-            class="text-zinc-400 hover:text-zinc-100"
+            class="text-(--marvis-text-secondary) hover:text-(--marvis-text)"
             :aria-label="`Edit note on line ${note.lineStart}`"
             @click="startEditing(note)"
           >
@@ -87,7 +93,7 @@ function canResolve(note: ReviewNote): boolean {
           </button>
           <button
             type="button"
-            class="text-zinc-400 hover:text-red-300"
+            class="text-(--marvis-text-secondary) hover:text-(--marvis-red)"
             :aria-label="`Delete note on line ${note.lineStart}`"
             @click="$emit('deleteNote', note.id)"
           >
@@ -100,24 +106,30 @@ function canResolve(note: ReviewNote): boolean {
           v-model="draft"
           rows="2"
           aria-label="Review note"
-          class="mt-1 w-full resize-y rounded-sm border border-white/10 bg-black/30 px-2 py-1 font-sans text-xs text-zinc-100 outline-none"
+          class="mt-1 w-full resize-y rounded-sm border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none"
           @keydown.esc.stop.prevent="editingId = null"
         />
         <div class="mt-1 flex gap-2">
-          <button type="submit" class="rounded-sm bg-sky-500/20 px-2 py-0.5 text-[11px] text-sky-200">Save</button>
-          <button type="button" class="rounded-sm px-2 py-0.5 text-[11px] text-zinc-500" @click="editingId = null">
+          <button type="submit" class="rounded-sm bg-(--marvis-border) px-2 py-0.5 text-[11px] text-(--marvis-text)">
+            Save
+          </button>
+          <button
+            type="button"
+            class="rounded-sm px-2 py-0.5 text-[11px] text-(--marvis-text-faint) hover:text-(--marvis-text)"
+            @click="editingId = null"
+          >
             Cancel
           </button>
         </div>
       </form>
-      <p v-else class="mt-0.5 whitespace-pre-wrap text-zinc-200">{{ note.content }}</p>
-      <p v-if="note.outdated" class="mt-0.5 text-[10px] text-amber-400/90">
+      <p v-else class="mt-0.5 whitespace-pre-wrap text-(--marvis-text)">{{ note.content }}</p>
+      <p v-if="note.outdated" class="mt-0.5 text-[10px] text-(--marvis-red)">
         The line this note points at changed. It is kept out of the review sent to the agent.
       </p>
       <p
         v-else-if="note.status === 'sent' && verdictFor(note)"
         class="mt-0.5 text-[10px]"
-        :class="verdictFor(note)!.resolvable ? 'text-zinc-500' : 'text-zinc-600'"
+        :class="verdictFor(note)!.resolvable ? 'text-(--marvis-text-dim)' : 'text-(--marvis-text-faint)'"
       >
         {{ verdictFor(note)!.message }}
       </p>
