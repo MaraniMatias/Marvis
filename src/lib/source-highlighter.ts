@@ -3,6 +3,7 @@ import { createHighlighterCore } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 import type typescript from "shiki/langs/typescript.mjs";
 import githubDarkDefault from "shiki/themes/github-dark-default.mjs";
+import { LANGUAGE_BY_EXTENSION } from "./source-languages";
 
 type SourceLanguage = (typeof typescript)[number];
 type LanguageLoader = () => Promise<SourceLanguage[]>;
@@ -174,132 +175,27 @@ const languageDefinitions = {
   yaml: { name: "yaml", load: () => import("shiki/langs/yaml.mjs").then(({ default: language }) => language) },
 } satisfies Record<string, LanguageDefinition>;
 
-const languageByExtension = new Map<string, LanguageDefinition>([
-  ["c", languageDefinitions.c],
-  ["cs", languageDefinitions.csharp],
-  ["css", languageDefinitions.css],
-  ["go", languageDefinitions.go],
-  ["gql", languageDefinitions.graphql],
-  ["graphql", languageDefinitions.graphql],
-  ["h", languageDefinitions.c],
-  ["htm", languageDefinitions.html],
-  ["html", languageDefinitions.html],
-  ["java", languageDefinitions.java],
-  ["js", languageDefinitions.javascript],
-  ["jsx", languageDefinitions.javascript],
-  ["json", languageDefinitions.json],
-  ["jsonc", languageDefinitions.jsonc],
-  ["kt", languageDefinitions.kotlin],
-  ["kts", languageDefinitions.kotlin],
-  ["adb", languageDefinitions.ada],
-  ["adoc", languageDefinitions.asciidoc],
-  ["asciidoc", languageDefinitions.asciidoc],
-  ["bash", languageDefinitions.shellscript],
-  ["bib", languageDefinitions.bibtex],
-  ["c", languageDefinitions.c],
-  ["cc", languageDefinitions.cpp],
-  ["cjs", languageDefinitions.javascript],
-  ["clj", languageDefinitions.clojure],
-  ["cljs", languageDefinitions.clojure],
-  ["cmake", languageDefinitions.cmake],
-  ["cpp", languageDefinitions.cpp],
-  ["cs", languageDefinitions.csharp],
-  ["css", languageDefinitions.css],
-  ["csv", languageDefinitions.csv],
-  ["cxx", languageDefinitions.cpp],
-  ["dart", languageDefinitions.dart],
-  ["diff", languageDefinitions.diff],
-  ["dockerfile", languageDefinitions.docker],
-  ["edn", languageDefinitions.clojure],
-  ["erl", languageDefinitions.erlang],
-  ["ex", languageDefinitions.elixir],
-  ["exs", languageDefinitions.elixir],
-  ["fish", languageDefinitions.fish],
-  ["fs", languageDefinitions.fsharp],
-  ["fsx", languageDefinitions.fsharp],
-  ["gd", languageDefinitions.gdscript],
-  ["glsl", languageDefinitions.glsl],
-  ["gql", languageDefinitions.graphql],
-  ["graphql", languageDefinitions.graphql],
-  ["h", languageDefinitions.c],
-  ["hh", languageDefinitions.cpp],
-  ["hpp", languageDefinitions.cpp],
-  ["htm", languageDefinitions.html],
-  ["html", languageDefinitions.html],
-  ["hxx", languageDefinitions.cpp],
-  ["ini", languageDefinitions.ini],
-  ["java", languageDefinitions.java],
-  ["jl", languageDefinitions.julia],
-  ["js", languageDefinitions.javascript],
-  ["json", languageDefinitions.json],
-  ["json5", languageDefinitions.json5],
-  ["jsonc", languageDefinitions.jsonc],
-  ["jsonl", languageDefinitions.jsonl],
-  ["jsx", languageDefinitions.javascript],
-  ["kt", languageDefinitions.kotlin],
-  ["kts", languageDefinitions.kotlin],
-  ["less", languageDefinitions.less],
-  ["lisp", languageDefinitions.commonLisp],
-  ["log", languageDefinitions.log],
-  ["lua", languageDefinitions.lua],
-  ["m", languageDefinitions.objectiveC],
-  ["make", languageDefinitions.make],
-  ["makefile", languageDefinitions.make],
-  ["md", languageDefinitions.markdown],
-  ["mdown", languageDefinitions.markdown],
-  ["markdown", languageDefinitions.markdown],
-  ["mjs", languageDefinitions.javascript],
-  ["mk", languageDefinitions.make],
-  ["ml", languageDefinitions.ocaml],
-  ["mmd", languageDefinitions.mermaid],
-  ["mts", languageDefinitions.typescript],
-  ["nu", languageDefinitions.nushell],
-  ["objc", languageDefinitions.objectiveC],
-  ["patch", languageDefinitions.diff],
-  ["php", languageDefinitions.php],
-  ["pl", languageDefinitions.perl],
-  ["prisma", languageDefinitions.prisma],
-  ["proto", languageDefinitions.proto],
-  ["ps1", languageDefinitions.powershell],
-  ["py", languageDefinitions.python],
-  ["pyw", languageDefinitions.python],
-  ["r", languageDefinitions.r],
-  ["rb", languageDefinitions.ruby],
-  ["rs", languageDefinitions.rust],
-  ["sass", languageDefinitions.sass],
-  ["scala", languageDefinitions.scala],
-  ["scss", languageDefinitions.scss],
-  ["sh", languageDefinitions.shellscript],
-  ["sol", languageDefinitions.solidity],
-  ["sql", languageDefinitions.sql],
-  ["styl", languageDefinitions.stylus],
-  ["sv", languageDefinitions.systemVerilog],
-  ["svelte", languageDefinitions.svelte],
-  ["swift", languageDefinitions.swift],
-  ["tex", languageDefinitions.latex],
-  ["tf", languageDefinitions.terraform],
-  ["toml", languageDefinitions.toml],
-  ["ts", languageDefinitions.typescript],
-  ["tsx", languageDefinitions.tsx],
-  ["v", languageDefinitions.verilog],
-  ["vb", languageDefinitions.vb],
-  ["vhd", languageDefinitions.vhdl],
-  ["vhdl", languageDefinitions.vhdl],
-  ["vim", languageDefinitions.viml],
-  ["vue", languageDefinitions.vue],
-  ["wat", languageDefinitions.wasm],
-  ["wgsl", languageDefinitions.wgsl],
-  ["xml", languageDefinitions.xml],
-  ["yaml", languageDefinitions.yaml],
-  ["yml", languageDefinitions.yaml],
-  ["zig", languageDefinitions.zig],
-  ["zsh", languageDefinitions.shellscript],
-]);
+/**
+ * The two doors onto a grammar: the Shiki name, and the file extension that asks for it. A name
+ * that is in neither resolves to no highlighting, which is a plain file rather than an error.
+ */
+const languageByName = new Map<string, LanguageDefinition>(
+  Object.values(languageDefinitions).map((language) => [language.name, language as LanguageDefinition]),
+);
+
+const languageByExtension = new Map<string, LanguageDefinition>();
+for (const [extension, name] of LANGUAGE_BY_EXTENSION) {
+  const language = languageByName.get(name);
+  if (language) languageByExtension.set(extension, language);
+}
 
 const highlighters = new Map<string, ReturnType<typeof createHighlighterCore>>();
 const highlightedSourceCache = new Map<string, Promise<readonly string[]>>();
 const highlightedBlockCache = new Map<string, Promise<string | null>>();
 const MAX_CACHED_BLOCKS = 256;
+/** A source entry is a whole file rendered, and the toolbar makes re-reading one under another
+    grammar a normal thing to do, so this cache is where the eviction actually matters. */
+const MAX_CACHED_SOURCES = 32;
 
 const sanitizerOptions = {
   ALLOWED_TAGS: ["span"],
@@ -499,8 +395,8 @@ const fenceLanguageByAlias = new Map<string, LanguageDefinition>(
   Object.entries(fenceLanguageAliases).map(([alias, key]) => [alias, languageDefinitions[key]]),
 );
 
-function cacheKey(path: string, source: string): string {
-  return JSON.stringify([path, source]);
+function cacheKey(language: string, source: string): string {
+  return JSON.stringify([language, source]);
 }
 
 function languageForPath(path: string) {
@@ -512,6 +408,15 @@ function languageForPath(path: string) {
 export function languageForFenceInfo(info: string): LanguageDefinition | undefined {
   const name = info.trim().split(/\s+/, 1)[0]?.toLowerCase();
   return name ? fenceLanguageByAlias.get(name) : undefined;
+}
+
+/**
+ * The grammar a name asks for, or undefined when it names no known one. The name comes either from
+ * the file's extension or from the reader choosing one, so it is looked up in the allowlist and
+ * never turned into a module path: an unknown name is no highlighting, not a fallback guess.
+ */
+export function languageForName(name: string): LanguageDefinition | undefined {
+  return languageByName.get(name);
 }
 
 function highlighterFor(language: LanguageDefinition) {
@@ -526,10 +431,6 @@ function highlighterFor(language: LanguageDefinition) {
   );
   highlighters.set(language.name, request);
   return request;
-}
-
-export function canHighlightSourcePath(path: string): boolean {
-  return languageForPath(path) !== undefined;
 }
 
 /** Sanitizes one Shiki render down to nested spans carrying nothing but a class and a color. */
@@ -585,13 +486,22 @@ export function highlightCodeBlock(language: LanguageDefinition, code: string): 
   return request;
 }
 
-export function highlightSource(path: string, source: string): Promise<readonly string[] | null> {
-  const language = languageForPath(path);
+/**
+ * The highlighted lines of `source` read as `languageName` says to read it, or null when the name
+ * asks for no grammar. `PLAIN_TEXT` is such a name by construction, since Shiki ships no plaintext
+ * language, which is how a plain file has always rendered.
+ */
+export function highlightSourceAs(languageName: string, source: string): Promise<readonly string[] | null> {
+  const language = languageForName(languageName);
   if (!language) return Promise.resolve(null);
 
-  const key = cacheKey(path, source);
+  const key = cacheKey(language.name, source);
   const cached = highlightedSourceCache.get(key);
   if (cached) return cached;
+  if (highlightedSourceCache.size >= MAX_CACHED_SOURCES) {
+    const oldest = highlightedSourceCache.keys().next().value;
+    if (oldest !== undefined) highlightedSourceCache.delete(oldest);
+  }
 
   const request = highlighterFor(language)
     .then((instance) => instance.codeToHtml(source, { lang: language.name, theme: "github-dark-default" }))
@@ -603,4 +513,9 @@ export function highlightSource(path: string, source: string): Promise<readonly 
   highlightedSourceCache.set(key, request);
   void request.catch(() => highlightedSourceCache.delete(key));
   return request;
+}
+
+export function highlightSource(path: string, source: string): Promise<readonly string[] | null> {
+  const language = languageForPath(path);
+  return language ? highlightSourceAs(language.name, source) : Promise.resolve(null);
 }

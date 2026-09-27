@@ -3,9 +3,11 @@ import { describe, expect, it } from "vitest";
 import {
   highlightCodeBlock,
   highlightSource,
+  highlightSourceAs,
   languageForFenceInfo,
   sanitizeHighlightedHtml,
 } from "./source-highlighter";
+import { PLAIN_TEXT } from "./source-languages";
 
 describe("source highlighter", () => {
   it("highlights known source and reuses the path/content cache entry", async () => {
@@ -17,6 +19,42 @@ describe("source highlighter", () => {
     expect(lines).toHaveLength(2);
     expect(lines?.[0]).toContain('class="line"');
     expect(lines?.[0]).toContain("color:");
+  });
+
+  it("reads the same source as whichever grammar it is told to, and caches one per grammar", async () => {
+    const source = "answer = 42";
+    const python = highlightSourceAs("python", source);
+    expect(highlightSourceAs("python", source)).toBe(python);
+    const lines = await python;
+    expect(lines?.[0]).toContain('class="line"');
+
+    // The same text under another grammar is another render, which is the whole point of forcing
+    // one: a cache keyed by anything but the grammar would hand back the first render.
+    const shell = highlightSourceAs("shellscript", source);
+    expect(shell).not.toBe(python);
+    expect(await shell).not.toEqual(lines);
+  });
+
+  it("reads a grammar the reader chose over one the extension never gave", async () => {
+    // This is what the toolbar's forced grammar reaches: a `.txt` is plain on its own.
+    expect(await highlightSource("notes.txt", "answer = 42")).toBeNull();
+    expect(await highlightSourceAs("python", "answer = 42")).toHaveLength(1);
+  });
+
+  it("gives a name that asks for no grammar no highlighting, and no grammar a module path", async () => {
+    for (const name of [
+      "",
+      "not-a-language",
+      "../../etc/passwd",
+      "shiki/langs/typescript.mjs",
+      "javascript:alert(1)",
+      "<img src=x onerror=alert(1)>",
+    ]) {
+      expect(await highlightSourceAs(name, "answer = 42")).toBeNull();
+    }
+    // Shiki ships no plaintext language, so the name that means "do not highlight" is one the
+    // allowlist does not know, and the caller's own text is what stays on screen.
+    expect(await highlightSourceAs(PLAIN_TEXT, "answer = 42")).toBeNull();
   });
 
   it("keeps only sanitized Shiki line markup", () => {

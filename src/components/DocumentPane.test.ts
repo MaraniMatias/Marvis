@@ -1,5 +1,6 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
+import type { VueWrapper } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, reactive, ref } from "vue";
 import type { VNodeChild } from "vue";
@@ -43,6 +44,29 @@ vi.mock("../lib/ipc", () => ({
   loadTerminalLayout: mocks.loadTerminalLayout,
   saveTerminalLayout: mocks.saveTerminalLayout,
 }));
+
+vi.mock("reka-ui", async () => {
+  const { h: createElement } = await import("vue");
+  // The document toolbar's popover always renders here, so a grammar can be picked without
+  // driving the open state, the way App.test.ts stubs the titlebar's own popover. Plain options
+  // objects rather than defineComponent, which would be one more component in a file that already
+  // warns about them.
+  const passThrough = (name: string) => ({
+    name,
+    setup:
+      (
+        _props: unknown,
+        context: { attrs: Record<string, unknown>; slots: Record<string, (() => unknown) | undefined> },
+      ) =>
+      () =>
+        createElement("div", context.attrs, context.slots.default?.() as never),
+  });
+  return {
+    PopoverRoot: passThrough("PopoverRoot"),
+    PopoverTrigger: passThrough("PopoverTrigger"),
+    PopoverContent: passThrough("PopoverContent"),
+  };
+});
 
 vi.mock("@git-diff-view/vue", async () => {
   const { defineComponent: component, h: createElement } = await import("vue");
@@ -157,6 +181,23 @@ function documentPaneProps(
   gitSnapshot = snapshot(currentCheckout.id),
 ) {
   return { checkout: currentCheckout, path, mode, gitSnapshot };
+}
+
+/** The grammar rows, by the label each one shows. */
+function languageRowLabels(wrapper: VueWrapper): (string | undefined)[] {
+  return wrapper
+    .get('[role="listbox"]')
+    .findAll('[role="option"]')
+    .map((row) => row.findAll("span")[0]?.text());
+}
+
+async function pickLanguage(wrapper: VueWrapper, label: string) {
+  const row = wrapper
+    .get('[role="listbox"]')
+    .findAll('[role="option"]')
+    .find((option) => option.text().startsWith(label));
+  if (!row) throw new Error(`no row for ${label}`);
+  await row.trigger("click");
 }
 
 describe("DocumentPane", () => {
@@ -303,6 +344,86 @@ describe("DocumentPane", () => {
     expect(wrapper.find('[aria-label="Document mode"]').exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Wrap");
     expect(wrapper.emitted("updateMode")).toBeUndefined();
+    // A grammar can still be forced onto a file that has no modes, which is the whole point.
+    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("TypeScript");
+    wrapper.unmount();
+  });
+
+  it("puts the grammar control on the same row, before the mode Markdown has", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "docs/readme.md", content: "# Current file" });
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps("docs/readme.md", "view"),
+    });
+    await flushPromises();
+
+    const language = wrapper.get('[aria-label="Highlight language"]');
+    const mode = wrapper.get('[aria-label="Document mode"]');
+    // In Auto the button says what the extension already decided, and it is not a mode: a grammar
+    // applies to a non-Markdown file too, so it cannot live inside that group.
+    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Markdown");
+    expect(language.element.compareDocumentPosition(mode.element) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(mode.findAll("button").map((button) => button.text())).toEqual(["View", "Code"]);
+    wrapper.unmount();
+  });
+
+  it("forces a grammar onto a file whose extension says nothing about it", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "notes.txt", content: "def answer():\n    return 42" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("notes.txt") });
+    await flushPromises();
+
+    // Nothing is applied yet, and the toolbar says so instead of naming a grammar that is not on.
+    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Auto (sin resaltado)");
+    expect(wrapper.find(".shiki").exists()).toBe(false);
+
+    const search = wrapper.get('input[aria-label="Search highlight languages"]');
+    // A search reads the label, the grammar name, or the suffix a file wears.
+    await search.setValue("yml");
+    expect(languageRowLabels(wrapper)).toEqual(["Auto", "Texto plano", "YAML"]);
+
+    await search.setValue("pyt");
+    await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.down");
+    await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.down");
+    await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.enter");
+    await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(2));
+    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Python");
+    wrapper.unmount();
+  });
+
+  it("reads Auto as the extension says and can be put back to plain text", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const answer: number = 42;" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(1));
+
+    await pickLanguage(wrapper, "Texto plano");
+    await flushPromises();
+    expect(wrapper.find(".shiki").exists()).toBe(false);
+    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Texto plano");
+
+    await pickLanguage(wrapper, "Auto");
+    await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(1));
+    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("TypeScript");
+    wrapper.unmount();
+  });
+
+  it("carries the chosen grammar to the next file, and says when a search matches none", async () => {
+    mocks.readCheckoutFile.mockImplementation(async (_checkoutId: string, path: string) => ({
+      path,
+      content: "def answer():\n    return 42",
+    }));
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("notes.txt") });
+    await flushPromises();
+    await pickLanguage(wrapper, "Python");
+    await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(2));
+
+    await wrapper.get('input[aria-label="Search highlight languages"]').setValue("zzz");
+    // Auto and plain text are the ways back out, so a search never takes them away.
+    expect(languageRowLabels(wrapper)).toEqual(["Auto", "Texto plano"]);
+    expect(wrapper.get('[role="listbox"]').text()).toContain("No language matches");
+
+    await wrapper.setProps({ path: "src/app.ts" });
+    await flushPromises();
+    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Python");
+    await vi.waitFor(() => expect(wrapper.findAll(".shiki .line")).toHaveLength(2));
     wrapper.unmount();
   });
 

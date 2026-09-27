@@ -1,4 +1,7 @@
 <script setup lang="ts">
+/* eslint-disable vue/html-self-closing */
+import { Check as CheckIcon, ChevronDown as ChevronDownIcon } from "@lucide/vue";
+import { PopoverContent, PopoverRoot, PopoverTrigger } from "reka-ui";
 import { computed, nextTick, ref, watch } from "vue";
 import type { DocumentMode } from "../domain/main-document";
 import type { Checkout } from "../domain/workspace";
@@ -6,6 +9,14 @@ import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { useMarkdownPreview } from "../presentation/markdown-preview";
 import { isIpcError } from "../domain/ipc";
 import { readCheckoutFile } from "../lib/ipc";
+import type { SourceLanguageOption } from "../lib/source-languages";
+import {
+  PLAIN_TEXT,
+  SELECTABLE_LANGUAGES,
+  detectedLanguageName,
+  languageExtensions,
+  languageLabel,
+} from "../lib/source-languages";
 
 const props = withDefaults(
   defineProps<{
@@ -52,48 +63,78 @@ let requestGeneration = 0;
 let highlightGeneration = 0;
 let loadedIdentity: string | null = null;
 
-const highlightableSourceExtensions = new Set([
-  "c",
-  "cs",
-  "css",
-  "go",
-  "gql",
-  "graphql",
-  "h",
-  "htm",
-  "html",
-  "java",
-  "js",
-  "jsx",
-  "json",
-  "jsonc",
-  "kt",
-  "kts",
-  "less",
-  "md",
-  "mdown",
-  "markdown",
-  "php",
-  "py",
-  "pyw",
-  "rs",
-  "scss",
-  "sh",
-  "sql",
-  "swift",
-  "toml",
-  "ts",
-  "tsx",
-  "vue",
-  "xml",
-  "yaml",
-  "yml",
-  "zsh",
+/**
+ * The grammar the source is read as: what the reader chose, or what the file's extension asks for.
+ * The choice is one for the panel, not one per file — it follows the reader to the next file, and it
+ * dies with the window rather than travelling to the database.
+ */
+const languageOverride = ref<string | null>(null);
+const languageOpen = ref(false);
+const languageSearch = ref("");
+const languageQuery = computed(() => languageSearch.value.trim().toLowerCase());
+const detectedLanguage = computed(() => (props.path === null ? null : (detectedLanguageName(props.path) ?? null)));
+const effectiveLanguage = computed(() => languageOverride.value ?? detectedLanguage.value);
+
+// The button says what is happening now: in Auto that is the detected grammar, and a file whose
+// extension names none is worth saying out loud rather than showing a language that is not applied.
+const languageButtonLabel = computed(() => {
+  if (languageOverride.value !== null) {
+    return languageOverride.value === PLAIN_TEXT ? "Texto plano" : languageLabel(languageOverride.value);
+  }
+  return detectedLanguage.value === null ? "Auto (sin resaltado)" : languageLabel(detectedLanguage.value);
+});
+
+interface LanguageRow {
+  /** Null is Auto: the extension decides, and a file it says nothing about stays plain. */
+  name: string | null;
+  label: string;
+  hint: string;
+}
+
+/** A search reads the written name, the grammar's own name, or the suffix a file wears. */
+const matchingLanguages = computed<readonly SourceLanguageOption[]>(() => {
+  const query = languageQuery.value;
+  if (query === "") return SELECTABLE_LANGUAGES;
+  return SELECTABLE_LANGUAGES.filter(
+    (language) =>
+      language.label.toLowerCase().includes(query) ||
+      language.name.includes(query) ||
+      languageExtensions(language.name).some((extension) => extension.includes(query)),
+  );
+});
+
+const languageRows = computed<LanguageRow[]>(() => [
+  // Auto and plain text are the two ways back out of a forced grammar, so the search never takes
+  // them away: it filters the grammars, not the ways out.
+  {
+    name: null,
+    label: "Auto",
+    hint: detectedLanguage.value === null ? "sin resaltado" : languageLabel(detectedLanguage.value),
+  },
+  { name: PLAIN_TEXT, label: "Texto plano", hint: "" },
+  ...matchingLanguages.value.map((language) => ({ name: language.name, label: language.label, hint: "" })),
 ]);
 
-function canHighlightSource(path: string): boolean {
-  const extension = path.split(".").pop()?.toLowerCase();
-  return extension !== undefined && highlightableSourceExtensions.has(extension);
+const languageIndex = ref(0);
+const activeLanguageRow = computed(() => Math.min(languageIndex.value, Math.max(languageRows.value.length - 1, 0)));
+
+watch(languageQuery, () => {
+  languageIndex.value = 0;
+});
+
+function moveLanguageRow(step: number) {
+  const total = languageRows.value.length;
+  if (total > 0) languageIndex.value = (languageIndex.value + step + total) % total;
+}
+
+function chooseLanguage(row: LanguageRow) {
+  languageOverride.value = row.name;
+  languageOpen.value = false;
+}
+
+function chooseActiveLanguage() {
+  const row = languageRows.value[activeLanguageRow.value];
+  if (row) chooseLanguage(row);
 }
 
 function invalidateHighlight(clear = true) {
@@ -108,14 +149,15 @@ function invalidateHighlight(clear = true) {
 function startHighlight(fileIdentity: string, source: string) {
   const path = props.path;
   if (path === null) return;
+  const language = effectiveLanguage.value;
   const request = ++highlightGeneration;
   highlightedLines.value = null;
   highlightedSource.value = null;
-  highlighting.value = canHighlightSource(path);
-  if (!highlighting.value) return;
+  highlighting.value = language !== null;
+  if (language === null) return;
 
   void import("../lib/source-highlighter")
-    .then(({ highlightSource }) => highlightSource(path, source))
+    .then(({ highlightSourceAs }) => highlightSourceAs(language, source))
     .then((lines) => {
       if (
         request !== highlightGeneration ||
@@ -305,6 +347,14 @@ watch(
   },
 );
 
+// Choosing a grammar is the one thing about a reading that changes without the file or the mode
+// changing, so the source is read again. The Markdown preview owns its own fences and ignores this.
+watch(effectiveLanguage, () => {
+  if (contentState.value === "ready" && !(props.mode === "view" && isMarkdown.value)) {
+    startHighlight(identity.value!, content.value);
+  }
+});
+
 function onFileScroll(event: Event) {
   const viewport = event.currentTarget as HTMLElement;
   readingPosition.value = { top: viewport.scrollTop, left: viewport.scrollLeft };
@@ -343,28 +393,84 @@ function onMarkdownLink(event: MouseEvent) {
       <span class="min-w-0 truncate text-[11px] text-(--marvis-text-dim)" :title="path ?? undefined">{{
         path ?? ""
       }}</span>
-      <div
-        v-if="isMarkdown"
-        role="group"
-        aria-label="Document mode"
-        class="document-mode-control flex shrink-0 items-center gap-0.5"
-      >
-        <button
-          type="button"
-          :aria-pressed="mode === 'view'"
-          class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
-          @click="$emit('updateMode', 'view')"
+      <!-- Both controls sit on the same row, at the same height, on the side the empty path text
+           pushes them to. The mode group is Markdown's alone, so the language one is its sibling
+           rather than another segment inside it. -->
+      <div class="flex shrink-0 items-center gap-1.5">
+        <!-- The pill is a plain div and not the PopoverRoot: reka's PopperRoot renders only its
+             slot with inheritAttrs off, so a label and a surface set on it are dropped. -->
+        <div role="group" aria-label="Highlight language" class="document-mode-control flex shrink-0 items-center">
+          <PopoverRoot v-model:open="languageOpen">
+            <PopoverTrigger
+              data-testid="language-trigger"
+              :title="`Resaltar como ${languageButtonLabel}. Solo afecta la vista Code.`"
+              class="document-mode-button flex items-center gap-1 rounded-sm px-2 py-1 text-[11px]"
+            >
+              {{ languageButtonLabel }}
+              <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
+            </PopoverTrigger>
+            <PopoverContent
+              side="bottom"
+              align="end"
+              :side-offset="4"
+              class="surface-popover flex w-56 flex-col gap-1 rounded p-1 text-[11px] text-(--marvis-text)"
+            >
+              <input
+                v-model="languageSearch"
+                type="search"
+                aria-label="Search highlight languages"
+                placeholder="Buscar…"
+                class="window-search min-w-0 appearance-none bg-transparent p-0 text-(--marvis-text-secondary) placeholder:text-(--marvis-text-faint)"
+                @keydown.down.prevent="moveLanguageRow(1)"
+                @keydown.up.prevent="moveLanguageRow(-1)"
+                @keydown.enter.prevent="chooseActiveLanguage"
+              />
+              <div role="listbox" aria-label="Grammar" class="flex max-h-60 flex-col overflow-auto">
+                <button
+                  v-for="(row, index) in languageRows"
+                  :key="row.name ?? 'auto'"
+                  type="button"
+                  role="option"
+                  :aria-selected="row.name === languageOverride"
+                  :title="row.label"
+                  class="flex items-center gap-1.5 rounded-sm px-2 py-1 text-left hover:bg-(--marvis-border)"
+                  :class="index === activeLanguageRow ? 'bg-(--marvis-border)' : ''"
+                  @click="chooseLanguage(row)"
+                >
+                  <span class="min-w-0 flex-1 truncate">{{ row.label }}</span>
+                  <span v-if="row.hint" class="shrink-0 text-(--marvis-text-faint)">{{ row.hint }}</span>
+                  <CheckIcon v-if="row.name === languageOverride" class="icon-xs shrink-0" aria-hidden="true" />
+                </button>
+                <p v-if="!matchingLanguages.length" class="px-2 py-1 text-(--marvis-text-faint)">
+                  No language matches "{{ languageSearch }}".
+                </p>
+              </div>
+            </PopoverContent>
+          </PopoverRoot>
+        </div>
+        <div
+          v-if="isMarkdown"
+          role="group"
+          aria-label="Document mode"
+          class="document-mode-control flex shrink-0 items-center gap-0.5"
         >
-          View
-        </button>
-        <button
-          type="button"
-          :aria-pressed="mode === 'code'"
-          class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
-          @click="$emit('updateMode', 'code')"
-        >
-          Code
-        </button>
+          <button
+            type="button"
+            :aria-pressed="mode === 'view'"
+            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
+            @click="$emit('updateMode', 'view')"
+          >
+            View
+          </button>
+          <button
+            type="button"
+            :aria-pressed="mode === 'code'"
+            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
+            @click="$emit('updateMode', 'code')"
+          >
+            Code
+          </button>
+        </div>
       </div>
     </header>
     <section ref="fileViewport" class="min-h-0 flex-1 overflow-auto" aria-label="File contents" @scroll="onFileScroll">
