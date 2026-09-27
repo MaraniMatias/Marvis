@@ -47,10 +47,14 @@ body {
     color 120ms ease;
 }
 
+/* The field shows focus by lifting its own surface. The global ring is not wanted here: the
+   input is a transparent child of a padded field, so it would draw a bright rectangle inside
+   the field instead of around it. */
 .window-search:hover,
 .window-search:focus-visible {
   background: var(--marvis-border);
   color: var(--marvis-text);
+  outline: none;
 }
 
 .window-breadcrumb {

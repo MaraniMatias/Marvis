@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
-import { FolderPlus as FolderPlusIcon, Plus as PlusIcon } from "@lucide/vue";
+import { Plus as PlusIcon } from "@lucide/vue";
 import type { Checkout, Session, TerminalLaunchType, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import {
   addSessionToLayout,
@@ -360,11 +360,11 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
             class="mt-4"
             @click="createTerminalSession('shell')"
           >
-            <PlusIcon class="icon-xxs" aria-hidden="true" />
+            <PlusIcon class="size-3.5 shrink-0" aria-hidden="true" />
             New terminal
           </Button>
           <Button v-else-if="!checkout" class="mt-4" :disabled="isOpening" @click="$emit('openFolder')">
-            <FolderPlusIcon class="icon-xxs" aria-hidden="true" />
+            <PlusIcon class="size-3.5 shrink-0" aria-hidden="true" />
             {{ isOpening ? "Opening…" : "Open directory" }}
           </Button>
           <span v-else-if="isStarting" class="mt-3 block text-xs text-(--marvis-text-faint)" role="status">

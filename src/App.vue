@@ -640,7 +640,7 @@ function reportWarning(message: string) {
     class="app-shell relative flex h-full min-w-[900px] flex-col"
     :style="{ '--inspector-width': `${appLayout.inspectorWidth}px` }"
   >
-    <header class="window-header flex h-12 shrink-0 items-center gap-4 border-b pl-[78px] pr-4">
+    <header class="window-header flex h-8 shrink-0 items-center gap-4 border-b pl-[78px] pr-4">
       <!-- The mockup's field is icon + placeholder on one flat surface, not a bordered box. -->
       <div class="flex w-[min(300px,34vw)] min-w-[220px] shrink-0 items-center gap-2 bg-(--marvis-bg-2) px-2.5 py-1.5">
         <SearchIcon class="icon-sm shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
@@ -650,7 +650,7 @@ function reportWarning(message: string) {
           data-testid="search-field"
           aria-label="Search files and commands"
           placeholder="Search..."
-          class="window-search min-w-0 flex-1 appearance-none bg-transparent p-0 text-xs text-(--marvis-text-secondary) outline-none placeholder:text-(--marvis-text-faint)"
+          class="window-search min-w-0 flex-1 appearance-none bg-transparent p-0 text-xs text-(--marvis-text-secondary) placeholder:text-(--marvis-text-faint)"
           @keydown.esc="blurSearchField"
         />
       </div>
