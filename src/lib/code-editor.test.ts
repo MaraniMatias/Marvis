@@ -1,19 +1,42 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from "vitest";
-import { defaultHighlightStyle, syntaxTree } from "@codemirror/language";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { defaultHighlightStyle, forceParsing, syntaxTree } from "@codemirror/language";
 import { redo, undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
 import { createCodeEditor } from "./code-editor";
 
+const views = new Set<EditorView>();
+const hosts = new Set<HTMLElement>();
+let initialStyles = new Set<HTMLStyleElement>();
+
+beforeEach(() => {
+  initialStyles = new Set(document.querySelectorAll("style"));
+});
+
+afterEach(() => {
+  for (const view of views) view.destroy();
+  views.clear();
+  for (const host of hosts) host.remove();
+  hosts.clear();
+  for (const style of document.querySelectorAll("style")) {
+    if (!initialStyles.has(style)) style.remove();
+  }
+});
+
 function mount(language: string, content: string): EditorView {
-  return createCodeEditor({
-    parent: document.createElement("div"),
+  const host = document.createElement("div");
+  hosts.add(host);
+  document.body.appendChild(host);
+  const view = createCodeEditor({
+    parent: host,
     content,
     language,
     readingPosition: { top: 0, left: 0 },
     onChange: () => {},
     onScroll: () => {},
   });
+  views.add(view);
+  return view;
 }
 
 /**
@@ -76,15 +99,11 @@ describe("code editor", () => {
     expect(tokens.get("!")).toEqual(["keyword"]);
     expect(tokens.get("*")).toEqual(["operator"]);
     expect([...tokens.values()].flat().some((name) => name?.includes("definition"))).toBe(false);
-
-    view.destroy();
   });
 
   it("does not read an escaped hash as a comment, since git only honours one at the line start", () => {
     const view = mount("gitignore", "\\#not-a-comment");
     expect(tokensByLine(view).get("\\#not-a-comment")).toBeUndefined();
-
-    view.destroy();
   });
 
   it("reads the metadata a Markdown document opens with as the YAML it is", () => {
@@ -92,6 +111,7 @@ describe("code editor", () => {
       "markdown",
       ["---", "name: tamis", 'color: "#F2B84B"', "# a note", "---", "", "# Tamis", "", "Body."].join("\n"),
     );
+    expect(forceParsing(view, view.state.doc.length)).toBe(true);
 
     // A key and its value are YAML, so they take the colors YAML gives them rather than the flat
     // text the Markdown grammar would leave the block as. The comment is YAML's too.
@@ -100,20 +120,17 @@ describe("code editor", () => {
 
     // The document behind the block is still read as Markdown: a heading is still a heading.
     expect(nodeNames(view)).toContain("ATXHeading1");
-
-    view.destroy();
   });
 
   it("leaves a document that only opens with a rule alone", () => {
     // A rule with nothing to close it is not metadata, so nothing in it is read as YAML: the words
     // stay the flat text the Markdown grammar leaves them, and the rule is a rule.
     const view = mount("markdown", "---\nname: thing\n\n# Heading");
+    expect(forceParsing(view, view.state.doc.length)).toBe(true);
 
     expect(colorPaintedOn(view, "name")).toBeUndefined();
     expect(nodeNames(view)).toContain("HorizontalRule");
     expect(nodeNames(view)).toContain("ATXHeading1");
-
-    view.destroy();
   });
 
   it("paints tokens in the dark palette the read-only preview already uses", () => {
@@ -126,8 +143,6 @@ describe("code editor", () => {
     expect(colorPaintedOn(view, "number")).toBe("#7ee787");
     expect(colorPaintedOn(view, "42")).toBe("#79c0ff");
     expect(colorPaintedOn(view, "// note")).toBe("#8b949e");
-
-    view.destroy();
   });
 
   it("paints no token in the light palette, which is the one it no longer carries", () => {
@@ -153,7 +168,6 @@ describe("code editor", () => {
         .filter((color): color is string => color !== undefined && light.has(color.toLowerCase()));
 
       expect({ language, fromLightPalette }).toEqual({ language, fromLightPalette: [] });
-      view.destroy();
     }
   });
 
@@ -170,7 +184,5 @@ describe("code editor", () => {
     expect(view.state.doc.toString()).toBe("const answer = 1;");
     expect(redo(view)).toBe(true);
     expect(view.state.doc.toString()).toBe("const answer = 1;// typed");
-
-    view.destroy();
   });
 });
