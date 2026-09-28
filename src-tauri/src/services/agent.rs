@@ -492,18 +492,30 @@ const PORT_RANGE_LEN: u16 = 512;
 /// Reserves a port by binding it, then releases it for the child. A collision is retried across
 /// the whole window; giving up is better than serving on someone else's port.
 fn free_port() -> Result<u16, BridgeError> {
-    for attempt in 0..PORT_RANGE_LEN {
-        // The counter moves every call so two bridges started at once do not both aim at the
-        // first port, and the attempt walks the window from wherever that left off.
-        let offset = NEXT_PORT_ATTEMPT.fetch_add(1, Ordering::Relaxed) as u16;
-        let candidate = PORT_RANGE_START.wrapping_add(offset).wrapping_add(attempt);
-        if TcpListener::bind(("127.0.0.1", candidate)).is_ok() {
-            return Ok(candidate);
-        }
-    }
-    Err(BridgeError::Unavailable(
-        "could not find a free port for the agent server".into(),
-    ))
+    first_available_port(
+        port_candidates(NEXT_PORT_ATTEMPT.fetch_add(1, Ordering::Relaxed)),
+        |candidate| TcpListener::bind(("127.0.0.1", candidate)).is_ok(),
+    )
+    .ok_or_else(|| {
+        BridgeError::Unavailable("could not find a free port for the agent server".into())
+    })
+}
+
+fn port_candidates(start_offset: u64) -> impl Iterator<Item = u16> {
+    let range_len = u64::from(PORT_RANGE_LEN);
+    let start_offset = start_offset % range_len;
+    (0..PORT_RANGE_LEN).map(move |attempt| {
+        PORT_RANGE_START + ((start_offset + u64::from(attempt)) % range_len) as u16
+    })
+}
+
+fn first_available_port(
+    candidates: impl IntoIterator<Item = u16>,
+    mut is_available: impl FnMut(u16) -> bool,
+) -> Option<u16> {
+    candidates
+        .into_iter()
+        .find(|candidate| is_available(*candidate))
 }
 
 /// Reads the password the child prints. The port is the one we asked for, and
@@ -803,9 +815,8 @@ pub fn map_error(error: BridgeError) -> IpcError {
 #[cfg(test)]
 mod tests {
     use std::{
-        net::TcpListener,
         path::{Path, PathBuf},
-        sync::{atomic::Ordering, Arc, Mutex},
+        sync::{Arc, Mutex},
         thread::sleep,
         time::{Duration, Instant},
     };
@@ -816,9 +827,9 @@ mod tests {
     };
 
     use super::{
-        agent_program, basic_credentials, free_port, same_directory, validate_session_id,
-        AgentEvent, AgentService, BridgeError, MAX_PROMPT_BYTES, NEXT_PORT_ATTEMPT, PORT_RANGE_LEN,
-        PORT_RANGE_START,
+        agent_program, basic_credentials, first_available_port, port_candidates, same_directory,
+        validate_session_id, AgentEvent, AgentService, BridgeError, MAX_PROMPT_BYTES,
+        PORT_RANGE_LEN, PORT_RANGE_START,
     };
 
     #[test]
@@ -868,45 +879,54 @@ mod tests {
 
     #[test]
     fn a_port_range_full_of_leftovers_still_leaves_room_to_start() {
-        // Every bridge killed with its parent leaves the port it was given taken by a process
-        // nobody manages. Filling the front of the window must not be what stops the next one.
-        //
-        // Which ports that is cannot be assumed. The window is the range OpenCode itself listens
-        // in, so on a machine already running the agent the front of it belongs to processes this
-        // test did not start, and binding a fixed run would die on `AddrInUse` without ever
-        // reaching the search. Take the first ports of the window that are still free, and step
-        // over the ones that are not.
         const HELD: u16 = 24;
-        let mut held: Vec<TcpListener> = Vec::new();
-        let mut ports: Vec<u16> = Vec::new();
-        for port in PORT_RANGE_START..PORT_RANGE_START + PORT_RANGE_LEN {
-            if let Ok(listener) = TcpListener::bind(("127.0.0.1", port)) {
-                held.push(listener);
-                ports.push(port);
-            }
-            if ports.len() == HELD as usize {
-                break;
-            }
-        }
+        let end = PORT_RANGE_START + PORT_RANGE_LEN;
+        // u64::MAX normalizes to the last slot, so this sequence wraps immediately and
+        // also verifies that offset handling cannot overflow.
+        let candidates = port_candidates(u64::MAX).collect::<Vec<_>>();
+        assert_eq!(candidates.len(), PORT_RANGE_LEN as usize);
+        assert_eq!(candidates[0], end - 1);
+        assert_eq!(candidates[1], PORT_RANGE_START);
+        let mut sorted = candidates.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (PORT_RANGE_START..end).collect::<Vec<_>>());
+
+        let occupied = &candidates[..HELD as usize];
+        let mut tried = Vec::new();
+        let found = first_available_port(candidates.iter().copied(), |candidate| {
+            tried.push(candidate);
+            !occupied.contains(&candidate)
+        })
+        .expect("a partly occupied window is enough to start");
+
+        assert_eq!(found, candidates[HELD as usize]);
+        assert_eq!(tried, candidates[..=HELD as usize]);
+
+        let mut tried = Vec::new();
+        let last_port = *candidates.last().expect("the port window is non-empty");
         assert_eq!(
-            ports.len(),
-            HELD as usize,
-            "the window is too occupied to fill"
+            first_available_port(candidates.iter().copied(), |candidate| {
+                tried.push(candidate);
+                candidate == last_port
+            }),
+            Some(last_port),
+            "the final candidate must still be reachable"
         );
+        assert_eq!(tried, candidates);
 
-        // The search starts from wherever the counter was last left, so the counter has to be
-        // pinned to the front for the run above to be the one it meets: pointed at the open end of
-        // the window instead, the search would walk into free space and prove nothing. Nothing
-        // else in this suite allocates a port, so no other test can move it out from under us.
-        NEXT_PORT_ATTEMPT.store(0, Ordering::Relaxed);
-
-        let found = free_port().expect("a partly filled window is enough to wedge");
-        // Every port below the one it hands back is either already somebody's or one the run
-        // holds, so coming back at or under the top of the run means it never climbed over it.
-        assert!(
-            found > *ports.last().expect("the run is not empty"),
-            "handed back {found}, which the run should have covered: {ports:?}"
+        let mut tried = Vec::new();
+        assert_eq!(
+            first_available_port(candidates.iter().copied(), |candidate| {
+                tried.push(candidate);
+                false
+            }),
+            None,
+            "a fully occupied window must be exhausted"
         );
+        assert_eq!(tried, candidates);
+        assert!(tried
+            .iter()
+            .all(|candidate| { *candidate >= PORT_RANGE_START && *candidate < end }));
     }
 
     #[test]
