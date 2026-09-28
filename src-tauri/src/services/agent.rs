@@ -13,7 +13,7 @@ use std::{
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread::sleep,
     time::{Duration, Instant},
@@ -34,6 +34,9 @@ pub use crate::domain::agent::AgentEvent;
 static NEXT_PORT_ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
 const SERVER_BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+// `stopAgent` is awaited by the UI; keep startup-cancellation latency short while the
+// underlying launcher remains non-interruptible.
+const STARTUP_STOP_WAIT: Duration = Duration::from_secs(3);
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 const AGENT_PROGRAM: &str = "opencode";
 /// The server is a loopback child, so basic auth with a per-child password is the
@@ -161,7 +164,7 @@ fn same_directory(left: &Path, right: &Path) -> bool {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub enum BridgeError {
     Unavailable(String),
     Foreign(String),
@@ -334,13 +337,25 @@ impl AgentBridge {
     fn stop(&self) {
         // The reader reconnects forever unless told to stop, so set the flag before
         // killing the server: otherwise joining it would never return.
-        self.stopped.store(true, Ordering::SeqCst);
+        self.signal_stop();
         if let Some(mut child) = self.child.lock().ok().and_then(|mut slot| slot.take()) {
-            let _ = child.kill();
             let _ = child.wait();
         }
         if let Some(handle) = self.reader.lock().ok().and_then(|mut slot| slot.take()) {
             let _ = handle.join();
+        }
+    }
+
+    /// Sends the child termination signal without waiting for process or reader cleanup.
+    fn signal_stop(&self) {
+        if let Ok(mut slot) = self.child.lock() {
+            if !self.stopped.swap(true, Ordering::SeqCst) {
+                if let Some(child) = slot.as_mut() {
+                    let _ = child.kill();
+                }
+            }
+        } else {
+            self.stopped.store(true, Ordering::SeqCst);
         }
     }
 }
@@ -615,16 +630,213 @@ fn status_detail(status: u16) -> String {
     }
 }
 
+type BridgeLauncher = dyn Fn(&str, &Path) -> Result<Arc<AgentBridge>, BridgeError> + Send + Sync;
+type ReaderStarter = dyn Fn(&Arc<AgentBridge>, &EventSink) + Send + Sync;
+type BridgeStopper = dyn Fn(&Arc<AgentBridge>) + Send + Sync;
+type SlotStopper = dyn Fn(Arc<BridgeSlot>, Duration) + Send + Sync;
+
+enum BridgeState {
+    Starting { stop_requested: bool },
+    Ready(Arc<AgentBridge>),
+    Failed(BridgeError),
+    Stopping,
+    Stopped,
+}
+
+struct BridgeSlot {
+    state: Mutex<BridgeState>,
+    changed: Condvar,
+}
+
+fn remove_slot_if_current(
+    bridges: &mut HashMap<String, Arc<BridgeSlot>>,
+    checkout_id: &str,
+    slot: &Arc<BridgeSlot>,
+) {
+    if bridges
+        .get(checkout_id)
+        .is_some_and(|current| Arc::ptr_eq(current, slot))
+    {
+        bridges.remove(checkout_id);
+    }
+}
+
+impl BridgeSlot {
+    fn starting() -> Self {
+        Self {
+            state: Mutex::new(BridgeState::Starting {
+                stop_requested: false,
+            }),
+            changed: Condvar::new(),
+        }
+    }
+
+    fn wait(&self) -> Result<Arc<AgentBridge>, BridgeError> {
+        let mut state = self
+            .state
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent bridge state is poisoned".into()))?;
+        loop {
+            match &*state {
+                BridgeState::Ready(bridge) => return Ok(Arc::clone(bridge)),
+                BridgeState::Failed(error) => return Err(error.clone()),
+                BridgeState::Stopped => {
+                    return Err(BridgeError::Failed(
+                        "the agent bridge was stopped while starting".into(),
+                    ))
+                }
+                BridgeState::Starting { .. } | BridgeState::Stopping => {
+                    state = self.changed.wait(state).map_err(|_| {
+                        BridgeError::Failed("the agent bridge state is poisoned".into())
+                    })?;
+                }
+            }
+        }
+    }
+
+    /// Signals a published child immediately, or records cancellation for an in-flight start.
+    fn signal(&self) {
+        let bridge = {
+            let Ok(mut state) = self.state.lock() else {
+                return;
+            };
+            match &mut *state {
+                BridgeState::Starting { stop_requested } => {
+                    *stop_requested = true;
+                    self.changed.notify_all();
+                    return;
+                }
+                BridgeState::Ready(bridge) => Some(Arc::clone(bridge)),
+                BridgeState::Failed(_) | BridgeState::Stopping | BridgeState::Stopped => None,
+            }
+        };
+        if let Some(bridge) = bridge {
+            bridge.signal_stop();
+        }
+    }
+
+    fn stop(&self, stopper: &BridgeStopper, timeout: Duration) {
+        // This deadline bounds waits on Starting/Stopping only. The stopper may still block
+        // in child.wait() or an SSE reader join; those require the F1.2 timeout/reap work.
+        let deadline = Instant::now() + timeout;
+        self.signal();
+        let Ok(mut state) = self.state.lock() else {
+            return;
+        };
+        loop {
+            match &mut *state {
+                BridgeState::Starting { stop_requested } => {
+                    *stop_requested = true;
+                    self.changed.notify_all();
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        *state = BridgeState::Stopped;
+                        self.changed.notify_all();
+                        return;
+                    }
+                    let (next, timed_out) = match self.changed.wait_timeout(state, remaining) {
+                        Ok(wait) => wait,
+                        Err(_) => return,
+                    };
+                    state = next;
+                    if timed_out.timed_out() && matches!(*state, BridgeState::Starting { .. }) {
+                        *state = BridgeState::Stopped;
+                        self.changed.notify_all();
+                        return;
+                    }
+                }
+                BridgeState::Stopping => {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        *state = BridgeState::Stopped;
+                        self.changed.notify_all();
+                        return;
+                    }
+                    let (next, timed_out) = match self.changed.wait_timeout(state, remaining) {
+                        Ok(wait) => wait,
+                        Err(_) => return,
+                    };
+                    state = next;
+                    if timed_out.timed_out() && matches!(*state, BridgeState::Stopping) {
+                        *state = BridgeState::Stopped;
+                        self.changed.notify_all();
+                        return;
+                    }
+                }
+                BridgeState::Ready(bridge) => {
+                    let bridge = Arc::clone(bridge);
+                    *state = BridgeState::Stopping;
+                    drop(state);
+                    stopper(&bridge);
+                    if let Ok(mut state) = self.state.lock() {
+                        *state = BridgeState::Stopped;
+                        self.changed.notify_all();
+                    }
+                    return;
+                }
+                BridgeState::Failed(_) | BridgeState::Stopped => return,
+            }
+        }
+    }
+}
+
 /// Owns one server per checkout for the app's lifetime.
-#[derive(Default)]
 pub struct AgentService {
-    bridges: Mutex<HashMap<String, Arc<AgentBridge>>>,
+    bridges: Mutex<HashMap<String, Arc<BridgeSlot>>>,
     sink: Mutex<Option<EventSink>>,
+    launcher: Arc<BridgeLauncher>,
+    reader_starter: Arc<ReaderStarter>,
+    stopper: Arc<BridgeStopper>,
+    slot_stopper: Arc<SlotStopper>,
+    startup_stop_wait: Duration,
 }
 
 impl AgentService {
     pub fn new() -> Self {
-        Self::default()
+        Self::with_lifecycle(
+            Arc::new(|checkout_id, directory| {
+                AgentBridge::start(checkout_id, directory).map(Arc::new)
+            }),
+            Arc::new(|bridge, sink| bridge.start_reader(sink)),
+            Arc::new(|bridge| bridge.stop()),
+            STARTUP_STOP_WAIT,
+        )
+    }
+
+    fn with_lifecycle(
+        launcher: Arc<BridgeLauncher>,
+        reader_starter: Arc<ReaderStarter>,
+        stopper: Arc<BridgeStopper>,
+        startup_stop_wait: Duration,
+    ) -> Self {
+        let slot_stopper_callback = Arc::clone(&stopper);
+        Self::with_lifecycle_and_slot_stopper(
+            launcher,
+            reader_starter,
+            stopper,
+            startup_stop_wait,
+            Arc::new(move |slot, timeout| {
+                slot.stop(slot_stopper_callback.as_ref(), timeout);
+            }),
+        )
+    }
+
+    fn with_lifecycle_and_slot_stopper(
+        launcher: Arc<BridgeLauncher>,
+        reader_starter: Arc<ReaderStarter>,
+        stopper: Arc<BridgeStopper>,
+        startup_stop_wait: Duration,
+        slot_stopper: Arc<SlotStopper>,
+    ) -> Self {
+        Self {
+            bridges: Mutex::new(HashMap::new()),
+            sink: Mutex::new(None),
+            launcher,
+            reader_starter,
+            stopper,
+            slot_stopper,
+            startup_stop_wait,
+        }
     }
 
     /// Sets where normalized events are delivered. Without one the bridges still work,
@@ -641,35 +853,114 @@ impl AgentService {
         checkout_id: &str,
         directory: &Path,
     ) -> Result<Arc<AgentBridge>, BridgeError> {
-        let bridges = self
-            .bridges
-            .lock()
-            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
-        if let Some(existing) = bridges.get(checkout_id) {
-            return Ok(Arc::clone(existing));
+        // Reserve this checkout under the global lock, then boot and create its reader only
+        // after releasing it. Stops likewise remove slots before killing or joining anything.
+        let (slot, is_starter) = {
+            let mut bridges = self
+                .bridges
+                .lock()
+                .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
+            match bridges.get(checkout_id) {
+                Some(slot) => (Arc::clone(slot), false),
+                None => {
+                    let slot = Arc::new(BridgeSlot::starting());
+                    bridges.insert(checkout_id.to_string(), Arc::clone(&slot));
+                    (slot, true)
+                }
+            }
+        };
+
+        if !is_starter {
+            return slot.wait();
         }
+
         let sink = self
             .sink
             .lock()
             .ok()
             .and_then(|slot| slot.as_ref().map(Arc::clone));
-        // The lock is released while the child boots: startup can take seconds, and
-        // holding it would serialize every other checkout's bridge behind it.
-        drop(bridges);
-        let started = Arc::new(AgentBridge::start(checkout_id, directory)?);
-        if let Some(sink) = sink {
-            started.start_reader(&sink);
+        // Startup still has blocking stdout/readiness I/O and the free-port probe is released
+        // before spawn; interruptible deadlines/reap and the port race remain F1.2/F1.3 work.
+        let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            (self.launcher)(checkout_id, directory)
+        }))
+        .unwrap_or_else(|_| {
+            Err(BridgeError::Failed(
+                "the agent bridge launcher panicked".into(),
+            ))
+        });
+        match started {
+            Ok(bridge) => {
+                let mut state = slot.state.lock().map_err(|_| {
+                    BridgeError::Failed("the agent bridge state is poisoned".into())
+                })?;
+                if !matches!(
+                    &*state,
+                    BridgeState::Starting {
+                        stop_requested: false
+                    }
+                ) {
+                    // Stop already removed the slot, so a late successful start must only clean
+                    // up its child and must never publish over a later checkout generation.
+                    *state = BridgeState::Stopping;
+                    drop(state);
+                    (self.stopper)(&bridge);
+                    if let Ok(mut state) = slot.state.lock() {
+                        *state = BridgeState::Stopped;
+                        slot.changed.notify_all();
+                    }
+                    return Err(BridgeError::Failed(
+                        "the agent bridge was stopped while starting".into(),
+                    ));
+                }
+                if let Some(sink) = sink {
+                    // Start the reader before publishing Ready, so a concurrent stop cannot
+                    // finish and then have a reader started for the stopped bridge.
+                    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        (self.reader_starter)(&bridge, &sink)
+                    }))
+                    .is_err()
+                    {
+                        let error =
+                            BridgeError::Failed("the agent event reader starter panicked".into());
+                        *state = BridgeState::Failed(error.clone());
+                        slot.changed.notify_all();
+                        drop(state);
+                        if let Ok(mut bridges) = self.bridges.lock() {
+                            remove_slot_if_current(&mut bridges, checkout_id, &slot);
+                        }
+                        (self.stopper)(&bridge);
+                        return Err(error);
+                    }
+                }
+                *state = BridgeState::Ready(Arc::clone(&bridge));
+                slot.changed.notify_all();
+                Ok(bridge)
+            }
+            Err(error) => {
+                let mut state = slot.state.lock().map_err(|_| {
+                    BridgeError::Failed("the agent bridge state is poisoned".into())
+                })?;
+                if matches!(&*state, BridgeState::Stopped)
+                    || matches!(
+                        &*state,
+                        BridgeState::Starting {
+                            stop_requested: true
+                        }
+                    )
+                {
+                    *state = BridgeState::Stopped;
+                } else {
+                    *state = BridgeState::Failed(error.clone());
+                }
+                slot.changed.notify_all();
+                drop(state);
+                if let Ok(mut bridges) = self.bridges.lock() {
+                    remove_slot_if_current(&mut bridges, checkout_id, &slot);
+                }
+                Err(error)
+            }
         }
-        let mut bridges = self
-            .bridges
-            .lock()
-            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
-        // A concurrent call may have won the race; keep the winner and drop ours.
-        if let Some(existing) = bridges.get(checkout_id) {
-            return Ok(Arc::clone(existing));
-        }
-        bridges.insert(checkout_id.to_string(), Arc::clone(&started));
-        Ok(started)
     }
 
     /// Every session the checkout's server knows about.
@@ -786,19 +1077,36 @@ impl AgentService {
 
     /// Stops the checkout's server. Called when the app shuts down.
     pub fn stop(&self, checkout_id: &str) {
-        if let Ok(mut bridges) = self.bridges.lock() {
-            if let Some(bridge) = bridges.remove(checkout_id) {
-                bridge.stop();
-            }
+        let slot = self
+            .bridges
+            .lock()
+            .ok()
+            .and_then(|mut bridges| bridges.remove(checkout_id));
+        if let Some(slot) = slot {
+            slot.stop(self.stopper.as_ref(), self.startup_stop_wait);
         }
     }
 
     pub fn stop_all(&self) {
-        if let Ok(mut bridges) = self.bridges.lock() {
-            for (_, bridge) in bridges.drain() {
-                bridge.stop();
-            }
+        let slots = self
+            .bridges
+            .lock()
+            .map(|mut bridges| bridges.drain().map(|(_, slot)| slot).collect::<Vec<_>>())
+            .unwrap_or_default();
+        // Signal every currently published child before any stopper waits for wait()/join().
+        for slot in &slots {
+            slot.signal();
         }
+        let deadline = Instant::now() + self.startup_stop_wait;
+        for slot in slots {
+            (self.slot_stopper)(slot, deadline.saturating_duration_since(Instant::now()));
+        }
+    }
+}
+
+impl Default for AgentService {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -815,8 +1123,12 @@ pub fn map_error(error: BridgeError) -> IpcError {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::HashMap,
         path::{Path, PathBuf},
-        sync::{Arc, Mutex},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Arc, Mutex,
+        },
         thread::sleep,
         time::{Duration, Instant},
     };
@@ -827,8 +1139,9 @@ mod tests {
     };
 
     use super::{
-        agent_program, basic_credentials, first_available_port, port_candidates, same_directory,
-        validate_session_id, AgentEvent, AgentService, BridgeError, MAX_PROMPT_BYTES,
+        agent_program, basic_credentials, first_available_port, port_candidates,
+        remove_slot_if_current, same_directory, validate_session_id, AgentBridge, AgentEvent,
+        AgentService, BridgeError, BridgeState, BridgeStopper, ServerCredentials, MAX_PROMPT_BYTES,
         PORT_RANGE_LEN, PORT_RANGE_START,
     };
 
@@ -842,6 +1155,690 @@ mod tests {
                 )
             });
         PathBuf::from(directory)
+    }
+
+    fn fake_bridge(checkout_id: &str) -> Arc<AgentBridge> {
+        // These tests cover the service lifecycle, not OS child-process behavior.
+        Arc::new(AgentBridge {
+            checkout_id: checkout_id.to_string(),
+            child: Mutex::new(None),
+            credentials: ServerCredentials {
+                port: 1,
+                password: "test".into(),
+                directory: PathBuf::new(),
+            },
+            reader: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        })
+    }
+
+    fn test_service(
+        launcher: impl Fn(&str, &Path) -> Result<Arc<AgentBridge>, BridgeError> + Send + Sync + 'static,
+        readers: Arc<AtomicUsize>,
+        stops: Arc<AtomicUsize>,
+    ) -> AgentService {
+        AgentService::with_lifecycle(
+            Arc::new(launcher),
+            Arc::new(move |_, _| {
+                readers.fetch_add(1, Ordering::SeqCst);
+            }),
+            Arc::new(move |_| {
+                stops.fetch_add(1, Ordering::SeqCst);
+            }),
+            Duration::from_millis(400),
+        )
+    }
+
+    #[test]
+    fn concurrent_requests_share_one_start_and_reader() {
+        const CALLERS: usize = 20;
+        let starts = Arc::new(AtomicUsize::new(0));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let (results_tx, results_rx) = mpsc::channel();
+        let launch_starts = Arc::clone(&starts);
+        let service = Arc::new(test_service(
+            move |checkout_id, _| {
+                launch_starts.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                Ok(fake_bridge(checkout_id))
+            },
+            Arc::clone(&readers),
+            Arc::clone(&stops),
+        ));
+        service.set_event_sink(Arc::new(|_| {}));
+        let barrier = Arc::new(std::sync::Barrier::new(CALLERS + 1));
+        let callers = (0..CALLERS)
+            .map(|_| {
+                let service = Arc::clone(&service);
+                let barrier = Arc::clone(&barrier);
+                let results_tx = results_tx.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let _ = results_tx.send(service.bridge("checkout", Path::new(".")));
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(results_tx);
+
+        barrier.wait();
+        let launch_started = started_rx.recv_timeout(Duration::from_secs(2));
+        // Release every possible launcher so a duplicate-start regression fails assertions
+        // instead of stranding a worker on the injected gate.
+        for _ in 0..CALLERS {
+            release_tx.send(()).unwrap();
+        }
+        let bridges = (0..CALLERS)
+            .map(|_| {
+                results_rx
+                    .recv_timeout(Duration::from_secs(2))
+                    .expect("all callers should complete")
+                    .expect("bridge start should succeed")
+            })
+            .collect::<Vec<_>>();
+        drop(callers);
+
+        assert!(launch_started.is_ok(), "no caller launched the checkout");
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(readers.load(Ordering::SeqCst), 1);
+        assert!(bridges
+            .iter()
+            .all(|bridge| Arc::ptr_eq(bridge, &bridges[0])));
+        service.stop("checkout");
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn different_checkouts_start_in_parallel() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_a_tx, release_a_rx) = mpsc::channel();
+        let (release_b_tx, release_b_rx) = mpsc::channel();
+        let release_a_rx = Arc::new(Mutex::new(release_a_rx));
+        let release_b_rx = Arc::new(Mutex::new(release_b_rx));
+        let (results_tx, results_rx) = mpsc::channel();
+        let launch_starts = Arc::clone(&starts);
+        let service = Arc::new(test_service(
+            move |checkout_id, _| {
+                launch_starts.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(checkout_id.to_string()).unwrap();
+                match checkout_id {
+                    "a" => release_a_rx.lock().unwrap().recv().unwrap(),
+                    "b" => release_b_rx.lock().unwrap().recv().unwrap(),
+                    _ => unreachable!(),
+                };
+                Ok(fake_bridge(checkout_id))
+            },
+            Arc::clone(&readers),
+            Arc::clone(&stops),
+        ));
+        service.set_event_sink(Arc::new(|_| {}));
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let a_service = Arc::clone(&service);
+        let a_barrier = Arc::clone(&barrier);
+        let a_results = results_tx.clone();
+        let a = std::thread::spawn(move || {
+            a_barrier.wait();
+            let _ = a_results.send(a_service.bridge("a", Path::new(".")));
+        });
+        let b_service = Arc::clone(&service);
+        let b_barrier = Arc::clone(&barrier);
+        let b_results = results_tx.clone();
+        let b = std::thread::spawn(move || {
+            b_barrier.wait();
+            let _ = b_results.send(b_service.bridge("b", Path::new(".")));
+        });
+        drop(results_tx);
+        barrier.wait();
+
+        let first = started_rx.recv_timeout(Duration::from_secs(5));
+        let second = started_rx.recv_timeout(Duration::from_secs(5));
+        release_a_tx.send(()).unwrap();
+        release_b_tx.send(()).unwrap();
+        let bridge_one = results_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("first checkout should complete")
+            .expect("first bridge should start");
+        let bridge_two = results_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("second checkout should complete")
+            .expect("second bridge should start");
+        drop((a, b));
+
+        assert!(
+            first.is_ok() && second.is_ok(),
+            "checkouts did not boot in parallel"
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(readers.load(Ordering::SeqCst), 2);
+        let mut started = [
+            first.expect("first checkout should reach the launcher"),
+            second.expect("second checkout should reach the launcher"),
+        ];
+        started.sort();
+        assert_eq!(started, ["a", "b"]);
+        let mut bridge_ids = [
+            bridge_one.checkout_id.as_str(),
+            bridge_two.checkout_id.as_str(),
+        ];
+        bridge_ids.sort();
+        assert_eq!(bridge_ids, ["a", "b"]);
+        service.stop_all();
+        assert_eq!(stops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn stopping_during_start_prevents_publication_and_stops_the_child() {
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let (start_result_tx, start_result_rx) = mpsc::channel();
+        let (stop_result_tx, stop_result_rx) = mpsc::channel();
+        let service = Arc::new(test_service(
+            move |checkout_id, _| {
+                started_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                Ok(fake_bridge(checkout_id))
+            },
+            Arc::clone(&readers),
+            Arc::clone(&stops),
+        ));
+        service.set_event_sink(Arc::new(|_| {}));
+        let starter_service = Arc::clone(&service);
+        let starter = std::thread::spawn(move || {
+            let _ = start_result_tx.send(starter_service.bridge("checkout", Path::new(".")));
+        });
+        let launch_started = started_rx.recv_timeout(Duration::from_secs(2));
+        let slot = Arc::clone(
+            service
+                .bridges
+                .lock()
+                .unwrap()
+                .get("checkout")
+                .expect("starting slot is published"),
+        );
+        let stop_service = Arc::clone(&service);
+        let stopper = std::thread::spawn(move || {
+            stop_service.stop("checkout");
+            let _ = stop_result_tx.send(());
+        });
+
+        let mut state = slot.state.lock().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(
+            &*state,
+            BridgeState::Starting {
+                stop_requested: true
+            }
+        ) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, timed_out) = slot.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if timed_out.timed_out() {
+                break;
+            }
+        }
+        let stop_requested = matches!(
+            &*state,
+            BridgeState::Starting {
+                stop_requested: true
+            }
+        );
+        drop(state);
+        release_tx.send(()).unwrap();
+        assert!(launch_started.is_ok(), "startup did not reach the launcher");
+        stop_result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("stop should finish after startup is released");
+        assert!(start_result_rx
+            .recv_timeout(Duration::from_secs(2))
+            .expect("startup should complete")
+            .is_err());
+        drop((starter, stopper));
+        assert!(stop_requested, "stop did not cancel the starting slot");
+        assert!(service.bridges.lock().unwrap().get("checkout").is_none());
+        assert_eq!(readers.load(Ordering::SeqCst), 0);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn stop_all_cancels_an_in_flight_start_before_returning() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let (launch_tx, launch_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let (start_result_tx, start_result_rx) = mpsc::channel();
+        let (stop_result_tx, stop_result_rx) = mpsc::channel();
+        let launch_starts = Arc::clone(&starts);
+        let service = Arc::new(test_service(
+            move |checkout_id, _| {
+                launch_starts.fetch_add(1, Ordering::SeqCst);
+                launch_tx.send(()).unwrap();
+                release_rx.lock().unwrap().recv().unwrap();
+                Ok(fake_bridge(checkout_id))
+            },
+            Arc::clone(&readers),
+            Arc::clone(&stops),
+        ));
+        service.set_event_sink(Arc::new(|_| {}));
+        let starter_service = Arc::clone(&service);
+        let starter = std::thread::spawn(move || {
+            let _ = start_result_tx.send(starter_service.bridge("checkout", Path::new(".")));
+        });
+        let launch_started = launch_rx.recv_timeout(Duration::from_secs(2));
+        let slot = Arc::clone(
+            service
+                .bridges
+                .lock()
+                .unwrap()
+                .get("checkout")
+                .expect("starting slot is published"),
+        );
+        let stop_service = Arc::clone(&service);
+        let stopper = std::thread::spawn(move || {
+            stop_service.stop_all();
+            let _ = stop_result_tx.send(());
+        });
+
+        let mut state = slot.state.lock().unwrap();
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !matches!(
+            &*state,
+            BridgeState::Starting {
+                stop_requested: true
+            }
+        ) {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                break;
+            }
+            let (next, timed_out) = slot.changed.wait_timeout(state, remaining).unwrap();
+            state = next;
+            if timed_out.timed_out() {
+                break;
+            }
+        }
+        let stop_requested = matches!(
+            &*state,
+            BridgeState::Starting {
+                stop_requested: true
+            }
+        );
+        drop(state);
+        release_tx.send(()).unwrap();
+        let stop_finished = stop_result_rx.recv_timeout(Duration::from_secs(2));
+        let start_result = start_result_rx.recv_timeout(Duration::from_secs(2));
+        drop((starter, stopper));
+
+        assert!(launch_started.is_ok(), "startup did not reach the launcher");
+        assert!(stop_requested, "stop_all did not cancel the starting slot");
+        assert!(stop_finished.is_ok(), "stop_all did not finish");
+        assert!(start_result.expect("startup should complete").is_err());
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(readers.load(Ordering::SeqCst), 0);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn concurrent_stops_stop_a_checkout_once() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let launch_starts = Arc::clone(&starts);
+        let service = Arc::new(test_service(
+            move |checkout_id, _| {
+                launch_starts.fetch_add(1, Ordering::SeqCst);
+                Ok(fake_bridge(checkout_id))
+            },
+            Arc::clone(&readers),
+            Arc::clone(&stops),
+        ));
+        service.bridge("checkout", Path::new(".")).unwrap();
+
+        let barrier = Arc::new(std::sync::Barrier::new(3));
+        let (results_tx, results_rx) = mpsc::channel();
+        let callers = (0..2)
+            .map(|_| {
+                let service = Arc::clone(&service);
+                let barrier = Arc::clone(&barrier);
+                let results_tx = results_tx.clone();
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    service.stop("checkout");
+                    let _ = results_tx.send(());
+                })
+            })
+            .collect::<Vec<_>>();
+        drop(results_tx);
+        barrier.wait();
+        let first = results_rx.recv_timeout(Duration::from_secs(2));
+        let second = results_rx.recv_timeout(Duration::from_secs(2));
+        drop(callers);
+
+        assert!(
+            first.is_ok() && second.is_ok(),
+            "both stop calls should return"
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_startup_stop_wait_is_bounded() {
+        let slot = Arc::new(super::BridgeSlot::starting());
+        let stopper: Arc<BridgeStopper> = Arc::new(|_| {});
+        let (done_tx, done_rx) = mpsc::channel();
+        let stopping_slot = Arc::clone(&slot);
+        let stopping_callback = Arc::clone(&stopper);
+        let stop = std::thread::spawn(move || {
+            stopping_slot.stop(stopping_callback.as_ref(), Duration::from_millis(20));
+            let _ = done_tx.send(());
+        });
+
+        done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("stop should time out instead of waiting forever");
+        drop(stop);
+        assert!(matches!(*slot.state.lock().unwrap(), BridgeState::Stopped));
+    }
+
+    #[test]
+    fn failure_cleanup_preserves_a_replacement_slot() {
+        let failed = Arc::new(super::BridgeSlot::starting());
+        *failed.state.lock().unwrap() = BridgeState::Failed(BridgeError::Failed("failed".into()));
+        let mut bridges = HashMap::new();
+        bridges.insert("checkout".to_string(), Arc::clone(&failed));
+
+        // stop removes failed S1; a later caller inserts S2 before S1's cleanup reaches map.
+        let removed = bridges.remove("checkout").unwrap();
+        let stopper: Arc<BridgeStopper> = Arc::new(|_| {});
+        removed.stop(stopper.as_ref(), Duration::from_millis(20));
+        let replacement = Arc::new(super::BridgeSlot::starting());
+        bridges.insert("checkout".to_string(), Arc::clone(&replacement));
+        remove_slot_if_current(&mut bridges, "checkout", &failed);
+
+        assert!(Arc::ptr_eq(bridges.get("checkout").unwrap(), &replacement));
+    }
+
+    #[test]
+    fn failed_start_can_be_retried() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let launch_starts = Arc::clone(&starts);
+        let service = test_service(
+            move |checkout_id, _| {
+                if launch_starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    Err(BridgeError::Unavailable("injected failure".into()))
+                } else {
+                    Ok(fake_bridge(checkout_id))
+                }
+            },
+            Arc::clone(&readers),
+            Arc::clone(&stops),
+        );
+        service.set_event_sink(Arc::new(|_| {}));
+
+        assert!(service.bridge("checkout", Path::new(".")).is_err());
+        assert!(service.bridge("checkout", Path::new(".")).is_ok());
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(readers.load(Ordering::SeqCst), 1);
+        service.stop("checkout");
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_panicking_launcher_releases_the_starting_slot() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let launch_starts = Arc::clone(&starts);
+        let service = test_service(
+            move |checkout_id, _| {
+                if launch_starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("injected launcher panic");
+                }
+                Ok(fake_bridge(checkout_id))
+            },
+            Arc::clone(&readers),
+            Arc::clone(&stops),
+        );
+
+        assert!(service.bridge("checkout", Path::new(".")).is_err());
+        assert!(service.bridge("checkout", Path::new(".")).is_ok());
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        service.stop("checkout");
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn stop_all_stops_each_child_once() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let launch_starts = Arc::clone(&starts);
+        let service = test_service(
+            move |checkout_id, _| {
+                launch_starts.fetch_add(1, Ordering::SeqCst);
+                Ok(fake_bridge(checkout_id))
+            },
+            Arc::clone(&readers),
+            Arc::clone(&stops),
+        );
+        service.set_event_sink(Arc::new(|_| {}));
+        service.bridge("a", Path::new(".")).unwrap();
+        service.bridge("b", Path::new(".")).unwrap();
+
+        service.stop_all();
+        service.stop_all();
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(readers.load(Ordering::SeqCst), 2);
+        assert_eq!(stops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn stop_all_signals_every_child_before_waiting_for_cleanup() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let bridges = Arc::new(Mutex::new(Vec::<Arc<AgentBridge>>::new()));
+        let (cleanup_started_tx, cleanup_started_rx) = mpsc::channel();
+        let (release_cleanup_tx, release_cleanup_rx) = mpsc::channel();
+        let release_cleanup_rx = Arc::new(Mutex::new(release_cleanup_rx));
+        let launch_starts = Arc::clone(&starts);
+        let launch_bridges = Arc::clone(&bridges);
+        let cleanup_bridges = Arc::clone(&bridges);
+        let cleanup_stops = Arc::clone(&stops);
+        let service = Arc::new(AgentService::with_lifecycle(
+            Arc::new(move |checkout_id, _| {
+                launch_starts.fetch_add(1, Ordering::SeqCst);
+                let bridge = fake_bridge(checkout_id);
+                launch_bridges.lock().unwrap().push(Arc::clone(&bridge));
+                Ok(bridge)
+            }),
+            Arc::new(|_, _| {}),
+            Arc::new(move |_| {
+                if cleanup_stops.fetch_add(1, Ordering::SeqCst) == 0 {
+                    let signaled = cleanup_bridges
+                        .lock()
+                        .unwrap()
+                        .iter()
+                        .filter(|bridge| bridge.stopped.load(Ordering::SeqCst))
+                        .count();
+                    cleanup_started_tx.send(signaled).unwrap();
+                    release_cleanup_rx.lock().unwrap().recv().unwrap();
+                }
+            }),
+            Duration::from_millis(400),
+        ));
+        service.bridge("a", Path::new(".")).unwrap();
+        service.bridge("b", Path::new(".")).unwrap();
+
+        let stopping_service = Arc::clone(&service);
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let stop_all = std::thread::spawn(move || {
+            stopping_service.stop_all();
+            let _ = stopped_tx.send(());
+        });
+        let signaled = cleanup_started_rx.recv_timeout(Duration::from_secs(2));
+        release_cleanup_tx.send(()).unwrap();
+        let stopped = stopped_rx.recv_timeout(Duration::from_secs(2));
+        drop(stop_all);
+
+        assert_eq!(signaled.expect("cleanup should start"), 2);
+        assert!(
+            stopped.is_ok(),
+            "stop_all should finish after cleanup is released"
+        );
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(stops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn stop_all_passes_the_remaining_shared_budget_to_each_slot() {
+        let received = Arc::new(Mutex::new(Vec::new()));
+        let observed = Arc::clone(&received);
+        let service = AgentService::with_lifecycle_and_slot_stopper(
+            Arc::new(|_, _| panic!("stop_all should not launch bridges")),
+            Arc::new(|_, _| {}),
+            Arc::new(|_| {}),
+            Duration::from_millis(400),
+            Arc::new(move |slot, timeout| {
+                let call = {
+                    let mut received = observed.lock().unwrap();
+                    received.push(timeout);
+                    received.len()
+                };
+                *slot.state.lock().unwrap() = BridgeState::Stopped;
+                slot.changed.notify_all();
+                if call == 1 {
+                    // Exhaust the shared budget deterministically before the second slot.
+                    std::thread::sleep(Duration::from_millis(500));
+                }
+            }),
+        );
+        let first = Arc::new(super::BridgeSlot::starting());
+        let second = Arc::new(super::BridgeSlot::starting());
+        {
+            let mut slots = service.bridges.lock().unwrap();
+            slots.insert("a".into(), Arc::clone(&first));
+            slots.insert("b".into(), Arc::clone(&second));
+        }
+
+        service.stop_all();
+        let received = received.lock().unwrap();
+        assert_eq!(received.len(), 2);
+        assert_eq!(received[1], Duration::ZERO);
+    }
+
+    #[test]
+    fn stop_all_cancels_multiple_starts_within_smoke_limit() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_a_tx, release_a_rx) = mpsc::channel();
+        let (release_b_tx, release_b_rx) = mpsc::channel();
+        let release_a_rx = Arc::new(Mutex::new(release_a_rx));
+        let release_b_rx = Arc::new(Mutex::new(release_b_rx));
+        let launch_starts = Arc::clone(&starts);
+        let service = Arc::new(test_service(
+            move |checkout_id, _| {
+                launch_starts.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(checkout_id.to_string()).unwrap();
+                match checkout_id {
+                    "a" => release_a_rx.lock().unwrap().recv().unwrap(),
+                    "b" => release_b_rx.lock().unwrap().recv().unwrap(),
+                    _ => unreachable!(),
+                };
+                Ok(fake_bridge(checkout_id))
+            },
+            Arc::clone(&readers),
+            Arc::clone(&stops),
+        ));
+        let (result_tx, result_rx) = mpsc::channel();
+        let a_service = Arc::clone(&service);
+        let a_result = result_tx.clone();
+        let a = std::thread::spawn(move || {
+            let _ = a_result.send(a_service.bridge("a", Path::new(".")));
+        });
+        let b_service = Arc::clone(&service);
+        let b_result = result_tx.clone();
+        let b = std::thread::spawn(move || {
+            let _ = b_result.send(b_service.bridge("b", Path::new(".")));
+        });
+        drop(result_tx);
+        let first_started = started_rx.recv_timeout(Duration::from_secs(2));
+        let second_started = started_rx.recv_timeout(Duration::from_secs(2));
+
+        let (stopped_tx, stopped_rx) = mpsc::channel();
+        let stopping_service = Arc::clone(&service);
+        let stop_all = std::thread::spawn(move || {
+            stopping_service.stop_all();
+            let _ = stopped_tx.send(());
+        });
+        // Deadline sharing is pinned structurally above; this is only a generous hang check.
+        let stopped = stopped_rx.recv_timeout(Duration::from_secs(10));
+        release_a_tx.send(()).unwrap();
+        release_b_tx.send(()).unwrap();
+        let first_result = result_rx.recv_timeout(Duration::from_secs(2));
+        let second_result = result_rx.recv_timeout(Duration::from_secs(2));
+        drop((a, b, stop_all));
+
+        assert!(first_started.is_ok() && second_started.is_ok());
+        assert!(stopped.is_ok(), "stop_all exceeded the smoke limit");
+        assert!(first_result.expect("first start should complete").is_err());
+        assert!(second_result
+            .expect("second start should complete")
+            .is_err());
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(readers.load(Ordering::SeqCst), 0);
+        assert_eq!(stops.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn a_panicking_reader_starter_does_not_poison_the_slot() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let launch_starts = Arc::clone(&starts);
+        let reader_starts = Arc::clone(&readers);
+        let stop_calls = Arc::clone(&stops);
+        let service = AgentService::with_lifecycle(
+            Arc::new(move |checkout_id, _| {
+                launch_starts.fetch_add(1, Ordering::SeqCst);
+                Ok(fake_bridge(checkout_id))
+            }),
+            Arc::new(move |_, _| {
+                if reader_starts.fetch_add(1, Ordering::SeqCst) == 0 {
+                    panic!("injected reader starter panic");
+                }
+            }),
+            Arc::new(move |_| {
+                stop_calls.fetch_add(1, Ordering::SeqCst);
+            }),
+            Duration::from_millis(400),
+        );
+        service.set_event_sink(Arc::new(|_| {}));
+
+        assert!(service.bridge("checkout", Path::new(".")).is_err());
+        assert!(service.bridge("checkout", Path::new(".")).is_ok());
+        assert_eq!(starts.load(Ordering::SeqCst), 2);
+        assert_eq!(readers.load(Ordering::SeqCst), 2);
+        service.stop("checkout");
+        assert_eq!(stops.load(Ordering::SeqCst), 2);
     }
 
     #[test]
