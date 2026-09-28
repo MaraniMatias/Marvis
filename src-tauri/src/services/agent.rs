@@ -832,6 +832,18 @@ mod tests {
         PORT_RANGE_LEN, PORT_RANGE_START,
     };
 
+    fn required_live_directory(name: &str) -> PathBuf {
+        let directory = std::env::var(name)
+            .ok()
+            .filter(|directory| !directory.is_empty())
+            .unwrap_or_else(|| {
+                panic!(
+                    "{name} is required for ignored live agent tests; set it to a dedicated temporary directory"
+                )
+            });
+        PathBuf::from(directory)
+    }
+
     #[test]
     fn resolves_the_opencode_binary_without_a_shell() {
         // None is acceptable on a machine without OpenCode; a shell string is not.
@@ -949,18 +961,13 @@ mod tests {
     }
 
     /// Proves the round marker really reaches the session, which is what makes the
-    /// reconnect path safe. Gated so it never runs in CI.
+    /// reconnect path safe.
     ///
-    /// `MARVIS_AGENT_BRIDGE=1 cargo test a_round_marker_reaches_the_real_session -- --nocapture`
+    /// `cargo test a_round_marker_reaches_the_real_session -- --ignored --nocapture`
+    #[ignore = "live OpenCode integration; requires a configured provider and sends a prompt"]
     #[test]
     fn a_round_marker_reaches_the_real_session() {
-        if std::env::var("MARVIS_AGENT_BRIDGE").as_deref() != Ok("1") {
-            eprintln!("skipped: set MARVIS_AGENT_BRIDGE=1 to exercise a real agent server");
-            return;
-        }
-        let directory = PathBuf::from(
-            std::env::var("MARVIS_AGENT_BRIDGE_DIR").expect("MARVIS_AGENT_BRIDGE_DIR"),
-        );
+        let directory = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
         let agents = AgentService::new();
         let created = agents
             .create_session("checkout:marker", &directory, "marker probe")
@@ -1008,16 +1015,11 @@ mod tests {
     /// never ran and for one that is working. Only the client, which saw the turn start, can
     /// tell those apart, so the wire contract is `idle_at` and this test pins the ambiguity.
     ///
-    /// `MARVIS_AGENT_BRIDGE=1 cargo test a_turn_is_observable_through_the_idle_time -- --nocapture`
+    /// `cargo test a_turn_is_observable_through_the_idle_time -- --ignored --nocapture`
+    #[ignore = "live OpenCode integration; requires a configured provider and sends a prompt"]
     #[test]
     fn a_turn_is_observable_through_the_idle_time() {
-        if std::env::var("MARVIS_AGENT_BRIDGE").as_deref() != Ok("1") {
-            eprintln!("skipped: set MARVIS_AGENT_BRIDGE=1 to exercise a real agent server");
-            return;
-        }
-        let directory = PathBuf::from(
-            std::env::var("MARVIS_AGENT_BRIDGE_DIR").expect("MARVIS_AGENT_BRIDGE_DIR"),
-        );
+        let directory = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
         let agents = AgentService::new();
         let created = agents
             .create_session("checkout:turn", &directory, "turn probe")
@@ -1065,16 +1067,11 @@ mod tests {
     /// agent with are all read off routes that exist in 2.0.18, and this is the only thing that
     /// says they still are.
     ///
-    /// `MARVIS_AGENT_BRIDGE=1 cargo test the_agent_catalog_is_readable_from_a_real_server -- --nocapture`
+    /// `cargo test the_agent_catalog_is_readable_from_a_real_server -- --ignored --nocapture`
+    #[ignore = "live OpenCode integration; requires the local OpenCode server and creates a session"]
     #[test]
     fn the_agent_catalog_is_readable_from_a_real_server() {
-        if std::env::var("MARVIS_AGENT_BRIDGE").as_deref() != Ok("1") {
-            eprintln!("skipped: set MARVIS_AGENT_BRIDGE=1 to exercise a real agent server");
-            return;
-        }
-        let directory = PathBuf::from(
-            std::env::var("MARVIS_AGENT_BRIDGE_DIR").expect("MARVIS_AGENT_BRIDGE_DIR"),
-        );
+        let directory = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
         let agents = AgentService::new();
         let agents_for_catalog = agents
             .agents("checkout:catalog", &directory)
@@ -1119,22 +1116,16 @@ mod tests {
         agents.stop("checkout:catalog");
     }
 
-    /// Talks to a real `opencode serve`. Gated so it never runs in CI, because it needs
-    /// the OpenCode binary, a working provider and the user's machine.
+    /// Talks to a real `opencode serve`; it is ignored by default because it needs the
+    /// OpenCode binary and a working provider.
     ///
-    /// `MARVIS_AGENT_BRIDGE=1 cargo test bridge_talks_to_a_real_server -- --nocapture`
+    /// `cargo test bridge_talks_to_a_real_server -- --ignored --nocapture`
+    #[ignore = "live OpenCode integration; requires a configured provider and sends a prompt"]
     #[test]
     fn bridge_talks_to_a_real_server() {
-        if std::env::var("MARVIS_AGENT_BRIDGE").as_deref() != Ok("1") {
-            eprintln!("skipped: set MARVIS_AGENT_BRIDGE=1 to exercise a real agent server");
-            return;
-        }
-        let first = std::env::var("MARVIS_AGENT_BRIDGE_DIR").expect("MARVIS_AGENT_BRIDGE_DIR");
-        let second =
-            std::env::var("MARVIS_AGENT_BRIDGE_OTHER_DIR").expect("MARVIS_AGENT_BRIDGE_OTHER_DIR");
+        let first = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
+        let second = required_live_directory("MARVIS_AGENT_BRIDGE_OTHER_DIR");
         let agents = AgentService::new();
-        let first = PathBuf::from(first);
-        let second = PathBuf::from(second);
 
         // Collect normalized events so the SSE reader is exercised, not just the requests.
         let seen: Arc<Mutex<Vec<AgentEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -1213,19 +1204,12 @@ mod tests {
     /// the way. What is not proven here is the presentation layer, which is judged from the
     /// diff by the frontend and cannot be seen from a test.
     ///
-    /// `MARVIS_AGENT_BRIDGE=1 cargo test two_checkouts_run_the_review_loop -- --nocapture`
+    /// `cargo test two_checkouts_run_the_review_loop -- --ignored --nocapture`
+    #[ignore = "live OpenCode integration; requires a configured provider, sends prompts, and edits files"]
     #[test]
     fn two_checkouts_run_the_review_loop() {
-        if std::env::var("MARVIS_AGENT_BRIDGE").as_deref() != Ok("1") {
-            eprintln!("skipped: set MARVIS_AGENT_BRIDGE=1 to exercise a real agent server");
-            return;
-        }
-        let first = PathBuf::from(
-            std::env::var("MARVIS_AGENT_BRIDGE_DIR").expect("MARVIS_AGENT_BRIDGE_DIR"),
-        );
-        let second = PathBuf::from(
-            std::env::var("MARVIS_AGENT_BRIDGE_OTHER_DIR").expect("MARVIS_AGENT_BRIDGE_OTHER_DIR"),
-        );
+        let first = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
+        let second = required_live_directory("MARVIS_AGENT_BRIDGE_OTHER_DIR");
         let target = first.join("marvis_loop_target.txt");
         let second_file = first.join("marvis_second_target.txt");
         let original = "alpha\nbravo\n";

@@ -586,16 +586,17 @@ mod tests {
     /// Q4 against a real `opencode serve`: a round held back while the agent was busy goes
     /// out on its own once flushed, and a second flush does not send it twice.
     ///
-    /// `MARVIS_AGENT_BRIDGE=1 cargo test a_queued_round_goes_out_when_flushed -- --nocapture`
+    /// `cargo test a_queued_round_goes_out_when_flushed -- --ignored --nocapture`
+    #[ignore = "live OpenCode integration; requires a configured provider and sends a prompt"]
     #[test]
     fn a_queued_round_goes_out_when_flushed() {
-        if std::env::var("MARVIS_AGENT_BRIDGE").as_deref() != Ok("1") {
-            eprintln!("skipped: set MARVIS_AGENT_BRIDGE=1 to exercise a real agent server");
-            return;
-        }
-        let directory = PathBuf::from(
-            std::env::var("MARVIS_AGENT_BRIDGE_DIR").expect("MARVIS_AGENT_BRIDGE_DIR"),
-        );
+        let directory = std::env::var("MARVIS_AGENT_BRIDGE_DIR")
+            .ok()
+            .filter(|directory| !directory.is_empty())
+            .map(PathBuf::from)
+            .expect(
+                "MARVIS_AGENT_BRIDGE_DIR is required for this ignored live test; set it to a dedicated temporary directory (see docs/agent-live-tests.md)",
+            );
         let temp = tempdir().unwrap();
         let (database, checkout_id, _) = database_with_two_checkouts(&temp);
         add_note(&database, &checkout_id, "a");
