@@ -67,6 +67,23 @@ Marvis stores its data on your computer and sends no telemetry. What an agent se
 
 Marvis is an early release. Download the build for your system from the [latest release](https://github.com/MaraniMatias/Marvis/releases/latest).
 
+Release tags are `v<version>` and must match `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. Builds target Apple Silicon (`aarch64-apple-darwin`) and x86_64 Linux (`amd64`); Intel macOS is not currently published.
+
+### Releasing
+
+Do not assume this workflow blocks old release tags: GitHub runs the workflow YAML stored at the tagged commit. For example, `v0.1.0` points to `57cda5e`, whose older workflow publishes directly on a tag push without the current checks. This YAML cannot block that workflow. Until the remote tag and release restrictions below have been configured and verified, releases are **unsafe and not ready**: do not create, push, or retag `v*` tags, and do not create or publish releases manually. Once those controls are verified, run the `Release` workflow manually from the default branch with the prospective `v<version>` input to run the full checks and builds without publishing. Create and push the version tag only at that exact successful SHA.
+
+Before enabling releases, an administrator must protect `main` with pull-request and required-check rules; create an active `v*` tag ruleset that restricts tag creation, updates, and deletions, with bypass limited to named release maintainers; and restrict who may create, edit, or delete releases. Set and verify the repository's publication policy (including immutable releases where available). These remote settings are prerequisites, not enforced by this workflow. The API check immediately before publishing detects tag movement but cannot close the race with a later update; immutable-tag protection is required.
+
+Release readiness must be verified against GitHub while authenticated: run `gh auth status`, inspect `gh api 'repos/MaraniMatias/Marvis/rulesets?includes_parents=true'` and `gh api repos/MaraniMatias/Marvis/branches/main/protection`, confirm the tag ruleset and release immutability/settings in repository settings, then resolve the remote tag:
+
+```sh
+TAG=v1.2.3
+gh api "repos/MaraniMatias/Marvis/git/ref/tags/$TAG"
+```
+
+For an annotated tag, follow each tag object's `object.sha` with `gh api "repos/MaraniMatias/Marvis/git/tags/$OBJECT_SHA"` (set `OBJECT_SHA` to the returned SHA) until the target is a commit. Compare that commit SHA with the successful dry-run/workflow SHA. If authentication or permission is unavailable, record the remote protections as **unverified** and do not declare release readiness.
+
 ### macOS
 
 Download the `.dmg` and drag Marvis into Applications. The app is not code-signed, so macOS warns you the first time you open it. Right-click the app and choose Open, or run this once in a terminal:
