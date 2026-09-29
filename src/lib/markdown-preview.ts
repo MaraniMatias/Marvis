@@ -1,8 +1,9 @@
 import DOMPurify from "dompurify";
 import MarkdownIt from "markdown-it";
 import taskLists from "markdown-it-task-lists";
-import { withoutFrontMatter } from "./front-matter";
+import { frontMatterContent, withoutFrontMatter } from "./front-matter";
 import { highlightCodeBlock, languageForFenceInfo } from "./source-highlighter";
+import { renderYamlTree } from "./yaml-tree";
 
 export interface MarkdownImageReference {
   /** The original Markdown URL, passed to the checkout-scoped image command. */
@@ -248,7 +249,12 @@ export async function renderMarkdownPreview(source: string, markdownPath: string
   const restored = sanitized.includes("<table")
     ? sanitized
     : sanitized.replace(/(<thead>[\s\S]*?<\/thead>\s*<tbody>[\s\S]*?<\/tbody>)/g, "<table>$1</table>");
-  return { html: await highlightFencedCode(restored), images };
+  const metadata = frontMatterContent(source);
+  const metadataHtml =
+    metadata === null
+      ? ""
+      : `<details class="markdown-front-matter"><summary>Metadata</summary>${renderYamlTree(metadata)}</details>`;
+  return { html: metadataHtml + (await highlightFencedCode(restored)), images };
 }
 
 export function attachMarkdownImages(

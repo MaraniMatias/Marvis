@@ -13,6 +13,7 @@ src-tauri/gen/
 .ruff_cache/
 .pytest_cache/
 __pycache__/
+/.worktrees/
 
 # Mockup: repo git anidado y su zip, no forman parte de Marvis.
 docs/marvis-ui/

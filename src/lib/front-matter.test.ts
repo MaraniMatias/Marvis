@@ -1,11 +1,18 @@
 import { describe, expect, it } from "vitest";
-import { FRONT_MATTER_FENCE, frontMatterLineCount, opensFrontMatter, withoutFrontMatter } from "./front-matter";
+import {
+  FRONT_MATTER_FENCE,
+  frontMatterContent,
+  frontMatterLineCount,
+  opensFrontMatter,
+  withoutFrontMatter,
+} from "./front-matter";
 
 describe("Front matter", () => {
   it("counts the block a document opens with", () => {
     const source = ["---", "title: Add the export", "tags: [api]", "---", "", "# Body"].join("\n");
 
     expect(frontMatterLineCount(source)).toBe(4);
+    expect(frontMatterContent(source)).toBe("title: Add the export\ntags: [api]");
     expect(withoutFrontMatter(source)).toBe("\n# Body");
   });
 
@@ -33,6 +40,11 @@ describe("Front matter", () => {
 
     expect(frontMatterLineCount(source)).toBe(0);
     expect(withoutFrontMatter(source)).toBe(source);
+  });
+
+  it("returns no content when there is no closed metadata block", () => {
+    expect(frontMatterContent("# Heading")).toBeNull();
+    expect(frontMatterContent("---\ntitle: x")).toBeNull();
   });
 
   it("reads a document whose lines end with CRLF", () => {
