@@ -1,6 +1,6 @@
 [package]
 name = "marvis"
-version = "0.3.2"
+version = "0.3.3"
 description = "A focused workspace for repositories and checkouts"
 authors = ["Marani Matias Ezequiel"]
 license = "MIT"
