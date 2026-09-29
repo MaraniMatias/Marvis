@@ -107,9 +107,9 @@ const showsSource = computed(() => !(props.mode === "view" && isMarkdown.value))
 // extension names none is worth saying out loud rather than showing a language that is not applied.
 const languageButtonLabel = computed(() => {
   if (languageOverride.value !== null) {
-    return languageOverride.value === PLAIN_TEXT ? "Texto plano" : languageLabel(languageOverride.value);
+    return languageOverride.value === PLAIN_TEXT ? "Plain text" : languageLabel(languageOverride.value);
   }
-  return detectedLanguage.value === null ? "Auto (sin resaltado)" : languageLabel(detectedLanguage.value);
+  return detectedLanguage.value === null ? "Auto (no highlighting)" : languageLabel(detectedLanguage.value);
 });
 
 interface LanguageRow {
@@ -137,9 +137,9 @@ const languageRows = computed<LanguageRow[]>(() => [
   {
     name: null,
     label: "Auto",
-    hint: detectedLanguage.value === null ? "sin resaltado" : languageLabel(detectedLanguage.value),
+    hint: detectedLanguage.value === null ? "no highlighting" : languageLabel(detectedLanguage.value),
   },
-  { name: PLAIN_TEXT, label: "Texto plano", hint: "" },
+  { name: PLAIN_TEXT, label: "Plain text", hint: "" },
   ...matchingLanguages.value.map((language) => ({ name: language.name, label: language.label, hint: "" })),
 ]);
 
@@ -693,7 +693,7 @@ function onMarkdownLink(event: MouseEvent) {
           <PopoverRoot v-model:open="languageOpen">
             <PopoverTrigger
               data-testid="language-trigger"
-              :title="`Resaltar como ${languageButtonLabel}. Solo afecta la vista Code.`"
+              :title="`Highlight as ${languageButtonLabel}. Only affects the Code view.`"
               class="text-menu-control gap-1 whitespace-nowrap"
             >
               {{ languageButtonLabel }}
@@ -709,7 +709,7 @@ function onMarkdownLink(event: MouseEvent) {
                   v-model="languageSearch"
                   type="search"
                   aria-label="Search highlight languages"
-                  placeholder="Buscar…"
+                  placeholder="Search…"
                   class="marvis-menu-search min-w-0 appearance-none"
                   @keydown.down.prevent="moveLanguageRow(1)"
                   @keydown.up.prevent="moveLanguageRow(-1)"

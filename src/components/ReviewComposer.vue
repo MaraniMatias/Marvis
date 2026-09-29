@@ -57,7 +57,7 @@ function submit() {
       rows="2"
       aria-label="Review note"
       placeholder="What should change here?"
-      class="w-full resize-y rounded-sm border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none placeholder:text-(--marvis-text-faint)"
+      class="w-full resize-y rounded-sm border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none placeholder:text-(--marvis-text-faint) focus:border-(--marvis-text-faint)"
     />
     <p v-if="isRange" class="mt-1 text-[10px] text-(--marvis-text-faint)">
       Click another line to widen the range, or cancel to start over.

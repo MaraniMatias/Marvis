@@ -106,7 +106,7 @@ function canResolve(note: ReviewNote): boolean {
           v-model="draft"
           rows="2"
           aria-label="Review note"
-          class="mt-1 w-full resize-y rounded-sm border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none"
+          class="mt-1 w-full resize-y rounded-sm border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none focus:border-(--marvis-text-faint)"
           @keydown.esc.stop.prevent="editingId = null"
         />
         <div class="mt-1 flex gap-2">

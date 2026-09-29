@@ -67,13 +67,11 @@
   --marvis-font: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
-/* No focus ring, anywhere in the window. The mockup's ring did not survive being ported onto the
-   controls the mockup never had, and a desktop window does not draw a web form's outline around
-   its buttons and its fields: it paints focus into what the control already is — the row that
-   lifts, the splitter that turns accent, the caret in the editor — and not around it. `:focus`
-   rather than `:focus-visible`, so a click on a field paints no ring either. Global rather than
-   `.app-shell`, because reka-ui portals the menus and the popovers out of the shell and a rule
-   scoped to the shell is a rule those two do not read. */
+/* No focus ring. A window does not draw a web form's outline around its controls, and the browser
+   default that would replace ours is worse, so this one rule is the whole of it: global, not
+   `.app-shell`, because reka-ui portals the menus and the popovers out of the shell. An input that
+   carries a border of its own turns that border to `--marvis-text-faint` instead, and the search
+   field — which has no border and only a surface — keeps the lift its wrapper already makes. */
 :focus {
   outline: none;
 }

@@ -437,13 +437,13 @@ describe("DocumentPane", () => {
     await flushPromises();
 
     // Nothing is applied yet, and the toolbar says so instead of naming a grammar that is not on.
-    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Auto (sin resaltado)");
+    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Auto (no highlighting)");
     expect(wrapper.get('[aria-label="Source code"]').attributes("data-language")).toBe("plaintext");
 
     const search = wrapper.get('input[aria-label="Search highlight languages"]');
     // A search reads the label, the grammar name, or the suffix a file wears.
     await search.setValue("yml");
-    expect(languageRowLabels(wrapper)).toEqual(["Auto", "Texto plano", "YAML"]);
+    expect(languageRowLabels(wrapper)).toEqual(["Auto", "Plain text", "YAML"]);
 
     await search.setValue("pyt");
     await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.down");
@@ -456,7 +456,7 @@ describe("DocumentPane", () => {
 
     await search.setValue("zzz");
     // Auto and plain text are the ways back out, so a search never takes them away.
-    expect(languageRowLabels(wrapper)).toEqual(["Auto", "Texto plano"]);
+    expect(languageRowLabels(wrapper)).toEqual(["Auto", "Plain text"]);
     expect(wrapper.get('[role="listbox"]').text()).toContain("No language matches");
     wrapper.unmount();
   });
@@ -468,10 +468,10 @@ describe("DocumentPane", () => {
     });
     const editor = () => wrapper.get('[aria-label="Source code"]').attributes("data-language");
     await vi.waitFor(() => expect(editor()).toBe("typescript"));
-    await pickLanguage(wrapper, "Texto plano");
+    await pickLanguage(wrapper, "Plain text");
     await flushPromises();
     expect(editor()).toBe("plaintext");
-    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Texto plano");
+    expect(wrapper.get('[data-testid="language-trigger"]').text()).toBe("Plain text");
 
     await pickLanguage(wrapper, "Auto");
     await vi.waitFor(() => expect(editor()).toBe("typescript"));
