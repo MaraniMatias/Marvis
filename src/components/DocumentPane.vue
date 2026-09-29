@@ -883,6 +883,97 @@ function onMarkdownLink(event: MouseEvent) {
   line-height: 1.75;
 }
 
+.markdown-preview :deep(.markdown-front-matter) {
+  margin: 0 0 2rem;
+  border: 1px solid var(--marvis-border);
+  border-radius: var(--marvis-radius);
+  background: var(--marvis-bg-1);
+  color: var(--marvis-text-secondary);
+  font-family: var(--marvis-font);
+  font-size: 0.75rem;
+  line-height: 1.6;
+}
+
+.markdown-preview :deep(.markdown-front-matter > summary),
+.markdown-preview :deep(.markdown-yaml-branch > summary) {
+  display: flex;
+  align-items: baseline;
+  gap: 0.45rem;
+  cursor: pointer;
+  list-style: none;
+}
+
+.markdown-preview :deep(.markdown-front-matter > summary) {
+  padding: 0.55rem 0.75rem;
+  color: var(--marvis-text);
+  font-weight: 600;
+}
+
+.markdown-preview :deep(.markdown-front-matter > summary::-webkit-details-marker),
+.markdown-preview :deep(.markdown-yaml-branch > summary::-webkit-details-marker) {
+  display: none;
+}
+
+.markdown-preview :deep(.markdown-front-matter > summary::before),
+.markdown-preview :deep(.markdown-yaml-branch > summary::before) {
+  width: 0.4rem;
+  height: 0.4rem;
+  flex: 0 0 auto;
+  border-right: 1px solid currentColor;
+  border-bottom: 1px solid currentColor;
+  content: "";
+  transform: rotate(-45deg);
+  transition: transform 120ms ease;
+}
+
+.markdown-preview :deep(.markdown-front-matter[open] > summary::before),
+.markdown-preview :deep(.markdown-yaml-branch[open] > summary::before) {
+  transform: rotate(45deg);
+}
+
+.markdown-preview :deep(.markdown-yaml-tree) {
+  padding: 0.25rem 0.75rem 0.65rem;
+  border-top: 1px solid var(--marvis-border);
+}
+
+.markdown-preview :deep(.markdown-yaml-branch > summary) {
+  padding: 0.2rem 0;
+  color: var(--marvis-text);
+}
+
+.markdown-preview :deep(.markdown-yaml-children) {
+  margin-left: 0.45rem;
+  padding-left: 0.95rem;
+  border-left: 1px solid var(--marvis-border);
+}
+
+.markdown-preview :deep(.markdown-yaml-leaf) {
+  display: flex;
+  gap: 0.45rem;
+  min-height: 1.55rem;
+  align-items: baseline;
+  padding: 0.2rem 0;
+}
+
+.markdown-preview :deep(.markdown-yaml-key) {
+  color: var(--marvis-accent);
+}
+
+.markdown-preview :deep(.markdown-yaml-separator) {
+  color: var(--marvis-text-faint);
+}
+
+.markdown-preview :deep(.markdown-yaml-value) {
+  color: var(--marvis-text-secondary);
+  white-space: pre-wrap;
+}
+
+.markdown-preview :deep(.markdown-yaml-empty) {
+  margin: 0;
+  padding: 0.35rem 0;
+  color: var(--marvis-text-faint);
+}
+
 .markdown-preview :deep(h1),
 .markdown-preview :deep(h2),
 .markdown-preview :deep(h3) {

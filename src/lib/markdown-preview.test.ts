@@ -171,12 +171,14 @@ describe("Markdown preview", () => {
     expect(preview.html).not.toContain("<script>");
   });
 
-  it("leaves nothing of a metadata block on the page", async () => {
+  it("shows metadata as a closed, expandable YAML tree", async () => {
     const preview = await renderMarkdownPreview(
       [
         "---",
         "title: Add the export",
         "tags: [api, docs]",
+        "author:",
+        "  name: Ada",
         "---",
         "",
         "Lead paragraph.",
@@ -192,12 +194,12 @@ describe("Markdown preview", () => {
       "docs/readme.md",
     );
 
-    // The block is dropped whole: not a key/value table, and not the rule and the setext heading
-    // that markdown-it would otherwise make out of it. The document behind it is rendered whole.
-    expect(preview.html).not.toContain("<dl");
-    expect(preview.html).not.toContain("<th>title");
-    expect(preview.html).not.toContain("<hr");
-    expect(preview.html).not.toContain("Add the export");
+    const document = new DOMParser().parseFromString(preview.html, "text/html");
+    expect(preview.html).toContain('<details class="markdown-front-matter"><summary>Metadata</summary>');
+    expect(preview.html).toContain('<details class="markdown-yaml-branch" open>');
+    expect(document.querySelector(".markdown-yaml-key")?.textContent).toBe("title");
+    expect(document.querySelector(".markdown-yaml-value")?.textContent).toBe("Add the export");
+    expect(preview.html).toContain("tags");
     expect(preview.html).toContain("<h1>What this does</h1>");
     expect(preview.html).toContain('type="checkbox"');
     expect(preview.html).toContain("<th>a</th>");
@@ -220,11 +222,10 @@ describe("Markdown preview", () => {
     );
     const document = new DOMParser().parseFromString(preview.html, "text/html");
 
-    // The block is not rendered at all, so nothing of it survives to be sanitized: what matters is
-    // that the document behind it is untouched and the value never became markup.
+    // Metadata is rendered by the escaped tree, while the document behind it is untouched.
     expect(document.querySelector("script, img")).toBeNull();
     expect(preview.html).not.toContain("<script>");
-    expect(preview.html).not.toContain("onerror");
+    expect(preview.html).toContain("&lt;img src=x onerror=alert(1)&gt;");
     expect(preview.html).toContain("text");
   });
 });

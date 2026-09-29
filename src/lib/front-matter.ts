@@ -37,6 +37,16 @@ export function frontMatterLineCount(source: string): number {
   return closing < 0 ? 0 : closing + 1;
 }
 
+/** The YAML between a document's opening and closing metadata fences, or null when there is none. */
+export function frontMatterContent(source: string): string | null {
+  const count = frontMatterLineCount(source);
+  if (count === 0) return null;
+  return source
+    .split(/\r?\n/)
+    .slice(1, count - 1)
+    .join("\n");
+}
+
 /** The document without its metadata block, which is what a preview of it renders. */
 export function withoutFrontMatter(source: string): string {
   const count = frontMatterLineCount(source);
