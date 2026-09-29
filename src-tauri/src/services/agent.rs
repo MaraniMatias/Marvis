@@ -38,10 +38,14 @@ const JSON_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CHILD_REAP_POLL: Duration = Duration::from_millis(10);
 // `stopAgent` is awaited by the UI.
 const STARTUP_STOP_WAIT: Duration = Duration::from_secs(3);
-// A waiter must outlive the launcher's 30s budget plus the 3s child reap and 3s reader cleanup.
+// A waiter has to cover the launcher's wall time: its 30s shared budget plus the 3s child reap
+// and 3s reader cleanup, which is the one path that spends both. It is only an inert caller-wait
+// bound: expiry does not cancel a healthy startup, and bounded retries share that same 30s launch
+// budget.
 const STARTUP_WAIT_TIMEOUT: Duration = Duration::from_secs(36);
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 const AGENT_PROGRAM: &str = "opencode";
+const EARLY_EOF_MESSAGE: &str = "the agent server reached EOF before reporting credentials";
 /// The server is a loopback child, so basic auth with a per-child password is the
 /// whole trust boundary. See `sec_09`.
 const MAX_PROMPT_BYTES: usize = 512 * 1024;
@@ -202,27 +206,71 @@ pub struct AgentBridge {
 /// Where normalized events go. Injected so the service does not depend on Tauri.
 pub type EventSink = Arc<dyn Fn(AgentEvent) + Send + Sync>;
 
-struct ChildGuard(Option<Child>);
+#[derive(Clone)]
+struct StartupChild(Arc<Mutex<Option<Child>>>);
+
+impl StartupChild {
+    fn new(child: Child) -> Self {
+        Self(Arc::new(Mutex::new(Some(child))))
+    }
+
+    fn with_mut<R>(&self, operation: impl FnOnce(&mut Child) -> R) -> R {
+        let mut child = self
+            .0
+            .lock()
+            .expect("the startup child lock should not be poisoned");
+        operation(
+            child
+                .as_mut()
+                .expect("the startup child should still be owned"),
+        )
+    }
+
+    fn take(&self) -> Option<Child> {
+        self.0
+            .lock()
+            .expect("the startup child lock should not be poisoned")
+            .take()
+    }
+}
+
+struct ChildGuard(Option<StartupChild>);
+
+/// Startup port hooks: the retry predicate is only consulted after the failed child is
+/// terminated, and a retry still requires the exact `EARLY_EOF_MESSAGE` result. `track_child`
+/// is only a test seam for retaining a cleanup handle to the same startup child.
+struct PortHooks<FindPort, IsAvailable, TrackChild> {
+    find_port: FindPort,
+    is_available: IsAvailable,
+    track_child: TrackChild,
+}
 
 impl ChildGuard {
-    fn new(child: Child) -> Self {
-        Self(Some(child))
+    fn new(child: impl Into<StartupChild>) -> Self {
+        Self(Some(child.into()))
     }
 
-    fn as_mut(&mut self) -> &mut Child {
+    fn with_mut<R>(&self, operation: impl FnOnce(&mut Child) -> R) -> R {
         self.0
-            .as_mut()
+            .as_ref()
             .expect("the startup child should still be owned")
+            .with_mut(operation)
     }
 
-    fn take(&mut self) -> Option<Child> {
+    fn take(&mut self) -> Option<StartupChild> {
         self.0.take()
+    }
+}
+
+impl From<Child> for StartupChild {
+    fn from(child: Child) -> Self {
+        Self::new(child)
     }
 }
 
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        if let Some(child) = self.take() {
+        if let Some(child) = self.take().and_then(|child| child.take()) {
             terminate_child(child, Instant::now() + STARTUP_STOP_WAIT);
         }
     }
@@ -242,72 +290,145 @@ impl AgentBridge {
         let deadline = Instant::now() + startup_timeout;
         let program = agent_program()
             .ok_or_else(|| BridgeError::Unavailable(OPENCODE_UNAVAILABLE.to_string()))?;
-        let port = free_port()?;
-        let child = Command::new(&program)
-            .args([
-                "serve",
-                "--port",
-                &port.to_string(),
-                "--hostname",
-                "127.0.0.1",
-            ])
-            .current_dir(directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .map_err(|error| {
-                BridgeError::Unavailable(format!("could not start OpenCode: {error}"))
-            })?;
-        let mut child = ChildGuard::new(child);
+        Self::start_with_deadline(
+            checkout_id,
+            directory,
+            deadline,
+            PortHooks {
+                find_port: free_port,
+                is_available: is_port_available,
+                track_child: no_startup_child_tracking,
+            },
+            |port| {
+                Command::new(&program)
+                    .args([
+                        "serve",
+                        "--port",
+                        &port.to_string(),
+                        "--hostname",
+                        "127.0.0.1",
+                    ])
+                    .current_dir(directory)
+                    .stdin(Stdio::null())
+                    .stdout(Stdio::piped())
+                    .stderr(Stdio::null())
+                    .spawn()
+                    .map_err(|error| {
+                        BridgeError::Unavailable(format!("could not start OpenCode: {error}"))
+                    })
+            },
+            read_credentials,
+            finish_credentials,
+        )
+    }
 
-        let (credentials, output_reader) =
-            match read_credentials(child.as_mut(), directory, port, deadline) {
+    /// Runs startup through injected seams so collision handling can be tested without real
+    /// ports. Only an exact early-EOF read error plus a post-termination unavailable port retries.
+    fn start_with_deadline<FindPort, IsAvailable, TrackChild, Launch, Read, Finish>(
+        checkout_id: &str,
+        directory: &Path,
+        deadline: Instant,
+        mut ports: PortHooks<FindPort, IsAvailable, TrackChild>,
+        mut launch: Launch,
+        mut read: Read,
+        mut finish: Finish,
+    ) -> Result<Self, BridgeError>
+    where
+        FindPort: FnMut() -> Result<u16, BridgeError>,
+        IsAvailable: FnMut(u16) -> bool,
+        TrackChild: FnMut(&StartupChild),
+        Launch: FnMut(u16) -> Result<Child, BridgeError>,
+        Read: FnMut(
+            &mut Child,
+            &Path,
+            u16,
+            Instant,
+        )
+            -> Result<(ServerCredentials, std::thread::JoinHandle<()>), BridgeError>,
+        Finish: FnMut(ServerCredentials, Instant) -> Result<ServerCredentials, BridgeError>,
+    {
+        for attempt in 0..MAX_START_ATTEMPTS {
+            // A retry shares the original deadline; do not spend a fresh startup budget on it.
+            if attempt > 0 && Instant::now() >= deadline {
+                return Err(startup_timeout_error());
+            }
+            let port = (ports.find_port)()?;
+            let child = StartupChild::new(launch(port)?);
+            (ports.track_child)(&child);
+            let mut child = ChildGuard::new(child);
+
+            let read_result = child.with_mut(|child| read(child, directory, port, deadline));
+            let (credentials, output_reader) = match read_result {
                 Ok(credentials) => credentials,
                 Err(error) => {
+                    let early_eof = is_early_eof(&error);
+                    let failed_child = child
+                        .take()
+                        .expect("the startup child should still be owned");
                     terminate_child(
-                        child
+                        failed_child
                             .take()
                             .expect("the startup child should still be owned"),
                         Instant::now() + STARTUP_STOP_WAIT,
                     );
+                    // The availability probe is intentionally repeated after EOF: the initial
+                    // bind is only a check, so another process may win the bind-to-spawn race.
+                    if early_eof && !(ports.is_available)(port) {
+                        if Instant::now() >= deadline {
+                            return Err(startup_timeout_error());
+                        }
+                        if attempt + 1 == MAX_START_ATTEMPTS {
+                            return Err(BridgeError::Unavailable(format!(
+                                "another process took the selected agent port; exhausted {MAX_START_ATTEMPTS} startup attempts"
+                            )));
+                        }
+                        continue;
+                    }
                     return Err(error);
                 }
             };
-        if Instant::now() >= deadline {
-            terminate_child(
-                child
-                    .take()
-                    .expect("the startup child should still be owned"),
-                Instant::now() + STARTUP_STOP_WAIT,
-            );
-            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
-            return Err(BridgeError::Unavailable(
-                "the agent server timed out while starting".into(),
-            ));
+            if Instant::now() >= deadline {
+                terminate_child(
+                    child
+                        .take()
+                        .expect("the startup child should still be owned")
+                        .take()
+                        .expect("the startup child should still be owned"),
+                    Instant::now() + STARTUP_STOP_WAIT,
+                );
+                join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
+                return Err(startup_timeout_error());
+            }
+            if let Err(error) = finish(credentials.clone(), deadline) {
+                terminate_child(
+                    child
+                        .take()
+                        .expect("the startup child should still be owned")
+                        .take()
+                        .expect("the startup child should still be owned"),
+                    Instant::now() + STARTUP_STOP_WAIT,
+                );
+                join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
+                return Err(error);
+            }
+            let child = child
+                .take()
+                .expect("the startup child should still be owned")
+                .take()
+                .expect("the startup child should still be owned");
+            return Ok(Self {
+                checkout_id: checkout_id.to_string(),
+                child: Mutex::new(Some(child)),
+                credentials,
+                output_reader: Mutex::new(Some(output_reader)),
+                event_socket: Mutex::new(None),
+                reader: Mutex::new(None),
+                stopped: std::sync::atomic::AtomicBool::new(false),
+            });
         }
-        if let Err(error) = finish_credentials(credentials.clone(), deadline) {
-            terminate_child(
-                child
-                    .take()
-                    .expect("the startup child should still be owned"),
-                Instant::now() + STARTUP_STOP_WAIT,
-            );
-            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
-            return Err(error);
-        }
-        let child = child
-            .take()
-            .expect("the startup child should still be owned");
-        Ok(Self {
-            checkout_id: checkout_id.to_string(),
-            child: Mutex::new(Some(child)),
-            credentials,
-            output_reader: Mutex::new(Some(output_reader)),
-            event_socket: Mutex::new(None),
-            reader: Mutex::new(None),
-            stopped: std::sync::atomic::AtomicBool::new(false),
-        })
+        Err(BridgeError::Unavailable(
+            "could not start the agent server after exhausting startup attempts".into(),
+        ))
     }
 
     fn base_url(&self) -> String {
@@ -805,18 +926,32 @@ fn agent_program() -> Option<PathBuf> {
 /// ports costs nothing and makes that recoverable without touching the leftovers.
 const PORT_RANGE_START: u16 = 46000;
 const PORT_RANGE_LEN: u16 = 512;
+const MAX_START_ATTEMPTS: usize = 3;
 
-/// Reserves a port by binding it, then releases it for the child. A collision is retried across
-/// the whole window; giving up is better than serving on someone else's port.
+/// Checks candidates by briefly binding each port and releasing it before the child starts. The
+/// port is not reserved until the child binds it; the startup loop may rescan the window after a
+/// bind-to-spawn race.
 fn free_port() -> Result<u16, BridgeError> {
+    free_port_with(is_port_available)
+}
+
+/// Applies the injected availability predicate to candidates from `port_candidates`; the
+/// corresponding post-failure hook must be checked only after child termination.
+fn free_port_with(is_available: impl FnMut(u16) -> bool) -> Result<u16, BridgeError> {
     first_available_port(
         port_candidates(NEXT_PORT_ATTEMPT.fetch_add(1, Ordering::Relaxed)),
-        |candidate| TcpListener::bind(("127.0.0.1", candidate)).is_ok(),
+        is_available,
     )
     .ok_or_else(|| {
         BridgeError::Unavailable("could not find a free port for the agent server".into())
     })
 }
+
+fn is_port_available(candidate: u16) -> bool {
+    TcpListener::bind(("127.0.0.1", candidate)).is_ok()
+}
+
+fn no_startup_child_tracking(_: &StartupChild) {}
 
 fn port_candidates(start_offset: u64) -> impl Iterator<Item = u16> {
     let range_len = u64::from(PORT_RANGE_LEN);
@@ -833,6 +968,18 @@ fn first_available_port(
     candidates
         .into_iter()
         .find(|candidate| is_available(*candidate))
+}
+
+fn startup_timeout_error() -> BridgeError {
+    BridgeError::Unavailable("the agent server timed out while starting".into())
+}
+
+fn is_early_eof(error: &BridgeError) -> bool {
+    matches!(
+        error,
+        BridgeError::Unavailable(message)
+            if message == EARLY_EOF_MESSAGE
+    )
 }
 
 /// Reads the password the child prints. The reader remains alive after the password so stdout
@@ -884,9 +1031,7 @@ fn read_credentials(
         Ok(Ok(None)) => {
             let _ = child.kill();
             join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
-            return Err(BridgeError::Unavailable(
-                "the agent server reached EOF before reporting credentials".into(),
-            ));
+            return Err(BridgeError::Unavailable(EARLY_EOF_MESSAGE.into()));
         }
         Ok(Err(error)) => {
             let _ = child.kill();
@@ -905,9 +1050,7 @@ fn read_credentials(
         Err(mpsc::RecvTimeoutError::Disconnected) => {
             let _ = child.kill();
             join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
-            return Err(BridgeError::Unavailable(
-                "the agent server reached EOF before reporting credentials".into(),
-            ));
+            return Err(BridgeError::Unavailable(EARLY_EOF_MESSAGE.into()));
         }
     };
 
@@ -983,7 +1126,7 @@ fn send_json<T: serde::de::DeserializeOwned>(
                 BridgeError::Failed(format!("unexpected agent server reply: {error}"))
             })
         }
-        // 4xx bodies carry the server's own message; keep it, it is actionable.
+        // Status errors are reduced to safe, actionable details; their bodies are not echoed.
         Err(ureq::Error::StatusCode(status)) => Err(BridgeError::Failed(status_detail(status))),
         Err(ureq::Error::Timeout(_)) => Err(BridgeError::Unavailable(
             "the agent server request timed out".into(),
@@ -1535,10 +1678,11 @@ mod tests {
 
     use super::{
         agent_program, basic_credentials, event_stream, finish_credentials, first_available_port,
-        join_reader, port_candidates, read_credentials, remove_slot_if_current, same_directory,
-        status_detail, terminate_child, validate_session_id, AgentBridge, AgentEvent, AgentService,
-        BridgeError, BridgeState, BridgeStopper, ChildGuard, EventSink, ServerCredentials,
-        MAX_PROMPT_BYTES, PORT_RANGE_LEN, PORT_RANGE_START,
+        free_port_with, join_reader, no_startup_child_tracking, port_candidates, read_credentials,
+        remove_slot_if_current, same_directory, status_detail, terminate_child,
+        validate_session_id, AgentBridge, AgentEvent, AgentService, BridgeError, BridgeState,
+        BridgeStopper, ChildGuard, EventSink, PortHooks, ServerCredentials, StartupChild,
+        EARLY_EOF_MESSAGE, MAX_PROMPT_BYTES, MAX_START_ATTEMPTS, PORT_RANGE_LEN, PORT_RANGE_START,
     };
 
     fn required_live_directory(name: &str) -> PathBuf {
@@ -2323,6 +2467,39 @@ mod tests {
             .expect("the POSIX test fixture should start")
     }
 
+    fn fixture_pid_is_gone(pid: u32) -> bool {
+        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
+        result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    struct FixtureChildCleanup(Arc<Mutex<Vec<StartupChild>>>);
+
+    impl FixtureChildCleanup {
+        fn new() -> Self {
+            Self(Arc::new(Mutex::new(Vec::new())))
+        }
+
+        fn tracker(&self) -> Arc<Mutex<Vec<StartupChild>>> {
+            Arc::clone(&self.0)
+        }
+    }
+
+    impl Drop for FixtureChildCleanup {
+        fn drop(&mut self) {
+            let children = self
+                .0
+                .lock()
+                .expect("fixture cleanup lock should not be poisoned")
+                .drain(..)
+                .collect::<Vec<_>>();
+            for child in children {
+                if let Some(child) = child.take() {
+                    terminate_child(child, Instant::now() + Duration::from_secs(1));
+                }
+            }
+        }
+    }
+
     #[test]
     fn child_guard_reaps_the_child_when_startup_unwinds() {
         let directory = tempfile::tempdir().unwrap();
@@ -2686,6 +2863,345 @@ mod tests {
         assert!(tried
             .iter()
             .all(|candidate| { *candidate >= PORT_RANGE_START && *candidate < end }));
+    }
+
+    #[test]
+    fn retries_a_collision_and_leaves_only_the_final_child_running() {
+        let directory = tempfile::tempdir().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let failed_pid = Arc::new(AtomicUsize::new(0));
+        let fixture_cleanup = FixtureChildCleanup::new();
+        let tracked_fixtures = fixture_cleanup.tracker();
+        let occupied = Arc::new(Mutex::new(Vec::<u16>::new()));
+        let launch_directory = directory.path().to_path_buf();
+        let selected = Arc::new(Mutex::new(Vec::<u16>::new()));
+
+        let finder_occupied = Arc::clone(&occupied);
+        let mut finder_probe =
+            move |candidate| !finder_occupied.lock().unwrap().contains(&candidate);
+        let find_port = move || free_port_with(&mut finder_probe);
+
+        let post_collision_occupied = Arc::clone(&occupied);
+        let is_available =
+            move |candidate| !post_collision_occupied.lock().unwrap().contains(&candidate);
+
+        let launch_attempts = Arc::clone(&attempts);
+        let launch_failed_pid = Arc::clone(&failed_pid);
+        let launch_occupied = Arc::clone(&occupied);
+        let launch_selected = Arc::clone(&selected);
+        let launch = move |port| {
+            let attempt = launch_attempts.fetch_add(1, Ordering::SeqCst);
+            launch_selected.lock().unwrap().push(port);
+            if attempt == 0 {
+                // The fake availability probe passed; model a third party winning the gap
+                // before this child could bind, without binding any real port.
+                launch_occupied.lock().unwrap().push(port);
+                let child = fixture_child(&launch_directory, "exec 1>&-; exec sleep 300");
+                launch_failed_pid.store(child.id() as usize, Ordering::SeqCst);
+                Ok(child)
+            } else {
+                Ok(fixture_child(
+                    &launch_directory,
+                    "printf 'server password secret\\n'; exec tail -f /dev/null",
+                ))
+            }
+        };
+
+        let read_attempts = Arc::new(AtomicUsize::new(0));
+        let read = move |_child: &mut Child, path: &Path, port, _deadline| {
+            if read_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
+                // stdout is closed, but the fixture remains alive so this assertion exercises
+                // production termination/reaping rather than the test waiting for an exited child.
+                Err(BridgeError::Unavailable(EARLY_EOF_MESSAGE.into()))
+            } else {
+                Ok((
+                    ServerCredentials {
+                        port,
+                        password: "secret".into(),
+                        directory: path.to_path_buf(),
+                    },
+                    std::thread::spawn(|| {}),
+                ))
+            }
+        };
+
+        let bridge = AgentBridge::start_with_deadline(
+            "collision",
+            directory.path(),
+            Instant::now() + Duration::from_secs(2),
+            PortHooks {
+                find_port,
+                is_available,
+                track_child: move |child: &StartupChild| {
+                    tracked_fixtures.lock().unwrap().push(child.clone())
+                },
+            },
+            launch,
+            read,
+            |credentials, _| Ok(credentials),
+        )
+        .expect("the second candidate should start");
+
+        let selected = selected.lock().unwrap().clone();
+        assert_eq!(attempts.load(Ordering::SeqCst), 2);
+        let failed_pid = failed_pid.load(Ordering::SeqCst) as u32;
+        assert_ne!(failed_pid, 0);
+        assert!(
+            fixture_pid_is_gone(failed_pid),
+            "the failed startup fixture must be terminated and reaped"
+        );
+        assert_eq!(selected.len(), 2);
+        assert_ne!(selected[0], selected[1]);
+        assert!(selected
+            .iter()
+            .all(|port| *port >= PORT_RANGE_START && *port < PORT_RANGE_START + PORT_RANGE_LEN));
+        assert_eq!(bridge.credentials.port, selected[1]);
+        assert!(bridge
+            .child
+            .lock()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .try_wait()
+            .unwrap()
+            .is_none());
+        drop(bridge);
+    }
+
+    #[test]
+    fn bind_to_spawn_collisions_have_a_bounded_retry_limit() {
+        let directory = tempfile::tempdir().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let failed_children_observed_exit = Arc::new(AtomicUsize::new(0));
+        let occupied = Arc::new(Mutex::new(Vec::<u16>::new()));
+        let launch_directory = directory.path().to_path_buf();
+
+        let finder_occupied = Arc::clone(&occupied);
+        let mut finder_probe =
+            move |candidate| !finder_occupied.lock().unwrap().contains(&candidate);
+        let find_port = move || free_port_with(&mut finder_probe);
+        let post_collision_occupied = Arc::clone(&occupied);
+        let is_available =
+            move |candidate| !post_collision_occupied.lock().unwrap().contains(&candidate);
+
+        let launch_attempts = Arc::clone(&attempts);
+        let launch_occupied = Arc::clone(&occupied);
+        let launch = move |port| {
+            launch_attempts.fetch_add(1, Ordering::SeqCst);
+            launch_occupied.lock().unwrap().push(port);
+            Ok(fixture_child(
+                &launch_directory,
+                "printf 'server is starting\\n'",
+            ))
+        };
+
+        // This counter observes fixture exit with the test's handle; the collision regression
+        // above checks production cleanup independently by pid.
+        let exited = Arc::clone(&failed_children_observed_exit);
+        let read = move |child: &mut Child, path: &Path, port, deadline| {
+            let result = read_credentials(child, path, port, deadline);
+            if result.is_err() && child.try_wait().unwrap().is_some() {
+                exited.fetch_add(1, Ordering::SeqCst);
+            }
+            result
+        };
+
+        let error = AgentBridge::start_with_deadline(
+            "collision-limit",
+            directory.path(),
+            Instant::now() + Duration::from_secs(2),
+            PortHooks {
+                find_port,
+                is_available,
+                track_child: no_startup_child_tracking,
+            },
+            launch,
+            read,
+            |credentials, _| Ok(credentials),
+        )
+        .err()
+        .expect("the collision retry limit must be enforced");
+
+        assert!(error_message(&error).contains("another process took the selected agent port"));
+        assert!(error_message(&error).contains("exhausted 3 startup attempts"));
+        assert_eq!(attempts.load(Ordering::SeqCst), MAX_START_ATTEMPTS);
+        assert_eq!(
+            failed_children_observed_exit.load(Ordering::SeqCst),
+            MAX_START_ATTEMPTS
+        );
+    }
+
+    #[test]
+    fn an_eof_with_a_free_port_is_not_retried() {
+        let directory = tempfile::tempdir().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let fixture_cleanup = FixtureChildCleanup::new();
+        let tracked_fixtures = fixture_cleanup.tracker();
+        let launch_directory = directory.path().to_path_buf();
+        let mut finder_probe = |_| true;
+        let find_port = move || free_port_with(&mut finder_probe);
+
+        let launch_attempts = Arc::clone(&attempts);
+        let launch = move |_| {
+            launch_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(fixture_child(&launch_directory, "exec tail -f /dev/null"))
+        };
+        let read = |_child: &mut Child, _path: &Path, _port, _deadline| {
+            Err(BridgeError::Unavailable(EARLY_EOF_MESSAGE.into()))
+        };
+
+        let error = AgentBridge::start_with_deadline(
+            "no-collision",
+            directory.path(),
+            Instant::now() + Duration::from_secs(1),
+            PortHooks {
+                find_port,
+                is_available: |_| true,
+                track_child: move |child: &StartupChild| {
+                    tracked_fixtures.lock().unwrap().push(child.clone())
+                },
+            },
+            launch,
+            read,
+            |credentials, _| Ok(credentials),
+        )
+        .err()
+        .expect("an EOF with an available port must fail immediately");
+
+        assert!(error_message(&error).contains("EOF"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_non_eof_read_error_with_an_occupied_port_is_not_retried() {
+        let directory = tempfile::tempdir().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let fixture_cleanup = FixtureChildCleanup::new();
+        let tracked_fixtures = fixture_cleanup.tracker();
+        let launch_directory = directory.path().to_path_buf();
+        let mut finder_probe = |_| true;
+        let find_port = move || free_port_with(&mut finder_probe);
+
+        let launch_attempts = Arc::clone(&attempts);
+        let launch = move |_| {
+            launch_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(fixture_child(&launch_directory, "exec tail -f /dev/null"))
+        };
+        let read = |_child: &mut Child, _path: &Path, _port, _deadline| {
+            Err(BridgeError::Unavailable(
+                "could not read the agent server output: injected error".into(),
+            ))
+        };
+
+        let error = AgentBridge::start_with_deadline(
+            "non-eof-error",
+            directory.path(),
+            Instant::now() + Duration::from_secs(1),
+            PortHooks {
+                find_port,
+                is_available: |_| false,
+                track_child: move |child: &StartupChild| {
+                    tracked_fixtures.lock().unwrap().push(child.clone())
+                },
+            },
+            launch,
+            read,
+            |credentials, _| Ok(credentials),
+        )
+        .err()
+        .expect("a non-EOF read error must fail immediately");
+
+        assert!(error_message(&error).contains("could not read the agent server output"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn rejected_credentials_are_not_retried() {
+        let directory = tempfile::tempdir().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let fixture_cleanup = FixtureChildCleanup::new();
+        let tracked_fixtures = fixture_cleanup.tracker();
+        let launch_directory = directory.path().to_path_buf();
+        let mut finder_probe = |_| true;
+        let find_port = move || free_port_with(&mut finder_probe);
+
+        let launch_attempts = Arc::clone(&attempts);
+        let launch = move |_| {
+            launch_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(fixture_child(&launch_directory, "exec tail -f /dev/null"))
+        };
+        let read = move |_child: &mut Child, path: &Path, port, _deadline| {
+            Ok((
+                ServerCredentials {
+                    port,
+                    password: "secret".into(),
+                    directory: path.to_path_buf(),
+                },
+                std::thread::spawn(|| {}),
+            ))
+        };
+
+        let error = AgentBridge::start_with_deadline(
+            "rejected",
+            directory.path(),
+            Instant::now() + Duration::from_secs(1),
+            PortHooks {
+                find_port,
+                is_available: |_| false,
+                track_child: move |child: &StartupChild| {
+                    tracked_fixtures.lock().unwrap().push(child.clone())
+                },
+            },
+            launch,
+            read,
+            |_, _| Err(BridgeError::Failed(status_detail(401))),
+        )
+        .err()
+        .expect("rejected credentials must fail without a port retry");
+
+        assert!(error_message(&error).contains("rejected Marvis's credentials"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn collision_retries_do_not_reset_the_startup_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let fixture_cleanup = FixtureChildCleanup::new();
+        let tracked_fixtures = fixture_cleanup.tracker();
+        let launch_directory = directory.path().to_path_buf();
+        let mut finder_probe = |_| true;
+        let find_port = move || free_port_with(&mut finder_probe);
+
+        let launch_attempts = Arc::clone(&attempts);
+        let launch = move |_| {
+            launch_attempts.fetch_add(1, Ordering::SeqCst);
+            Ok(fixture_child(&launch_directory, "exec tail -f /dev/null"))
+        };
+        let read = |_child: &mut Child, _path: &Path, _port, _deadline| {
+            Err(BridgeError::Unavailable(EARLY_EOF_MESSAGE.into()))
+        };
+
+        let error = AgentBridge::start_with_deadline(
+            "expired",
+            directory.path(),
+            Instant::now(),
+            PortHooks {
+                find_port,
+                is_available: |_| false,
+                track_child: move |child: &StartupChild| {
+                    tracked_fixtures.lock().unwrap().push(child.clone())
+                },
+            },
+            launch,
+            read,
+            |credentials, _| Ok(credentials),
+        )
+        .err()
+        .expect("an exhausted shared deadline must report timeout");
+
+        assert!(error_message(&error).contains("timed out while starting"));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
     }
 
     #[test]
