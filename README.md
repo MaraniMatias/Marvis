@@ -67,11 +67,22 @@ Marvis stores its data on your computer and sends no telemetry. What an agent se
 
 Marvis is an early release. Download the build for your system from the [latest release](https://github.com/MaraniMatias/Marvis/releases/latest).
 
-Release tags are `v<version>` and must match `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. Builds target Apple Silicon (`aarch64-apple-darwin`) and x86_64 Linux (`amd64`); Intel macOS is not currently published.
+Release tags are `v<version>` and must match `package.json`, `src-tauri/Cargo.toml`, and `src-tauri/tauri.conf.json`. Builds target Apple Silicon (`aarch64-apple-darwin`), x86_64 Linux (`amd64`) and arm64 Linux (`arm64`); Intel macOS is not currently published. Every release also carries a `SHA256SUMS` file, so a downloaded build can be checked with `sha256sum -c SHA256SUMS`.
 
 ### Releasing
 
+Bumping the version writes all three manifests, commits them, tags the commit and pushes both, so a release starts with one command:
+
+```sh
+pnpm release 0.2.0            # write, commit, tag v0.2.0 and push
+pnpm release 0.2.0 --dry-run  # report the writes, change nothing
+```
+
+It refuses to move the version backwards, to reuse a tag that exists, or to tag a working tree with uncommitted changes. `pnpm release:check` runs on every pull request and reports any drift between the manifests.
+
 Do not assume this workflow blocks old release tags: GitHub runs the workflow YAML stored at the tagged commit. For example, `v0.1.0` points to `57cda5e`, whose older workflow publishes directly on a tag push without the current checks. This YAML cannot block that workflow. Until the remote tag and release restrictions below have been configured and verified, releases are **unsafe and not ready**: do not create, push, or retag `v*` tags, and do not create or publish releases manually. Once those controls are verified, run the `Release` workflow manually from the default branch with the prospective `v<version>` input to run the full checks and builds without publishing. Create and push the version tag only at that exact successful SHA.
+
+A tag run creates the release as a **draft**: the artifacts and their checksums are uploaded, but nothing is downloadable until a maintainer publishes the draft on the [releases page](https://github.com/MaraniMatias/Marvis/releases). That is the last point at which a wrong set of artifacts can be stopped, because a published release cannot be taken back once its tag exists.
 
 Before enabling releases, an administrator must protect `main` with pull-request and required-check rules; create an active `v*` tag ruleset that restricts tag creation, updates, and deletions, with bypass limited to named release maintainers; and restrict who may create, edit, or delete releases. Set and verify the repository's publication policy (including immutable releases where available). These remote settings are prerequisites, not enforced by this workflow. The API check immediately before publishing detects tag movement but cannot close the race with a later update; immutable-tag protection is required.
 
@@ -86,7 +97,7 @@ For an annotated tag, follow each tag object's `object.sha` with `gh api "repos/
 
 ### macOS
 
-Download the `.dmg` and drag Marvis into Applications. The app is not code-signed, so macOS warns you the first time you open it. Right-click the app and choose Open, or run this once in a terminal:
+Download the `.dmg` and drag Marvis into Applications. The app is ad-hoc signed, not signed with an Apple Developer ID, so macOS still warns you the first time you open it. Right-click the app and choose Open, or run this once in a terminal:
 
 ```sh
 xattr -dr com.apple.quarantine /Applications/Marvis.app
@@ -94,10 +105,11 @@ xattr -dr com.apple.quarantine /Applications/Marvis.app
 
 ### Debian and Ubuntu
 
-Download the `.deb` and install it:
+Download the `.deb` matching your architecture and install it:
 
 ```sh
-sudo apt install ./Marvis_<version>_amd64.deb
+sudo apt install ./Marvis_<version>_amd64.deb   # x86_64
+sudo apt install ./Marvis_<version>_arm64.deb   # arm64
 ```
 
 ### Other Linux distributions

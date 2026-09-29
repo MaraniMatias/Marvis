@@ -12,6 +12,8 @@
     "preview": "vite preview",
     "tauri": "tauri",
     "dev:app": "tauri dev --features dev-bridge --config src-tauri/tauri.dev-bridge.conf.json",
+    "release": "node scripts/release.mjs --bump",
+    "release:check": "node scripts/release.mjs --check",
     "fmt": "prettier --write \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml",
     "fmt:check": "prettier --check \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "lint": "eslint src vite.config.ts",
