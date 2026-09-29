@@ -7,13 +7,13 @@
 
 use std::{
     collections::HashMap,
-    io::{BufRead, BufReader},
-    net::TcpListener,
+    io::{self, BufRead, BufReader, Read, Write},
+    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
     process::{Child, Command, Stdio},
     sync::{
         atomic::{AtomicU64, Ordering},
-        Arc, Condvar, Mutex,
+        mpsc, Arc, Condvar, Mutex,
     },
     thread::sleep,
     time::{Duration, Instant},
@@ -34,9 +34,12 @@ pub use crate::domain::agent::AgentEvent;
 static NEXT_PORT_ATTEMPT: AtomicU64 = AtomicU64::new(0);
 
 const SERVER_BOOT_TIMEOUT: Duration = Duration::from_secs(30);
-// `stopAgent` is awaited by the UI; keep startup-cancellation latency short while the
-// underlying launcher remains non-interruptible.
+const JSON_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const CHILD_REAP_POLL: Duration = Duration::from_millis(10);
+// `stopAgent` is awaited by the UI.
 const STARTUP_STOP_WAIT: Duration = Duration::from_secs(3);
+// A waiter must outlive the launcher's 30s budget plus the 3s child reap and 3s reader cleanup.
+const STARTUP_WAIT_TIMEOUT: Duration = Duration::from_secs(36);
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
 const AGENT_PROGRAM: &str = "opencode";
 /// The server is a loopback child, so basic auth with a per-child password is the
@@ -186,6 +189,10 @@ pub struct AgentBridge {
     checkout_id: String,
     child: Mutex<Option<Child>>,
     credentials: ServerCredentials,
+    /// Drains stdout after credentials arrive, so later child output cannot fill the pipe.
+    output_reader: Mutex<Option<std::thread::JoinHandle<()>>>,
+    /// A clone of the event socket, used to interrupt a blocking read during stop.
+    event_socket: Mutex<Option<TcpStream>>,
     /// Set once the server is up, so the event reader can be told to stop.
     reader: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// The reader loop reconnects forever, so it needs its own exit condition.
@@ -195,13 +202,48 @@ pub struct AgentBridge {
 /// Where normalized events go. Injected so the service does not depend on Tauri.
 pub type EventSink = Arc<dyn Fn(AgentEvent) + Send + Sync>;
 
+struct ChildGuard(Option<Child>);
+
+impl ChildGuard {
+    fn new(child: Child) -> Self {
+        Self(Some(child))
+    }
+
+    fn as_mut(&mut self) -> &mut Child {
+        self.0
+            .as_mut()
+            .expect("the startup child should still be owned")
+    }
+
+    fn take(&mut self) -> Option<Child> {
+        self.0.take()
+    }
+}
+
+impl Drop for ChildGuard {
+    fn drop(&mut self) {
+        if let Some(child) = self.take() {
+            terminate_child(child, Instant::now() + STARTUP_STOP_WAIT);
+        }
+    }
+}
+
 impl AgentBridge {
     /// Starts a server for `directory` and waits until it prints its credentials.
     fn start(checkout_id: &str, directory: &Path) -> Result<Self, BridgeError> {
+        Self::start_with_timeout(checkout_id, directory, SERVER_BOOT_TIMEOUT)
+    }
+
+    fn start_with_timeout(
+        checkout_id: &str,
+        directory: &Path,
+        startup_timeout: Duration,
+    ) -> Result<Self, BridgeError> {
+        let deadline = Instant::now() + startup_timeout;
         let program = agent_program()
             .ok_or_else(|| BridgeError::Unavailable(OPENCODE_UNAVAILABLE.to_string()))?;
         let port = free_port()?;
-        let mut child = Command::new(&program)
+        let child = Command::new(&program)
             .args([
                 "serve",
                 "--port",
@@ -217,18 +259,52 @@ impl AgentBridge {
             .map_err(|error| {
                 BridgeError::Unavailable(format!("could not start OpenCode: {error}"))
             })?;
+        let mut child = ChildGuard::new(child);
 
-        let credentials = match read_credentials(&mut child, directory, port) {
-            Ok(credentials) => credentials,
-            Err(error) => {
-                let _ = child.kill();
-                return Err(error);
-            }
-        };
+        let (credentials, output_reader) =
+            match read_credentials(child.as_mut(), directory, port, deadline) {
+                Ok(credentials) => credentials,
+                Err(error) => {
+                    terminate_child(
+                        child
+                            .take()
+                            .expect("the startup child should still be owned"),
+                        Instant::now() + STARTUP_STOP_WAIT,
+                    );
+                    return Err(error);
+                }
+            };
+        if Instant::now() >= deadline {
+            terminate_child(
+                child
+                    .take()
+                    .expect("the startup child should still be owned"),
+                Instant::now() + STARTUP_STOP_WAIT,
+            );
+            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
+            return Err(BridgeError::Unavailable(
+                "the agent server timed out while starting".into(),
+            ));
+        }
+        if let Err(error) = finish_credentials(credentials.clone(), deadline) {
+            terminate_child(
+                child
+                    .take()
+                    .expect("the startup child should still be owned"),
+                Instant::now() + STARTUP_STOP_WAIT,
+            );
+            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
+            return Err(error);
+        }
+        let child = child
+            .take()
+            .expect("the startup child should still be owned");
         Ok(Self {
             checkout_id: checkout_id.to_string(),
             child: Mutex::new(Some(child)),
             credentials,
+            output_reader: Mutex::new(Some(output_reader)),
+            event_socket: Mutex::new(None),
             reader: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
         })
@@ -266,10 +342,43 @@ impl AgentBridge {
         self.stopped.load(Ordering::SeqCst)
     }
 
+    fn install_event_socket(&self, socket: TcpStream) -> bool {
+        let Ok(mut slot) = self.event_socket.lock() else {
+            let _ = socket.shutdown(Shutdown::Both);
+            return false;
+        };
+        *slot = Some(socket);
+        if self.is_stopped() {
+            if let Some(socket) = slot.take() {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
+            false
+        } else {
+            true
+        }
+    }
+
+    fn clear_event_socket(&self) {
+        if let Ok(mut slot) = self.event_socket.lock() {
+            if let Some(socket) = slot.take() {
+                let _ = socket.shutdown(Shutdown::Both);
+            }
+        }
+    }
+
     /// Fetches `path` and returns the `data` payload, refusing a foreign directory.
     fn get_json<T: serde::de::DeserializeOwned>(&self, path: &str) -> Result<T, BridgeError> {
+        self.get_json_with_timeout(path, JSON_REQUEST_TIMEOUT)
+    }
+
+    fn get_json_with_timeout<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<T, BridgeError> {
         let envelope: ApiEnvelope<T> = send_json(
-            ureq::get(&format!("{}{path}", self.base_url()))
+            json_client(timeout)
+                .get(&format!("{}{path}", self.base_url()))
                 .header("authorization", self.auth_header())
                 .header("accept", "application/json")
                 .call(),
@@ -284,7 +393,8 @@ impl AgentBridge {
         body: &B,
     ) -> Result<T, BridgeError> {
         let envelope: ApiEnvelope<T> = send_json(
-            ureq::post(&format!("{}{path}", self.base_url()))
+            json_client(JSON_REQUEST_TIMEOUT)
+                .post(&format!("{}{path}", self.base_url()))
                 .header("authorization", self.auth_header())
                 .send_json(body),
         )?;
@@ -335,14 +445,35 @@ impl AgentBridge {
     }
 
     fn stop(&self) {
+        self.stop_with_timeout(STARTUP_STOP_WAIT);
+    }
+
+    fn stop_with_timeout(&self, timeout: Duration) {
         // The reader reconnects forever unless told to stop, so set the flag before
         // killing the server: otherwise joining it would never return.
         self.signal_stop();
-        if let Some(mut child) = self.child.lock().ok().and_then(|mut slot| slot.take()) {
-            let _ = child.wait();
+        let deadline = Instant::now() + timeout;
+        if let Some(socket) = self
+            .event_socket
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            let _ = socket.shutdown(Shutdown::Both);
+        }
+        if let Some(child) = self.child.lock().ok().and_then(|mut slot| slot.take()) {
+            terminate_child(child, deadline);
+        }
+        if let Some(handle) = self
+            .output_reader
+            .lock()
+            .ok()
+            .and_then(|mut slot| slot.take())
+        {
+            join_reader(handle, deadline);
         }
         if let Some(handle) = self.reader.lock().ok().and_then(|mut slot| slot.take()) {
-            let _ = handle.join();
+            join_reader(handle, deadline);
         }
     }
 
@@ -371,6 +502,134 @@ struct SseFrame {
     data: serde_json::Value,
 }
 
+/// A small HTTP body reader for `/api/event`. ureq's body timeout is a total-body timeout, which
+/// would periodically tear down a healthy event stream. The bridge keeps a clone of this socket
+/// so stop can interrupt a silent read without changing the stream's lifetime.
+struct SseReader {
+    reader: BufReader<TcpStream>,
+    chunked: bool,
+    remaining_chunk: usize,
+    finished: bool,
+}
+
+impl Read for SseReader {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        if self.finished || buffer.is_empty() {
+            return Ok(0);
+        }
+        if self.chunked && self.remaining_chunk == 0 {
+            let mut size = String::new();
+            self.reader.read_line(&mut size)?;
+            let size = size
+                .trim_end()
+                .split(';')
+                .next()
+                .and_then(|value| usize::from_str_radix(value.trim(), 16).ok())
+                .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid SSE chunk"))?;
+            if size == 0 {
+                let mut trailer = String::new();
+                loop {
+                    trailer.clear();
+                    if self.reader.read_line(&mut trailer)? == 0 {
+                        self.finished = true;
+                        return Ok(0);
+                    }
+                    if trailer == "\r\n" || trailer == "\n" {
+                        break;
+                    }
+                }
+                self.finished = true;
+                return Ok(0);
+            }
+            self.remaining_chunk = size;
+        }
+
+        let limit = if self.chunked {
+            buffer.len().min(self.remaining_chunk)
+        } else {
+            buffer.len()
+        };
+        let read = self.reader.read(&mut buffer[..limit])?;
+        if read == 0 {
+            self.finished = true;
+            return Ok(0);
+        }
+        if self.chunked {
+            self.remaining_chunk -= read;
+            if self.remaining_chunk == 0 {
+                let mut crlf = [0; 2];
+                self.reader.read_exact(&mut crlf)?;
+                if crlf != *b"\r\n" {
+                    return Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "invalid SSE chunk terminator",
+                    ));
+                }
+            }
+        }
+        Ok(read)
+    }
+}
+
+fn event_stream(bridge: &AgentBridge) -> io::Result<SseReader> {
+    let address = SocketAddr::from(([127, 0, 0, 1], bridge.credentials.port));
+    let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))?;
+    let interrupt_socket = stream.try_clone()?;
+    stream.set_nodelay(true)?;
+    stream.set_write_timeout(Some(Duration::from_secs(10)))?;
+    write!(
+        stream,
+        "GET /api/event HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: {}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+        bridge.credentials.port,
+        bridge.auth_header()
+    )?;
+    if !bridge.install_event_socket(interrupt_socket) {
+        return Err(io::Error::new(
+            io::ErrorKind::Interrupted,
+            "the event stream was stopped",
+        ));
+    }
+
+    let mut reader = BufReader::new(stream);
+    let mut status_line = String::new();
+    reader.read_line(&mut status_line)?;
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .and_then(|value| value.parse::<u16>().ok())
+        .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid SSE response"))?;
+    if status != 200 {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "the agent event stream was rejected",
+        ));
+    }
+    let mut chunked = false;
+    let mut header = String::new();
+    loop {
+        header.clear();
+        reader.read_line(&mut header)?;
+        if header == "\r\n" || header == "\n" {
+            break;
+        }
+        if let Some((name, value)) = header.split_once(':') {
+            if name.eq_ignore_ascii_case("transfer-encoding")
+                && value
+                    .split(',')
+                    .any(|value| value.trim().eq_ignore_ascii_case("chunked"))
+            {
+                chunked = true;
+            }
+        }
+    }
+    Ok(SseReader {
+        reader,
+        chunked,
+        remaining_chunk: 0,
+        finished: false,
+    })
+}
+
 /// Consumes `/api/event` until the server dies, normalizing and forwarding each frame.
 ///
 /// Reconnects with a bounded backoff: a dropped stream is normal (laptop sleep, server
@@ -379,15 +638,10 @@ struct SseFrame {
 fn read_events(bridge: Arc<AgentBridge>, sink: EventSink) {
     let mut backoff = Duration::from_millis(250);
     while !bridge.is_stopped() {
-        let stream = stream_client();
-        let response = stream
-            .get(&format!("{}/api/event", bridge.base_url()))
-            .header("authorization", bridge.auth_header())
-            .header("accept", "text/event-stream")
-            .call();
-        let mut reader = BufReader::new(match response {
-            Ok(response) => response.into_body().into_reader(),
+        let mut reader = BufReader::new(match event_stream(&bridge) {
+            Ok(reader) => reader,
             Err(_) => {
+                bridge.clear_event_socket();
                 if !sleep_unless_stopped(&bridge, backoff) {
                     return;
                 }
@@ -428,6 +682,7 @@ fn read_events(bridge: Arc<AgentBridge>, sink: EventSink) {
                 data,
             });
         }
+        bridge.clear_event_socket();
         if !sleep_unless_stopped(&bridge, backoff) {
             return;
         }
@@ -450,12 +705,59 @@ fn sleep_unless_stopped(bridge: &AgentBridge, total: Duration) -> bool {
     !bridge.is_stopped()
 }
 
-/// A client with no global timeout, because an event stream is expected to stay idle.
-fn stream_client() -> ureq::Agent {
+/// Kills only the child owned by this bridge and reaps it. If the bounded poll cannot observe
+/// exit, a detached reaper owns the child and performs the final wait without extending the
+/// caller's deadline.
+fn terminate_child(mut child: Child, deadline: Instant) {
+    let _ = child.kill();
+    reap_child(child, deadline);
+}
+
+fn reap_child(mut child: Child, deadline: Instant) {
+    loop {
+        match child.try_wait() {
+            Ok(Some(_)) => return,
+            Err(_) => return reap_child_in_background(child),
+            Ok(None) if Instant::now() >= deadline => break,
+            Ok(None) => {
+                sleep(CHILD_REAP_POLL.min(deadline.saturating_duration_since(Instant::now())))
+            }
+        }
+    }
+    reap_child_in_background(child);
+}
+
+fn reap_child_in_background(child: Child) {
+    let _ = std::thread::spawn(move || {
+        let mut child = child;
+        let _ = child.wait();
+    });
+}
+
+/// Reader I/O is interruptible, so the normal path finishes before the deadline. If an
+/// unexpected reader does not finish, dropping its handle detaches it rather than blocking the
+/// caller. Joining the current event thread would panic; it is already on the return path.
+fn join_reader(handle: std::thread::JoinHandle<()>, deadline: Instant) {
+    if handle.thread().id() == std::thread::current().id() {
+        return;
+    }
+    while !handle.is_finished() {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        sleep(CHILD_REAP_POLL.min(remaining));
+    }
+    if handle.is_finished() {
+        let _ = handle.join();
+    }
+}
+
+fn json_client(timeout: Duration) -> ureq::Agent {
     ureq::Agent::new_with_config(
         ureq::Agent::config_builder()
-            .timeout_global(None)
-            .timeout_connect(Some(Duration::from_secs(10)))
+            .timeout_global(Some(timeout))
+            .timeout_connect(Some(timeout))
             .build(),
     )
 }
@@ -533,39 +835,89 @@ fn first_available_port(
         .find(|candidate| is_available(*candidate))
 }
 
-/// Reads the password the child prints. The port is the one we asked for, and
+/// Reads the password the child prints. The reader remains alive after the password so stdout
+/// written later cannot block the server. The port is the one we asked for, and
 /// `finish_credentials` proves the child actually bound it.
 fn read_credentials(
     child: &mut Child,
     directory: &Path,
     port: u16,
-) -> Result<ServerCredentials, BridgeError> {
+    deadline: Instant,
+) -> Result<(ServerCredentials, std::thread::JoinHandle<()>), BridgeError> {
     let stdout = child
         .stdout
         .take()
         .ok_or_else(|| BridgeError::Unavailable("the agent server produced no output".into()))?;
-    let mut lines = BufReader::new(stdout).lines();
-    let deadline = Instant::now() + SERVER_BOOT_TIMEOUT;
-    while Instant::now() < deadline {
-        let line = match lines.next() {
-            Some(Ok(line)) => line,
-            Some(Err(error)) => {
-                return Err(BridgeError::Unavailable(format!(
-                    "could not read the agent server output: {error}"
-                )))
+
+    let (credentials_tx, credentials_rx) = mpsc::channel();
+    let output_reader = std::thread::spawn(move || {
+        let mut lines = BufReader::new(stdout).lines();
+        let mut reported = false;
+        loop {
+            match lines.next() {
+                Some(Ok(line)) if !reported => {
+                    if let Some(password) = line.strip_prefix("server password ") {
+                        reported = true;
+                        let _ = credentials_tx.send(Ok(Some(password.trim().to_string())));
+                    }
+                }
+                Some(Ok(_)) => {}
+                Some(Err(error)) => {
+                    if !reported {
+                        let _ = credentials_tx.send(Err(error));
+                    }
+                    break;
+                }
+                None => {
+                    if !reported {
+                        let _ = credentials_tx.send(Ok(None));
+                    }
+                    break;
+                }
             }
-            None => break,
-        };
-        if let Some(password) = line.strip_prefix("server password ") {
-            return finish_credentials(ServerCredentials {
-                port,
-                password: password.trim().to_string(),
-                directory: directory.to_path_buf(),
-            });
         }
-    }
-    Err(BridgeError::Unavailable(
-        "the agent server did not report a password in time".into(),
+    });
+
+    let result = credentials_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
+    let password = match result {
+        Ok(Ok(Some(password))) => password,
+        Ok(Ok(None)) => {
+            let _ = child.kill();
+            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
+            return Err(BridgeError::Unavailable(
+                "the agent server reached EOF before reporting credentials".into(),
+            ));
+        }
+        Ok(Err(error)) => {
+            let _ = child.kill();
+            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
+            return Err(BridgeError::Unavailable(format!(
+                "could not read the agent server output: {error}"
+            )));
+        }
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            let _ = child.kill();
+            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
+            return Err(BridgeError::Unavailable(
+                "timed out waiting for the agent server credentials".into(),
+            ));
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+            let _ = child.kill();
+            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
+            return Err(BridgeError::Unavailable(
+                "the agent server reached EOF before reporting credentials".into(),
+            ));
+        }
+    };
+
+    Ok((
+        ServerCredentials {
+            port,
+            password,
+            directory: directory.to_path_buf(),
+        },
+        output_reader,
     ))
 }
 
@@ -578,25 +930,36 @@ fn read_credentials(
 /// tell every later reader that the project has no agents at all, and the colors the sidebar
 /// paints come from that list. Waiting here costs about a second of boot, once per checkout,
 /// and no later call has to wonder.
-fn finish_credentials(credentials: ServerCredentials) -> Result<ServerCredentials, BridgeError> {
+fn finish_credentials(
+    credentials: ServerCredentials,
+    deadline: Instant,
+) -> Result<ServerCredentials, BridgeError> {
     let probe = AgentBridge {
         checkout_id: String::new(),
         child: Mutex::new(None),
         credentials: credentials.clone(),
+        output_reader: Mutex::new(None),
+        event_socket: Mutex::new(None),
         reader: Mutex::new(None),
         stopped: std::sync::atomic::AtomicBool::new(false),
     };
-    let deadline = Instant::now() + SERVER_BOOT_TIMEOUT;
     loop {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(BridgeError::Unavailable(
+                "the agent server timed out while waiting for readiness".into(),
+            ));
+        }
         // /api/agent is cheap and confirms reachability, directory scoping and readiness at
         // once, which is why this route and not another.
-        let catalog: Vec<serde_json::Value> = probe.get_json("/api/agent")?;
+        let catalog: Vec<serde_json::Value> =
+            probe.get_json_with_timeout("/api/agent", remaining)?;
         if !catalog.is_empty() || Instant::now() >= deadline {
             // A catalog that never fills is still a usable server: the bridge works, and a row
             // with no color of its own falls back rather than failing.
             return Ok(credentials);
         }
-        sleep(Duration::from_millis(50));
+        sleep(Duration::from_millis(50).min(remaining));
     }
 }
 
@@ -606,9 +969,15 @@ fn send_json<T: serde::de::DeserializeOwned>(
 ) -> Result<ApiEnvelope<T>, BridgeError> {
     match response {
         Ok(mut response) => {
-            let raw = response.body_mut().read_to_vec().map_err(|error| {
-                BridgeError::Failed(format!("could not read the reply: {error}"))
-            })?;
+            let raw = response
+                .body_mut()
+                .read_to_vec()
+                .map_err(|error| match error {
+                    ureq::Error::Timeout(_) => {
+                        BridgeError::Unavailable("the agent server request timed out".into())
+                    }
+                    error => BridgeError::Failed(format!("could not read the reply: {error}")),
+                })?;
             // The body is deliberately not echoed: it can carry session content.
             serde_json::from_slice(&raw).map_err(|error| {
                 BridgeError::Failed(format!("unexpected agent server reply: {error}"))
@@ -616,6 +985,9 @@ fn send_json<T: serde::de::DeserializeOwned>(
         }
         // 4xx bodies carry the server's own message; keep it, it is actionable.
         Err(ureq::Error::StatusCode(status)) => Err(BridgeError::Failed(status_detail(status))),
+        Err(ureq::Error::Timeout(_)) => Err(BridgeError::Unavailable(
+            "the agent server request timed out".into(),
+        )),
         Err(error) => Err(BridgeError::Unavailable(format!(
             "the agent server is not reachable: {error}"
         ))),
@@ -632,7 +1004,7 @@ fn status_detail(status: u16) -> String {
 
 type BridgeLauncher = dyn Fn(&str, &Path) -> Result<Arc<AgentBridge>, BridgeError> + Send + Sync;
 type ReaderStarter = dyn Fn(&Arc<AgentBridge>, &EventSink) + Send + Sync;
-type BridgeStopper = dyn Fn(&Arc<AgentBridge>) + Send + Sync;
+type BridgeStopper = dyn Fn(&Arc<AgentBridge>, Duration) + Send + Sync;
 type SlotStopper = dyn Fn(Arc<BridgeSlot>, Duration) + Send + Sync;
 
 enum BridgeState {
@@ -671,7 +1043,8 @@ impl BridgeSlot {
         }
     }
 
-    fn wait(&self) -> Result<Arc<AgentBridge>, BridgeError> {
+    fn wait_with_timeout(&self, timeout: Duration) -> Result<Arc<AgentBridge>, BridgeError> {
+        let deadline = Instant::now() + timeout;
         let mut state = self
             .state
             .lock()
@@ -686,9 +1059,27 @@ impl BridgeSlot {
                     ))
                 }
                 BridgeState::Starting { .. } | BridgeState::Stopping => {
-                    state = self.changed.wait(state).map_err(|_| {
-                        BridgeError::Failed("the agent bridge state is poisoned".into())
-                    })?;
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    if remaining.is_zero() {
+                        return Err(BridgeError::Unavailable(
+                            "timed out waiting for the agent bridge to start".into(),
+                        ));
+                    }
+                    let (next, timed_out) =
+                        self.changed.wait_timeout(state, remaining).map_err(|_| {
+                            BridgeError::Failed("the agent bridge state is poisoned".into())
+                        })?;
+                    state = next;
+                    if timed_out.timed_out()
+                        && matches!(
+                            &*state,
+                            BridgeState::Starting { .. } | BridgeState::Stopping
+                        )
+                    {
+                        return Err(BridgeError::Unavailable(
+                            "timed out waiting for the agent bridge to start".into(),
+                        ));
+                    }
                 }
             }
         }
@@ -716,8 +1107,6 @@ impl BridgeSlot {
     }
 
     fn stop(&self, stopper: &BridgeStopper, timeout: Duration) {
-        // This deadline bounds waits on Starting/Stopping only. The stopper may still block
-        // in child.wait() or an SSE reader join; those require the F1.2 timeout/reap work.
         let deadline = Instant::now() + timeout;
         self.signal();
         let Ok(mut state) = self.state.lock() else {
@@ -767,7 +1156,7 @@ impl BridgeSlot {
                     let bridge = Arc::clone(bridge);
                     *state = BridgeState::Stopping;
                     drop(state);
-                    stopper(&bridge);
+                    stopper(&bridge, deadline.saturating_duration_since(Instant::now()));
                     if let Ok(mut state) = self.state.lock() {
                         *state = BridgeState::Stopped;
                         self.changed.notify_all();
@@ -789,18 +1178,21 @@ pub struct AgentService {
     stopper: Arc<BridgeStopper>,
     slot_stopper: Arc<SlotStopper>,
     startup_stop_wait: Duration,
+    startup_wait: Duration,
 }
 
 impl AgentService {
     pub fn new() -> Self {
-        Self::with_lifecycle(
+        let mut service = Self::with_lifecycle(
             Arc::new(|checkout_id, directory| {
                 AgentBridge::start(checkout_id, directory).map(Arc::new)
             }),
             Arc::new(|bridge, sink| bridge.start_reader(sink)),
-            Arc::new(|bridge| bridge.stop()),
+            Arc::new(|bridge, timeout| bridge.stop_with_timeout(timeout)),
             STARTUP_STOP_WAIT,
-        )
+        );
+        service.startup_wait = STARTUP_WAIT_TIMEOUT;
+        service
     }
 
     fn with_lifecycle(
@@ -836,6 +1228,7 @@ impl AgentService {
             stopper,
             slot_stopper,
             startup_stop_wait,
+            startup_wait: startup_stop_wait,
         }
     }
 
@@ -871,7 +1264,7 @@ impl AgentService {
         };
 
         if !is_starter {
-            return slot.wait();
+            return slot.wait_with_timeout(self.startup_wait);
         }
 
         let sink = self
@@ -879,8 +1272,6 @@ impl AgentService {
             .lock()
             .ok()
             .and_then(|slot| slot.as_ref().map(Arc::clone));
-        // Startup still has blocking stdout/readiness I/O and the free-port probe is released
-        // before spawn; interruptible deadlines/reap and the port race remain F1.2/F1.3 work.
         let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (self.launcher)(checkout_id, directory)
         }))
@@ -904,7 +1295,7 @@ impl AgentService {
                     // up its child and must never publish over a later checkout generation.
                     *state = BridgeState::Stopping;
                     drop(state);
-                    (self.stopper)(&bridge);
+                    (self.stopper)(&bridge, self.startup_stop_wait);
                     if let Ok(mut state) = slot.state.lock() {
                         *state = BridgeState::Stopped;
                         slot.changed.notify_all();
@@ -929,7 +1320,7 @@ impl AgentService {
                         if let Ok(mut bridges) = self.bridges.lock() {
                             remove_slot_if_current(&mut bridges, checkout_id, &slot);
                         }
-                        (self.stopper)(&bridge);
+                        (self.stopper)(&bridge, self.startup_stop_wait);
                         return Err(error);
                     }
                 }
@@ -1124,7 +1515,11 @@ pub fn map_error(error: BridgeError) -> IpcError {
 mod tests {
     use std::{
         collections::HashMap,
+        io::{self, Read, Write},
+        net::{Shutdown, TcpListener},
+        panic::{catch_unwind, AssertUnwindSafe},
         path::{Path, PathBuf},
+        process::{Child, Command, Stdio},
         sync::{
             atomic::{AtomicUsize, Ordering},
             mpsc, Arc, Mutex,
@@ -1139,10 +1534,11 @@ mod tests {
     };
 
     use super::{
-        agent_program, basic_credentials, first_available_port, port_candidates,
-        remove_slot_if_current, same_directory, validate_session_id, AgentBridge, AgentEvent,
-        AgentService, BridgeError, BridgeState, BridgeStopper, ServerCredentials, MAX_PROMPT_BYTES,
-        PORT_RANGE_LEN, PORT_RANGE_START,
+        agent_program, basic_credentials, event_stream, finish_credentials, first_available_port,
+        join_reader, port_candidates, read_credentials, remove_slot_if_current, same_directory,
+        status_detail, terminate_child, validate_session_id, AgentBridge, AgentEvent, AgentService,
+        BridgeError, BridgeState, BridgeStopper, ChildGuard, EventSink, ServerCredentials,
+        MAX_PROMPT_BYTES, PORT_RANGE_LEN, PORT_RANGE_START,
     };
 
     fn required_live_directory(name: &str) -> PathBuf {
@@ -1167,9 +1563,21 @@ mod tests {
                 password: "test".into(),
                 directory: PathBuf::new(),
             },
+            output_reader: Mutex::new(None),
+            event_socket: Mutex::new(None),
             reader: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
         })
+    }
+
+    struct ReaderExitSignal(Option<mpsc::Sender<()>>);
+
+    impl Drop for ReaderExitSignal {
+        fn drop(&mut self) {
+            if let Some(sender) = self.0.take() {
+                let _ = sender.send(());
+            }
+        }
     }
 
     fn test_service(
@@ -1182,7 +1590,7 @@ mod tests {
             Arc::new(move |_, _| {
                 readers.fetch_add(1, Ordering::SeqCst);
             }),
-            Arc::new(move |_| {
+            Arc::new(move |_, _| {
                 stops.fetch_add(1, Ordering::SeqCst);
             }),
             Duration::from_millis(400),
@@ -1248,6 +1656,65 @@ mod tests {
         assert!(bridges
             .iter()
             .all(|bridge| Arc::ptr_eq(bridge, &bridges[0])));
+        service.stop("checkout");
+        assert_eq!(stops.load(Ordering::SeqCst), 1);
+    }
+
+    #[test]
+    fn a_waiter_timeout_does_not_cancel_a_slower_shared_start() {
+        let starts = Arc::new(AtomicUsize::new(0));
+        let readers = Arc::new(AtomicUsize::new(0));
+        let stops = Arc::new(AtomicUsize::new(0));
+        let (started_tx, started_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let release_rx = Arc::new(Mutex::new(release_rx));
+        let starts_for_launcher = Arc::clone(&starts);
+        let release_for_launcher = Arc::clone(&release_rx);
+        let service = test_service(
+            move |checkout_id, _| {
+                starts_for_launcher.fetch_add(1, Ordering::SeqCst);
+                started_tx.send(()).unwrap();
+                release_for_launcher.lock().unwrap().recv().unwrap();
+                Ok(fake_bridge(checkout_id))
+            },
+            Arc::clone(&readers),
+            Arc::clone(&stops),
+        );
+        let mut service = service;
+        service.startup_wait = Duration::from_millis(50);
+        let service = Arc::new(service);
+        service.set_event_sink(Arc::new(|_| {}));
+
+        let starter_service = Arc::clone(&service);
+        let (starter_result_tx, starter_result_rx) = mpsc::channel();
+        let starter = std::thread::spawn(move || {
+            let _ = starter_result_tx.send(starter_service.bridge("checkout", Path::new(".")));
+        });
+        started_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the slow launcher should start");
+
+        let waiter_service = Arc::clone(&service);
+        let (waiter_result_tx, waiter_result_rx) = mpsc::channel();
+        let waiter = std::thread::spawn(move || {
+            let _ = waiter_result_tx.send(waiter_service.bridge("checkout", Path::new(".")));
+        });
+        assert!(waiter_result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the waiter should finish at its deadline")
+            .is_err());
+
+        for _ in 0..2 {
+            release_tx.send(()).unwrap();
+        }
+        assert!(starter_result_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the original starter should finish")
+            .is_ok());
+        starter.join().unwrap();
+        waiter.join().unwrap();
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        assert_eq!(readers.load(Ordering::SeqCst), 1);
         service.stop("checkout");
         assert_eq!(stops.load(Ordering::SeqCst), 1);
     }
@@ -1539,7 +2006,7 @@ mod tests {
     #[test]
     fn a_startup_stop_wait_is_bounded() {
         let slot = Arc::new(super::BridgeSlot::starting());
-        let stopper: Arc<BridgeStopper> = Arc::new(|_| {});
+        let stopper: Arc<BridgeStopper> = Arc::new(|_, _| {});
         let (done_tx, done_rx) = mpsc::channel();
         let stopping_slot = Arc::clone(&slot);
         let stopping_callback = Arc::clone(&stopper);
@@ -1556,6 +2023,43 @@ mod tests {
     }
 
     #[test]
+    fn waiting_for_a_start_is_bounded() {
+        let slot = super::BridgeSlot::starting();
+        let started = Instant::now();
+        let error = match slot.wait_with_timeout(Duration::from_millis(20)) {
+            Ok(_) => panic!("a starting slot without a publisher must time out"),
+            Err(error) => error,
+        };
+
+        assert!(error_message(&error).contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(matches!(
+            *slot.state.lock().unwrap(),
+            BridgeState::Starting {
+                stop_requested: false
+            }
+        ));
+    }
+
+    #[test]
+    fn a_reader_join_does_not_outlive_its_budget() {
+        let (release_tx, release_rx) = mpsc::channel();
+        let (finished_tx, finished_rx) = mpsc::channel();
+        let reader = std::thread::spawn(move || {
+            let _ = release_rx.recv();
+            let _ = finished_tx.send(());
+        });
+        let started = Instant::now();
+        join_reader(reader, Instant::now() + Duration::from_millis(20));
+
+        assert!(started.elapsed() < Duration::from_millis(200));
+        release_tx.send(()).unwrap();
+        finished_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the detached test reader should eventually exit");
+    }
+
+    #[test]
     fn failure_cleanup_preserves_a_replacement_slot() {
         let failed = Arc::new(super::BridgeSlot::starting());
         *failed.state.lock().unwrap() = BridgeState::Failed(BridgeError::Failed("failed".into()));
@@ -1564,7 +2068,7 @@ mod tests {
 
         // stop removes failed S1; a later caller inserts S2 before S1's cleanup reaches map.
         let removed = bridges.remove("checkout").unwrap();
-        let stopper: Arc<BridgeStopper> = Arc::new(|_| {});
+        let stopper: Arc<BridgeStopper> = Arc::new(|_, _| {});
         removed.stop(stopper.as_ref(), Duration::from_millis(20));
         let replacement = Arc::new(super::BridgeSlot::starting());
         bridges.insert("checkout".to_string(), Arc::clone(&replacement));
@@ -1669,7 +2173,7 @@ mod tests {
                 Ok(bridge)
             }),
             Arc::new(|_, _| {}),
-            Arc::new(move |_| {
+            Arc::new(move |_, _| {
                 if cleanup_stops.fetch_add(1, Ordering::SeqCst) == 0 {
                     let signaled = cleanup_bridges
                         .lock()
@@ -1713,7 +2217,7 @@ mod tests {
         let service = AgentService::with_lifecycle_and_slot_stopper(
             Arc::new(|_, _| panic!("stop_all should not launch bridges")),
             Arc::new(|_, _| {}),
-            Arc::new(|_| {}),
+            Arc::new(|_, _| {}),
             Duration::from_millis(400),
             Arc::new(move |slot, timeout| {
                 let call = {
@@ -1808,6 +2312,252 @@ mod tests {
         assert_eq!(stops.load(Ordering::SeqCst), 2);
     }
 
+    fn fixture_child(directory: &Path, script: &str) -> Child {
+        Command::new("sh")
+            .args(["-c", script])
+            .current_dir(directory)
+            .stdin(Stdio::null())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("the POSIX test fixture should start")
+    }
+
+    #[test]
+    fn child_guard_reaps_the_child_when_startup_unwinds() {
+        let directory = tempfile::tempdir().unwrap();
+        let child = fixture_child(directory.path(), "exec tail -f /dev/null");
+        let pid = child.id() as libc::pid_t;
+        let result = catch_unwind(AssertUnwindSafe(|| {
+            let _guard = ChildGuard::new(child);
+            panic!("injected startup panic");
+        }));
+
+        assert!(result.is_err());
+        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+    }
+
+    #[test]
+    fn credential_wait_times_out_when_stdout_stays_open_without_output() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = fixture_child(directory.path(), "exec tail -f /dev/null");
+        let error = read_credentials(
+            &mut child,
+            directory.path(),
+            1,
+            Instant::now() + Duration::from_millis(50),
+        )
+        .expect_err("a silent child must not satisfy startup");
+
+        assert!(error_message(&error).contains("timed out"));
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "fixture child was not reaped"
+        );
+    }
+
+    #[test]
+    fn credential_wait_times_out_on_a_partial_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = fixture_child(directory.path(), "printf partial; exec tail -f /dev/null");
+        let error = read_credentials(
+            &mut child,
+            directory.path(),
+            1,
+            Instant::now() + Duration::from_millis(50),
+        )
+        .expect_err("a partial line without EOF must not satisfy startup");
+
+        assert!(error_message(&error).contains("timed out"));
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "fixture child was not reaped"
+        );
+    }
+
+    #[test]
+    fn credential_wait_distinguishes_early_eof() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = fixture_child(directory.path(), "printf 'server is starting\\n'");
+        let error = read_credentials(
+            &mut child,
+            directory.path(),
+            1,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect_err("a child that exits before credentials must fail");
+
+        assert!(error_message(&error).contains("EOF"));
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "fixture child was not reaped"
+        );
+    }
+
+    #[test]
+    fn credential_reader_drains_stdout_after_startup() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = fixture_child(
+            directory.path(),
+            "printf 'server password secret\\nstdout after boot\\n'; exec tail -f /dev/null",
+        );
+        let (credentials, output_reader) = read_credentials(
+            &mut child,
+            directory.path(),
+            1,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("the fixture credentials should be read");
+
+        assert_eq!(credentials.password, "secret");
+        terminate_child(child, Instant::now() + Duration::from_secs(1));
+        join_reader(output_reader, Instant::now() + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn readiness_request_times_out_when_the_child_never_answers_http() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
+        let port = listener.local_addr().unwrap().port();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("test request should connect");
+            accepted_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+            let _ = stream.write_all(b"");
+        });
+        let error = finish_credentials(
+            ServerCredentials {
+                port,
+                password: "secret".into(),
+                directory: directory.path().to_path_buf(),
+            },
+            Instant::now() + Duration::from_millis(100),
+        )
+        .expect_err("an HTTP server that never answers must time out");
+
+        accepted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the readiness request should reach the fixture");
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+        assert!(error_message(&error).contains("timed out"));
+    }
+
+    #[test]
+    fn stopping_interrupts_an_idle_sse_reader() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
+        let port = listener.local_addr().unwrap().port();
+        let (accepted_tx, accepted_rx) = mpsc::channel();
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("SSE request should connect");
+            stream
+                .write_all(
+                    b"HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+                )
+                .unwrap();
+            accepted_tx.send(()).unwrap();
+            let _ = release_rx.recv();
+        });
+        let child = fixture_child(directory.path(), "exec tail -f /dev/null");
+        let bridge = Arc::new(AgentBridge {
+            checkout_id: "idle-sse".into(),
+            child: Mutex::new(Some(child)),
+            credentials: ServerCredentials {
+                port,
+                password: "secret".into(),
+                directory: directory.path().to_path_buf(),
+            },
+            output_reader: Mutex::new(None),
+            event_socket: Mutex::new(None),
+            reader: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        });
+        let (reader_done_tx, reader_done_rx) = mpsc::channel();
+        let reader_exit = ReaderExitSignal(Some(reader_done_tx));
+        let sink: EventSink = Arc::new(move |_: AgentEvent| {
+            let _ = &reader_exit;
+        });
+        bridge.start_reader(&sink);
+        accepted_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the reader should connect to the fixture");
+
+        let budget = Duration::from_millis(200);
+        let started = Instant::now();
+        bridge.stop_with_timeout(budget);
+        assert!(started.elapsed() <= budget + Duration::from_millis(100));
+        drop(sink);
+        reader_done_rx
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the SSE reader should terminate after stop");
+        release_tx.send(()).unwrap();
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn truncated_chunked_sse_eof_returns_without_spinning() {
+        let directory = tempfile::tempdir().unwrap();
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("SSE request should connect");
+            let mut request = Vec::new();
+            let mut buffer = [0; 512];
+            while !request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let read = stream
+                    .read(&mut buffer)
+                    .expect("the request should be readable");
+                if read == 0 {
+                    break;
+                }
+                request.extend_from_slice(&buffer[..read]);
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n")
+                .unwrap();
+            let _ = stream.shutdown(Shutdown::Write);
+        });
+        let bridge = AgentBridge {
+            checkout_id: "truncated-sse".into(),
+            child: Mutex::new(None),
+            credentials: ServerCredentials {
+                port,
+                password: "secret".into(),
+                directory: directory.path().to_path_buf(),
+            },
+            output_reader: Mutex::new(None),
+            event_socket: Mutex::new(None),
+            reader: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        };
+        let mut reader = event_stream(&bridge).expect("the truncated stream should connect");
+        let started = Instant::now();
+        let mut body = Vec::new();
+        let result = reader.read_to_end(&mut body);
+
+        assert!(started.elapsed() < Duration::from_secs(1));
+        assert!(result.is_ok() || result.unwrap_err().kind() == io::ErrorKind::ConnectionReset);
+        assert!(body.is_empty());
+        bridge.clear_event_socket();
+        server.join().unwrap();
+    }
+
+    fn error_message(error: &BridgeError) -> &str {
+        match error {
+            BridgeError::Unavailable(message)
+            | BridgeError::Foreign(message)
+            | BridgeError::Failed(message) => message,
+        }
+    }
+
     #[test]
     fn a_panicking_reader_starter_does_not_poison_the_slot() {
         let starts = Arc::new(AtomicUsize::new(0));
@@ -1826,7 +2576,7 @@ mod tests {
                     panic!("injected reader starter panic");
                 }
             }),
-            Arc::new(move |_| {
+            Arc::new(move |_, _| {
                 stop_calls.fetch_add(1, Ordering::SeqCst);
             }),
             Duration::from_millis(400),
@@ -1955,6 +2705,11 @@ mod tests {
             foreign.code,
             crate::domain::ipc::IpcErrorCode::AgentOwnershipMismatch
         );
+    }
+
+    #[test]
+    fn reports_rejected_credentials_distinctly() {
+        assert!(status_detail(401).contains("rejected Marvis's credentials"));
     }
 
     /// Proves the round marker really reaches the session, which is what makes the
