@@ -146,6 +146,48 @@ body {
   box-shadow: -10px 0 24px rgb(0 0 0 / 20%);
 }
 
+.split-inspector-drawer {
+  top: 32px;
+  height: calc(100% - 32px);
+}
+
+.split-inspector-closed {
+  display: none;
+}
+
+/* The hit area that peeks the drawer. It sits above the drawer only while the drawer is
+   closed, so it is the thing the pointer finds at the edge; once the drawer is open the strip
+   drops below it and the whole panel, its scrollbar included, takes the pointer again.
+
+   It is 20px rather than a hairline because a hairline is not something a pointer finds by
+   accident, and this area has no other way to announce itself. It costs the diff view its
+   outermost 20px, which is the whitespace past the last column, and only in the split layout. */
+.inspector-hover-strip {
+  position: absolute;
+  z-index: 40;
+  top: 32px;
+  right: 0;
+  bottom: 0;
+  width: 20px;
+}
+
+.inspector-hover-strip-open {
+  z-index: 20;
+}
+
+/* Nothing is drawn until the pointer is on the strip: a permanent handle would be a grey bar
+   down the window edge for a layout that is only peeking. The accent on hover is the only sign
+   the edge opens something. */
+.inspector-hover-strip:hover::after {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  width: 3px;
+  background: var(--marvis-accent);
+  content: "";
+}
+
 .document-pane {
   background: transparent;
 }

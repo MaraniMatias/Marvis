@@ -26,36 +26,46 @@ const SIDEBAR_WIDTH_MIN: u32 = 240;
 const SIDEBAR_WIDTH_MAX: u32 = 500;
 const INSPECTOR_WIDTH_MIN: u32 = 200;
 const INSPECTOR_WIDTH_MAX: u32 = 480;
+const PREVIEW_WIDTH_MIN: u32 = 260;
+const PREVIEW_WIDTH_MAX: u32 = 900;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppLayoutState {
     pub version: u8,
+    pub mode: String,
     pub sidebar_width: u32,
     pub inspector_width: u32,
+    pub preview_width: u32,
 }
 
 impl Default for AppLayoutState {
     fn default() -> Self {
         Self {
-            version: 1,
+            version: 2,
+            mode: "focus".into(),
             sidebar_width: 240,
             inspector_width: 280,
+            preview_width: 360,
         }
     }
 }
 
 impl AppLayoutState {
-    /// A layout written by an older build carries fields that no longer exist and widths
-    /// from a different range. Both are pulled into the current shape rather than
-    /// discarding the record, so a resize survives the upgrade.
+    /// Clamp persisted dimensions and discard unknown layout modes.
     fn normalized(mut self) -> Self {
+        if self.mode != "focus" && self.mode != "split" {
+            self.mode = "focus".into();
+        }
         self.sidebar_width = self
             .sidebar_width
             .clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
         self.inspector_width = self
             .inspector_width
             .clamp(INSPECTOR_WIDTH_MIN, INSPECTOR_WIDTH_MAX);
+        self.preview_width = self
+            .preview_width
+            .clamp(PREVIEW_WIDTH_MIN, PREVIEW_WIDTH_MAX);
         self
     }
 }
@@ -684,7 +694,7 @@ impl Database {
         let layout = serde_json::from_str::<AppLayoutState>(&serialized)
             .ok()
             .map(AppLayoutState::normalized)
-            .filter(|layout| layout.version == 1)
+            .filter(|layout| layout.version == 2)
             .unwrap_or_default();
         if serde_json::to_string(&layout).map_err(|error| error.to_string())? != serialized {
             connection
@@ -696,7 +706,7 @@ impl Database {
 
     pub fn save_app_layout(&self, layout: &AppLayoutState) -> Result<(), String> {
         let layout = layout.clone().normalized();
-        if layout.version != 1 {
+        if layout.version != 2 {
             return Err("saved UI layout has an unsupported version".into());
         }
         let serialized = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
@@ -2480,8 +2490,10 @@ mod tests {
         database.register_plain_repo(repo).unwrap();
 
         let layout = AppLayoutState {
+            mode: "split".into(),
             sidebar_width: 340,
             inspector_width: 420,
+            preview_width: 720,
             ..AppLayoutState::default()
         };
         database.save_app_layout(&layout).unwrap();
@@ -2524,7 +2536,7 @@ mod tests {
             connection
                 .execute(
                     "UPDATE preferences SET value = ?1 WHERE key = 'ui_layout_v1'",
-                    [r#"{"version":99}"#],
+                    [r#"{"version":1,"sidebarWidth":300,"inspectorWidth":320}"#],
                 )
                 .unwrap();
         }
@@ -2556,33 +2568,31 @@ mod tests {
     }
 
     #[test]
-    fn app_layout_normalizes_a_layout_saved_by_an_older_build() {
-        // The retired fields are unknown to the current struct, and the widths come from
-        // the old ranges: a resize from that build is kept where it still fits.
-        let old_layout = serde_json::json!({
-            "version": 1,
+    fn app_layout_normalizes_dimensions_and_unknown_modes() {
+        let layout = serde_json::from_value::<AppLayoutState>(serde_json::json!({
+            "version": 2,
+            "mode": "unknown",
             "sidebarWidth": 260,
             "inspectorWidth": 320,
-            "sidebarVisible": false,
-            "focusSnapshot": null,
-            "collapsedRepoIds": ["repo:collapsed"],
-            "reduceTransparency": true
-        });
-        let layout = serde_json::from_value::<AppLayoutState>(old_layout)
-            .unwrap()
-            .normalized();
+            "previewWidth": 1200
+        }))
+        .unwrap()
+        .normalized();
         assert_eq!(
             layout,
             AppLayoutState {
+                mode: "focus".into(),
                 sidebar_width: 260,
                 inspector_width: 320,
+                preview_width: 900,
                 ..Default::default()
             }
         );
 
         let out_of_range = serde_json::from_value::<AppLayoutState>(serde_json::json!({
             "sidebarWidth": 220,
-            "inspectorWidth": 560
+            "inspectorWidth": 560,
+            "previewWidth": 200
         }))
         .unwrap()
         .normalized();
@@ -2591,6 +2601,7 @@ mod tests {
             AppLayoutState {
                 sidebar_width: 240,
                 inspector_width: 480,
+                preview_width: 260,
                 ..Default::default()
             }
         );

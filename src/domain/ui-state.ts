@@ -1,9 +1,11 @@
 import type { MainDocument, MainViewState } from "./main-document";
 
 export interface AppLayoutState {
-  version: 1;
+  version: 2;
+  mode: "focus" | "split";
   sidebarWidth: number;
   inspectorWidth: number;
+  previewWidth: number;
 }
 
 export interface CheckoutUiState extends MainViewState {
@@ -21,13 +23,16 @@ export interface CheckoutUiState extends MainViewState {
 
 export const SIDEBAR_WIDTH_LIMITS = { min: 240, max: 500 } as const;
 export const INSPECTOR_WIDTH_LIMITS = { min: 200, max: 480 } as const;
+export const PREVIEW_WIDTH_LIMITS = { min: 260, max: 900 } as const;
 /** What the main panel needs before the inspector can no longer sit beside it. */
 const MIN_MAIN_WIDTH = 430;
 
 export const DEFAULT_APP_LAYOUT: AppLayoutState = {
-  version: 1,
+  version: 2,
+  mode: "focus",
   sidebarWidth: 240,
   inspectorWidth: 280,
+  previewWidth: 360,
 };
 
 export const DEFAULT_CHECKOUT_UI_STATE: CheckoutUiState = {
@@ -60,9 +65,10 @@ function safePath(value: unknown): value is string {
 }
 
 export function normalizeAppLayout(value: unknown): AppLayoutState {
-  if (!isRecord(value) || value.version !== 1) return { ...DEFAULT_APP_LAYOUT };
+  if (!isRecord(value) || value.version !== 2) return { ...DEFAULT_APP_LAYOUT };
   return {
-    version: 1,
+    version: 2,
+    mode: value.mode === "split" ? "split" : "focus",
     sidebarWidth: boundedNumber(
       value.sidebarWidth,
       DEFAULT_APP_LAYOUT.sidebarWidth,
@@ -74,6 +80,12 @@ export function normalizeAppLayout(value: unknown): AppLayoutState {
       DEFAULT_APP_LAYOUT.inspectorWidth,
       INSPECTOR_WIDTH_LIMITS.min,
       INSPECTOR_WIDTH_LIMITS.max,
+    ),
+    previewWidth: boundedNumber(
+      value.previewWidth,
+      DEFAULT_APP_LAYOUT.previewWidth,
+      PREVIEW_WIDTH_LIMITS.min,
+      PREVIEW_WIDTH_LIMITS.max,
     ),
   };
 }
@@ -116,13 +128,15 @@ export function normalizeCheckoutUiState(value: unknown): CheckoutUiState {
 
 export function resizeLayoutPanel(
   layout: AppLayoutState,
-  panel: "sidebar" | "inspector",
+  panel: "sidebar" | "inspector" | "preview",
   width: number,
 ): AppLayoutState {
   if (!Number.isFinite(width)) return layout;
-  const limits = panel === "sidebar" ? SIDEBAR_WIDTH_LIMITS : INSPECTOR_WIDTH_LIMITS;
+  const limits =
+    panel === "sidebar" ? SIDEBAR_WIDTH_LIMITS : panel === "inspector" ? INSPECTOR_WIDTH_LIMITS : PREVIEW_WIDTH_LIMITS;
   const clamped = Math.round(Math.min(limits.max, Math.max(limits.min, width)));
-  return panel === "sidebar" ? { ...layout, sidebarWidth: clamped } : { ...layout, inspectorWidth: clamped };
+  if (panel === "sidebar") return { ...layout, sidebarWidth: clamped };
+  return panel === "inspector" ? { ...layout, inspectorWidth: clamped } : { ...layout, previewWidth: clamped };
 }
 
 export function needsInspectorDrawer(layout: AppLayoutState, viewportWidth: number): boolean {

@@ -280,6 +280,7 @@ const SidebarStub = defineComponent({
     "archiveWorktree",
     "restoreArchived",
     "renameSession",
+    "newTerminal",
   ],
   setup(_, { emit }) {
     return () =>
@@ -287,6 +288,7 @@ const SidebarStub = defineComponent({
         h("button", { "data-testid": "select-checkout-two", onClick: () => emit("selectCheckout", "checkout:two") }),
         h("button", { "data-testid": "select-session-one", onClick: () => emit("selectSession", "session:one") }),
         h("button", { "data-testid": "select-session-two", onClick: () => emit("selectSession", "session:two") }),
+        h("button", { "data-testid": "new-terminal-one", onClick: () => emit("newTerminal", "checkout:one") }),
         h("button", { "data-testid": "close-workdir-base", onClick: () => emit("closeWorkdir", "checkout:one") }),
         h("button", { "data-testid": "close-workdir-worktree", onClick: () => emit("closeWorkdir", "checkout:two") }),
         h("button", { "data-testid": "close-missing-base", onClick: () => emit("closeMissing", "checkout:one") }),
@@ -1125,9 +1127,11 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 1,
+        version: 2,
+        mode: "focus",
         sidebarWidth: 310,
         inspectorWidth: 340,
+        previewWidth: 360,
       });
       wrapper.unmount();
     });
@@ -1140,18 +1144,22 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 1,
+        version: 2,
+        mode: "focus",
         sidebarWidth: 500,
         inspectorWidth: 200,
+        previewWidth: 360,
       });
       wrapper.unmount();
     });
 
     it("keeps the inspector width when the narrow drawer reports a collapsed panel", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 1,
+        version: 2,
+        mode: "focus",
         sidebarWidth: 345,
         inspectorWidth: 450,
+        previewWidth: 360,
       });
       const group = wrapper.getComponent(SplitterGroup);
       const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
@@ -1166,18 +1174,22 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 1,
+        version: 2,
+        mode: "focus",
         sidebarWidth: 400,
         inspectorWidth: 450,
+        previewWidth: 360,
       });
       wrapper.unmount();
     });
 
     it("lets double-click on a handle reset just that panel", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 1,
+        version: 2,
+        mode: "focus",
         sidebarWidth: 345,
         inspectorWidth: 450,
+        previewWidth: 360,
       });
       const resizeCalls = vi.fn();
       mocks.onProgrammaticPanelResize = resizeCalls;
@@ -1191,18 +1203,22 @@ describe("App UI integration", () => {
       await vi.advanceTimersByTimeAsync(300);
       await flushPromises();
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 1,
+        version: 2,
+        mode: "focus",
         sidebarWidth: DEFAULT_APP_LAYOUT.sidebarWidth,
         inspectorWidth: 450,
+        previewWidth: 360,
       });
       wrapper.unmount();
     });
 
     it("gives the inspector its full width back when space returns", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 1,
+        version: 2,
+        mode: "focus",
         sidebarWidth: 300,
         inspectorWidth: 300,
+        previewWidth: 360,
       });
       const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
       const resizeCalls = vi.fn();
@@ -1219,6 +1235,128 @@ describe("App UI integration", () => {
 
       expect(inspectorPanel.emitted("expand")).toBeTruthy();
       expect(resizeCalls).toHaveBeenCalledWith("inspector-panel", 300);
+      wrapper.unmount();
+    });
+
+    it("keeps the terminal mounted with the latest preview in split mode", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
+
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+      await wrapper.get('[data-testid="layout-toggle"]').trigger("click");
+      expect(wrapper.get('[data-testid="layout-toggle"]').attributes()).toMatchObject({
+        "aria-label": "Switch to focus layout",
+        "aria-pressed": "true",
+      });
+      expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).not.toBe("none");
+      expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
+      expect(mocks.sessionPaneMounts).toBe(1);
+
+      const resizeHandle = wrapper.get('[aria-label="Resize preview panel"]');
+      await resizeHandle.trigger("pointermove", { pointerId: 1, clientX: 400 });
+      expect(wrapper.getComponent({ name: "MainPane" }).emitted("resizePreview")).toBeUndefined();
+      await resizeHandle.trigger("keydown", { key: "ArrowLeft" });
+      await wrapper.get('[data-testid="select-session-one"]').trigger("click");
+      await flushPromises();
+      expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
+      expect(mocks.sessionPaneMounts).toBe(1);
+
+      await wrapper.get('[data-testid="new-terminal-one"]').trigger("click");
+      await flushPromises();
+      expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
+
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({ ...DEFAULT_APP_LAYOUT, mode: "split", previewWidth: 380 });
+      expect(mocks.saveCheckoutUiState).toHaveBeenLastCalledWith(
+        "checkout:one",
+        expect.objectContaining({ mainView: "document", document: expect.objectContaining({ path: "README.md" }) }),
+      );
+      await wrapper.get('[data-testid="layout-toggle"]').trigger("click");
+      expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).toBe("none");
+      expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
+      wrapper.unmount();
+    });
+
+    it("resizes the preview only while its handle is being dragged", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
+        ...DEFAULT_APP_LAYOUT,
+        mode: "split",
+      });
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+      const handle = wrapper.get('[aria-label="Resize preview panel"]');
+      const pane = wrapper.getComponent({ name: "MainPane" });
+      const element = handle.element as HTMLElement;
+      element.setPointerCapture = vi.fn();
+      element.hasPointerCapture = vi.fn().mockReturnValue(true);
+      element.releasePointerCapture = vi.fn();
+      vi.spyOn(wrapper.get("#main-panel > div").element, "getBoundingClientRect").mockReturnValue({
+        right: 1000,
+      } as DOMRect);
+
+      await handle.trigger("pointermove", { pointerId: 1, clientX: 700 });
+      expect(pane.emitted("resizePreview")).toBeUndefined();
+      await handle.trigger("pointerdown", { pointerId: 1, clientX: 700 });
+      await handle.trigger("pointermove", { pointerId: 2, clientX: 650 });
+      expect(pane.emitted("resizePreview")).toBeUndefined();
+      await handle.trigger("pointermove", { pointerId: 1, clientX: 650 });
+      expect(pane.emitted("resizePreview")).toEqual([[345]]);
+      await handle.trigger("pointerup", { pointerId: 1 });
+      await handle.trigger("pointermove", { pointerId: 1, clientX: 600 });
+      expect(pane.emitted("resizePreview")).toHaveLength(1);
+      wrapper.unmount();
+    });
+
+    it("peeks the split inspector for 300ms and closes it with Escape", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
+        ...DEFAULT_APP_LAYOUT,
+        mode: "split",
+      });
+      const inspector = wrapper.findComponent({ name: "InspectorPane" });
+
+      expect(wrapper.find(".inspector-hover-strip").exists()).toBe(true);
+      expect(inspector.element.parentElement).toBe(wrapper.get(".app-shell").element);
+      expect(inspector.classes()).toContain("split-inspector-closed");
+      await wrapper.get(".inspector-hover-strip").trigger("pointerenter");
+      expect(inspector.classes()).not.toContain("split-inspector-closed");
+
+      await wrapper.get(".inspector-hover-strip").trigger("pointerleave");
+      await vi.advanceTimersByTimeAsync(299);
+      expect(inspector.classes()).not.toContain("split-inspector-closed");
+      await inspector.trigger("pointerenter");
+      await vi.advanceTimersByTimeAsync(300);
+      expect(inspector.classes()).not.toContain("split-inspector-closed");
+
+      await inspector.trigger("pointerleave");
+      await vi.advanceTimersByTimeAsync(299);
+      expect(inspector.classes()).not.toContain("split-inspector-closed");
+      await inspector.trigger("pointerenter");
+      await vi.advanceTimersByTimeAsync(300);
+      expect(inspector.classes()).not.toContain("split-inspector-closed");
+
+      // The drawer appearing under the pointer fires a leave on the strip and an enter on the
+      // drawer at once. In whichever order the browser delivers them the drawer stays open, and
+      // it closes on the single leave that means the pointer is over neither.
+      await wrapper.get(".inspector-hover-strip").trigger("pointerenter");
+      await inspector.trigger("pointerenter");
+      await wrapper.get(".inspector-hover-strip").trigger("pointerleave");
+      await vi.advanceTimersByTimeAsync(300);
+      expect(inspector.classes()).not.toContain("split-inspector-closed");
+
+      await inspector.trigger("pointerleave");
+      await vi.advanceTimersByTimeAsync(300);
+      expect(inspector.classes()).toContain("split-inspector-closed");
+      await wrapper.get(".inspector-hover-strip").trigger("pointerenter");
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+      await flushPromises();
+      expect(inspector.classes()).toContain("split-inspector-closed");
+
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+      expect(wrapper.find(".inspector-hover-strip").exists()).toBe(true);
+      expect(inspector.classes()).toContain("right-inspector-drawer");
+      expect(inspector.classes()).toContain("split-inspector-closed");
+      expect(wrapper.findComponent({ name: "MainPane" }).props("split")).toBe(true);
       wrapper.unmount();
     });
   });

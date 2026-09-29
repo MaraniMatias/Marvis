@@ -10,11 +10,23 @@ import {
 
 describe("persisted UI state", () => {
   it("keeps the marvis default panel widths", () => {
-    expect(DEFAULT_APP_LAYOUT).toEqual({ version: 1, sidebarWidth: 240, inspectorWidth: 280 });
+    expect(DEFAULT_APP_LAYOUT).toEqual({
+      version: 2,
+      mode: "focus",
+      sidebarWidth: 240,
+      inspectorWidth: 280,
+      previewWidth: 360,
+    });
   });
 
   it("round-trips the saved widths and drops the fields the layout no longer has", () => {
-    const saved = { ...DEFAULT_APP_LAYOUT, sidebarWidth: 340, inspectorWidth: 420 };
+    const saved = {
+      ...DEFAULT_APP_LAYOUT,
+      mode: "split" as const,
+      sidebarWidth: 340,
+      inspectorWidth: 420,
+      previewWidth: 720,
+    };
     expect(normalizeAppLayout(JSON.parse(JSON.stringify(saved)))).toEqual(saved);
     expect(
       normalizeAppLayout({
@@ -28,13 +40,16 @@ describe("persisted UI state", () => {
   });
 
   it("uses defaults for unknown versions and clamps corrupt dimensions", () => {
+    expect(normalizeAppLayout({ version: 1, mode: "split", sidebarWidth: 400 })).toEqual(DEFAULT_APP_LAYOUT);
     expect(normalizeAppLayout({ version: 9 })).toEqual(DEFAULT_APP_LAYOUT);
-    expect(normalizeAppLayout({ version: 1, sidebarWidth: 900, inspectorWidth: -1 })).toEqual({
-      version: 1,
+    expect(normalizeAppLayout({ version: 2, sidebarWidth: 900, inspectorWidth: -1, previewWidth: 1200 })).toEqual({
+      version: 2,
+      mode: "focus",
       sidebarWidth: 500,
       inspectorWidth: 200,
+      previewWidth: 900,
     });
-    expect(normalizeAppLayout({ version: 1 })).toEqual(DEFAULT_APP_LAYOUT);
+    expect(normalizeAppLayout({ version: 2 })).toEqual(DEFAULT_APP_LAYOUT);
   });
 
   it("clamps user resizing to the supported range", () => {
@@ -43,6 +58,8 @@ describe("persisted UI state", () => {
     expect(resized.inspectorWidth).toBe(DEFAULT_APP_LAYOUT.inspectorWidth);
     expect(resizeLayoutPanel(resized, "sidebar", 10).sidebarWidth).toBe(240);
     expect(resizeLayoutPanel(resized, "inspector", 900).inspectorWidth).toBe(480);
+    expect(resizeLayoutPanel(resized, "preview", 100).previewWidth).toBe(260);
+    expect(resizeLayoutPanel(resized, "preview", 1000).previewWidth).toBe(900);
     expect(resizeLayoutPanel(resized, "inspector", Number.NaN)).toEqual(resized);
   });
 

@@ -4,7 +4,13 @@ import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { SplitterGroup, SplitterPanel, SplitterResizeHandle } from "reka-ui";
-import { GitFork as GitForkIcon, Search as SearchIcon, Settings as SettingsIcon } from "@lucide/vue";
+import {
+  Columns2 as Columns2Icon,
+  Columns3 as Columns3Icon,
+  GitFork as GitForkIcon,
+  Search as SearchIcon,
+  Settings as SettingsIcon,
+} from "@lucide/vue";
 import type { Checkout } from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
@@ -68,6 +74,7 @@ const openCrumb = ref<string | null>(null);
 const { push: pushToast, pushCause: reportCause } = useToasts();
 const appLayout = ref<AppLayoutState>({ ...DEFAULT_APP_LAYOUT });
 const appLayoutReady = ref(false);
+const appShell = ref<HTMLElement | null>(null);
 const checkoutUiStates = ref<Record<string, CheckoutUiState>>({});
 const checkoutUiReady = ref(false);
 const mainPane = ref<InstanceType<typeof MainPane> | null>(null);
@@ -75,7 +82,14 @@ const sidebarPanel = ref<{ resize(size: number): void } | null>(null);
 const inspectorPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
 const searchField = ref<HTMLInputElement | null>(null);
 const viewportWidth = ref(window.innerWidth);
-const isNarrow = computed(() => needsInspectorDrawer(appLayout.value, viewportWidth.value));
+const isNarrow = computed(
+  () => appLayout.value.mode === "focus" && needsInspectorDrawer(appLayout.value, viewportWidth.value),
+);
+const isSplitLayout = computed(() => appLayout.value.mode === "split");
+const inspectorInDrawer = computed(() => isNarrow.value || isSplitLayout.value);
+const splitInspectorOpen = ref(false);
+const pointerOverSplitStrip = ref(false);
+const pointerOverSplitDrawer = ref(false);
 const activeRepo = computed(
   () =>
     workspace.value.repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === activeCheckout.value?.id)) ??
@@ -139,6 +153,7 @@ let unlistenCloseRequested: (() => void) | undefined;
 let allowWindowClose = false;
 let windowClosePromise: Promise<void> | null = null;
 let uiLayoutSaveTimer: number | undefined;
+let inspectorCloseTimer: number | undefined;
 const checkoutUiSaveTimers = new Map<string, number>();
 let uiStateWriteQueue: Promise<void> = Promise.resolve();
 const loadedCheckoutUiIds = new Set<string>();
@@ -359,6 +374,7 @@ const activeCheckoutUiState = computed(() => {
 /** Shows one view in the main panel and saves it as this checkout's restored view. */
 function showView(checkoutId: string, view: MainView) {
   const previous = mainViews.value[checkoutId];
+  if (isSplitLayout.value && view.kind === "terminal" && previous && previous.kind !== "terminal") return;
   mainViews.value = { ...mainViews.value, [checkoutId]: view };
   updateCheckoutUiState(checkoutId, {
     ...mainViewToState(view, checkoutId),
@@ -411,9 +427,75 @@ async function activateTerminalSession(sessionId: string) {
   const checkout = allCheckouts.value.find((item) => item.sessions.some((session) => session.id === sessionId));
   if (!checkout) return;
   await selectWorkspaceSession(sessionId);
-  showView(checkout.id, { kind: "terminal", sessionId });
+  if (!isSplitLayout.value) showView(checkout.id, { kind: "terminal", sessionId });
+  else if (loadedCheckoutUiIds.has(checkout.id) && mainViews.value[checkout.id]?.kind === "terminal") {
+    showView(checkout.id, { kind: "terminal", sessionId });
+  }
   await nextTick();
   mainPane.value?.focusActiveTerminal();
+}
+
+function toggleLayoutMode() {
+  appLayout.value = { ...appLayout.value, mode: appLayout.value.mode === "split" ? "focus" : "split" };
+}
+
+function cancelSplitInspectorClose() {
+  if (inspectorCloseTimer !== undefined) window.clearTimeout(inspectorCloseTimer);
+  inspectorCloseTimer = undefined;
+}
+
+function openSplitInspector() {
+  if (!isSplitLayout.value) return;
+  cancelSplitInspectorClose();
+  splitInspectorOpen.value = true;
+}
+
+/**
+ * The drawer closes only once the pointer is over neither the strip nor the drawer.
+ *
+ * The two live in different subtrees, so moving between them fires a leave on one and an
+ * enter on the other. A timer alone would depend on the enter landing after the leave;
+ * tracking where the pointer is makes the close a fact about the pointer instead.
+ */
+function scheduleSplitInspectorClose() {
+  if (!isSplitLayout.value) return;
+  if (pointerOverSplitStrip.value || pointerOverSplitDrawer.value) return;
+  cancelSplitInspectorClose();
+  inspectorCloseTimer = window.setTimeout(() => {
+    inspectorCloseTimer = undefined;
+    splitInspectorOpen.value = false;
+  }, 300);
+}
+
+function enterSplitStrip() {
+  pointerOverSplitStrip.value = true;
+  openSplitInspector();
+}
+
+function leaveSplitStrip() {
+  pointerOverSplitStrip.value = false;
+  scheduleSplitInspectorClose();
+}
+
+function enterSplitDrawer() {
+  pointerOverSplitDrawer.value = true;
+  openSplitInspector();
+}
+
+function leaveSplitDrawer() {
+  pointerOverSplitDrawer.value = false;
+  scheduleSplitInspectorClose();
+}
+
+function closeSplitInspector() {
+  cancelSplitInspectorClose();
+  pointerOverSplitStrip.value = false;
+  pointerOverSplitDrawer.value = false;
+  splitInspectorOpen.value = false;
+}
+
+function onAppKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape" && splitInspectorOpen.value) closeSplitInspector();
 }
 
 function updateCheckoutUiState(checkoutId: string, patch: Partial<CheckoutUiState>) {
@@ -505,7 +587,7 @@ function onSplitterLayout(sizes: number[]) {
   if (!appLayoutReady.value || sizes.length < 3) return;
   let next = appLayout.value;
   if (sizes[0] > 0) next = resizeLayoutPanel(next, "sidebar", sizes[0]);
-  if (!isNarrow.value && sizes[2] > 0) next = resizeLayoutPanel(next, "inspector", sizes[2]);
+  if (!inspectorInDrawer.value && sizes[2] > 0) next = resizeLayoutPanel(next, "inspector", sizes[2]);
   if (next.sidebarWidth !== appLayout.value.sidebarWidth || next.inspectorWidth !== appLayout.value.inspectorWidth) {
     appLayout.value = next;
   }
@@ -517,16 +599,20 @@ function resetPanelWidth(panel: "sidebar" | "inspector") {
   appLayout.value = resizeLayoutPanel(appLayout.value, panel, width);
 }
 
+function resizeAppPreview(width: number) {
+  appLayout.value = resizeLayoutPanel(appLayout.value, "preview", width);
+}
+
 watch(appLayout, () => scheduleAppLayoutSave(), { deep: true });
 
 // A narrow window cannot hold the main panel and the inspector side by side, so the inspector
 // floats over it as a drawer. Its width is left alone, to be restored when space returns.
 watch(
-  [isNarrow, appLayoutReady],
+  [inspectorInDrawer, appLayoutReady],
   async () => {
     if (!appLayoutReady.value) return;
     await nextTick();
-    if (isNarrow.value) inspectorPanel.value?.collapse();
+    if (inspectorInDrawer.value) inspectorPanel.value?.collapse();
     else {
       inspectorPanel.value?.expand();
       inspectorPanel.value?.resize(appLayout.value.inspectorWidth);
@@ -534,6 +620,10 @@ watch(
   },
   { immediate: true, flush: "post" },
 );
+
+watch(isSplitLayout, (split) => {
+  if (!split) closeSplitInspector();
+});
 
 watch(
   () => activeCheckout.value?.id,
@@ -571,6 +661,7 @@ watch(
 
 onMounted(async () => {
   window.addEventListener("resize", onViewportResize);
+  window.addEventListener("keydown", onAppKeydown);
   const currentWindow = getCurrentWindow();
   try {
     unlistenCloseRequested = await currentWindow.onCloseRequested(async (event) => {
@@ -611,7 +702,9 @@ onUnmounted(() => {
   activityListenerDisposed = true;
   unlistenCloseRequested?.();
   window.removeEventListener("resize", onViewportResize);
+  window.removeEventListener("keydown", onAppKeydown);
   unlistenFileActivity?.();
+  if (inspectorCloseTimer !== undefined) window.clearTimeout(inspectorCloseTimer);
   if (uiLayoutSaveTimer !== undefined) window.clearTimeout(uiLayoutSaveTimer);
   for (const timer of checkoutUiSaveTimers.values()) window.clearTimeout(timer);
   checkoutUiSaveTimers.clear();
@@ -894,6 +987,7 @@ function reportWarning(message: string) {
 <template>
   <div
     v-if="appLayoutReady"
+    ref="appShell"
     class="app-shell relative flex h-full min-w-[900px] flex-col"
     :style="{ '--inspector-width': `${appLayout.inspectorWidth}px` }"
   >
@@ -1003,6 +1097,17 @@ function reportWarning(message: string) {
       <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-8 flex-1" @dblclick="zoomFromTitlebar" />
       <button
         type="button"
+        :aria-label="appLayout.mode === 'split' ? 'Switch to focus layout' : 'Switch to split layout'"
+        :aria-pressed="appLayout.mode === 'split'"
+        data-testid="layout-toggle"
+        class="icon-button shrink-0 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+        @click="toggleLayoutMode"
+      >
+        <Columns2Icon v-if="appLayout.mode === 'split'" class="icon-xs" aria-hidden="true" />
+        <Columns3Icon v-else class="icon-xs" aria-hidden="true" />
+      </button>
+      <button
+        type="button"
         aria-label="Settings"
         data-testid="settings-button"
         class="icon-button shrink-0 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
@@ -1053,11 +1158,18 @@ function reportWarning(message: string) {
           class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-(--marvis-text-faint)"
         />
       </SplitterResizeHandle>
-      <SplitterPanel id="main-panel" :min-size="420" size-unit="px" class="main-column min-h-0 min-w-0 flex-1">
+      <SplitterPanel
+        id="main-panel"
+        :min-size="isSplitLayout ? (activeMainView.kind === 'terminal' ? 320 : 585) : 420"
+        size-unit="px"
+        class="main-column min-h-0 min-w-0 flex-1"
+      >
         <MainPane
           ref="mainPane"
           :checkout="activeCheckout"
           :view="activeMainView"
+          :split="isSplitLayout"
+          :preview-width="appLayout.previewWidth"
           :ready="checkoutUiReady"
           :git-snapshot="gitSnapshot"
           :review="review"
@@ -1077,10 +1189,12 @@ function reportWarning(message: string) {
           @update-document-mode="setDocumentMode"
           @reading-position-changed="activeCheckout && updateDocumentReadingPosition(activeCheckout.id, $event)"
           @diff-position-changed="activeCheckout && updateDiffReadingPosition(activeCheckout.id, $event)"
+          @resize-preview="resizeAppPreview"
           @open-markdown-link="activeCheckout && openFileDocument({ checkoutId: activeCheckout.id, path: $event })"
         />
       </SplitterPanel>
       <SplitterResizeHandle
+        v-show="!inspectorInDrawer"
         id="inspector-resize-handle"
         aria-label="Resize files and changes inspector"
         class="splitter-handle"
@@ -1094,7 +1208,7 @@ function reportWarning(message: string) {
       <SplitterPanel
         id="inspector-panel"
         ref="inspectorPanel"
-        :default-size="isNarrow ? 0 : appLayout.inspectorWidth"
+        :default-size="inspectorInDrawer ? 0 : appLayout.inspectorWidth"
         :min-size="INSPECTOR_WIDTH_LIMITS.min"
         :max-size="INSPECTOR_WIDTH_LIMITS.max"
         :collapsed-size="0"
@@ -1104,19 +1218,35 @@ function reportWarning(message: string) {
       >
         <!-- The review, the agent list and the send itself belong to the diff (F.5): this panel
              is the file tree and the change set, and nothing more. -->
-        <InspectorPane
-          :class="{ 'right-inspector-drawer': isNarrow }"
-          :checkout="checkoutUiReady ? activeCheckout : null"
-          :repo="checkoutUiReady ? activeRepo : null"
-          :git-snapshot="gitSnapshot"
-          :saved-state="activeCheckout ? checkoutUiStates[activeCheckout.id] : null"
-          @open-file="openFileDocument"
-          @open-change="openChangedDocument"
-          @open-all-changes="openAllChanges"
-          @update-ui-state="activeCheckout && updateInspectorUiState(activeCheckout.id, $event)"
-        />
+        <Teleport :to="appShell" :disabled="!isSplitLayout || !appShell">
+          <InspectorPane
+            :class="{
+              'right-inspector-drawer': inspectorInDrawer,
+              'split-inspector-drawer': isSplitLayout,
+              'split-inspector-closed': isSplitLayout && !splitInspectorOpen,
+            }"
+            :checkout="checkoutUiReady ? activeCheckout : null"
+            :repo="checkoutUiReady ? activeRepo : null"
+            :git-snapshot="gitSnapshot"
+            :saved-state="activeCheckout ? checkoutUiStates[activeCheckout.id] : null"
+            @open-file="openFileDocument"
+            @open-change="openChangedDocument"
+            @open-all-changes="openAllChanges"
+            @update-ui-state="activeCheckout && updateInspectorUiState(activeCheckout.id, $event)"
+            @pointerenter="enterSplitDrawer"
+            @pointerleave="leaveSplitDrawer"
+          />
+        </Teleport>
       </SplitterPanel>
     </SplitterGroup>
+    <div
+      v-if="isSplitLayout"
+      aria-hidden="true"
+      class="inspector-hover-strip"
+      :class="{ 'inspector-hover-strip-open': splitInspectorOpen }"
+      @pointerenter="enterSplitStrip"
+      @pointerleave="leaveSplitStrip"
+    />
     <ConfirmDialog
       :open="!!pendingConfirm"
       :title="pendingConfirm?.title ?? ''"
