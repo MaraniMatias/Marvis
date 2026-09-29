@@ -2,15 +2,24 @@
 # Ships one release: bumps the version, pushes the commit and the tag, waits for the build and
 # publishes the draft it leaves behind.
 #
-# Usage: scripts/release.sh <version>          # v0.2.0 or 0.2.0
+# Usage: scripts/release.sh <version> [--dry-run]
 #
 # The version is bumped with scripts/release.mjs, which owns the manifests; this owns git and the
 # GitHub release, which are the two things that cannot be undone from here. That split is why the
-# tag is pushed before the build is known to pass: the alternative is a three-run dance between
-# bumping and tagging, and the dry run it needs cannot even start until the bumped manifests are on
-# the default branch. What this gives up instead is a human pausing between the artifacts being
-# uploaded and the release going live, so the pause is conditional on the run instead: nothing is
-# published unless every matrix job succeeded, which is also the only way a release exists at all.
+# tag is pushed before the build is known to pass: the alternative is a dance between bumping and
+# tagging, and a dry run cannot even start until the bumped manifests are on the default branch.
+# What this gives up instead is a human pausing between the artifacts being uploaded and the
+# release going live, so the pause is conditional on the run instead: nothing is published unless
+# every matrix job succeeded, which is also the only way a release exists at all.
+#
+# Every step is skipped when the state already satisfies it, so the same command resumes a release
+# instead of refusing it. That is what makes the two-command release work:
+#
+#   scripts/release.sh 0.2.1 --dry-run   # bump, push main, run the build, no tag
+#   scripts/release.sh 0.2.1             # pushes that tag, waits, publishes
+#
+# The second command finds the manifests already at 0.2.1 and the tag already made, and only has the
+# tag to push. It also resumes a release whose build failed, which `gh run rerun <id>` would also do.
 #
 # If a build fails the tag is already pushed, so nothing was published and the run can be retried
 # with `gh run rerun <id>`: the same tag, the same commit, no new version.
@@ -23,14 +32,31 @@ cd "$(dirname "$0")/.."
 step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 die() { printf '\033[31m%s\033[0m\n' "$1" >&2; exit 1; }
 
-[[ $# -eq 1 ]] || die "usage: scripts/release.sh <version>     # the whole release
-       pnpm release:preview <version>       # report the writes, change nothing"
+usage() {
+  cat <<'USAGE'
+usage: scripts/release.sh <version> [--dry-run]
+       pnpm release v0.2.0                     # bump, tag, build, publish
+       pnpm release v0.2.0 --dry-run           # bump and build, no tag
+       pnpm release:preview v0.2.0             # report the writes, change nothing
+USAGE
+}
+
+dry_run=false
+args=()
+for argument in "$@"; do
+  case "$argument" in
+    --dry-run) dry_run=true ;;
+    -h | --help) usage; exit 0 ;;
+    *) args+=("$argument") ;;
+  esac
+done
+[[ ${#args[@]} -eq 1 ]] || { usage >&2; exit 1; }
 
 # The tag is `v<version>` and the manifests hold the version bare, so both spellings are accepted
 # here and normalized once.
-requested="${1#v}"
+requested="${args[0]#v}"
 [[ "$requested" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)*$ ]] ||
-  die "\"$1\" is not a version like 0.2.0 or v0.2.0"
+  die "\"${args[0]}\" is not a version like 0.2.0 or v0.2.0"
 tag="v$requested"
 
 step "Checking this repository can take a release"
@@ -46,22 +72,66 @@ repository="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
   die "releases are cut from main; you are on $(git rev-parse --abbrev-ref HEAD)"
 [[ -z "$(git status --porcelain)" ]] ||
   die "the working tree has uncommitted changes; commit or stash them first"
-# Checked on the remote as well as locally: a tag left behind by a failed attempt is not a reason to
-# bump the version again, and pushing over it would move a release that may already be public.
-git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null && die "$tag already exists locally"
-git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 &&
-  die "$tag already exists on the remote"
-printf 'repository %s, branch main, tag %s is free\n' "$repository" "$tag"
 
-step "Writing $tag into the manifests, and committing it"
-# --no-push: the two pushes below are separate so a failure leaves a commit with no tag rather than
-# a tag with no commit on the branch that was checked.
-node scripts/release.mjs --bump "$requested" --no-push
+# What the release is resuming from. The manifests are read with node because they are JSON, and
+# reading them any other way is the kind of parsing that breaks on the next format change.
+current="$(node -p "require('./package.json').version")"
+head="$(git rev-parse HEAD)"
+# `set -e` does not fire on a failing left side of `&&`, so these read as questions, not commands.
+tag_local=0
+git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null && tag_local=1
+tag_remote=0
+git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 && tag_remote=1
 
-step "Pushing the commit and the tag"
-git push origin HEAD:main
-git push origin "refs/tags/$tag"
-release_commit="$(git rev-parse "$tag^{commit}")"
+if ((tag_remote)) && ((!tag_local)); then
+  # A resume from a fresh clone needs the tag before its commit can be read.
+  git fetch -q origin "refs/tags/$tag:refs/tags/$tag"
+  tag_local=1
+fi
+if ((tag_local)) && [[ "$(git rev-parse "$tag^{commit}")" != "$head" ]]; then
+  die "$tag points at $(git rev-parse --short "$tag^{commit}"), not at HEAD ($(git rev-parse --short "$head"))"
+fi
+if [[ "$current" != "$requested" ]] && ((tag_local || tag_remote)); then
+  die "$tag exists and the manifests are at $current, so $requested cannot be a new release of it"
+fi
+printf 'repository %s, branch main, manifests at %s\n' "$repository" "$current"
+
+if ((tag_remote)); then
+  step "Resuming $tag, which is already on the remote"
+  release_commit="$(git rev-parse "$tag^{commit}")"
+else
+  if [[ "$current" == "$requested" ]]; then
+    if ((tag_local)); then
+      # What --dry-run leaves behind: the version is committed and the tag was made with it.
+      step "The manifests and the tag are already at $requested"
+    else
+      step "The manifests are already at $requested; tagging this commit"
+      # Someone bumped the version and committed it, without a tag.
+      git tag -a "$tag" -m "Marvis $tag"
+    fi
+  else
+    step "Writing $tag into the manifests, and committing it"
+    # --no-push: the two pushes below are separate so a failure leaves a commit with no tag rather
+    # than a tag with no commit on the branch that was checked.
+    node scripts/release.mjs --bump "$requested" --no-push
+  fi
+
+  step "Pushing the commit"
+  git push origin HEAD:main
+  release_commit="$head"
+
+  if $dry_run; then
+    step "Building $tag without tagging it"
+    # The workflow refuses to start on a tag that does not exist, so the dry run is the one that
+    # checks main against the version it claims to be releasing.
+    gh workflow run release.yml -f tag="$tag"
+    echo "When it is green, finish with: pnpm release ${args[0]}"
+    exit 0
+  fi
+
+  step "Pushing the tag"
+  git push origin "refs/tags/$tag"
+fi
 
 step "Waiting for the Release workflow"
 # Filtered by the tagged commit rather than by the tag as a ref: `--ref` is not a flag every gh has
