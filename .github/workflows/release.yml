@@ -169,6 +169,12 @@ jobs:
       # Only this job creates the GitHub Release and uploads the built artifacts.
       contents: write
     steps:
+      # Only the changelog, and only to read the notes from it: this job builds nothing.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.version.outputs.sha }}
+          sparse-checkout: /CHANGELOG.md
+          sparse-checkout-cone-mode: false
       - name: Verify remote release tag still points to validated commit
         env:
           GH_TOKEN: ${{ github.token }}
@@ -208,9 +214,13 @@ jobs:
             echo 'No release artifacts were downloaded.' >&2
             exit 1
           fi
-          # Summed from inside this directory so the file records bare names, which is what a reader
-          # has after downloading the release, and so `sha256sum -c SHA256SUMS` verifies it in place.
-          sha256sum "${assets[@]}" > SHA256SUMS
+          # Summed from inside each file's own directory so the record names the file and not the
+          # build path it happened to sit under: `merge-multiple` keeps the artifact's directories,
+          # and a downloader has a flat folder, so `sha256sum -c SHA256SUMS` has to match that.
+          : > SHA256SUMS
+          for asset in "${assets[@]}"; do
+            (cd "$(dirname "$asset")" && sha256sum "$(basename "$asset")") >> SHA256SUMS
+          done
           files=(release-assets/SHA256SUMS)
           for asset in "${assets[@]}"; do files+=("release-assets/$asset"); done
           cd "$GITHUB_WORKSPACE"
