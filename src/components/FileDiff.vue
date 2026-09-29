@@ -295,8 +295,8 @@ async function loadDiff(path: string, preservePosition = false) {
   if (!keepPreviousDiff) {
     diff.value = null;
     diffHunks.value = [];
+    collapsedHunks.value = [];
   }
-  collapsedHunks.value = [];
   diffScrollTop.value = oldScrollTop;
   diffError.value = "";
   diffState.value = "loading";
@@ -310,9 +310,16 @@ async function loadDiff(path: string, preservePosition = false) {
       props.path !== path
     )
       return;
-    diff.value = result;
-    if (!result.isBinary && !result.symlinkTarget && result.patch.includes("@@")) {
-      diffHunks.value = createHunks(path, result.patch);
+    // A refresh that changed nothing must not redraw. The diff view keeps the open note
+    // composer in state that a new DiffFile identity wipes, and git reports every write in the
+    // workdir, not just in the file on screen: rebuilding on each one closed the composer the
+    // moment the user started typing, for a diff that had not moved.
+    if (result.patch !== diff.value?.patch) {
+      diff.value = result;
+      collapsedHunks.value = [];
+      if (!result.isBinary && !result.symlinkTarget && result.patch.includes("@@")) {
+        diffHunks.value = createHunks(path, result.patch);
+      }
     }
     diffState.value = "ready";
     emit("ready", path);

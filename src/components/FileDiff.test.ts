@@ -35,7 +35,7 @@ vi.mock("@git-diff-view/vue", async () => {
     DiffModeEnum: { Unified: 4 },
     DiffView: component({
       name: "DiffView",
-      props: { extendData: { type: Object, default: () => ({}) } },
+      props: { extendData: { type: Object, default: () => ({}) }, diffFile: { type: Object, default: null } },
       setup:
         (
           props: { extendData: { newFile?: Record<string, { data: ReviewNote[] }> } },
@@ -200,6 +200,39 @@ describe("FileDiff", () => {
     expect(all.get("header").text()).toContain("All changes");
     expect(all.get("header").text()).toContain("bug/1310-timeline");
     all.unmount();
+  });
+
+  it("does not redraw a diff that git reports unchanged", async () => {
+    const gitSnapshot = snapshot();
+    const wrapper = mountDiff({ gitSnapshot });
+    await flushPromises();
+
+    const diffFile = () => wrapper.getComponent({ name: "DiffView" }).props("diffFile");
+    const first = diffFile();
+    expect(first).not.toBeNull();
+
+    // Git reports every write in the workdir, not only in the file on screen, so a refresh lands
+    // here after any save anywhere. It has to hand the view the same file: a new one takes the
+    // open note composer down with it, which closed the composer the moment typing began.
+    gitSnapshot.statusRevision += 1;
+    await flushPromises();
+    expect(mocks.getGitDiff).toHaveBeenCalledTimes(2);
+    expect(diffFile()).toBe(first);
+
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+other\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
+    });
+    gitSnapshot.statusRevision += 1;
+    await flushPromises();
+    // A diff that did move is redrawn, or the view would keep showing lines git no longer has.
+    expect(diffFile()).not.toBe(first);
+    wrapper.unmount();
   });
 
   it("hides the header of a diff nested in the change-set stack, so the send is only one", async () => {
