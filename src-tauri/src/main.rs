@@ -5,6 +5,8 @@ use tauri::{Emitter, Manager};
 mod commands;
 pub mod domain;
 pub mod git;
+#[cfg(target_os = "macos")]
+mod menus;
 mod persistence;
 pub mod services;
 mod terminal;
@@ -17,6 +19,20 @@ fn with_dev_plugins(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri
         builder.plugin(tauri_plugin_mcp_bridge::init())
     }
     #[cfg(not(all(debug_assertions, feature = "dev-bridge")))]
+    {
+        builder
+    }
+}
+
+/// Replaces the menu Tauri builds when it is given none, which on macOS is a File, a View, a
+/// Window and a Help with nothing in it. It is replaced only on macOS: a menu set on Linux or
+/// Windows draws a bar inside the window, and neither has one today.
+fn with_menus(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
+    #[cfg(target_os = "macos")]
+    {
+        builder.menu(menus::build)
+    }
+    #[cfg(not(target_os = "macos"))]
     {
         builder
     }
@@ -36,7 +52,7 @@ fn main() {
                 let _ = window.set_focus();
             }
         }));
-    with_dev_plugins(builder)
+    with_menus(with_dev_plugins(builder))
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -379,6 +395,65 @@ mod startup_tests {
                  reaches it before anything can turn it away"
             );
         }
+    }
+
+    #[test]
+    fn the_menu_bar_is_the_app_menu_and_the_one_macos_requires() {
+        // Tauri builds a menu of its own when the builder is given none, so the way to have a
+        // small menu bar is not to have no menu code. It is to have menu code that says what
+        // stays, and these are the two submenus that stay.
+        let menus = include_str!("menus.rs");
+        assert_eq!(
+            menus.matches("Submenu::with_items(").count(),
+            2,
+            "the menu bar is not the app menu and Edit any more"
+        );
+        for item in [
+            // The app menu, named after the product. macOS reads the first submenu as the
+            // application menu, and an app that cannot be hidden, put away or quit from it is
+            // not an app.
+            "handle.package_info().name.clone()",
+            "PredefinedMenuItem::about",
+            "PredefinedMenuItem::services",
+            "PredefinedMenuItem::hide(",
+            "PredefinedMenuItem::hide_others",
+            "PredefinedMenuItem::quit",
+            // Edit, and every one of these is load-bearing rather than conventional. macOS never
+            // tells the webview about `⌘C`, `⌘V`, `⌘X`, `⌘A` or `⌘Z`; the key equivalents on
+            // these items send `copy:` and the rest down the responder chain into it. Drop `copy`
+            // and the search field, the editor and the terminal silently stop copying, and the
+            // right-click copy menu does not stand in for it.
+            r#""Edit""#,
+            "PredefinedMenuItem::undo",
+            "PredefinedMenuItem::redo",
+            "PredefinedMenuItem::cut",
+            "PredefinedMenuItem::copy",
+            "PredefinedMenuItem::paste",
+            "PredefinedMenuItem::select_all",
+        ] {
+            assert!(
+                menus.contains(item),
+                "the menu bar stopped carrying `{item}`"
+            );
+        }
+
+        // And it is set, on macOS only. A menu set on Linux or Windows would draw a bar inside
+        // the window, which is a second place for the app's menus to live.
+        let main = include_str!("main.rs");
+        let registered = main.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            registered.contains("with_menus(with_dev_plugins(builder))"),
+            "the menu is built and then never handed to the app"
+        );
+        let helper = registered
+            .split("fn with_menus(")
+            .nth(1)
+            .and_then(|body| body.split("\n}").next())
+            .expect("`with_menus` is not a function any more");
+        assert!(
+            helper.contains(r#"#[cfg(target_os = "macos")]"#),
+            "the menu is set on every platform, and only macOS has a menu bar"
+        );
     }
 
     #[test]

@@ -6,7 +6,15 @@ the part a reader should read and the generated list is the part they can skip. 
 under `Unreleased` and rename that heading to the version when you tag it; a version with no section
 here still gets its generated notes.
 
-## Unreleased
+## 0.3.0
+
+- **A menu bar with the menus that earn their place.** Marvis used to open with the menu macOS
+  gives every app that does not bring its own: a File, a View, a Window and a Help with nothing in
+  it. What is left is the Marvis menu — About, Services, Hide, Hide Others, Quit — and Edit, which
+  is not there by convention. macOS does not deliver `⌘C`, `⌘V`, `⌘X`, `⌘A` or `⌘Z` to the app at
+  all: the Edit menu is what turns them into `copy:` and `paste:` and sends them into the window.
+  Take it away and copying stops working in the search field, the editor and the terminal. Window
+  went with the rest, so the traffic lights are how the window is minimized, zoomed and closed.
 
 - **Archiving a worktree instead of losing it.** The cross on a worktree row now archives it: the
   row leaves the sidebar and nothing on disk moves — the branch, its commits and its files stay

@@ -1,0 +1,61 @@
+//! The macOS menu bar: the app menu, and the one submenu the platform will not let an app do
+//! without.
+//!
+//! Tauri builds a menu of its own when the builder is given none, and that one carries File, View,
+//! Window and an empty Help. So a small menu bar is not the absence of menu code, it is menu code
+//! that says what stays. These are the two submenus that stay.
+
+use tauri::menu::{AboutMetadata, Menu, PredefinedMenuItem, Submenu};
+use tauri::{AppHandle, Runtime};
+
+/// The menu bar the app opens with.
+pub fn build<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R>> {
+    let app_menu = Submenu::with_items(
+        handle,
+        handle.package_info().name.clone(),
+        true,
+        &[
+            &PredefinedMenuItem::about(handle, None, Some(about_metadata(handle)))?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::services(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::hide(handle, None)?,
+            &PredefinedMenuItem::hide_others(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::quit(handle, None)?,
+        ],
+    )?;
+
+    // The separators are cosmetic and every one of the items is not. On macOS the webview is
+    // never told about `⌘C`, `⌘V`, `⌘X`, `⌘A` or `⌘Z`; the key equivalents on these items are
+    // what send `copy:`, `paste:`, `cut:`, `selectAll:` and `undo:` down the responder chain into
+    // it. An app whose menu bar has no Edit submenu cannot copy out of its own search field, its
+    // own editor or its own terminal, and the copy menu on the right-click does not stand in.
+    let edit_menu = Submenu::with_items(
+        handle,
+        "Edit",
+        true,
+        &[
+            &PredefinedMenuItem::undo(handle, None)?,
+            &PredefinedMenuItem::redo(handle, None)?,
+            &PredefinedMenuItem::separator(handle)?,
+            &PredefinedMenuItem::cut(handle, None)?,
+            &PredefinedMenuItem::copy(handle, None)?,
+            &PredefinedMenuItem::paste(handle, None)?,
+            &PredefinedMenuItem::select_all(handle, None)?,
+        ],
+    )?;
+
+    // The app menu comes first because on macOS the first submenu *is* the application menu.
+    Menu::with_items(handle, &[&app_menu, &edit_menu])
+}
+
+/// What the About panel says: the three fields macOS shows, and the only three it shows.
+fn about_metadata<R: Runtime>(handle: &AppHandle<R>) -> AboutMetadata<'_> {
+    AboutMetadata {
+        name: Some(handle.package_info().name.clone()),
+        version: Some(handle.package_info().version.to_string()),
+        copyright: handle.config().bundle.copyright.clone(),
+        ..Default::default()
+    }
+}
