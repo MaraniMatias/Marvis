@@ -118,7 +118,10 @@ else
 
   step "Pushing the commit"
   git push origin HEAD:main
-  release_commit="$head"
+  # HEAD now, and not the one read before the bump: the manifests commit is what the workflow runs
+  # against, and the earlier HEAD is a commit no run is ever made for, so polling for it waits out
+  # the whole timeout and reports a release that is already building.
+  release_commit="$(git rev-parse HEAD)"
 
   if $dry_run; then
     step "Building $tag without tagging it"
