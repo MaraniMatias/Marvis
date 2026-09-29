@@ -21,6 +21,8 @@ import {
   reconcileReviewRound,
   requeueReviewRounds,
   resolveReviewNote,
+  exportReviewMarkdown,
+  loadReviewTarget,
   stopAgent,
   updateReviewNote,
   verifyReviewNoteAnchors,
@@ -29,6 +31,8 @@ import {
   getGitDiffStats,
   loadTerminalLayout,
   openFolder,
+  readCheckoutFile,
+  saveReviewTarget,
   resizeTerminal,
   saveTerminalLayout,
   writeCheckoutFile,
@@ -78,13 +82,37 @@ describe("workspace IPC client", () => {
   });
 
   it("sends the expected content with a checkout-scoped file write", async () => {
-    await writeCheckoutFile("checkout:one", "src/app.ts", "new", "old");
+    await writeCheckoutFile("checkout:one", "src/app.ts", "new", "old", "checkout");
 
     expect(invoke).toHaveBeenCalledWith("file_write", {
       checkoutId: "checkout:one",
       path: "src/app.ts",
       content: "new",
       expectedContent: "old",
+      origin: "checkout",
+    });
+  });
+
+  it("threads file origin and review export metadata through IPC", async () => {
+    await readCheckoutFile("checkout:one", "notes.md", "review");
+    await exportReviewMarkdown("2026-03-14", "2026-03-14-1532", "# Review");
+    await loadReviewTarget("checkout:one");
+    await saveReviewTarget("checkout:one", "opencode");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "file_read", {
+      checkoutId: "checkout:one",
+      path: "notes.md",
+      origin: "review",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "review_export_markdown", {
+      date: "2026-03-14",
+      timestamp: "2026-03-14-1532",
+      markdown: "# Review",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(3, "review_target_load", { checkoutId: "checkout:one" });
+    expect(invoke).toHaveBeenNthCalledWith(4, "review_target_save", {
+      checkoutId: "checkout:one",
+      target: "opencode",
     });
   });
 });

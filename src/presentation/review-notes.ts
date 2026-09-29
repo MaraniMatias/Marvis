@@ -79,12 +79,17 @@ export interface ActiveReviewNotes {
  * The three reads are getters, so a consumer tracks them by reading them the way it tracks any
  * other reactive source.
  */
+export type ReviewTarget = "markdown" | "opencode";
+
 export interface ReviewSender {
+  /** The checkout's delivery destination. No saved choice means Markdown. */
+  readonly target: ReviewTarget;
   /** The checkout's sessions, for the destination picker. */
   readonly sessions: AgentSession[];
   /** The session a review goes to, or null while the checkout has none. */
   readonly targetId: string | null;
   selectTarget(sessionId: string | null): void;
+  selectReviewTarget(target: ReviewTarget): void;
   /** Rounds whose turn has not finished, which is what the count under the button reports. */
   readonly unfinishedRounds: number;
   /** Records one round with the chosen notes and delivers it to the target. */

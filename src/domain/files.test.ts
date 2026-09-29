@@ -14,4 +14,10 @@ describe("absoluteFilePath", () => {
   it("leaves a checkout directory that is only separators to the file's own path", () => {
     expect(absoluteFilePath("/", "notes.txt")).toBe("/notes.txt");
   });
+
+  it("uses the review root for exported files", () => {
+    expect(absoluteFilePath("/repo", "notes.md", "review", "/Users/dev/.marvis/tmp/code-reviews/")).toBe(
+      "/Users/dev/.marvis/tmp/code-reviews/notes.md",
+    );
+  });
 });

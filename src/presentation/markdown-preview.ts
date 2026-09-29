@@ -1,5 +1,6 @@
 import { onBeforeUnmount, ref } from "vue";
 import { readCheckoutMarkdownImage } from "../lib/ipc";
+import type { DocumentOrigin } from "../domain/main-document";
 
 const MAX_MARKDOWN_IMAGES = 12;
 const MAX_MARKDOWN_IMAGE_BYTES = 8 * 1024 * 1024;
@@ -10,7 +11,7 @@ export function isMarkdownPath(path: string): boolean {
   return extension !== undefined && MARKDOWN_EXTENSIONS.has(extension);
 }
 
-export function useMarkdownPreview(getCheckoutId: () => string | null) {
+export function useMarkdownPreview(getCheckoutId: () => string | null, getOrigin: () => DocumentOrigin) {
   const markdownHtml = ref("");
   const markdownPreviewState = ref<"idle" | "loading" | "ready">("idle");
   const markdownImageWarning = ref(false);
@@ -57,6 +58,11 @@ export function useMarkdownPreview(getCheckoutId: () => string | null) {
     const preview = await renderMarkdownPreview(source, path);
     const paths = preview.images.map((image) => image.path);
     const loadedImages = new Map<string, { mimeType: string; dataBase64: string }>();
+    if (getOrigin() === "review") {
+      markdownHtml.value = attachMarkdownImages(preview.html, paths, loadedImages);
+      markdownPreviewState.value = "ready";
+      return;
+    }
     markdownImageWarning.value = preview.images.length > MAX_MARKDOWN_IMAGES;
 
     let totalImageBytes = 0;

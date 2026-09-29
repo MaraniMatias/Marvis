@@ -8,7 +8,7 @@ use crate::{
         ipc::IpcError,
     },
     persistence::Database,
-    services,
+    services::{self, files::ReviewRoot},
 };
 
 #[tauri::command]
@@ -40,11 +40,14 @@ pub async fn files_search(
 pub async fn file_read(
     checkout_id: String,
     path: PathBuf,
+    origin: String,
     database: State<'_, Database>,
+    review_root: State<'_, ReviewRoot>,
 ) -> Result<FileContent, IpcError> {
     let database = database.inner().clone();
+    let review_root = review_root.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::files::read(&database, &checkout_id, &path)
+        services::files::read(&database, &checkout_id, &origin, &path, &review_root)
     })
     .await
     .map_err(operation_error)?
@@ -56,14 +59,48 @@ pub async fn file_write(
     path: PathBuf,
     content: String,
     expected_content: String,
+    origin: String,
     database: State<'_, Database>,
+    review_root: State<'_, ReviewRoot>,
 ) -> Result<(), IpcError> {
     let database = database.inner().clone();
+    let review_root = review_root.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::files::write(&database, &checkout_id, &path, &content, &expected_content)
+        services::files::write(
+            &database,
+            &checkout_id,
+            &origin,
+            &path,
+            &content,
+            &expected_content,
+            &review_root,
+        )
     })
     .await
     .map_err(operation_error)?
+}
+
+#[tauri::command]
+pub async fn review_export_markdown(
+    date: String,
+    timestamp: String,
+    markdown: String,
+    review_root: State<'_, ReviewRoot>,
+) -> Result<String, IpcError> {
+    let review_root = review_root.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        services::files::export_review_markdown(&review_root, &date, &timestamp, &markdown)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+#[tauri::command]
+pub async fn review_root_path(review_root: State<'_, ReviewRoot>) -> Result<String, IpcError> {
+    let review_root = review_root.0.clone();
+    tauri::async_runtime::spawn_blocking(move || services::files::review_root_path(&review_root))
+        .await
+        .map_err(operation_error)?
 }
 
 #[tauri::command]

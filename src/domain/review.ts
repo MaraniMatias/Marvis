@@ -52,6 +52,16 @@ export interface ReviewContext {
   date?: string;
 }
 
+export function localReviewTimestamp(now = new Date()): { date: string; timestamp: string } {
+  const year = String(now.getFullYear()).padStart(4, "0");
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  const hour = String(now.getHours()).padStart(2, "0");
+  const minute = String(now.getMinutes()).padStart(2, "0");
+  const date = `${year}-${month}-${day}`;
+  return { date, timestamp: `${date}-${hour}${minute}` };
+}
+
 const fenceLanguageByExtension: Record<string, string> = {
   c: "c",
   cc: "cpp",

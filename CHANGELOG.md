@@ -6,6 +6,15 @@ the part a reader should read and the generated list is the part they can skip. 
 under `Unreleased` and rename that heading to the version when you tag it; a version with no section
 here still gets its generated notes.
 
+## Unreleased
+
+- **Markdown export is now the default review destination.** With no saved choice, sending review
+  notes writes a non-overwriting Markdown file under `~/.marvis/tmp/code-reviews/` and opens it in
+  Marvis for editing. This changes what existing users get from the review button: choose OpenCode
+  once per checkout to keep sending rounds to an OpenCode session. Exporting does not create a
+  round or mark notes sent. Saved open documents without an origin are dropped and the checkout
+  view falls back to its default; review notes are unaffected.
+
 ## 0.3.0
 
 - **A menu bar with the menus that earn their place.** Marvis used to open with the menu macOS

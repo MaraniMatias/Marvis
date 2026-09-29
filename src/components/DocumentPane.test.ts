@@ -23,6 +23,7 @@ const mocks = vi.hoisted(() => ({
   searchCheckoutFiles: vi.fn(),
   readCheckoutFile: vi.fn(),
   writeCheckoutFile: vi.fn(),
+  getReviewRootPath: vi.fn(),
   readCheckoutMarkdownImage: vi.fn(),
   getGitDiff: vi.fn(),
   getGitDiffPage: vi.fn(),
@@ -37,6 +38,7 @@ vi.mock("../lib/ipc", () => ({
   searchCheckoutFiles: mocks.searchCheckoutFiles,
   readCheckoutFile: mocks.readCheckoutFile,
   writeCheckoutFile: mocks.writeCheckoutFile,
+  getReviewRootPath: mocks.getReviewRootPath,
   readCheckoutMarkdownImage: mocks.readCheckoutMarkdownImage,
   getGitDiff: mocks.getGitDiff,
   getGitDiffPage: mocks.getGitDiffPage,
@@ -191,7 +193,7 @@ function documentPaneProps(
   currentCheckout = checkout("checkout:one"),
   gitSnapshot = snapshot(currentCheckout.id),
 ) {
-  return { checkout: currentCheckout, path, mode, gitSnapshot };
+  return { checkout: currentCheckout, path, origin: "checkout" as const, mode, gitSnapshot };
 }
 
 /** The grammar rows, by the label each one shows. */
@@ -231,6 +233,7 @@ describe("DocumentPane", () => {
       totalLines: 3,
       hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
     });
+    mocks.getReviewRootPath.mockResolvedValue("/Users/dev/.marvis/tmp/code-reviews");
     for (const toast of [...toasts.value]) dismiss(toast.id);
   });
 
@@ -253,7 +256,7 @@ describe("DocumentPane", () => {
       components: { InspectorPane, MainPane },
       setup() {
         function openFile(file: { checkoutId: string; path: string }) {
-          view.value = { kind: "document", path: file.path, mode: "view" };
+          view.value = { kind: "document", path: file.path, mode: "view", origin: "checkout" };
         }
         function openChange(file: { checkoutId: string; path: string }) {
           view.value = { kind: "diff", path: file.path };
@@ -283,7 +286,7 @@ describe("DocumentPane", () => {
     await vi.waitFor(() => expect(wrapper.find('[aria-label="File contents"] article').exists()).toBe(true));
     expect(wrapper.get('[aria-label="File contents"] article').text()).toContain("Marvis");
     expect(wrapper.get('[aria-label="File contents"]').element.querySelector('a[href^="javascript:"]')).toBeNull();
-    expect(mocks.readCheckoutFile).toHaveBeenCalledWith(currentCheckout.id, "docs/readme.md");
+    expect(mocks.readCheckoutFile).toHaveBeenCalledWith(currentCheckout.id, "docs/readme.md", "checkout");
 
     await wrapper
       .get('[aria-label="Document mode"]')
@@ -337,6 +340,54 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("copying the path of an exported file yields the path that exists", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "notes.md", content: "# Review" });
+    const wrapper = mount(DocumentPane, {
+      props: { ...documentPaneProps("notes.md", "view"), origin: "review" },
+    });
+    await flushPromises();
+
+    await wrapper.get('[aria-label="Copy file path"]').trigger("click");
+
+    expect(mocks.getReviewRootPath).toHaveBeenCalledOnce();
+    expect(writeText).toHaveBeenCalledWith("/Users/dev/.marvis/tmp/code-reviews/notes.md");
+    wrapper.unmount();
+  });
+
+  it("an exported file and a checkout file with the same name keep separate drafts", async () => {
+    mocks.readCheckoutFile.mockImplementation(async (_checkoutId: string, path: string, origin: string) => ({
+      path,
+      content: origin === "review" ? "review baseline" : "checkout baseline",
+    }));
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("notes.md") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    const editor = wrapper.get(".cm-content").element as HTMLElement;
+    editor.textContent = "checkout draft";
+    editor.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: "t" }));
+    await flushPromises();
+
+    await wrapper.setProps({ origin: "review" });
+    await vi.waitFor(() => expect(wrapper.get(".cm-content").text()).toContain("review baseline"));
+    await wrapper.setProps({ origin: "checkout" });
+    await vi.waitFor(() => expect(wrapper.get(".cm-content").text()).toContain("checkout draft"));
+
+    expect(mocks.readCheckoutFile).toHaveBeenCalledWith("checkout:one", "notes.md", "review");
+    wrapper.unmount();
+  });
+
+  it("an exported Markdown preview does not request images from the checkout", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "notes.md", content: "![image](image.png)" });
+    const wrapper = mount(DocumentPane, {
+      props: { ...documentPaneProps("notes.md", "view"), origin: "review" },
+    });
+    await vi.waitFor(() => expect(wrapper.find('[aria-label="File contents"] article').exists()).toBe(true));
+
+    expect(mocks.readCheckoutMarkdownImage).not.toHaveBeenCalled();
+    expect(wrapper.text()).not.toContain("Some Markdown images were missing");
+    wrapper.unmount();
+  });
+
   it("keeps a Code draft visible and saves it with its original content", async () => {
     mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const answer = 42;" });
     mocks.writeCheckoutFile.mockResolvedValue(undefined);
@@ -356,6 +407,7 @@ describe("DocumentPane", () => {
       "src/app.ts",
       "const answer = 43;",
       "const answer = 42;",
+      "checkout",
     );
     expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(false);
     wrapper.unmount();

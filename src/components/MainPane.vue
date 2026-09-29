@@ -148,6 +148,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
             class="absolute inset-0"
             :checkout="checkout"
             :path="documentView?.path ?? null"
+            :origin="documentView?.origin ?? 'checkout'"
             :mode="documentView?.mode ?? 'code'"
             :git-snapshot="gitSnapshot"
             :refresh-revision="refreshRevision"

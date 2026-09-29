@@ -76,7 +76,13 @@ describe("persisted UI state", () => {
   it("restores checkout document and inspector state while rejecting unsafe paths", () => {
     const saved = {
       ...DEFAULT_CHECKOUT_UI_STATE,
-      document: { checkoutId: "checkout:/repo", path: "docs/guide.md", source: "file", mode: "view" },
+      document: {
+        checkoutId: "checkout:/repo",
+        path: "docs/guide.md",
+        origin: "checkout",
+        source: "file",
+        mode: "view",
+      },
       mainView: "document",
       inspectorTab: "changes",
       selectedFilePath: "docs/guide.md",
@@ -98,20 +104,46 @@ describe("persisted UI state", () => {
     ).toMatchObject({ document: null, selectedFilePath: null, expandedDirectories: ["safe"] });
   });
 
-  it("keeps a state saved before the change set existed, and drops a shape it cannot read", () => {
-    // A state written when the panel had two views still reads: a document is a file view.
+  it("defaults UI flags when absent, and drops documents without a known origin", () => {
+    // The panel flags have defaults, but a document without its required root is not guessable.
     expect(
       normalizeCheckoutUiState({
         version: 1,
         mainView: "document",
-        document: { checkoutId: "checkout:/repo", path: "docs/guide.md", source: "file", mode: "view" },
+        document: {
+          checkoutId: "checkout:/repo",
+          path: "docs/guide.md",
+          origin: "checkout",
+          source: "file",
+          mode: "view",
+        },
         inspectorTab: "files",
       }),
     ).toMatchObject({
       mainView: "document",
       diffAllFiles: false,
-      document: { path: "docs/guide.md", source: "file", mode: "view" },
+      document: { path: "docs/guide.md", origin: "checkout", source: "file", mode: "view" },
     });
+    expect(
+      normalizeCheckoutUiState({
+        version: 1,
+        mainView: "document",
+        document: { checkoutId: "checkout:/repo", path: "docs/guide.md", source: "file", mode: "view" },
+      }),
+    ).toMatchObject({ mainView: "document", document: null });
+    expect(
+      normalizeCheckoutUiState({
+        version: 1,
+        mainView: "document",
+        document: {
+          checkoutId: "checkout:/repo",
+          path: "2026-03-14-1532.md",
+          origin: "review",
+          source: "file",
+          mode: "view",
+        },
+      }),
+    ).toMatchObject({ document: { origin: "review", path: "2026-03-14-1532.md" } });
     // An unreadable mainView or flag falls to the terminal rather than failing the load.
     expect(normalizeCheckoutUiState({ version: 1, mainView: "diff", diffAllFiles: "yes" })).toMatchObject({
       mainView: "terminal",

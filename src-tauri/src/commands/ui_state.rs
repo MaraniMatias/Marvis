@@ -53,6 +53,31 @@ pub async fn checkout_ui_state_save(
     .map_err(validation_error)
 }
 
+#[tauri::command]
+pub async fn review_target_load(
+    checkout_id: String,
+    database: State<'_, Database>,
+) -> Result<String, IpcError> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || database.review_target(&checkout_id))
+        .await
+        .map_err(operation_error)?
+        .map_err(validation_error)
+}
+
+#[tauri::command]
+pub async fn review_target_save(
+    checkout_id: String,
+    target: String,
+    database: State<'_, Database>,
+) -> Result<(), IpcError> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || database.set_review_target(&checkout_id, &target))
+        .await
+        .map_err(operation_error)?
+        .map_err(validation_error)
+}
+
 fn operation_error(error: tauri::Error) -> IpcError {
     IpcError::new(
         IpcErrorCode::OperationFailed,

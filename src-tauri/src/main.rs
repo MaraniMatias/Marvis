@@ -60,6 +60,7 @@ fn main() {
             use tauri::Manager;
 
             let data_dir = app.path().app_data_dir()?;
+            let review_root = services::files::review_root(&app.path().home_dir()?);
             std::fs::create_dir_all(&data_dir)?;
             let database = persistence::Database::open(data_dir.join("marvis.sqlite3"))
                 .map_err(std::io::Error::other)?;
@@ -121,6 +122,7 @@ fn main() {
                 });
             }
             app.manage(database);
+            app.manage(review_root);
             app.manage(std::sync::Arc::new(terminal::TerminalBackend::default()));
             app.manage(std::sync::Arc::new(
                 services::git::GitWatcherManager::default(),
@@ -160,6 +162,8 @@ fn main() {
             commands::files::files_search,
             commands::files::file_read,
             commands::files::file_write,
+            commands::files::review_export_markdown,
+            commands::files::review_root_path,
             commands::files::file_read_markdown_image,
             commands::git::git_status,
             commands::git::git_diff_stats,
@@ -199,7 +203,9 @@ fn main() {
             commands::ui_state::ui_layout_load,
             commands::ui_state::ui_layout_save,
             commands::ui_state::checkout_ui_state_load,
-            commands::ui_state::checkout_ui_state_save
+            commands::ui_state::checkout_ui_state_save,
+            commands::ui_state::review_target_load,
+            commands::ui_state::review_target_save
         ])
         .run(tauri::generate_context!())
         .expect("failed to run Marvis");
@@ -287,7 +293,7 @@ mod security_tests {
     }
 
     #[test]
-    fn sec_05_2_the_only_write_the_webview_can_reach_is_contained_by_the_checkout() {
+    fn sec_05_2_the_only_write_the_webview_can_reach_is_contained_by_its_allowed_root() {
         // `sec_05` says what the webview may ask for. This says what it may change, which is the
         // question that only became one when the app started writing into the user's
         // repositories. It is numbered beside `sec_05` rather than on its own: `sec_06` is
@@ -339,9 +345,9 @@ mod security_tests {
             }
         }
 
-        // The one command that mutates a file names the checkout it is allowed to write inside
-        // and hands the work to the service that resolves the path against it. A `file_write`
-        // that grew a bare path, or that stopped going through the service, is the escape.
+        // File writes name their origin and hand it to the service that resolves the path against
+        // that origin's root. A `file_write` that grew a bare path, or that stopped going through
+        // the service, is the escape.
         let write_command = include_str!("commands/files.rs")
             .split("#[tauri::command]")
             .find(|block| block.contains("pub async fn file_write("))
@@ -349,8 +355,8 @@ mod security_tests {
         assert!(write_command.contains("checkout_id: String"));
         assert!(write_command.contains("services::files::write"));
 
-        // And that service is the one holding the guards: the path is resolved against the
-        // checkout, a traversal is refused, and a read-only file is not replaced.
+        // The checkout retains its guards, and the review root gets its own canonical containment
+        // check rather than borrowing the checkout's.
         let file_service = include_str!("services/files.rs")
             .split("#[cfg(test)]")
             .next()
@@ -360,6 +366,8 @@ mod security_tests {
             "parse_relative_path",
             "permissions.readonly()",
             "fs::set_permissions",
+            "resolve_review_path",
+            "canonical_path.starts_with(&canonical_root)",
         ] {
             assert!(
                 file_service.contains(guard),

@@ -1,4 +1,5 @@
 export type DocumentMode = "code" | "view";
+export type DocumentOrigin = "checkout" | "review";
 
 /** The copy of the whole-change-set view, shared by the breadcrumb and the diff header. */
 export const ALL_CHANGES_LABEL = "All changes";
@@ -6,7 +7,7 @@ export const ALL_CHANGES_LABEL = "All changes";
 /** The one thing the main panel shows (D.1). A diff of every changed file has no path. */
 export type MainView =
   | { kind: "terminal"; sessionId: string | null }
-  | { kind: "document"; path: string; mode: DocumentMode }
+  | { kind: "document"; path: string; mode: DocumentMode; origin: DocumentOrigin }
   | { kind: "diff"; path: string | null };
 
 /**
@@ -26,6 +27,7 @@ export interface MainViewState {
 export interface MainDocument {
   checkoutId: string;
   path: string;
+  origin: DocumentOrigin;
   source: "file" | "change";
   mode: "diff" | DocumentMode;
 }
@@ -48,13 +50,13 @@ export function mainViewToState(view: MainView, checkoutId: string): MainViewSta
   if (view.kind === "document")
     return {
       mainView: "document",
-      document: { checkoutId, path: view.path, source: "file", mode: view.mode },
+      document: { checkoutId, path: view.path, origin: view.origin, source: "file", mode: view.mode },
       diffAllFiles: false,
     };
   if (view.path === null) return { mainView: "terminal", document: null, diffAllFiles: true };
   return {
     mainView: "document",
-    document: { checkoutId, path: view.path, source: "change", mode: "diff" },
+    document: { checkoutId, path: view.path, origin: "checkout", source: "change", mode: "diff" },
     diffAllFiles: false,
   };
 }
@@ -66,5 +68,5 @@ export function mainViewFromState(state: MainViewState): MainView {
   if (state.mainView !== "document" || !document) return { kind: "terminal", sessionId: null };
   return document.mode === "diff"
     ? { kind: "diff", path: document.path }
-    : { kind: "document", path: document.path, mode: document.mode };
+    : { kind: "document", path: document.path, mode: document.mode, origin: document.origin };
 }

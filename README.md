@@ -13,7 +13,7 @@ If you keep several worktrees of one repository open, files and terminals from d
 
 Local review notes also go stale. You write "this is wrong", the file changes the next day, and the note ends up pointing at the wrong place. Marvis attaches each note to a specific line of a diff and checks whether that line still matches. Notes that no longer apply are marked as outdated instead of quietly misleading you.
 
-And if you use a coding agent, giving it feedback usually means copying your comments into a separate chat. In Marvis, the agent runs in a terminal inside the same checkout, next to the diff. With OpenCode, Marvis sends your notes to it as one message. With any other agent, you export the notes as Markdown and paste them into its terminal.
+And if you use a coding agent, giving it feedback usually means copying your comments into a separate chat. In Marvis, the agent runs in a terminal inside the same checkout, next to the diff. You can export notes as an editable Markdown file, or choose OpenCode to send them as one message to a session.
 
 Marvis is not an IDE, a GitHub or GitLab client, or a plain terminal. It is a working surface around a repository, and its editor is there for quick changes.
 
@@ -27,7 +27,7 @@ You can create a new worktree from any checkout. A worktree you are done with ca
 
 ### Browse and edit files
 
-Each checkout has a file tree you can search by name. Files open in a simple code editor with syntax highlighting, so you can make quick changes without leaving Marvis. The editor is meant for small edits, not as a replacement for your main one. Marvis keeps a draft for every file, so switching files does not lose your changes. It only writes inside the checkout, and it will not overwrite read-only files.
+Each checkout has a file tree you can search by name. Files open in a simple code editor with syntax highlighting, so you can make quick changes without leaving Marvis. The editor is meant for small edits, not as a replacement for your main one. Marvis keeps a draft for every file, so switching files does not lose your changes. Checkout documents are written only inside their checkout; exported reviews live separately, and read-only files are never overwritten.
 
 Markdown files can be shown as source or as a rendered preview, with task lists shown as checkboxes and local images displayed inline.
 
@@ -39,7 +39,7 @@ Diffs open in their own view, side by side or unified, with the number of added 
 
 Click a line in a diff to write a note on it, or drag across several lines to cover a range. A note starts as a draft, becomes sent when it goes to the agent, and you mark it resolved once the change is made. When a file changes, Marvis re-checks each note and marks it outdated if its line moved or disappeared. "Clear outdated" removes those notes in one step.
 
-Notes can be grouped into a review round. Marvis sends a round to the agent as a single message and never sends the same round twice, even if the app closes in the middle of sending. You can also export a round as Markdown and paste it anywhere.
+Choose Markdown to export the selected notes to a file that opens in Marvis, where you can edit, copy, or paste it anywhere. Markdown is the default destination per checkout and does not mark notes as sent. Choose OpenCode to send them as a review round to a session; Marvis records the round before sending so an interrupted send can be reconciled after restart.
 
 ### Run terminals
 
@@ -51,7 +51,7 @@ Marvis does not tie you to one agent. Start Claude Code, Codex, OpenCode, pi, or
 
 OpenCode also has a built-in integration. If you use [OpenCode](https://opencode.ai), Marvis starts a separate local agent server for each checkout. It starts when the checkout needs it and stops when you close the checkout or the app. From Marvis you can create sessions, send prompts, stop a running turn, and pick from the models and agents you have available. When you send a review round, the agent is told to read each note and apply the change it describes.
 
-The OpenCode integration is optional. Everything else works without it, with any agent or none.
+The OpenCode integration is optional. Everything else works without it, with any agent or none; export Markdown to pass a review to another agent.
 
 ### The window
 

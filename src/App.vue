@@ -27,9 +27,12 @@ import {
   archiveCheckout as persistCheckoutArchive,
   closeCheckout as persistCheckoutClose,
   closeMissingCheckout as persistMissingCheckoutClose,
+  exportReviewMarkdown,
+  loadReviewTarget,
   renameTerminal,
   restoreArchivedWorktrees as persistArchivedRestore,
   selectCheckout as persistCheckoutSelection,
+  saveReviewTarget,
 } from "./lib/ipc";
 
 import { useWorkspaceState } from "./presentation/workspace";
@@ -37,11 +40,11 @@ import { useRecentPaths } from "./presentation/recent-paths";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
 import { useGitWatchers } from "./presentation/git-watchers";
 import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
-import type { ReviewSender } from "./presentation/review-notes";
+import type { ReviewSender, ReviewTarget } from "./presentation/review-notes";
 import { useAgentSessions } from "./presentation/agent-sessions";
 import { useToasts } from "./presentation/toasts";
 import { defaultAgentSession } from "./domain/agent";
-import { buildReviewMarkdown } from "./domain/review";
+import { buildReviewMarkdown, localReviewTimestamp } from "./domain/review";
 import { isMarkdownPath } from "./presentation/markdown-preview";
 import {
   DEFAULT_APP_LAYOUT,
@@ -104,6 +107,23 @@ const gitSnapshot = useActiveGitSnapshot(
 );
 const review = useReviewNotes(activeCheckout, activeRepo);
 const agent = useAgentSessions(activeCheckout, activeRepo);
+const reviewTarget = ref<ReviewTarget>("markdown");
+let reviewTargetLoadGeneration = 0;
+watch(
+  () => activeCheckout.value?.id ?? null,
+  async (checkoutId) => {
+    const request = ++reviewTargetLoadGeneration;
+    reviewTarget.value = "markdown";
+    if (!checkoutId) return;
+    try {
+      const target = await loadReviewTarget(checkoutId);
+      if (request === reviewTargetLoadGeneration) reviewTarget.value = target === "opencode" ? target : "markdown";
+    } catch (cause) {
+      if (request === reviewTargetLoadGeneration) reportCause(cause);
+    }
+  },
+  { immediate: true },
+);
 const allCheckouts = computed(() => workspace.value.repos.flatMap((repo) => repo.checkouts));
 const registeredSessionIds = computed(() =>
   workspace.value.repos.flatMap((repo) =>
@@ -383,7 +403,7 @@ function showView(checkoutId: string, view: MainView) {
 
 function viewPath(view: MainView | undefined): string | null {
   if (!view || view.kind === "terminal") return null;
-  return view.path;
+  return view.kind === "document" ? `${view.origin}\0${view.path}` : view.path;
 }
 
 function openFileDocument(selection: { checkoutId: string; path: string }) {
@@ -391,6 +411,7 @@ function openFileDocument(selection: { checkoutId: string; path: string }) {
     kind: "document",
     path: selection.path,
     mode: isMarkdownPath(selection.path) ? "view" : "code",
+    origin: "checkout",
   });
 }
 
@@ -887,13 +908,21 @@ async function sendReviewToAgent(ids: string[], queue = false) {
   const notes = review.notes.filter((note) => chosen.has(note.id));
   if (!checkout || checkout.isMissing || activeRepo.value?.kind !== "git" || notes.length === 0) return;
   if (sendingReview.value) return;
+  const destination = reviewTarget.value;
   const status = gitSnapshot.status;
+  const localTime = localReviewTimestamp();
   const markdown = buildReviewMarkdown(notes, {
+    date: localTime.date,
     branch: status?.branch,
     defaultBranch: status?.defaultBranch,
   });
   sendingReview.value = true;
   try {
+    if (destination === "markdown") {
+      const path = await exportReviewMarkdown(localTime.date, localTime.timestamp, markdown);
+      showView(checkout.id, { kind: "document", path, mode: "view", origin: "review" });
+      return;
+    }
     const target = await resolveAgentTarget();
     if (!target) return;
     // `queue` records the round and leaves the agent alone: the message it was accepted
@@ -909,6 +938,18 @@ async function sendReviewToAgent(ids: string[], queue = false) {
     reportCause(cause);
   } finally {
     sendingReview.value = false;
+  }
+}
+
+async function selectReviewTarget(target: ReviewTarget) {
+  const checkoutId = activeCheckout.value?.id;
+  if (!checkoutId) return;
+  reviewTargetLoadGeneration += 1;
+  reviewTarget.value = target;
+  try {
+    await saveReviewTarget(checkoutId, target);
+  } catch (cause) {
+    reportCause(cause);
   }
 }
 
@@ -929,6 +970,9 @@ async function resolveAgentTarget(): Promise<string | null> {
  * the user picks one, which `selectTarget` does.
  */
 const reviewSender: ReviewSender = {
+  get target() {
+    return reviewTarget.value;
+  },
   get sessions() {
     return agent.sessions;
   },
@@ -939,6 +983,7 @@ const reviewSender: ReviewSender = {
     return review.rounds.filter((round) => round.status !== "acked").length;
   },
   selectTarget: (sessionId) => agent.selectTarget(sessionId),
+  selectReviewTarget,
   send: sendReviewToAgent,
 };
 provide(REVIEW_SENDER, reviewSender);

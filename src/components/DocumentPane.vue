@@ -4,13 +4,13 @@ import { Check as CheckIcon, ChevronDown as ChevronDownIcon, Copy as CopyIcon } 
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui";
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
-import type { DocumentMode } from "../domain/main-document";
+import type { DocumentMode, DocumentOrigin } from "../domain/main-document";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { useMarkdownPreview } from "../presentation/markdown-preview";
 import { isIpcError } from "../domain/ipc";
 import { absoluteFilePath } from "../domain/files";
-import { readCheckoutFile, writeCheckoutFile } from "../lib/ipc";
+import { getReviewRootPath, readCheckoutFile, writeCheckoutFile } from "../lib/ipc";
 import type { SourceLanguageOption } from "../lib/source-languages";
 import {
   PLAIN_TEXT,
@@ -27,12 +27,13 @@ const props = withDefaults(
     checkout: Checkout | null;
     /** Null while the terminal or the diff owns the panel; the loaded document stays put. */
     path: string | null;
+    origin?: DocumentOrigin;
     mode: DocumentMode;
     gitSnapshot: ActiveGitSnapshot;
     refreshRevision?: number;
     readingPosition?: { top: number; left: number };
   }>(),
-  { refreshRevision: 0, readingPosition: () => ({ top: 0, left: 0 }) },
+  { origin: "checkout", refreshRevision: 0, readingPosition: () => ({ top: 0, left: 0 }) },
 );
 const emit = defineEmits<{
   updateMode: [mode: DocumentMode];
@@ -59,8 +60,10 @@ let editorGeneration = 0;
 let syncingEditor = false;
 let restoringEditorPosition = false;
 const { push: pushToast, pushCause: reportCause } = useToasts();
+// A review document is outside the checkout, so checkout Git status cannot mark it deleted.
 const deleted = computed(
   () =>
+    props.origin === "checkout" &&
     props.path !== null &&
     (props.gitSnapshot.status?.files.some((file) => file.path === props.path && file.status === "D") ?? false),
 );
@@ -68,8 +71,11 @@ const available = computed(() => !deleted.value);
 const readingPosition = ref(props.readingPosition);
 const { markdownHtml, markdownPreviewState, markdownImageWarning, isMarkdownPath, load, clear } = useMarkdownPreview(
   () => props.checkout?.id ?? null,
+  () => props.origin,
 );
-const identity = computed(() => (props.path === null ? null : `${props.checkout?.id ?? ""}\0${props.path}`));
+const identity = computed(() =>
+  props.path === null ? null : `${props.checkout?.id ?? ""}\0${props.origin}\0${props.path}`,
+);
 const isMarkdown = computed(() => props.path !== null && isMarkdownPath(props.path));
 const sourceLines = computed(() => content.value.split(/\r?\n/));
 const sourceLineNumbers = computed(() => sourceLines.value.map((_, index) => index + 1).join("\n"));
@@ -87,7 +93,9 @@ let loadedIdentity: string | null = null;
  * and the map dies with the window rather than travelling to the database.
  */
 const languageOverrides = reactive(new Map<string, string>());
-const languageKey = computed(() => (props.path === null ? null : `${props.checkout?.id ?? ""}\0${props.path}`));
+const languageKey = computed(() =>
+  props.path === null ? null : `${props.checkout?.id ?? ""}\0${props.origin}\0${props.path}`,
+);
 const languageOverride = computed(() => {
   const key = languageKey.value;
   return key === null ? null : (languageOverrides.get(key) ?? null);
@@ -235,9 +243,10 @@ function errorText(error: unknown): string {
 async function copyFilePath() {
   const checkoutPath = props.checkout?.canonicalPath;
   const path = props.path;
-  if (!checkoutPath || path === null) return;
+  if (path === null || (props.origin === "checkout" && !checkoutPath)) return;
   try {
-    await writeText(absoluteFilePath(checkoutPath, path));
+    const reviewRoot = props.origin === "review" ? await getReviewRootPath() : undefined;
+    await writeText(absoluteFilePath(checkoutPath ?? "", path, props.origin, reviewRoot));
     pushToast("File path copied.", "info");
   } catch (error) {
     reportCause(error);
@@ -352,7 +361,7 @@ async function saveDraft() {
   const expectedContent = draftExpectedContent.get(fileIdentity) ?? originalContent.value;
   saving.value = true;
   try {
-    await writeCheckoutFile(checkoutId, path, draft, expectedContent);
+    await writeCheckoutFile(checkoutId, path, draft, expectedContent, props.origin);
     if (identity.value === fileIdentity && props.checkout?.id === checkoutId && props.path === path) {
       originalContent.value = draft;
       // The editor remains live while the write is in flight. Do not discard a newer edit that
@@ -427,7 +436,7 @@ async function loadFile(preservePosition = false) {
     contentError.value = "";
   }
   try {
-    const result = await readCheckoutFile(checkoutId, path);
+    const result = await readCheckoutFile(checkoutId, path, props.origin);
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
     const draft = drafts.get(fileIdentity);
     // The bytes are usually the ones already on screen, because whatever changed was somewhere

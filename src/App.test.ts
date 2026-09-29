@@ -20,6 +20,9 @@ const mocks = vi.hoisted(() => ({
   loadAppLayout: vi.fn(),
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
+  loadReviewTarget: vi.fn(),
+  saveReviewTarget: vi.fn(),
+  exportReviewMarkdown: vi.fn(),
   closeCheckout: vi.fn(),
   closeMissingCheckout: vi.fn(),
   archiveCheckout: vi.fn(),
@@ -152,11 +155,14 @@ vi.mock("./lib/ipc", () => ({
   closeMissingCheckout: mocks.closeMissingCheckout,
   restoreArchivedWorktrees: mocks.restoreArchivedWorktrees,
   listRecentPaths: mocks.listRecentPaths,
+  exportReviewMarkdown: mocks.exportReviewMarkdown,
+  loadReviewTarget: mocks.loadReviewTarget,
   loadAppLayout: mocks.loadAppLayout,
   loadCheckoutUiState: mocks.loadCheckoutUiState,
   renameTerminal: mocks.renameTerminal,
   saveAppLayout: mocks.saveAppLayout,
   saveCheckoutUiState: mocks.saveCheckoutUiState,
+  saveReviewTarget: mocks.saveReviewTarget,
   // The real command returns the refreshed workspace; App assigns it straight back,
   // so returning undefined here crashed the next render. Only the shell and Neovim requests
   // reach it from the titlebar, so it also reports that a terminal was asked for.
@@ -508,6 +514,9 @@ describe("App UI integration", () => {
     mocks.loadCheckoutUiState.mockResolvedValue({ ...DEFAULT_CHECKOUT_UI_STATE });
     mocks.saveAppLayout.mockResolvedValue(undefined);
     mocks.saveCheckoutUiState.mockResolvedValue(undefined);
+    mocks.loadReviewTarget.mockResolvedValue("markdown");
+    mocks.saveReviewTarget.mockResolvedValue(undefined);
+    mocks.exportReviewMarkdown.mockResolvedValue("2026-03-14-1532.md");
     mocks.toggleMaximize.mockResolvedValue(undefined);
     mocks.currentWindow = {
       onCloseRequested: vi.fn(async (handler) => {
@@ -1336,7 +1345,37 @@ describe("App UI integration", () => {
     });
   });
 
+  it("exports a review by default without dispatching a round or changing note status", async () => {
+    mocks.gitStatus = { branch: "feature", defaultBranch: "main" };
+    mocks.reviewNotes = [reviewNoteFixture()];
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+    await wrapper.get('[data-testid="open-all-changes"]').trigger("click");
+    await flushPromises();
+    await wrapper.get('[data-testid="send-review"]').trigger("click");
+    await flushPromises();
+
+    expect(mocks.exportReviewMarkdown).toHaveBeenCalledOnce();
+    const [date, timestamp, markdown] = mocks.exportReviewMarkdown.mock.calls[0];
+    expect(date).toMatch(/^\d{4}-\d{2}-\d{2}$/);
+    expect(timestamp).toMatch(new RegExp(`^${date}-\\d{4}$`));
+    expect(markdown).toContain(`# Code Review ${date}`);
+    expect(mocks.dispatchReviewRound).not.toHaveBeenCalled();
+    expect(mocks.createAgentSession).not.toHaveBeenCalled();
+    expect(mocks.reviewNotes[0]?.status).toBe("draft");
+    expect(wrapper.get('[data-testid="document-pane"]').text()).toBe("2026-03-14-1532.md");
+
+    await vi.advanceTimersByTimeAsync(300);
+    await flushPromises();
+    expect(mocks.saveCheckoutUiState).toHaveBeenLastCalledWith(
+      "checkout:one",
+      expect.objectContaining({ document: expect.objectContaining({ origin: "review" }) }),
+    );
+    wrapper.unmount();
+  });
+
   it("dispatches the review to the chosen agent session as one round", async () => {
+    mocks.loadReviewTarget.mockResolvedValue("opencode");
     mocks.gitStatus = { branch: "feature", defaultBranch: "main" };
     mocks.reviewNotes = [reviewNoteFixture()];
     mocks.agentSessions = [agentSessionFixture("ses_one", 10)];
@@ -1389,6 +1428,7 @@ describe("App UI integration", () => {
   });
 
   it("starts a session when the checkout has none, rather than dropping the review", async () => {
+    mocks.loadReviewTarget.mockResolvedValue("opencode");
     mocks.gitStatus = { branch: "feature", defaultBranch: "main" };
     mocks.reviewNotes = [reviewNoteFixture()];
     mocks.agentSessions = [];
@@ -1448,7 +1488,7 @@ describe("App UI integration", () => {
       "checkout:one",
       expect.objectContaining({
         mainView: "document",
-        document: { checkoutId: "checkout:one", path: "README.md", source: "file", mode: "view" },
+        document: { checkoutId: "checkout:one", path: "README.md", origin: "checkout", source: "file", mode: "view" },
         documentScrollTop: 240,
         documentScrollLeft: 12,
         // A new view starts at the top, so the diff offset does not follow the document.

@@ -138,10 +138,8 @@ const notesWithoutLine = computed(() =>
   fileNotes.value.filter((note) => note.status === "sent" && wholeFileInMemory.value && anchorText(note) === null),
 );
 
-// Sending to opencode. The diff is where a review is written, so it is also where it is handed
-// over. What this view owns is the choice of notes and the choice of when; the round itself
-// belongs to the store and the destination to the shell, which is why the send arrives by
-// injection rather than as a prop it cannot pass on.
+// The diff owns which notes go out, while the shell owns what the selected destination does with
+// them. The distinction matters here because only an agent handoff can be queued or interrupted.
 
 /** Absent when no shell is above this diff, which is the case in the diff's own tests. */
 const sender = inject(REVIEW_SENDER, null);
@@ -152,7 +150,7 @@ const targetOpen = ref(false);
 const targetQuery = ref("");
 const targetIndex = ref(0);
 /** A list this short is picked by looking at it; past this it earns a search of its own. */
-const searchesTargets = computed(() => (sender?.sessions.length ?? 0) > 5);
+const searchesTargets = computed(() => sender?.target === "opencode" && (sender.sessions.length ?? 0) > 5);
 /** Newest first, the order the rest of the app reads sessions in. */
 const targetRows = computed(() => {
   const rows = sortAgentSessions(sender?.sessions ?? []);
@@ -186,7 +184,7 @@ const outdatedCount = computed(() => props.review.notes.filter((note) => note.ou
 const targetSession = computed(() => sender?.sessions.find((session) => session.id === sender.targetId) ?? undefined);
 /** A blocked session is not working, so only a real turn makes the send a decision. */
 const targetBusy = computed(() => agentAttention(targetSession.value) === "busy");
-const showBusyChoice = computed(() => busyChoiceOpen.value && targetBusy.value);
+const showBusyChoice = computed(() => sender?.target === "opencode" && busyChoiceOpen.value && targetBusy.value);
 const canSend = computed(() => sendableNotes.value.length > 0);
 
 function sendNow(queue: boolean) {
@@ -199,6 +197,10 @@ function sendNow(queue: boolean) {
 
 /** A working agent cannot be interrupted, so the button asks instead of sending into a turn. */
 function requestSend() {
+  if (sender?.target === "markdown") {
+    sendNow(false);
+    return;
+  }
   if (targetBusy.value) {
     busyChoiceOpen.value = true;
     return;
@@ -209,6 +211,11 @@ function requestSend() {
 function chooseTarget(sessionId: string) {
   sender?.selectTarget(sessionId);
   targetOpen.value = false;
+}
+
+function chooseReviewTarget(event: Event) {
+  const target = (event.currentTarget as HTMLSelectElement).value;
+  if (target === "markdown" || target === "opencode") sender?.selectReviewTarget(target);
 }
 
 function moveTargetRow(step: number) {
@@ -485,16 +492,26 @@ onUnmounted(() => {
             type="button"
             data-testid="send-review"
             :disabled="!canSend"
-            aria-label="Send to opencode"
+            :aria-label="sender.target === 'markdown' ? 'Export as Markdown' : 'Send to opencode'"
             class="marvis-control h-7 justify-center px-2.5 text-xs"
             @click="requestSend"
           >
-            Send to opencode
+            {{ sender.target === "markdown" ? "Export as Markdown" : "Send to opencode" }}
           </button>
+          <select
+            :value="sender.target"
+            data-testid="review-target"
+            aria-label="Review destination"
+            class="marvis-control h-7 px-2 text-xs"
+            @change="chooseReviewTarget"
+          >
+            <option value="markdown">Markdown</option>
+            <option value="opencode">OpenCode</option>
+          </select>
           <!-- One session is the default target, so the picker only earns its place above one.
                It is the app's own menu rather than a native select, and it earns a search only
                once there are more rows than a short list is worth reading. -->
-          <PopoverRoot v-if="sender.sessions.length > 1" v-model:open="targetOpen">
+          <PopoverRoot v-if="sender.target === 'opencode' && sender.sessions.length > 1" v-model:open="targetOpen">
             <PopoverTrigger
               data-testid="send-target"
               aria-label="Send review to"
@@ -584,7 +601,7 @@ onUnmounted(() => {
           </div>
         </div>
         <p
-          v-if="sender.unfinishedRounds > 0"
+          v-if="sender.target === 'opencode' && sender.unfinishedRounds > 0"
           data-testid="unfinished-rounds"
           class="text-[11px] text-(--marvis-text-faint)"
         >

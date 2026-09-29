@@ -154,13 +154,23 @@ function reviewApi(notes: ReviewNote[] = []) {
   });
 }
 
-function senderStub(sessions: AgentSession[] = [session("ses_one")], targetId = "ses_one", unfinishedRounds = 0) {
+function senderStub(
+  sessions: AgentSession[] = [session("ses_one")],
+  targetId: string | null = "ses_one",
+  unfinishedRounds = 0,
+  reviewTarget: "markdown" | "opencode" = "opencode",
+) {
   const sessionList = ref(sessions);
   const target = ref(targetId);
   const unfinished = ref(unfinishedRounds);
+  const destination = ref(reviewTarget);
   const send = vi.fn(async () => undefined);
   const selectTarget = vi.fn();
+  const selectReviewTarget = vi.fn((next: "markdown" | "opencode") => (destination.value = next));
   const sender: ReviewSender = {
+    get target() {
+      return destination.value;
+    },
     get sessions() {
       return sessionList.value;
     },
@@ -171,9 +181,10 @@ function senderStub(sessions: AgentSession[] = [session("ses_one")], targetId = 
       return unfinished.value;
     },
     selectTarget,
+    selectReviewTarget,
     send,
   };
-  return { sender, send, selectTarget };
+  return { sender, send, selectTarget, selectReviewTarget };
 }
 
 /** The diff is reached through the shell, so the sender is what the shell provides. */
@@ -332,6 +343,51 @@ describe("FileDiff", () => {
 
     await options[0].trigger("click");
     expect(many.selectTarget).toHaveBeenCalledWith("ses_one");
+    wrapper.unmount();
+  });
+
+  it("exports the notes as markdown without a session, a busy dialog, or a round count", async () => {
+    const busy = session("ses_one", { title: "review one", busy: true, idleAt: null });
+    const stub = senderStub([busy], "ses_one", 3, "markdown");
+    const wrapper = mountDiff({ review: reviewApi([note()]) }, stub.sender);
+    await flushPromises();
+
+    expect(wrapper.find('[data-testid="send-target"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="send-busy"]').exists()).toBe(false);
+    expect(wrapper.find('[data-testid="unfinished-rounds"]').exists()).toBe(false);
+    expect(wrapper.get('[data-testid="send-review"]').text()).toBe("Export as Markdown");
+    await wrapper.get('[data-testid="send-review"]').trigger("click");
+    expect(stub.send).toHaveBeenCalledWith(["note:1"], false);
+    wrapper.unmount();
+  });
+
+  it("lets the checkout choose a review destination", async () => {
+    const stub = senderStub([session("ses_one")], "ses_one", 0, "markdown");
+    const wrapper = mountDiff({ review: reviewApi([note()]) }, stub.sender);
+    await flushPromises();
+
+    await wrapper.get('[data-testid="review-target"]').setValue("opencode");
+    expect(stub.selectReviewTarget).toHaveBeenCalledWith("opencode");
+    expect(wrapper.get('[data-testid="send-review"]').text()).toBe("Send to opencode");
+    wrapper.unmount();
+  });
+
+  it("the markdown target does not change which notes are included", async () => {
+    const review = reviewApi([
+      note({ id: "draft" }),
+      note({ id: "sent", status: "sent" }),
+      note({ id: "resolved", status: "resolved" }),
+      note({ id: "outdated", outdated: true }),
+    ]);
+    const stub = senderStub([], null, 0, "markdown");
+    const wrapper = mountDiff({ review }, stub.sender);
+    await flushPromises();
+
+    await wrapper.get('[data-testid="send-review"]').trigger("click");
+    expect(stub.send).toHaveBeenLastCalledWith(["draft", "sent"], false);
+    await wrapper.get('[data-testid="include-outdated"]').setValue(true);
+    await wrapper.get('[data-testid="send-review"]').trigger("click");
+    expect(stub.send).toHaveBeenLastCalledWith(["draft", "sent", "outdated"], false);
     wrapper.unmount();
   });
 

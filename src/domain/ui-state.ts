@@ -64,6 +64,21 @@ function safePath(value: unknown): value is string {
   return value.split(/[\\/]/).every((part) => part !== ".." && part !== "." && part.length > 0);
 }
 
+function safeReviewPath(value: unknown): value is string {
+  if (
+    typeof value !== "string" ||
+    value.length === 0 ||
+    value.length > 4096 ||
+    value.startsWith("/") ||
+    /^[A-Za-z]:/.test(value) ||
+    !value.endsWith(".md") ||
+    value.includes("\\") ||
+    value.includes("\0")
+  )
+    return false;
+  return value.split("/").every((part) => part !== ".." && part !== "." && part.length > 0);
+}
+
 export function normalizeAppLayout(value: unknown): AppLayoutState {
   if (!isRecord(value) || value.version !== 2) return { ...DEFAULT_APP_LAYOUT };
   return {
@@ -95,13 +110,17 @@ export function normalizeCheckoutUiState(value: unknown): CheckoutUiState {
   const rawDocument = value.document;
   const document =
     isRecord(rawDocument) &&
-    safePath(rawDocument.path) &&
+    typeof rawDocument.path === "string" &&
+    (rawDocument.origin === "review" || rawDocument.origin === "checkout") &&
+    (rawDocument.origin === "review" ? safeReviewPath(rawDocument.path) : safePath(rawDocument.path)) &&
     typeof rawDocument.checkoutId === "string" &&
     (rawDocument.source === "file" || rawDocument.source === "change") &&
-    (rawDocument.mode === "diff" || rawDocument.mode === "view" || rawDocument.mode === "code")
+    (rawDocument.mode === "diff" || rawDocument.mode === "view" || rawDocument.mode === "code") &&
+    (rawDocument.origin !== "review" || (rawDocument.source === "file" && rawDocument.mode !== "diff"))
       ? ({
           checkoutId: rawDocument.checkoutId,
           path: rawDocument.path,
+          origin: rawDocument.origin,
           source: rawDocument.source,
           mode: rawDocument.mode,
         } satisfies MainDocument)

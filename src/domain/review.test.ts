@@ -3,6 +3,7 @@ import {
   anchorOutcome,
   buildDiffLineTexts,
   buildReviewMarkdown,
+  localReviewTimestamp,
   diffLineText,
   reviewFenceLanguage,
   reviewLineRange,
@@ -32,6 +33,22 @@ function note(overrides: Partial<ReviewNote>): ReviewNote {
 }
 
 describe("Review markdown export", () => {
+  it("uses the date it is given instead of the UTC one", () => {
+    const markdown = buildReviewMarkdown([note({})], { date: "2026-03-14" });
+    expect(markdown.startsWith("# Code Review 2026-03-14\n")).toBe(true);
+  });
+
+  it("local_review_timestamp_is_zero_padded_across_the_hour_and_month_boundaries", () => {
+    expect(localReviewTimestamp(new Date(2026, 2, 1, 9, 5))).toEqual({
+      date: "2026-03-01",
+      timestamp: "2026-03-01-0905",
+    });
+    expect(localReviewTimestamp(new Date(2026, 2, 1, 0, 0))).toEqual({
+      date: "2026-03-01",
+      timestamp: "2026-03-01-0000",
+    });
+  });
+
   it("matches the CodeReview.nvim default format", () => {
     const markdown = buildReviewMarkdown(
       [

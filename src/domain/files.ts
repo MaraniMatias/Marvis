@@ -38,6 +38,13 @@ export interface CheckoutImage {
  * the one place the two are joined, and it owns the separator: a checkout that arrives with a
  * trailing slash must not produce a doubled one.
  */
-export function absoluteFilePath(canonicalPath: string, path: string): string {
-  return `${canonicalPath.replace(/[\\/]+$/, "")}/${path}`;
+export function absoluteFilePath(
+  canonicalPath: string,
+  path: string,
+  origin: "checkout" | "review" = "checkout",
+  reviewRoot?: string,
+): string {
+  const root = origin === "review" ? reviewRoot : canonicalPath;
+  if (!root) throw new Error("review file path requires its root");
+  return `${root.replace(/[\\/]+$/, "")}/${path}`;
 }

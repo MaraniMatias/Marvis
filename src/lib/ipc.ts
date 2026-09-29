@@ -9,6 +9,8 @@ import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemova
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { AppLayoutState, CheckoutUiState } from "../domain/ui-state";
 import type { AgentAgent, AgentSession } from "../domain/agent";
+import type { ReviewTarget } from "../presentation/review-notes";
+import type { DocumentOrigin } from "../domain/main-document";
 
 export interface CreatedTerminal {
   session: Session;
@@ -23,8 +25,8 @@ export function searchCheckoutFiles(checkoutId: string): Promise<FileSearchResul
   return invoke<FileSearchResult>("files_search", { checkoutId });
 }
 
-export function readCheckoutFile(checkoutId: string, path: string): Promise<FileContent> {
-  return invoke<FileContent>("file_read", { checkoutId, path });
+export function readCheckoutFile(checkoutId: string, path: string, origin: DocumentOrigin): Promise<FileContent> {
+  return invoke<FileContent>("file_read", { checkoutId, path, origin });
 }
 
 export function writeCheckoutFile(
@@ -32,8 +34,25 @@ export function writeCheckoutFile(
   path: string,
   content: string,
   expectedContent: string,
+  origin: DocumentOrigin,
 ): Promise<void> {
-  return invoke<void>("file_write", { checkoutId, path, content, expectedContent });
+  return invoke<void>("file_write", { checkoutId, path, content, expectedContent, origin });
+}
+
+export function exportReviewMarkdown(date: string, timestamp: string, markdown: string): Promise<string> {
+  return invoke<string>("review_export_markdown", { date, timestamp, markdown });
+}
+
+export function getReviewRootPath(): Promise<string> {
+  return invoke<string>("review_root_path");
+}
+
+export function loadReviewTarget(checkoutId: string): Promise<ReviewTarget> {
+  return invoke<ReviewTarget>("review_target_load", { checkoutId });
+}
+
+export function saveReviewTarget(checkoutId: string, target: ReviewTarget): Promise<void> {
+  return invoke<void>("review_target_save", { checkoutId, target });
 }
 
 export function readCheckoutMarkdownImage(

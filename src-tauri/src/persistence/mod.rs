@@ -75,6 +75,7 @@ impl AppLayoutState {
 pub struct PersistedDocument {
     pub checkout_id: String,
     pub path: String,
+    pub origin: String,
     pub source: String,
     pub mode: String,
 }
@@ -757,6 +758,26 @@ impl Database {
                 .map_err(db_error)?;
         }
         Ok(state)
+    }
+
+    pub fn review_target(&self, checkout_id: &str) -> Result<String, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let key = format!("review_target:{checkout_id}");
+        Ok(match get_preference(&connection, &key)?.as_deref() {
+            Some("opencode") => "opencode".into(),
+            _ => "markdown".into(),
+        })
+    }
+
+    pub fn set_review_target(&self, checkout_id: &str, target: &str) -> Result<(), String> {
+        if !matches!(target, "markdown" | "opencode") {
+            return Err("review target is not supported".into());
+        }
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        let key = format!("review_target:{checkout_id}");
+        set_preference(&transaction, &key, Some(target))?;
+        transaction.commit().map_err(db_error)
     }
 
     pub fn save_checkout_ui_state(
@@ -1905,16 +1926,34 @@ fn safe_checkout_relative_path(path: &str) -> bool {
             .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
+fn safe_review_relative_path(path: &str) -> bool {
+    !path.is_empty()
+        && path.len() <= 4096
+        && path.ends_with(".md")
+        && !path.contains('\\')
+        && !path.contains('\0')
+        && Path::new(path)
+            .components()
+            .all(|component| matches!(component, std::path::Component::Normal(_)))
+}
+
 fn validate_checkout_ui_state(checkout_id: &str, state: &CheckoutUiState) -> bool {
     state.version == 1
         && matches!(state.main_view.as_str(), "terminal" | "document")
         && matches!(state.inspector_tab.as_str(), "files" | "changes")
         && state.document.as_ref().is_none_or(|document| {
             document.checkout_id == checkout_id
-                && safe_checkout_relative_path(&document.path)
+                && matches!(document.origin.as_str(), "checkout" | "review")
+                && if document.origin == "review" {
+                    safe_review_relative_path(&document.path)
+                } else {
+                    safe_checkout_relative_path(&document.path)
+                }
                 && matches!(document.source.as_str(), "file" | "change")
                 && matches!(document.mode.as_str(), "diff" | "view" | "code")
                 && (document.source != "file" || document.mode != "diff")
+                && (document.origin != "review"
+                    || (document.source == "file" && document.mode != "diff"))
         })
         && (state.main_view != "document" || state.document.is_some())
         // The whole-change-set diff names no file, so a document alongside it is contradictory.
@@ -2501,6 +2540,7 @@ mod tests {
             document: Some(PersistedDocument {
                 checkout_id: checkout_id.clone(),
                 path: "docs/guide.md".into(),
+                origin: "checkout".into(),
                 source: "file".into(),
                 mode: "view".into(),
             }),
@@ -2565,6 +2605,119 @@ mod tests {
             )
             .unwrap();
         assert!(!invalid_global_state_remains);
+    }
+
+    #[test]
+    fn a_review_document_survives_a_restart_with_its_origin() {
+        let temp = tempdir().unwrap();
+        let folder = temp.path().join("checkout");
+        fs::create_dir(&folder).unwrap();
+        let checkout_id = plain_repo(&folder, "now").checkouts[0].id.clone();
+        let db_path = temp.path().join("ui-state.sqlite3");
+        {
+            let database = Database::open(&db_path).unwrap();
+            database
+                .register_plain_repo(plain_repo(&folder, "now"))
+                .unwrap();
+            database
+                .save_checkout_ui_state(
+                    &checkout_id,
+                    &CheckoutUiState {
+                        document: Some(PersistedDocument {
+                            checkout_id: checkout_id.clone(),
+                            path: "2026-03-14-1532.md".into(),
+                            origin: "review".into(),
+                            source: "file".into(),
+                            mode: "view".into(),
+                        }),
+                        main_view: "document".into(),
+                        ..CheckoutUiState::default()
+                    },
+                )
+                .unwrap();
+        }
+
+        let reopened = Database::open(&db_path).unwrap();
+        assert_eq!(
+            reopened
+                .load_checkout_ui_state(&checkout_id)
+                .unwrap()
+                .document
+                .unwrap()
+                .origin,
+            "review"
+        );
+    }
+
+    #[test]
+    fn a_document_saved_without_an_origin_is_dropped_not_guessed() {
+        let temp = tempdir().unwrap();
+        let folder = temp.path().join("checkout");
+        fs::create_dir(&folder).unwrap();
+        let repo = plain_repo(&folder, "now");
+        let checkout_id = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("ui-state.sqlite3")).unwrap();
+        database.register_plain_repo(repo).unwrap();
+        let old_shape = serde_json::to_string(&serde_json::json!({
+            "version": 1,
+            "document": {
+                "checkoutId": checkout_id.clone(),
+                "path": "README.md",
+                "source": "file",
+                "mode": "view"
+            },
+            "mainView": "document",
+            "diffAllFiles": false,
+            "inspectorTab": "files",
+            "selectedFilePath": null,
+            "selectedChangePath": null,
+            "expandedDirectories": [],
+            "filesScrollTop": 0,
+            "changesScrollTop": 0,
+            "documentScrollTop": 0,
+            "documentScrollLeft": 0,
+            "diffScrollTop": 0
+        }))
+        .unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO checkout_ui_states (checkout_id, state_json) VALUES (?1, ?2)",
+                params![checkout_id, old_shape],
+            )
+            .unwrap();
+
+        assert_eq!(
+            database.load_checkout_ui_state(&checkout_id).unwrap(),
+            CheckoutUiState::default()
+        );
+    }
+
+    #[test]
+    fn review_target_defaults_to_markdown_and_is_stored_per_checkout() {
+        let database = Database::open_in_memory().unwrap();
+        assert_eq!(database.review_target("checkout:one").unwrap(), "markdown");
+        database
+            .set_review_target("checkout:one", "opencode")
+            .unwrap();
+        assert_eq!(database.review_target("checkout:one").unwrap(), "opencode");
+        assert_eq!(database.review_target("checkout:two").unwrap(), "markdown");
+        assert!(database.set_review_target("checkout:one", "codex").is_err());
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO preferences (key, value) VALUES ('review_target:checkout:three', 'codex')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(
+            database.review_target("checkout:three").unwrap(),
+            "markdown"
+        );
     }
 
     #[test]
@@ -2668,6 +2821,7 @@ mod tests {
             document: Some(PersistedDocument {
                 checkout_id: checkout_id.clone(),
                 path: "src/main.rs".into(),
+                origin: "checkout".into(),
                 source: "change".into(),
                 mode: "diff".into(),
             }),
@@ -2696,6 +2850,7 @@ mod tests {
             document: Some(PersistedDocument {
                 checkout_id: old_checkout_id.clone(),
                 path: "README.md".into(),
+                origin: "checkout".into(),
                 source: "file".into(),
                 mode: "view".into(),
             }),

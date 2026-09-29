@@ -3,7 +3,8 @@ import { ALL_CHANGES_LABEL, mainViewFromState, mainViewLabel, mainViewToState, r
 import type { MainView } from "./main-document";
 
 const terminal: MainView = { kind: "terminal", sessionId: "session:one" };
-const document: MainView = { kind: "document", path: "docs/guide.md", mode: "view" };
+const document: MainView = { kind: "document", path: "docs/guide.md", mode: "view", origin: "checkout" };
+const reviewDocument: MainView = { kind: "document", path: "2026-03-14-1532.md", mode: "view", origin: "review" };
 const fileDiff: MainView = { kind: "diff", path: "src/main.rs" };
 const allDiff: MainView = { kind: "diff", path: null };
 
@@ -39,6 +40,12 @@ describe("checkout-scoped main views", () => {
     }
   });
 
+  it("round-trips a review document through the persisted state", () => {
+    const state = mainViewToState(reviewDocument, "checkout:one");
+    expect(state.document).toMatchObject({ origin: "review", path: "2026-03-14-1532.md" });
+    expect(mainViewFromState(state)).toEqual(reviewDocument);
+  });
+
   it("saves the terminal as the terminal, without the session the workspace already owns", () => {
     expect(mainViewToState(terminal, "checkout:one")).toEqual({
       mainView: "terminal",
@@ -61,7 +68,13 @@ describe("checkout-scoped main views", () => {
     expect(
       mainViewFromState({
         mainView: "document",
-        document: { checkoutId: "checkout:one", path: "src/main.rs", source: "change", mode: "diff" },
+        document: {
+          checkoutId: "checkout:one",
+          path: "src/main.rs",
+          origin: "checkout",
+          source: "change",
+          mode: "diff",
+        },
         diffAllFiles: false,
       }),
     ).toEqual(fileDiff);
