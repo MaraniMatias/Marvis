@@ -61,12 +61,16 @@ node scripts/release.mjs --bump "$requested" --no-push
 step "Pushing the commit and the tag"
 git push origin HEAD:main
 git push origin "refs/tags/$tag"
+release_commit="$(git rev-parse "$tag^{commit}")"
 
 step "Waiting for the Release workflow"
-# The run does not exist the instant the tag lands, so the first seconds are a poll and not a watch.
+# Filtered by the tagged commit rather than by the tag as a ref: `--ref` is not a flag every gh has
+# (`gh run list` takes `--branch` or `--commit`), and the commit is what the run is really about. The
+# event filter keeps the CI runs on the same commit out of the answer.
 run=""
 for _ in $(seq 1 18); do
-  run="$(gh run list --workflow release.yml --ref "$tag" --limit 1 --json databaseId --jq '.[0].databaseId // empty')"
+  run="$(gh run list --workflow release.yml --commit "$release_commit" --event push --limit 1 \
+    --json databaseId --jq '.[0].databaseId // empty')"
   [[ -n "$run" ]] && break
   sleep 5
 done
