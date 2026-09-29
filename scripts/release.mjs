@@ -91,9 +91,12 @@ function check(tag) {
 }
 
 function bump(version, { dryRun, push }) {
-  if (!SEMVER.test(version)) {
+  // The tag is `v<version>` and the manifests hold the version bare, so both spellings are accepted.
+  const bare = version.replace(/^v/, "");
+  if (!SEMVER.test(bare)) {
     fail(`"${version}" is not a semantic version`);
   }
+  version = bare;
   const [path, current] = MANIFESTS.map((manifest) => [manifest.path, manifest.read()])[0];
   // Compared on the numeric core alone, so `0.2.0` may follow `0.2.0-rc.1` but not `0.3.0`.
   const core = (value) => value.split(/[-+]/)[0].split(".").map(Number);
@@ -117,7 +120,11 @@ function bump(version, { dryRun, push }) {
     for (const manifest of MANIFESTS) {
       console.log(`${manifest.path}: ${manifest.read()} -> ${version}`);
     }
-    console.log(`would commit, tag ${tag} and push${push ? "" : " nothing (dry run)"}`);
+    console.log(
+      dryRun
+        ? `dry run: would commit and tag ${tag}, and push nothing`
+        : `would commit, tag ${tag} and push${push ? "" : " nothing (--no-push)"}`,
+    );
     return;
   }
   if (git(["status", "--porcelain"])) {
@@ -143,7 +150,9 @@ if (args.includes("--check")) {
   const tag = args.find((argument) => argument.startsWith("v") && SEMVER.test(argument.slice(1)));
   check(tag);
 } else if (args.includes("--bump")) {
-  const version = args[args.indexOf("--bump") + 1];
+  // The first argument that is not a flag, so `pnpm release:preview v0.2.0` and
+  // `pnpm release v0.2.0 --dry-run` both read the same.
+  const version = args.slice(args.indexOf("--bump") + 1).find((argument) => !argument.startsWith("--"));
   if (!version) {
     fail("--bump needs a version, for example: node scripts/release.mjs --bump 0.2.0");
   }
