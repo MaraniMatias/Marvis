@@ -335,6 +335,42 @@ describe("FileDiff", () => {
     wrapper.unmount();
   });
 
+  it("lists the newest session first, and only searches a list long enough to need it", async () => {
+    const two = senderStub([
+      session("ses_old", { title: "old work", updatedAt: 1 }),
+      session("ses_new", { title: "new work", updatedAt: 5 }),
+    ]);
+    const short = mountDiff({ review: reviewApi([note()]) }, two.sender);
+    await flushPromises();
+    // A send goes to the session that was last used, so the newest one leads the list.
+    expect(short.findAll('[role="option"]').map((option) => option.text())).toEqual(["new work", "old work"]);
+    expect(short.find('input[aria-label="Search sessions"]').exists()).toBe(false);
+    short.unmount();
+
+    const sessions = Array.from({ length: 6 }, (_, index) =>
+      session(`ses_${index}`, { title: index === 3 ? "CanvasForm work" : `session ${index}`, updatedAt: index }),
+    );
+    const six = senderStub(sessions, "ses_0");
+    const wrapper = mountDiff({ review: reviewApi([note()]) }, six.sender);
+    await flushPromises();
+
+    expect(wrapper.findAll('[role="option"]').map((option) => option.text())).toEqual([
+      "session 5",
+      "session 4",
+      "CanvasForm work",
+      "session 2",
+      "session 1",
+      "session 0",
+    ]);
+    const search = wrapper.get('input[aria-label="Search sessions"]');
+    await search.setValue("canvas");
+    expect(wrapper.findAll('[role="option"]').map((option) => option.text())).toEqual(["CanvasForm work"]);
+    await search.setValue("nothing");
+    expect(wrapper.findAll('[role="option"]')).toHaveLength(0);
+    expect(wrapper.get(".menu-note").text()).toBe('No session matches "nothing".');
+    wrapper.unmount();
+  });
+
   it("asks what to do when the target is mid-task, and can be talked out of it", async () => {
     const busy = session("ses_one", { title: "review one", busy: true, idleAt: null });
     const stub = senderStub([busy]);

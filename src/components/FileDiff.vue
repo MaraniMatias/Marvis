@@ -8,7 +8,7 @@ import { computed, inject, nextTick, onUnmounted, ref, shallowRef, watch } from 
 import type { GitFileDiff, GitDiffPageLine } from "../domain/git";
 import { ALL_CHANGES_LABEL } from "../domain/main-document";
 import { isIpcError } from "../domain/ipc";
-import { agentAttention } from "../domain/agent";
+import { agentAttention, sortAgentSessions } from "../domain/agent";
 import { buildDiffLineTexts, diffLineText, isReviewableNote, reviewRangeCode } from "../domain/review";
 import type { AnchorOutcome, ReviewNote, ReviewSide } from "../domain/review";
 import type { Checkout } from "../domain/workspace";
@@ -149,18 +149,31 @@ const includeOutdated = ref(false);
 /** Open while the target is working and the user has not yet chosen what to do about it. */
 const busyChoiceOpen = ref(false);
 const targetOpen = ref(false);
+const targetQuery = ref("");
 const targetIndex = ref(0);
-const targetRows = computed(() => sender?.sessions ?? []);
+/** A list this short is picked by looking at it; past this it earns a search of its own. */
+const searchesTargets = computed(() => (sender?.sessions.length ?? 0) > 5);
+/** Newest first, the order the rest of the app reads sessions in. */
+const targetRows = computed(() => {
+  const rows = sortAgentSessions(sender?.sessions ?? []);
+  const query = targetQuery.value.trim().toLowerCase();
+  return query ? rows.filter((row) => row.title.toLowerCase().includes(query)) : rows;
+});
 const activeTargetRow = computed(() => Math.min(targetIndex.value, Math.max(targetRows.value.length - 1, 0)));
 
-// The destination menu opens on the row that is already chosen, so the arrow keys start where
-// the user already is rather than at the top of a list of two.
+// Each opening starts on the row already chosen, so the arrow keys start where the user already
+// is, and without the filter of a menu that is no longer open.
 watch(targetOpen, (open) => {
-  if (open)
-    targetIndex.value = Math.max(
-      targetRows.value.findIndex((row) => row.id === sender?.targetId),
-      0,
-    );
+  if (!open) return;
+  targetQuery.value = "";
+  targetIndex.value = Math.max(
+    targetRows.value.findIndex((row) => row.id === sender?.targetId),
+    0,
+  );
+});
+
+watch(targetQuery, () => {
+  targetIndex.value = 0;
 });
 const sendableNotes = computed(() => {
   const pending = props.review.notes.filter(isReviewableNote);
@@ -479,17 +492,14 @@ onUnmounted(() => {
             Send to opencode
           </button>
           <!-- One session is the default target, so the picker only earns its place above one.
-               It is the app's own menu rather than a native select, and it carries no search:
-               there is nothing here long enough to need one. -->
+               It is the app's own menu rather than a native select, and it earns a search only
+               once there are more rows than a short list is worth reading. -->
           <PopoverRoot v-if="sender.sessions.length > 1" v-model:open="targetOpen">
             <PopoverTrigger
               data-testid="send-target"
               aria-label="Send review to"
               :title="targetSession?.title"
               class="text-menu-control max-w-44 gap-1 whitespace-nowrap"
-              @keydown.down.prevent="moveTargetRow(1)"
-              @keydown.up.prevent="moveTargetRow(-1)"
-              @keydown.enter.prevent="chooseActiveTarget"
             >
               <span class="min-w-0 truncate">{{ targetSession?.title ?? "Choose a session" }}</span>
               <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
@@ -497,6 +507,8 @@ onUnmounted(() => {
             <!-- Portalled for the same reason the document toolbar portals its own: the list is
                  absolutely positioned and the diff under it paints over anything left in place. -->
             <PopoverPortal>
+              <!-- The keys are read here rather than on the search, so the menu answers them the
+                   same whether or not a checkout has enough sessions to be searched. -->
               <PopoverContent
                 side="bottom"
                 align="end"
@@ -506,6 +518,14 @@ onUnmounted(() => {
                 @keydown.up.prevent="moveTargetRow(-1)"
                 @keydown.enter.prevent="chooseActiveTarget"
               >
+                <input
+                  v-if="searchesTargets"
+                  v-model="targetQuery"
+                  type="search"
+                  aria-label="Search sessions"
+                  placeholder="Search…"
+                  class="marvis-menu-search min-w-0 appearance-none"
+                />
                 <div role="listbox" aria-label="Send review to" class="marvis-menu-scroll flex flex-col">
                   <button
                     v-for="(row, index) in targetRows"
@@ -521,6 +541,7 @@ onUnmounted(() => {
                     <span class="menu-item-label">{{ row.title }}</span>
                     <CheckIcon v-if="row.id === sender.targetId" class="icon-xxs menu-check" aria-hidden="true" />
                   </button>
+                  <p v-if="!targetRows.length" class="menu-note">No session matches "{{ targetQuery }}".</p>
                 </div>
               </PopoverContent>
             </PopoverPortal>
