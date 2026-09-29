@@ -1,7 +1,9 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-indent, vue/html-closing-bracket-newline, vue/html-self-closing */
+import { Check as CheckIcon, ChevronDown as ChevronDownIcon } from "@lucide/vue";
 import { DiffFile, DiffModeEnum, DiffView } from "@git-diff-view/vue";
 import "@git-diff-view/vue/styles/diff-view-pure.css";
+import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui";
 import { computed, inject, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
 import type { GitFileDiff, GitDiffPageLine } from "../domain/git";
 import { ALL_CHANGES_LABEL } from "../domain/main-document";
@@ -146,6 +148,20 @@ const sender = inject(REVIEW_SENDER, null);
 const includeOutdated = ref(false);
 /** Open while the target is working and the user has not yet chosen what to do about it. */
 const busyChoiceOpen = ref(false);
+const targetOpen = ref(false);
+const targetIndex = ref(0);
+const targetRows = computed(() => sender?.sessions ?? []);
+const activeTargetRow = computed(() => Math.min(targetIndex.value, Math.max(targetRows.value.length - 1, 0)));
+
+// The destination menu opens on the row that is already chosen, so the arrow keys start where
+// the user already is rather than at the top of a list of two.
+watch(targetOpen, (open) => {
+  if (open)
+    targetIndex.value = Math.max(
+      targetRows.value.findIndex((row) => row.id === sender?.targetId),
+      0,
+    );
+});
 const sendableNotes = computed(() => {
   const pending = props.review.notes.filter(isReviewableNote);
   // An outdated note points at a line that has since changed, so it is held back unless the
@@ -177,8 +193,19 @@ function requestSend() {
   sendNow(false);
 }
 
-function chooseTarget(event: Event) {
-  sender?.selectTarget((event.target as HTMLSelectElement).value);
+function chooseTarget(sessionId: string) {
+  sender?.selectTarget(sessionId);
+  targetOpen.value = false;
+}
+
+function moveTargetRow(step: number) {
+  const total = targetRows.value.length;
+  if (total > 0) targetIndex.value = (targetIndex.value + step + total) % total;
+}
+
+function chooseActiveTarget() {
+  const session = targetRows.value[activeTargetRow.value];
+  if (session) chooseTarget(session.id);
 }
 
 let diffGeneration = 0;
@@ -446,23 +473,58 @@ onUnmounted(() => {
             data-testid="send-review"
             :disabled="!canSend"
             aria-label="Send to opencode"
-            class="diff-send-button rounded-sm border px-2 py-1 text-[11px]"
+            class="marvis-control h-7 justify-center px-2.5 text-xs"
             @click="requestSend"
           >
             Send to opencode
           </button>
-          <!-- One session is the default target, so the picker only earns its place above one. -->
-          <select
-            v-if="sender.sessions.length > 1"
-            :value="sender.targetId ?? ''"
-            aria-label="Send review to"
-            class="max-w-44 rounded-sm border border-(--marvis-border) bg-(--marvis-bg-2) px-1 py-0.5 text-[11px] text-(--marvis-text)"
-            @change="chooseTarget"
-          >
-            <option v-for="session in sender.sessions" :key="session.id" :value="session.id">
-              {{ session.title }}
-            </option>
-          </select>
+          <!-- One session is the default target, so the picker only earns its place above one.
+               It is the app's own menu rather than a native select, and it carries no search:
+               there is nothing here long enough to need one. -->
+          <PopoverRoot v-if="sender.sessions.length > 1" v-model:open="targetOpen">
+            <PopoverTrigger
+              data-testid="send-target"
+              aria-label="Send review to"
+              :title="targetSession?.title"
+              class="text-menu-control max-w-44 gap-1 whitespace-nowrap"
+              @keydown.down.prevent="moveTargetRow(1)"
+              @keydown.up.prevent="moveTargetRow(-1)"
+              @keydown.enter.prevent="chooseActiveTarget"
+            >
+              <span class="min-w-0 truncate">{{ targetSession?.title ?? "Choose a session" }}</span>
+              <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
+            </PopoverTrigger>
+            <!-- Portalled for the same reason the document toolbar portals its own: the list is
+                 absolutely positioned and the diff under it paints over anything left in place. -->
+            <PopoverPortal>
+              <PopoverContent
+                side="bottom"
+                align="end"
+                :side-offset="4"
+                class="surface-popover marvis-menu w-64"
+                @keydown.down.prevent="moveTargetRow(1)"
+                @keydown.up.prevent="moveTargetRow(-1)"
+                @keydown.enter.prevent="chooseActiveTarget"
+              >
+                <div role="listbox" aria-label="Send review to" class="marvis-menu-scroll flex flex-col">
+                  <button
+                    v-for="(row, index) in targetRows"
+                    :key="row.id"
+                    type="button"
+                    role="option"
+                    :aria-selected="row.id === sender.targetId"
+                    :title="row.title"
+                    class="menu-item select-none text-left"
+                    :class="{ 'is-active': index === activeTargetRow }"
+                    @click="chooseTarget(row.id)"
+                  >
+                    <span class="menu-item-label">{{ row.title }}</span>
+                    <CheckIcon v-if="row.id === sender.targetId" class="icon-xxs menu-check" aria-hidden="true" />
+                  </button>
+                </div>
+              </PopoverContent>
+            </PopoverPortal>
+          </PopoverRoot>
           <span v-if="canSend" data-testid="send-count" class="text-[11px] text-(--marvis-text-faint)">
             {{ sendableNotes.length }} {{ sendableNotes.length === 1 ? "note" : "notes" }}
             <template v-if="draftCount">· {{ draftCount }} {{ draftCount === 1 ? "draft" : "drafts" }}</template>
@@ -477,7 +539,7 @@ onUnmounted(() => {
             <button
               type="button"
               data-testid="send-now"
-              class="rounded-sm border border-(--marvis-border) px-2 py-0.5 text-[11px] text-(--marvis-text) hover:bg-(--marvis-bg-2)"
+              class="marvis-control h-6 justify-center px-2 text-xs"
               @click="sendNow(false)"
             >
               Send now
@@ -485,7 +547,7 @@ onUnmounted(() => {
             <button
               type="button"
               data-testid="send-queue"
-              class="rounded-sm border border-(--marvis-border) px-2 py-0.5 text-[11px] text-(--marvis-text) hover:bg-(--marvis-bg-2)"
+              class="marvis-control h-6 justify-center px-2 text-xs"
               @click="sendNow(true)"
             >
               Queue
@@ -493,7 +555,7 @@ onUnmounted(() => {
             <button
               type="button"
               data-testid="send-not-now"
-              class="px-2 py-0.5 text-[11px] text-(--marvis-text-faint) hover:text-(--marvis-text)"
+              class="px-2 text-xs text-(--marvis-text-faint) hover:text-(--marvis-text)"
               @click="busyChoiceOpen = false"
             >
               Not now
@@ -783,24 +845,6 @@ onUnmounted(() => {
 .diff-viewport :deep(.diff-tailwindcss-wrapper[data-theme="dark"] [data-state="plain"]),
 .diff-viewport :deep(.diff-tailwindcss-wrapper[data-theme="dark"] [data-state="hunk"]) {
   color: var(--marvis-text);
-}
-
-/* The send is the one action of the header that means something, so it reads as a button
-   rather than as another mode of the diff. */
-.diff-send-button {
-  border-color: var(--marvis-border);
-  background: var(--marvis-bg-2);
-  color: var(--marvis-text);
-  font-family: inherit;
-}
-
-.diff-send-button:hover:not(:disabled) {
-  background: var(--marvis-border);
-}
-
-.diff-send-button:disabled {
-  color: var(--marvis-text-faint);
-  cursor: not-allowed;
 }
 
 /* Hunk headers sit on the change's own surface, as the mockup's group rows do. */

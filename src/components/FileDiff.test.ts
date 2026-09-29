@@ -49,6 +49,28 @@ vi.mock("@git-diff-view/vue", async () => {
   };
 });
 
+vi.mock("reka-ui", async () => {
+  const { h: createElement } = await import("vue");
+  // The destination menu always renders here, so a target can be picked without driving the open
+  // state, the way DocumentPane.test.ts stubs the toolbar's own popover.
+  const passThrough = (name: string) => ({
+    name,
+    setup:
+      (
+        _props: unknown,
+        context: { attrs: Record<string, unknown>; slots: Record<string, (() => unknown) | undefined> },
+      ) =>
+      () =>
+        createElement("div", context.attrs, context.slots.default?.() as never),
+  });
+  return {
+    PopoverRoot: passThrough("PopoverRoot"),
+    PopoverTrigger: passThrough("PopoverTrigger"),
+    PopoverPortal: passThrough("PopoverPortal"),
+    PopoverContent: passThrough("PopoverContent"),
+  };
+});
+
 import FileDiff from "./FileDiff.vue";
 
 const checkout: Checkout = {
@@ -292,17 +314,23 @@ describe("FileDiff", () => {
     const one = senderStub([session("ses_one")]);
     const single = mountDiff({ review: reviewApi([note()]) }, one.sender);
     await flushPromises();
-    expect(single.find('select[aria-label="Send review to"]').exists()).toBe(false);
+    expect(single.find('[data-testid="send-target"]').exists()).toBe(false);
     single.unmount();
 
     const many = senderStub([session("ses_one"), session("ses_two", { title: "review two" })], "ses_two", 2);
     const wrapper = mountDiff({ review: reviewApi([note()]) }, many.sender);
     await flushPromises();
 
-    const picker = wrapper.get('select[aria-label="Send review to"]');
-    expect(picker.findAll("option").map((option) => option.text())).toEqual(["ses_one", "review two"]);
+    expect(wrapper.get('[data-testid="send-target"]').text()).toContain("review two");
+    const options = wrapper.findAll('[role="option"]');
+    expect(options.map((option) => option.text())).toEqual(["ses_one", "review two"]);
+    // The chosen one is the one that carries the check, so the list says where it already points.
+    expect(options[1].attributes("aria-selected")).toBe("true");
+    expect(options[1].find("svg").exists()).toBe(true);
+    expect(options[0].attributes("aria-selected")).toBe("false");
     expect(wrapper.get('[data-testid="unfinished-rounds"]').text()).toBe("2 rounds not finished");
-    await picker.setValue("ses_one");
+
+    await options[0].trigger("click");
     expect(many.selectTarget).toHaveBeenCalledWith("ses_one");
     wrapper.unmount();
   });
