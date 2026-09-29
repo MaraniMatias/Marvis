@@ -16,6 +16,12 @@ on:
 permissions:
   contents: read
 
+# One release at a time, and never interrupted halfway: a run that is cancelled after it has
+# created the release leaves a tag with no artifacts.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
 jobs:
   version:
     runs-on: ubuntu-latest
@@ -69,23 +75,9 @@ jobs:
       - name: Check tag matches package manifests
         env:
           RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-        run: |
-          node <<'NODE'
-          const fs = require('node:fs');
-          const tagVersion = process.env.RELEASE_TAG.slice(1);
-          const cargoVersion = fs.readFileSync('src-tauri/Cargo.toml', 'utf8')
-            .match(/^\[package\][\s\S]*?^version\s*=\s*"([^"]+)"/m)?.[1];
-          const manifests = [
-            ['package.json', JSON.parse(fs.readFileSync('package.json', 'utf8')).version],
-            ['src-tauri/tauri.conf.json', JSON.parse(fs.readFileSync('src-tauri/tauri.conf.json', 'utf8')).version],
-            ['src-tauri/Cargo.toml', cargoVersion],
-          ];
-          for (const [path, manifestVersion] of manifests) {
-            if (manifestVersion !== tagVersion) {
-              throw new Error(`${process.env.RELEASE_TAG} does not match ${path} version ${manifestVersion}`);
-            }
-          }
-          NODE
+        # The same script CI runs on every pull request, so the manifests cannot drift unnoticed
+        # and only fail here, at the moment a tag cannot be taken back.
+        run: node scripts/release.mjs --check "$RELEASE_TAG"
 
   checks:
     needs: version
@@ -115,18 +107,33 @@ jobs:
           - platform: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             bundles: deb,appimage
+          # Arm64 desktop Linux, on GitHub's native arm64 runner, which is free in a public
+          # repository. Same 22.04 image as the job above, so the same pre-t64 package names and
+          # the same prerequisites step cover both.
+          - platform: ubuntu-22.04-arm
+            target: aarch64-unknown-linux-gnu
+            bundles: deb,appimage
     runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.version.outputs.sha }}
+      # pnpm before node: `cache: pnpm` shells out to pnpm to find the store, so a pnpm that is not
+      # installed yet fails the step instead of skipping the cache.
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
+      # The release is the one build that cannot skip work, and the Rust dependencies are most of
+      # it: they only change when Cargo.lock does, so a warm cache is the difference between a
+      # few minutes and a cold compile of the whole graph.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
       - name: Install the Tauri Linux prerequisites
         if: startsWith(matrix.platform, 'ubuntu')
         run: |
@@ -192,11 +199,35 @@ jobs:
           GITHUB_REPOSITORY: ${{ github.repository }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          files=()
-          while IFS= read -r -d '' file; do files+=("$file"); done < <(find release-assets -type f -print0)
-          if ((${#files[@]} == 0)); then
+          set -euo pipefail
+          cd release-assets
+          # Excluded by name so re-running this step in the same workspace cannot sum the previous
+          # run's checksums and then upload them twice.
+          mapfile -t assets < <(find . -type f ! -name SHA256SUMS -print | sed 's|^\./||' | sort)
+          if ((${#assets[@]} == 0)); then
             echo 'No release artifacts were downloaded.' >&2
             exit 1
           fi
+          # Summed from inside this directory so the file records bare names, which is what a reader
+          # has after downloading the release, and so `sha256sum -c SHA256SUMS` verifies it in place.
+          sha256sum "${assets[@]}" > SHA256SUMS
+          files=(release-assets/SHA256SUMS)
+          for asset in "${assets[@]}"; do files+=("release-assets/$asset"); done
+          cd "$GITHUB_WORKSPACE"
+
+          # The curated section for this version, when there is one. `gh` prepends it to the notes it
+          # generates, so the summary leads and the commit list still follows.
+          notes=()
+          if [[ -f CHANGELOG.md ]]; then
+            curated="$(awk -v version="${RELEASE_TAG#v}" '
+              $0 == "## " version { inside = 1; next }
+              inside && /^## / { exit }
+              inside { print }
+            ' CHANGELOG.md)"
+            if [[ -n "$curated" ]]; then notes=(--notes "$curated"); fi
+          fi
+
+          # A draft, so the artifacts and their checksums can be checked before anyone can
+          # download them: a published release cannot be taken back once a tag exists.
           gh release create --repo "$GITHUB_REPOSITORY" "$RELEASE_TAG" "${files[@]}" \
-            --verify-tag --title "Marvis $RELEASE_TAG" --generate-notes
+            --verify-tag --draft --title "Marvis $RELEASE_TAG" --generate-notes "${notes[@]}"

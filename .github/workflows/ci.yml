@@ -19,14 +19,22 @@ jobs:
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.ref || github.sha }}
+      # pnpm before node: `cache: pnpm` shells out to pnpm to find the store, so a pnpm that is not
+      # installed yet fails the step instead of skipping the cache.
+      - uses: pnpm/action-setup@v4
       - uses: actions/setup-node@v4
         with:
           node-version: 22
-      - uses: pnpm/action-setup@v4
+          cache: pnpm
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: rustfmt, clippy
+      # The Rust dependencies are the build's cost, and they only change when Cargo.lock does.
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: ./src-tauri -> target
       - run: pnpm install --frozen-lockfile
+      - run: pnpm release:check
       - run: pnpm fmt:check
       - run: pnpm lint
       - run: pnpm lint:rust
