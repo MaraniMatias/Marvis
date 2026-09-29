@@ -427,7 +427,9 @@ onUnmounted(() => {
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
           <p class="truncate text-[11px] text-(--marvis-text-dim)" :title="title">{{ title }}</p>
-          <p v-if="!path && branch" class="truncate text-[11px] text-(--marvis-text-faint)">{{ branch }}</p>
+          <p v-if="!path && branch" class="truncate text-[11px] text-(--marvis-text-faint)" :title="branch">
+            {{ branch }}
+          </p>
         </div>
       </div>
       <div v-if="sender" class="mt-2 flex flex-col items-end gap-1">
@@ -526,7 +528,7 @@ onUnmounted(() => {
               @click="toggleFile(file.path)"
             >
               <span class="diff-status" :data-status="file.status">{{ file.status }}</span>
-              <span class="truncate">{{ file.path }}</span>
+              <span class="truncate" :title="file.path">{{ file.path }}</span>
               <span v-if="file.additions" class="diff-add">+{{ file.additions }}</span>
               <span v-if="file.deletions" class="diff-del">-{{ file.deletions }}</span>
             </button>
@@ -592,6 +594,7 @@ onUnmounted(() => {
                     type="button"
                     class="diff-hunk h-full w-full truncate px-2 text-left text-(--marvis-accent)"
                     :aria-expanded="!row.collapsed"
+                    :title="row.line.text"
                     @click="toggleHunk(row.hunkIndex)"
                   >
                     {{ row.collapsed ? "▸" : "▾" }} {{ row.line.text }}
@@ -673,6 +676,7 @@ onUnmounted(() => {
                 type="button"
                 class="diff-hunk mb-1 w-full truncate border-b border-(--marvis-border) px-2 py-1 text-left font-mono text-[10px] text-(--marvis-text-dim)"
                 :aria-expanded="!collapsedHunks.includes(index)"
+                :title="hunk.title"
                 @click="toggleHunk(index)"
               >
                 {{ collapsedHunks.includes(index) ? "▸" : "▾" }} {{ hunk.title }}

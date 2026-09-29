@@ -2,7 +2,7 @@ import { ClipboardAddon } from "@xterm/addon-clipboard";
 import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
-import type { ITheme } from "@xterm/xterm";
+import type { ITheme, IDisposable } from "@xterm/xterm";
 import { ligatureRanges } from "./ligature-joiner";
 
 /**
@@ -95,6 +95,58 @@ export function enableTerminalLigatures(terminal: Terminal): void {
   } catch {
     // Nothing to announce: the panel still works, it just spells the sequences out.
   }
+}
+
+/**
+ * Lets macOS users select text in applications that take over the terminal mouse. Option-drag is
+ * xterm.js' force-selection gesture; it is enabled only while an application has mouse tracking
+ * active, so the shell keeps its normal rectangular Option selection.
+ */
+export function enableTerminalSelectionCopy(
+  terminal: Terminal,
+  copy: (text: string) => void | Promise<void>,
+): IDisposable {
+  const element = terminal.element;
+  if (!element) return { dispose: () => {} };
+
+  const document = element.ownerDocument;
+  let dragging = false;
+  let moved = false;
+
+  const syncSelectionMode = () => {
+    const forceSelection = terminal.modes.mouseTrackingMode !== "none";
+    if (terminal.options.macOptionClickForcesSelection !== forceSelection) {
+      terminal.options.macOptionClickForcesSelection = forceSelection;
+    }
+  };
+  const onMouseDown = (event: MouseEvent) => {
+    if (event.button !== 0) return;
+    dragging = true;
+    moved = false;
+  };
+  const onMouseMove = () => {
+    if (dragging) moved = true;
+  };
+  const onMouseUp = () => {
+    if (!dragging) return;
+    dragging = false;
+    if (moved && terminal.hasSelection()) void copy(terminal.getSelection());
+  };
+
+  syncSelectionMode();
+  element.addEventListener("mousedown", onMouseDown);
+  document.addEventListener("mousemove", onMouseMove);
+  document.addEventListener("mouseup", onMouseUp);
+  const writeParsed = terminal.onWriteParsed(syncSelectionMode);
+
+  return {
+    dispose: () => {
+      element.removeEventListener("mousedown", onMouseDown);
+      document.removeEventListener("mousemove", onMouseMove);
+      document.removeEventListener("mouseup", onMouseUp);
+      writeParsed.dispose();
+    },
+  };
 }
 
 /**

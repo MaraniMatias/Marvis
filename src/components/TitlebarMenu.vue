@@ -86,7 +86,7 @@ function onOpenChange(open: boolean) {
         <template v-for="(section, index) in sections" :key="index">
           <DropdownMenuSeparator v-if="section.kind === 'separator'" class="menu-separator" />
           <div v-else>
-            <p v-if="section.kind === 'group'" class="group-header">{{ section.label }}</p>
+            <p v-if="section.kind === 'group'" class="group-header" :title="section.label">{{ section.label }}</p>
             <DropdownMenuItem
               v-for="item in rows(section)"
               :key="item.id"

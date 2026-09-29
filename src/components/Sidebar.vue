@@ -277,7 +277,7 @@ const agentTitle = computed(() =>
          content, so a row whose title and counts end at the edge are read through it. -->
     <div class="min-h-0 flex-1 overflow-y-auto pr-2">
       <div v-for="group in groups" :key="group.label" class="workdir-group">
-        <div class="group-header">{{ group.label }}</div>
+        <div class="group-header" :title="group.label">{{ group.label }}</div>
 
         <template v-for="workdir in group.workdirs" :key="workdir.checkout.id">
           <div
@@ -436,7 +436,7 @@ const agentTitle = computed(() =>
                   class="workdir-select"
                   :aria-current="item.active ? 'page' : undefined"
                   :aria-label="`Terminal session: ${item.session.name}`"
-                  :title="item.session.name"
+                  :title="item.title"
                   @click="emit('selectSession', item.session.id)"
                   @dblclick="startRename(item.session)"
                   @keydown.f2.prevent="startRename(item.session)"
@@ -628,11 +628,12 @@ const agentTitle = computed(() =>
   font-size: 12px;
 }
 
-/* A ".new-item" label is 12px, so its icon drops to match. At 14px the glyph outweighed its
-   own text and the pair read as detached. */
+/* Keep the plus in the same 14px layout slot as the terminal icon. Its 1px inset keeps the 12px
+   glyph visually light without moving the label two pixels to the left. */
 .workdir-select.new-item .workdir-status-icon {
-  width: 12px;
-  height: 12px;
+  width: 14px;
+  height: 14px;
+  padding: 1px;
 }
 
 /* Row actions: hover only, never on the selected row. Out of flow, so a resting

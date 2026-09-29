@@ -49,7 +49,7 @@ function submit() {
   >
     <p class="mb-1 font-mono text-[10px] text-(--marvis-text-faint)">
       {{ label }}
-      <span v-if="code" class="ml-2 truncate text-(--marvis-text-secondary)">{{ code }}</span>
+      <span v-if="code" class="ml-2 truncate text-(--marvis-text-secondary)" :title="code">{{ code }}</span>
     </p>
     <textarea
       ref="input"

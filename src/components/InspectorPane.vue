@@ -569,7 +569,12 @@ const matchedSearchEntries = searchEntries.value
               v-for="(item, index) in treeWindow.rows"
               :key="item.entry?.path ?? `${item.depth}-${index}-${item.message}`"
             >
-              <p v-if="!item.entry" class="file-row file-note" :style="{ paddingLeft: rowIndent(item.depth) }">
+              <p
+                v-if="!item.entry"
+                class="file-row file-note"
+                :style="{ paddingLeft: rowIndent(item.depth) }"
+                :title="item.message"
+              >
                 {{ item.message }}
               </p>
               <button
@@ -649,7 +654,12 @@ const matchedSearchEntries = searchEntries.value
           </p>
           <p v-else-if="changedFileCount === 0" role="status" class="pane-state">No changed files.</p>
           <template v-else>
-            <p v-if="gitSnapshot.changesWatchError" class="file-row file-note" :style="{ paddingLeft: '6px' }">
+            <p
+              v-if="gitSnapshot.changesWatchError"
+              class="file-row file-note"
+              :style="{ paddingLeft: '6px' }"
+              :title="`Live updates unavailable: ${gitSnapshot.changesWatchError}`"
+            >
               Live updates unavailable: {{ gitSnapshot.changesWatchError }}
             </p>
             <div
@@ -659,7 +669,9 @@ const matchedSearchEntries = searchEntries.value
               }"
             >
               <template v-for="row in changeWindow.rows" :key="row.key">
-                <div v-if="row.kind === 'group'" class="details-group-header">{{ row.dir || "/" }}</div>
+                <div v-if="row.kind === 'group'" class="details-group-header" :title="row.dir || '/'">
+                  <span class="file-name">{{ row.dir || "/" }}</span>
+                </div>
                 <button
                   v-else
                   type="button"

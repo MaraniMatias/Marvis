@@ -43,7 +43,7 @@ Notes can be grouped into a review round. Marvis sends a round to the agent as a
 
 ### Run terminals
 
-Every checkout can have as many terminals as you need, arranged in horizontal and vertical splits. Layouts are saved per checkout, and the sidebar shows which terminals are running and which have exited. Terminals are real shells, so you can run anything in them, including a coding agent such as Claude Code, Codex, OpenCode, or pi. They close when you quit Marvis.
+Every checkout can have as many terminals as you need, arranged in horizontal and vertical splits. Layouts are saved per checkout, and the sidebar shows which terminals are running and which have exited. Terminals are real shells, so you can run anything in them, including a coding agent such as Claude Code, Codex, OpenCode, or pi. They close when you quit Marvis. On macOS, hold ⌥ while dragging to select text inside a TUI that captures the mouse; selected text is copied automatically.
 
 ### Work with a coding agent
 

@@ -66,6 +66,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 const terminalLib = vi.hoisted(() => ({
   attachTerminalRenderer: vi.fn(),
   enableTerminalLigatures: vi.fn(),
+  enableTerminalSelectionCopy: vi.fn(() => ({ dispose: vi.fn() })),
   fitCalls: 0,
 }));
 
@@ -86,6 +87,7 @@ for (const [property, value] of [
 vi.mock("../lib/marvis-terminal", () => ({
   createMarvisTerminal: () => new MockTerminal(),
   enableTerminalLigatures: terminalLib.enableTerminalLigatures,
+  enableTerminalSelectionCopy: terminalLib.enableTerminalSelectionCopy,
   attachTerminalRenderer: terminalLib.attachTerminalRenderer,
 }));
 
@@ -151,6 +153,7 @@ describe("TerminalSession UI", () => {
     // Both are refused by xterm.js until the terminal is on the page.
     expect(terminalMock.openCalls).toBe(1);
     expect(terminalLib.enableTerminalLigatures).toHaveBeenCalledTimes(1);
+    expect(terminalLib.enableTerminalSelectionCopy).toHaveBeenCalledTimes(1);
     expect(terminalLib.attachTerminalRenderer).toHaveBeenCalledTimes(1);
     expect(writeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", new TextEncoder().encode("λ pasted"));
     expect(resizeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", 97, 31);

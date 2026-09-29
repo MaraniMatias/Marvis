@@ -1,12 +1,19 @@
 <script setup lang="ts">
 import { Channel } from "@tauri-apps/api/core";
+import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type { TerminalSessionStatus } from "../domain/workspace";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
-import { attachTerminalRenderer, createMarvisTerminal, enableTerminalLigatures } from "../lib/marvis-terminal";
+import {
+  attachTerminalRenderer,
+  createMarvisTerminal,
+  enableTerminalLigatures,
+  enableTerminalSelectionCopy,
+} from "../lib/marvis-terminal";
 import { renderPtyOutput } from "../lib/terminal-renderer";
+import { useToasts } from "../presentation/toasts";
 
 const props = withDefaults(
   defineProps<{
@@ -31,6 +38,7 @@ const closing = ref(false);
 const terminal = createMarvisTerminal();
 const fit = new FitAddon();
 terminal.loadAddon(fit);
+const { pushCause } = useToasts();
 
 let sessionId: string | null = null;
 let channel: Channel<ArrayBuffer> | undefined;
@@ -41,6 +49,7 @@ let resizeQueue: Promise<void> = Promise.resolve();
 let resizeScheduled = false;
 let disposed = false;
 let started = false;
+let selectionCopy: { dispose(): void } | undefined;
 let latestSize = { cols: 0, rows: 0 };
 
 function showError(cause: unknown) {
@@ -187,6 +196,11 @@ onMounted(() => {
   // renderer that will actually draw.
   enableTerminalLigatures(terminal);
   attachTerminalRenderer(terminal);
+  selectionCopy = enableTerminalSelectionCopy(terminal, (text) => {
+    void writeText(text).catch((cause) => {
+      pushCause(cause);
+    });
+  });
   fitActiveView();
   // The face is a `local()` one, so the browser resolves it after the first paint, and the fit
   // above measures whatever cell the *fallback* has — a monospace fallback's advance is wider
@@ -204,6 +218,7 @@ onUnmounted(() => {
   disposed = true;
   if (statusTimer !== undefined) window.clearInterval(statusTimer);
   resizeObserver?.disconnect();
+  selectionCopy?.dispose();
   if (channel) channel.onmessage = () => {};
   terminal.dispose();
 });

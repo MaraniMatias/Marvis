@@ -108,6 +108,9 @@
   color: var(--marvis-text-faint);
   font-size: 11px;
   letter-spacing: 0.02em;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* Diff stats, shared by both sidebars */

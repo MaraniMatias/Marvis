@@ -166,7 +166,10 @@ function messageOf(cause: unknown): string {
           >
             {{ mode === "create" ? "Create worktree from main" : "Remove worktree" }}
           </h2>
-          <p class="mt-1 truncate text-xs text-(--marvis-text-faint)">
+          <p
+            class="mt-1 truncate text-xs text-(--marvis-text-faint)"
+            :title="`${checkout?.branch || checkout?.path} · ${repo?.name}`"
+          >
             {{ checkout?.branch || checkout?.path }} · {{ repo?.name }}
           </p>
         </div>
@@ -257,7 +260,9 @@ function messageOf(cause: unknown): string {
             discarded if you continue.
           </p>
           <ul class="mt-2 max-h-24 overflow-y-auto pl-4 text-xs text-(--marvis-text-faint)">
-            <li v-for="file in removal.dirtyFiles.slice(0, 8)" :key="file" class="truncate">{{ file }}</li>
+            <li v-for="file in removal.dirtyFiles.slice(0, 8)" :key="file" class="truncate" :title="file">
+              {{ file }}
+            </li>
             <li v-if="removal.dirtyFiles.length > 8">and {{ removal.dirtyFiles.length - 8 }} more…</li>
           </ul>
           <button type="button" class="mt-2 text-xs text-(--marvis-accent) underline" @click="openShell">

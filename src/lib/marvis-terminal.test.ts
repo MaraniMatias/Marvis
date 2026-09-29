@@ -1,6 +1,11 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { attachTerminalRenderer, createMarvisTerminal, enableTerminalLigatures } from "./marvis-terminal";
+import {
+  attachTerminalRenderer,
+  createMarvisTerminal,
+  enableTerminalLigatures,
+  enableTerminalSelectionCopy,
+} from "./marvis-terminal";
 
 const stubs = vi.hoisted(() => ({
   loaded: [] as string[],
@@ -13,6 +18,10 @@ const stubs = vi.hoisted(() => ({
 class FakeTerminal {
   options: Record<string, unknown>;
   unicode = { activeVersion: "6", versions: ["6", "11"] };
+  element = document.createElement("div");
+  modes = { mouseTrackingMode: "none" as "none" | "drag" };
+  selection = "";
+  writeParsedListeners: Array<() => void> = [];
   joiner: ((text: string) => [number, number][]) | null = null;
   addons: FakeAddon[] = [];
   constructor(options: Record<string, unknown>) {
@@ -26,6 +35,18 @@ class FakeTerminal {
   registerCharacterJoiner(handler: (text: string) => [number, number][]) {
     this.joiner = handler;
     return 1;
+  }
+  onWriteParsed(listener: () => void) {
+    this.writeParsedListeners.push(listener);
+    return {
+      dispose: () => (this.writeParsedListeners = this.writeParsedListeners.filter((item) => item !== listener)),
+    };
+  }
+  hasSelection() {
+    return Boolean(this.selection);
+  }
+  getSelection() {
+    return this.selection;
   }
 }
 
@@ -161,6 +182,51 @@ describe("enableTerminalLigatures", () => {
     };
 
     expect(() => enableTerminalLigatures(terminal as never)).not.toThrow();
+  });
+});
+
+describe("enableTerminalSelectionCopy", () => {
+  it("copies a selection after a mouse drag", () => {
+    const terminal = fakeTerminal();
+    terminal.selection = "selected text";
+    const copy = vi.fn();
+    const disposable = enableTerminalSelectionCopy(terminal as never, copy);
+
+    terminal.element.dispatchEvent(new MouseEvent("mousedown", { button: 0 }));
+    document.dispatchEvent(new MouseEvent("mousemove", { buttons: 1 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0 }));
+
+    expect(copy).toHaveBeenCalledWith("selected text");
+    disposable.dispose();
+  });
+
+  it("does not copy a click or a drag without a selection", () => {
+    const terminal = fakeTerminal();
+    const copy = vi.fn();
+    const disposable = enableTerminalSelectionCopy(terminal as never, copy);
+
+    terminal.element.dispatchEvent(new MouseEvent("mousedown", { button: 0 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0 }));
+    terminal.element.dispatchEvent(new MouseEvent("mousedown", { button: 0 }));
+    document.dispatchEvent(new MouseEvent("mousemove", { buttons: 1 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0 }));
+
+    expect(copy).not.toHaveBeenCalled();
+    disposable.dispose();
+  });
+
+  it("forces macOS selection only while an application owns the mouse", () => {
+    const terminal = fakeTerminal();
+    const disposable = enableTerminalSelectionCopy(terminal as never, vi.fn());
+
+    expect(terminal.options.macOptionClickForcesSelection).toBe(false);
+    terminal.modes.mouseTrackingMode = "drag";
+    terminal.writeParsedListeners.forEach((listener) => listener());
+    expect(terminal.options.macOptionClickForcesSelection).toBe(true);
+    terminal.modes.mouseTrackingMode = "none";
+    terminal.writeParsedListeners.forEach((listener) => listener());
+    expect(terminal.options.macOptionClickForcesSelection).toBe(false);
+    disposable.dispose();
   });
 });
 
