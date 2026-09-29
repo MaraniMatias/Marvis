@@ -559,31 +559,6 @@ describe("App UI integration", () => {
   }
 
   describe("titlebar", () => {
-    it("shows a real search field and no command palette hint", async () => {
-      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
-
-      const search = wrapper.get('[data-testid="search-field"]');
-      expect(search.element.tagName).toBe("INPUT");
-      expect(search.attributes("aria-label")).toBe("Search files and commands");
-      expect(search.attributes("placeholder")).toBe("Search...");
-      expect(wrapper.find("kbd").exists()).toBe(false);
-      wrapper.unmount();
-    });
-
-    it("takes focus and gives it back on Escape", async () => {
-      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), undefined, {
-        attachTo: document.body,
-      });
-      const search = wrapper.get('[data-testid="search-field"]').element as HTMLInputElement;
-
-      search.focus();
-      expect(document.activeElement).toBe(search);
-      await search.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-
-      expect(document.activeElement).not.toBe(search);
-      wrapper.unmount();
-    });
-
     it("leaves an empty spacer for the window drag and zooms it on double click", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
 

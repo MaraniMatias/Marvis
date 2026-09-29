@@ -39,54 +39,6 @@ body {
   border-color: var(--marvis-border);
 }
 
-/* The mockup's search box is a flat `--marvis-bg-2` surface: no border, no radius. The input
-   itself stays transparent and the field lifts as one piece — lifting the input drew a
-   brighter rectangle inside the field, which is what read as broken. */
-.window-search {
-  background: transparent;
-  transition: color 120ms ease;
-}
-
-/* The field is 31px tall and the shell's 14px base would put the glyphs in a 21px box, which
-   sits low in the field: the line box is centred, the type inside it is not. The way out is not
-   to fight the font's metrics — at 12px this one draws 7.7px above the baseline and almost
-   nothing below it, so the glyph box is lopsided whichever way it is placed — but to give the
-   input the whole height of the field and let the line itself carry the centring. The field
-   stretches; the input fills it; the line is the height of the field.
-
-   Centred is still a shade high, though. A centred line is not a centred word: the ink runs
-   from the cap line down to the baseline and stops there, so the band sits 0.75px above the
-   middle of the field — measured off a WKWebView snapshot — next to a loupe that sits dead
-   centre. Nothing about the line moves it, a taller line or a shorter box moves it none, only
-   where the box sits, so the box carries the last pixel: a quarter pixel is as close as a 2x
-   grid gets. */
-.search-field .window-search {
-  position: relative;
-  top: 1px;
-  height: 100%;
-  line-height: 31px;
-}
-
-.window-search::placeholder {
-  color: var(--marvis-text-faint);
-}
-
-.window-search:hover {
-  color: var(--marvis-text);
-}
-
-/* The wrapper carries the surface, so the field lifts as one piece on hover or focus. That lift
-   is the whole of the field's focus: the input itself is transparent and stays that way, the way
-   a window's toolbar field does. */
-.search-field {
-  transition: background-color 120ms ease;
-}
-
-.search-field:hover,
-.search-field:focus-within {
-  background: var(--marvis-border);
-}
-
 .window-breadcrumb {
   color: var(--marvis-text-secondary);
 }

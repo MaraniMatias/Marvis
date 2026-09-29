@@ -1,5 +1,5 @@
 <script setup lang="ts">
-/* eslint-disable vue/html-self-closing, vue/html-closing-bracket-newline, vue/html-indent */
+/* eslint-disable vue/html-closing-bracket-newline, vue/html-indent */
 import { listen } from "@tauri-apps/api/event";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from "vue";
@@ -8,7 +8,6 @@ import {
   Columns2 as Columns2Icon,
   Columns3 as Columns3Icon,
   GitFork as GitForkIcon,
-  Search as SearchIcon,
   Settings as SettingsIcon,
 } from "@lucide/vue";
 import type { Checkout } from "./domain/workspace";
@@ -80,7 +79,6 @@ const checkoutUiReady = ref(false);
 const mainPane = ref<InstanceType<typeof MainPane> | null>(null);
 const sidebarPanel = ref<{ resize(size: number): void } | null>(null);
 const inspectorPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
-const searchField = ref<HTMLInputElement | null>(null);
 const viewportWidth = ref(window.innerWidth);
 const isNarrow = computed(
   () => appLayout.value.mode === "focus" && needsInspectorDrawer(appLayout.value, viewportWidth.value),
@@ -742,10 +740,6 @@ function zoomFromTitlebar() {
   void getCurrentWindow().toggleMaximize().catch(showWindowError);
 }
 
-function blurSearchField() {
-  searchField.value?.blur();
-}
-
 function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
   lifecycle.value = { mode, checkoutId };
 }
@@ -992,34 +986,12 @@ function reportWarning(message: string) {
     :style="{ '--inspector-width': `${appLayout.inspectorWidth}px` }"
   >
     <header class="window-header flex h-8 shrink-0 items-center gap-4 border-b pl-[78px] pr-4">
-      <!-- The mockup's field is icon + placeholder on one flat surface, not a bordered box.
-           The surface and its lift live here; the input inside stays transparent, so the whole
-           field rises as one piece instead of drawing a rectangle within itself.
-           It stretches instead of carrying vertical padding, because it has to fill the header's
-           31px and sit flush on the border: padding left the field 3px short and centering
-           stranded a 1.5px band of header between it and the panels. Stretching keeps the
-           flush whatever the line box measures, and the mockup's own 5px then falls out of the
-           centering at the shell's 14px base size. The width is the mockup's flat 220px rather
-           than a fluid one, so the field does not drift wider as the window grows. -->
-      <div class="search-field flex w-[220px] shrink-0 items-stretch gap-2 self-stretch bg-(--marvis-bg-2) px-2.5">
-        <SearchIcon class="icon-sm shrink-0 self-center text-(--marvis-text-faint)" aria-hidden="true" />
-        <input
-          ref="searchField"
-          type="search"
-          data-testid="search-field"
-          aria-label="Search files and commands"
-          placeholder="Search..."
-          class="window-search min-w-0 flex-1 appearance-none bg-transparent p-0 text-xs text-(--marvis-text-secondary) placeholder:text-(--marvis-text-faint)"
-          @keydown.esc="blurSearchField"
-        />
-      </div>
-      <!-- The mockup packs the field and the crumbs against the left, with the empty space and
-           the gear at the far end. Dragging lives on that empty space, so the crumbs keep their
-           place instead of being pushed to the opposite edge. The nav grows into the room the
-           mockup gives it and only truncates when it runs out, rather than capping each crumb. -->
+      <!-- The mockup packs the crumbs against the left, with the empty space and the gear at the
+           far end. Dragging lives on that empty space, so the crumbs keep their place instead of
+           being pushed to the opposite edge. The nav grows into the room the mockup gives it and
+           only truncates when it runs out, rather than capping each crumb. -->
       <!-- The crumb line is chrome that names where you are, not text to copy: a drag across it
-           was painting a selection over the whole header. The search field sits outside the nav,
-           so its own text is still selectable. -->
+           was painting a selection over the whole header. -->
       <nav
         ref="lineEl"
         aria-label="Repository location"
