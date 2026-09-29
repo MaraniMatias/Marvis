@@ -449,7 +449,7 @@ pub fn export_review_markdown(
         .map_err(|error| filesystem_error("could not create review export folder", error))?;
     let root = fs::canonicalize(review_root)
         .map_err(|error| filesystem_error("could not resolve review export folder", error))?;
-    let stem = format!("{timestamp}");
+    let stem = timestamp.to_string();
     for suffix in 1usize.. {
         let filename = if suffix == 1 {
             format!("{stem}.md")

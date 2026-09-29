@@ -6,7 +6,7 @@ the part a reader should read and the generated list is the part they can skip. 
 under `Unreleased` and rename that heading to the version when you tag it; a version with no section
 here still gets its generated notes.
 
-## Unreleased
+## 0.6.0
 
 - **Markdown export is now the default review destination.** With no saved choice, sending review
   notes writes a non-overwriting Markdown file under `~/.marvis/tmp/code-reviews/` and opens it in
