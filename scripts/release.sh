@@ -162,11 +162,15 @@ step "Reading the draft the run left behind"
 assets="$(gh release view "$tag" --json assets --jq '.assets | length')"
 [[ "$assets" -gt 0 ]] || die "$tag has no assets, so there is nothing to publish"
 gh release view "$tag" --json assets --jq '.assets[].name' | sed 's/^/  /'
-url="$(gh release view "$tag" --json url --jq .url)"
+# A draft is addressed by its id and not by its name, and only swaps `untagged-<id>` for
+# `tag/<name>` once it is published. Both paths below that still mean a draft want that address,
+# so it is read once here — and named for what it is, because reading it here and echoing it after
+# the PATCH is what printed a link to a page that does not exist.
+draft_url="$(gh release view "$tag" --json url --jq .url)"
 
 if [[ -n "${RELEASE_SKIP_PUBLISH:-}" ]]; then
   step "Leaving it as a draft, as asked"
-  echo "$url"
+  echo "$draft_url"
   exit 0
 fi
 
@@ -176,5 +180,7 @@ step "Publishing the release"
 gh api -X PATCH "repos/$repository/releases/$(gh release view "$tag" --json databaseId --jq .databaseId)" \
   -F draft=false >/dev/null
 [[ "$(gh release view "$tag" --json isDraft --jq .isDraft)" == "false" ]] ||
-  die "the release still reads as a draft; publish it by hand at $url"
-echo "$url"
+  die "the release still reads as a draft; publish it by hand at $draft_url"
+# Read after the PATCH, and not reused from above: the last line of this script is the link
+# somebody copies.
+gh release view "$tag" --json url --jq .url
