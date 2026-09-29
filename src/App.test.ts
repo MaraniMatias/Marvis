@@ -216,6 +216,11 @@ vi.mock("./presentation/active-git-snapshot", () => ({
     statusEventCheckoutId: null,
   }),
 }));
+vi.mock("./presentation/git-watchers", () => ({
+  // The watchers are the backend's business; this suite is about what the app does with the
+  // workspace, not about when a repository starts being observed.
+  useGitWatchers: vi.fn(),
+}));
 vi.mock("./presentation/review-notes", () => ({
   // The diff reaches the send through this key, so the real one has to be here.
   REVIEW_SENDER: Symbol("marvis:review-sender"),

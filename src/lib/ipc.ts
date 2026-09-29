@@ -68,8 +68,10 @@ export function getGitDiffPage(checkoutId: string, path: string, offset: number,
   return invoke<GitDiffPage>("git_diff_page", { checkoutId, path, offset, limit });
 }
 
-export function watchGitCheckout(checkoutId: string): Promise<void> {
-  return invoke<void>("git_watch_checkout", { checkoutId });
+/** Watches a whole repository rather than one checkout. Its worktrees share a Git directory, so
+ *  a commit in one of them moves the merge base every sibling counts its lines against. */
+export function watchGitRepo(repoId: string): Promise<void> {
+  return invoke<void>("git_watch_repo", { repoId });
 }
 
 export function listReviewNotes(checkoutId: string): Promise<ReviewNote[]> {
@@ -184,8 +186,8 @@ export function stopAgent(checkoutId: string): Promise<void> {
   return invoke<void>("agent_stop", { checkoutId });
 }
 
-export function unwatchGitCheckout(checkoutId: string): Promise<void> {
-  return invoke<void>("git_unwatch_checkout", { checkoutId });
+export function unwatchGitRepo(repoId: string): Promise<void> {
+  return invoke<void>("git_unwatch_repo", { repoId });
 }
 
 export function openFolder(path: string): Promise<OpenedFolder> {

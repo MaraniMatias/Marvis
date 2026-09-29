@@ -38,21 +38,31 @@ const state = reactive({
   fileCounts: {} as Record<string, DiffStatsFile>,
 });
 
+/**
+ * How long a change waits for company before it costs a round trip.
+ *
+ * Each checkout's watcher already holds a change back until its directory has been quiet for
+ * 220ms, so this is not about one checkout saving a file. It is about the several checkouts
+ * and repos reporting in the same breath: a commit in one worktree moves the merge base every
+ * sibling diffs against, so one save speaks for a whole repo. Without a window, each of those
+ * answers is its own sweep of every checkout in the workspace, and they all run at once.
+ */
+const REFRESH_DEBOUNCE_MS = 120;
+
 /** The checkout whose files the Changes tab lists. Every caller names the same one. */
 let activeCheckoutId: string | null = null;
 let consumers = 0;
 let unlisten: (() => void) | undefined;
-let generation = 0;
-let refreshQueued = false;
+let refreshTimer: ReturnType<typeof setTimeout> | undefined;
+let refreshing = false;
+let refreshAgain = false;
 
 export function useDiffStats(repos: MaybeRefOrGetter<Repo[]>, checkoutId: MaybeRefOrGetter<string | null>): DiffStats {
   if (++consumers === 1) void startListening();
 
   // Each caller decides on its own what counts as a change, because the sidebar watches
   // every checkout while the inspector watches only the one it is showing. Two callers
-  // asking at once collapse into one call below, so a redundant ask costs nothing. The
-  // immediate call always asks: a caller that just mounted is showing rows whose numbers
-  // it does not have yet.
+  // asking at once collapse into one call below, so a redundant ask costs nothing.
   watch(
     [
       // Only the set of checkouts matters here, not the rest of the workspace: a terminal
@@ -72,7 +82,9 @@ export function useDiffStats(repos: MaybeRefOrGetter<Repo[]>, checkoutId: MaybeR
         // in two checkouts, so the previous checkout's numbers never outlive the selection.
         state.fileCounts = {};
       }
-      scheduleRefresh();
+      // Not debounced: a row that just appeared is showing numbers it does not have, and
+      // the guard below keeps this from running beside another sweep.
+      refreshNow();
     },
     { immediate: true },
   );
@@ -81,6 +93,8 @@ export function useDiffStats(repos: MaybeRefOrGetter<Repo[]>, checkoutId: MaybeR
     if (--consumers > 0) return;
     unlisten?.();
     unlisten = undefined;
+    clearTimeout(refreshTimer);
+    refreshTimer = undefined;
     // The last reader is gone, so nothing may answer with numbers nobody is showing.
     activeCheckoutId = null;
     state.checkoutTotals = {};
@@ -92,25 +106,38 @@ export function useDiffStats(repos: MaybeRefOrGetter<Repo[]>, checkoutId: MaybeR
 
 async function startListening() {
   try {
-    unlisten = await listen<string>("git-status-changed", () => scheduleRefresh());
+    unlisten = await listen<string[]>("git-status-changed", () => scheduleRefresh());
   } catch {
     // Without the event the counts refresh on selection and on workspace changes only, which
     // is stale but never wrong.
   }
 }
 
-/** A burst of changes is one round trip, the way the file list debounces its own refresh. */
+/** A burst of changes is one round trip, and the sweep behind it is never asked to run twice
+ *  at once: a refresh already on its way collects the change and the answer behind it. */
 function scheduleRefresh() {
-  if (refreshQueued) return;
-  refreshQueued = true;
-  queueMicrotask(() => {
-    refreshQueued = false;
-    void refresh();
+  if (refreshTimer !== undefined) return;
+  refreshTimer = setTimeout(() => {
+    refreshTimer = undefined;
+    refreshNow();
+  }, REFRESH_DEBOUNCE_MS);
+}
+
+function refreshNow() {
+  if (refreshing) {
+    refreshAgain = true;
+    return;
+  }
+  refreshing = true;
+  void refresh().finally(() => {
+    refreshing = false;
+    if (!refreshAgain) return;
+    refreshAgain = false;
+    refreshNow();
   });
 }
 
 async function refresh() {
-  const request = ++generation;
   const checkoutId = activeCheckoutId;
   // One failure must not take the other half down: a checkout with no readable counts leaves
   // the sidebar totals it already had, and the Changes tab loses only its numbers.
@@ -118,12 +145,14 @@ async function refresh() {
     getGitCheckoutDiffStats().catch(() => null),
     checkoutId ? getGitDiffStats(checkoutId).catch(() => null) : Promise.resolve(null),
   ]);
-  if (request !== generation) return;
   if (totals) {
     for (const id of Object.keys(state.checkoutTotals)) delete state.checkoutTotals[id];
     Object.assign(state.checkoutTotals, totals);
   }
-  if (files) {
+  // The sweep was started for one checkout and the panel may have moved on while it ran. A path
+  // is only the same path in two checkouts by accident, so numbers counted against a selection
+  // that is gone are dropped rather than shown on rows describing another change set.
+  if (files && checkoutId === activeCheckoutId) {
     const counts: Record<string, DiffStatsFile> = {};
     for (const file of files) counts[file.path] = { additions: file.additions, deletions: file.deletions };
     state.fileCounts = counts;

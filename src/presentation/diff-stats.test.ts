@@ -9,7 +9,7 @@ import type { Checkout, Repo } from "../domain/workspace";
 const mocks = vi.hoisted(() => ({
   getGitCheckoutDiffStats: vi.fn(),
   getGitDiffStats: vi.fn(),
-  handlers: new Map<string, (event: { payload: string }) => void>(),
+  handlers: new Map<string, (event: { payload: string[] }) => void>(),
   unlisten: vi.fn(),
 }));
 
@@ -18,7 +18,7 @@ vi.mock("../lib/ipc", () => ({
   getGitDiffStats: mocks.getGitDiffStats,
 }));
 vi.mock("@tauri-apps/api/event", () => ({
-  listen: vi.fn(async (name: string, handler: (event: { payload: string }) => void) => {
+  listen: vi.fn(async (name: string, handler: (event: { payload: string[] }) => void) => {
     mocks.handlers.set(name, handler);
     return mocks.unlisten;
   }),
@@ -84,6 +84,13 @@ describe("useDiffStats", () => {
     mocks.getGitDiffStats.mockResolvedValue([countedFile("src/file.ts", 5, 2)]);
   });
 
+  /** A change waits out the window before it costs a round trip, unlike a row that just
+   *  appeared, which is showing numbers it does not have yet. */
+  async function afterDebounce() {
+    await vi.advanceTimersByTimeAsync(200);
+    await flushPromises();
+  }
+
   it("covers every checkout in one call and asks per file only for the active one", async () => {
     const repos = ref([repo([checkout("checkout:a"), checkout("checkout:b")])]);
     const activeId = ref<string | null>("checkout:a");
@@ -100,34 +107,96 @@ describe("useDiffStats", () => {
   });
 
   it("refreshes on the same git-status-changed signal that refreshes the file list", async () => {
+    vi.useFakeTimers();
     const repos = ref([repo([checkout("checkout:a")])]);
     const wrapper = mount(host(repos, ref("checkout:a")));
     await flushPromises();
     expect(mocks.getGitCheckoutDiffStats).toHaveBeenCalledTimes(1);
 
     mocks.getGitCheckoutDiffStats.mockResolvedValue({ "checkout:a": { additions: 9, deletions: 9 } });
-    mocks.handlers.get("git-status-changed")?.({ payload: "checkout:a" });
-    await flushPromises();
+    // One commit in a worktree moves the merge base every sibling diffs against, so the
+    // signal names all of them rather than the one that moved.
+    mocks.handlers.get("git-status-changed")?.({ payload: ["checkout:a", "checkout:b"] });
+    await afterDebounce();
 
     expect(mocks.getGitCheckoutDiffStats).toHaveBeenCalledTimes(2);
     expect(mocks.getGitDiffStats).toHaveBeenCalledTimes(2);
     expect(wrapper.text()).toContain("a:9");
 
     wrapper.unmount();
+    vi.useRealTimers();
   });
 
   it("collapses a burst of changes into one call, the way the file list debounces its own", async () => {
+    vi.useFakeTimers();
     const repos = ref([repo([checkout("checkout:a")])]);
     const wrapper = mount(host(repos, ref("checkout:a")));
     await flushPromises();
 
     const changed = mocks.handlers.get("git-status-changed");
-    changed?.({ payload: "checkout:a" });
-    changed?.({ payload: "checkout:a" });
-    changed?.({ payload: "checkout:a" });
-    await flushPromises();
+    changed?.({ payload: ["checkout:a"] });
+    changed?.({ payload: ["checkout:a"] });
+    changed?.({ payload: ["checkout:a"] });
+    await afterDebounce();
 
     expect(mocks.getGitCheckoutDiffStats).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+    vi.useRealTimers();
+  });
+
+  it("does not let a sweep that started for the previous checkout paint the new one's rows", async () => {
+    const repos = ref([repo([checkout("checkout:a")])]);
+    const activeId = ref<string | null>("checkout:a");
+    let releaseFirst!: (files: GitChangedFile[]) => void;
+    mocks.getGitDiffStats
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseFirst = resolve;
+          }),
+      )
+      .mockResolvedValue([countedFile("src/file.ts", 40, 41)]);
+    const wrapper = mount(host(repos, activeId));
+    await flushPromises();
+
+    activeId.value = "checkout:b";
+    await nextTick();
+    // The sweep already out there belongs to a selection that is gone. Asking again while it
+    // runs is what would put two sweeps of the whole workspace side by side.
+    releaseFirst([countedFile("src/file.ts", 99, 99)]);
+    await flushPromises();
+
+    expect(mocks.getGitDiffStats).toHaveBeenCalledTimes(2);
+    expect(mocks.getGitDiffStats).toHaveBeenLastCalledWith("checkout:b");
+    expect(wrapper.text()).toContain("f:40");
+    wrapper.unmount();
+  });
+
+  it("asks again for the new checkout when one arrives mid-sweep", async () => {
+    const repos = ref([repo([checkout("checkout:a")])]);
+    const activeId = ref<string | null>("checkout:a");
+    let releaseFirst!: (files: GitChangedFile[]) => void;
+    mocks.getGitDiffStats
+      .mockImplementationOnce(
+        () =>
+          new Promise((resolve) => {
+            releaseFirst = resolve;
+          }),
+      )
+      .mockResolvedValue([countedFile("src/file.ts", 40, 41)]);
+    const wrapper = mount(host(repos, activeId));
+    await flushPromises();
+
+    activeId.value = "checkout:b";
+    repos.value = [repo([checkout("checkout:a"), checkout("checkout:b")])];
+    releaseFirst([countedFile("src/file.ts", 99, 99)]);
+    await flushPromises();
+
+    // One answer behind the other, never both at once: the second asks about the checkout
+    // that is showing now.
+    expect(mocks.getGitCheckoutDiffStats).toHaveBeenCalledTimes(2);
+    expect(mocks.getGitDiffStats).toHaveBeenLastCalledWith("checkout:b");
+    expect(wrapper.text()).toContain("f:40");
     wrapper.unmount();
   });
 
@@ -138,11 +207,11 @@ describe("useDiffStats", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("f:5");
 
-    let release!: () => void;
+    let release!: (files: GitChangedFile[]) => void;
     mocks.getGitDiffStats.mockImplementation(
       () =>
         new Promise((resolve) => {
-          release = () => resolve([countedFile("src/file.ts", 40, 41)]);
+          release = resolve;
         }),
     );
     activeId.value = "checkout:b";
@@ -151,7 +220,7 @@ describe("useDiffStats", () => {
     // checkout counted a different change set, and the two can share a path.
     expect(wrapper.text()).toContain("f:none");
 
-    release();
+    release([countedFile("src/file.ts", 40, 41)]);
     await flushPromises();
 
     expect(mocks.getGitDiffStats).toHaveBeenLastCalledWith("checkout:b");

@@ -1,14 +1,11 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
     io::{self, BufRead, BufReader},
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
-    sync::{
-        atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
-    },
+    sync::{mpsc, Arc, Mutex},
     thread,
     time::Duration,
 };
@@ -35,6 +32,13 @@ const MAX_DIFF_LINES: usize = 100_000;
 const MAX_DIFF_BYTES: usize = 32 * 1024 * 1024;
 const MAX_DIFF_LINE_BYTES: usize = 64 * 1024;
 const MAX_DIFF_HUNKS: usize = 10_000;
+/// How much of a file is read looking for the NUL byte that makes Git call it binary.
+const BINARY_SNIFF_BYTES: usize = 8_000;
+/// How many checkouts are read at once when the sidebar names all of them. Each reading is a
+/// handful of `git` processes, so a workspace with many worktrees would otherwise fork all of
+/// them into the machine in the same moment. The point is to overlap the work, not to let the
+/// work starve itself.
+const PARALLEL_READS: usize = 8;
 pub const MAX_DIFF_PAGE_LINES: usize = 32;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -131,22 +135,55 @@ pub struct GitDiffPage {
 
 #[derive(Default)]
 pub struct GitWatcherManager {
-    watchers: Mutex<BTreeMap<String, (RecommendedWatcher, mpsc::SyncSender<WatchMessage>)>>,
-    /// The line counts of a checkout, kept here because the same debounced change that
-    /// refreshes the file list is what makes them stale. `Arc` so a watch thread can mark its
-    /// own entry without borrowing the manager.
-    diff_stats: Arc<GitDiffStatsCache>,
+    /// One watcher per repository, not per checkout. The worktrees of a repo share a Git
+    /// directory, so watching them one at a time means every write in it is reported once per
+    /// worktree, the kernel walks the same tree the same number of times, and a commit still
+    /// leaves the siblings holding numbers taken against a merge base that has moved.
+    watchers: Mutex<BTreeMap<String, RepoWatcher>>,
+    /// What each checkout was when it was last read, kept here because the same debounced
+    /// change that refreshes the file list is what makes it stale. `Arc` so a watch thread can
+    /// mark its own entry without borrowing the manager.
+    snapshots: Arc<GitSnapshotCache>,
+}
+
+struct RepoWatcher {
+    _watcher: RecommendedWatcher,
+    sender: mpsc::Sender<WatchMessage>,
+}
+
+/// What one repository's watcher has to know to say which checkouts a change speaks for.
+#[derive(Clone, Default)]
+pub struct RepoWatchPlan {
+    /// Each live worktree's directory, mapped to the checkout that lives in it, so a file
+    /// written there is attributed to one row rather than to the whole repo.
+    pub roots: BTreeMap<PathBuf, String>,
+    /// Each worktree's own Git directory, which holds its index and its HEAD. Staging in one
+    /// worktree is that worktree's business; only a shared ref is the repository's.
+    pub git_dirs: BTreeMap<PathBuf, String>,
+    /// The Git directory the worktrees share. A ref or index write there moves the merge base
+    /// every sibling diffs against, so it speaks for all of them and not for one.
+    pub common_dir: Option<PathBuf>,
+    /// Every checkout the repo still has on disk.
+    pub all: Vec<String>,
+}
+
+/// The checkouts a batch of filesystem changes speaks for: the ones whose own files moved, and
+/// the whole repository when what moved was a ref every one of them reads.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct WatchUpdate {
+    status: Vec<String>,
+    activity: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum WatchMessage {
-    Changed,
+    Changed(WatchUpdate),
     Stop,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum WatchWakeup {
-    Changed,
+    Changed(WatchUpdate),
     Stop,
 }
 
@@ -157,6 +194,7 @@ struct GitContext {
     root: PathBuf,
 }
 
+#[derive(Clone)]
 struct Snapshot {
     status: GitStatus,
     merge_base: String,
@@ -168,201 +206,275 @@ struct GitCounts {
     totals: GitDiffStats,
 }
 
-/// One checkout's counts plus the base they were taken against, kept next to the watchers
-/// because answering costs several `git` processes per checkout and the sidebar asks for all
-/// of them at once. Only a watched checkout is ever held: an unwatched one has no change
-/// signal, so a stored entry would be a lie.
+/// One checkout snapshot, kept next to the watchers because reading one costs several `git`
+/// processes and the sidebar asks about every checkout at once.
+///
+/// The file list, the row totals and the merge base they were taken against are all views of
+/// the same reading, so one entry answers all three and a change drops it whole. `git status`
+/// and the counts of one checkout are therefore the same snapshot rather than two readings of
+/// the same working tree.
+///
+/// Every Git checkout in the workspace is watched, so an entry is invalidated by a real change
+/// signal. That is what makes holding one honest, and it is why a checkout the user is not
+/// looking at carries numbers as fresh as the one they are.
 #[derive(Clone)]
-struct CachedGitCounts {
-    checkout_id: String,
+struct CachedGitSnapshot {
     /// Choosing another default branch moves the base ref, which no watcher can see, so the
     /// entry is matched against it instead of invalidated.
     default_branch: Option<String>,
     stale: bool,
-    counts: GitCounts,
+    snapshot: Snapshot,
+    /// Filled in the first time something asks for the lines rather than the file list, and
+    /// read back by the next ask. The sidebar and the Changes tab both want them on every
+    /// change and neither should pay for the other: a checkout nobody touched is a lookup.
+    counts: Option<GitCounts>,
 }
 
 #[derive(Default)]
-struct GitDiffStatsCache {
-    entries: Mutex<BTreeMap<String, CachedGitCounts>>,
+struct GitSnapshotCache {
+    entries: Mutex<BTreeMap<String, CachedGitSnapshot>>,
 }
 
 impl GitWatcherManager {
     pub fn watch(
         &self,
         app: AppHandle,
-        checkout_id: String,
-        paths: Vec<PathBuf>,
+        repo_id: String,
+        plan: RepoWatchPlan,
     ) -> Result<(), IpcError> {
         let mut watchers = self
             .watchers
             .lock()
             .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error.to_string()))?;
-        if watchers.contains_key(&checkout_id) {
+        if watchers.contains_key(&repo_id) {
             return Ok(());
         }
 
-        let (sender, receiver) = mpsc::sync_channel(1);
+        let (sender, receiver) = mpsc::channel();
         let event_sender = sender.clone();
-        let checkout_root = paths.first().cloned().unwrap_or_default();
-        let file_activity_pending = Arc::new(AtomicBool::new(false));
-        let callback_activity_pending = file_activity_pending.clone();
+        let callback_plan = plan.clone();
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
                 if let Ok(event) = result {
-                    if event
-                        .paths
-                        .iter()
-                        .any(|path| is_checkout_file_activity(path, &checkout_root))
-                    {
-                        callback_activity_pending.store(true, Ordering::Relaxed);
-                    }
-                    if should_refresh_for_event(&event) {
-                        let _ = event_sender.try_send(WatchMessage::Changed);
+                    if let Some(update) = affected_checkouts(&callback_plan, &event) {
+                        // The channel only has to wake the worker; which checkouts moved rides
+                        // along with it, and the worker merges a burst into one answer.
+                        let _ = event_sender.send(WatchMessage::Changed(update));
                     }
                 }
             })
             .map_err(|error| {
                 IpcError::new(
                     IpcErrorCode::OperationFailed,
-                    format!("could not watch checkout: {error}"),
+                    format!("could not watch repository: {error}"),
                 )
             })?;
-        for path in paths {
+        for path in plan
+            .roots
+            .keys()
+            .chain(plan.git_dirs.keys())
+            .chain(plan.common_dir.iter())
+        {
             watcher
-                .watch(&path, RecursiveMode::Recursive)
+                .watch(path, RecursiveMode::Recursive)
                 .map_err(|error| {
                     IpcError::new(
                         IpcErrorCode::OperationFailed,
-                        format!("could not watch checkout: {error}"),
+                        format!("could not watch repository: {error}"),
                     )
                 })?;
         }
 
-        let event_checkout_id = checkout_id.clone();
-        let activity_checkout_id = checkout_id.clone();
-        let stale_checkout_id = checkout_id.clone();
-        let worker_activity_pending = file_activity_pending;
-        let worker_diff_stats = self.diff_stats.clone();
+        let worker_snapshots = self.snapshots.clone();
         thread::Builder::new()
             .name("marvis-git-watch".into())
             .spawn(move || {
-                while let WatchWakeup::Changed = receive_debounced_change(&receiver, WATCH_DEBOUNCE)
+                while let WatchWakeup::Changed(update) =
+                    receive_debounced_change(&receiver, WATCH_DEBOUNCE)
                 {
-                    // Before the event, so a refresh it triggers never reads the counts the
-                    // same change just invalidated.
-                    worker_diff_stats.mark_stale(&stale_checkout_id);
-                    let _ = app.emit(STATUS_CHANGED_EVENT, &event_checkout_id);
-                    if worker_activity_pending.swap(false, Ordering::Relaxed) {
-                        let _ = app.emit(FILE_ACTIVITY_EVENT, &activity_checkout_id);
+                    // Before the event, so a refresh it triggers never reads what the same
+                    // change just invalidated.
+                    worker_snapshots.mark_stale(&update.status);
+                    let _ = app.emit(STATUS_CHANGED_EVENT, &update.status);
+                    if !update.activity.is_empty() {
+                        let _ = app.emit(FILE_ACTIVITY_EVENT, &update.activity);
                     }
                 }
             })
             .map_err(|error| {
                 IpcError::new(
                     IpcErrorCode::OperationFailed,
-                    format!("could not start checkout watcher: {error}"),
+                    format!("could not start repository watcher: {error}"),
                 )
             })?;
 
-        watchers.insert(checkout_id, (watcher, sender));
+        watchers.insert(
+            repo_id,
+            RepoWatcher {
+                _watcher: watcher,
+                sender,
+            },
+        );
         Ok(())
     }
 
-    pub fn unwatch(&self, checkout_id: &str) {
+    pub fn unwatch(&self, repo_id: &str, checkout_ids: &[String]) {
         if let Ok(mut watchers) = self.watchers.lock() {
-            if let Some((watcher, sender)) = watchers.remove(checkout_id) {
+            if let Some(RepoWatcher { sender, .. }) = watchers.remove(repo_id) {
                 let _ = sender.send(WatchMessage::Stop);
-                drop(watcher);
             }
         }
-        self.diff_stats.forget(checkout_id);
+        self.snapshots.forget_many(checkout_ids);
     }
 
-    /// The counts already held for a watched checkout, or `None` when they must be asked for.
-    fn cached_diff_stats(
+    /// What is already held for a checkout, or `None` when it must be read again. Every live
+    /// Git checkout is watched, so a held entry is invalidated by whatever changed it.
+    fn cached_state(
         &self,
         checkout_id: &str,
         default_branch: Option<&str>,
-    ) -> Option<GitCounts> {
-        if !self.is_watched(checkout_id) {
-            return None;
-        }
-        self.diff_stats.fresh(checkout_id, default_branch)
+    ) -> Option<CachedGitSnapshot> {
+        self.snapshots.fresh(checkout_id, default_branch)
     }
 
-    fn store_diff_stats(&self, counts: CachedGitCounts) {
-        if !self.is_watched(&counts.checkout_id) {
-            return;
-        }
-        self.diff_stats.store(counts);
-    }
-
-    fn is_watched(&self, checkout_id: &str) -> bool {
-        self.watchers
-            .lock()
-            .is_ok_and(|watchers| watchers.contains_key(checkout_id))
+    fn store_state(&self, checkout_id: String, state: CachedGitSnapshot) {
+        self.snapshots.insert(checkout_id, state);
     }
 }
 
-impl GitDiffStatsCache {
-    fn fresh(&self, checkout_id: &str, default_branch: Option<&str>) -> Option<GitCounts> {
+/// Which checkouts a filesystem change speaks for.
+///
+/// A path inside a worktree, or inside the Git directory that belongs to that one worktree, is
+/// that worktree's business: a file written or a file staged there moves nothing for anyone
+/// else. A path in the Git directory the worktrees share is the repository's, because a commit
+/// there moves the merge base every sibling counts its lines against and their numbers are now
+/// describing a change set that no longer exists.
+///
+/// Anything outside all of them belongs to none of them, and a change that touches no checkout
+/// is not a change at all: Git writes an object for every commit, and re-reading the sidebar
+/// because a blob landed is the cost this whole path exists to avoid.
+fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<WatchUpdate> {
+    let mut status: BTreeSet<String> = BTreeSet::new();
+    let mut activity: BTreeSet<String> = BTreeSet::new();
+    let mut repo_wide = false;
+    for path in &event.paths {
+        if let Some(checkout_id) = longest_match(&plan.git_dirs, path) {
+            status.insert(checkout_id.clone());
+            continue;
+        }
+        if plan
+            .common_dir
+            .as_ref()
+            .is_some_and(|common| path.starts_with(common))
+        {
+            repo_wide |= should_refresh_path(path);
+            continue;
+        }
+        for (root, checkout_id) in &plan.roots {
+            if path.starts_with(root) {
+                status.insert(checkout_id.clone());
+                if is_checkout_file_activity(path, root) {
+                    activity.insert(checkout_id.clone());
+                }
+            }
+        }
+    }
+    if repo_wide {
+        status.extend(plan.all.iter().cloned());
+    }
+    (!status.is_empty()).then(|| WatchUpdate {
+        status: status.into_iter().collect(),
+        activity: activity.into_iter().collect(),
+    })
+}
+
+/// The checkout owning a directory the path sits in, when it sits in one of them. The longest
+/// match wins, so a worktree nested under another is its own and not its parent.
+fn longest_match(dirs: &BTreeMap<PathBuf, String>, path: &Path) -> Option<String> {
+    dirs.iter()
+        .filter(|(dir, _)| path.starts_with(dir))
+        .max_by_key(|(dir, _)| dir.components().count())
+        .map(|(_, checkout_id)| checkout_id.clone())
+}
+
+impl GitSnapshotCache {
+    fn fresh(&self, checkout_id: &str, default_branch: Option<&str>) -> Option<CachedGitSnapshot> {
         self.entries
             .lock()
             .ok()?
             .get(checkout_id)
             .filter(|entry| !entry.stale && entry.default_branch.as_deref() == default_branch)
-            .map(|entry| entry.counts.clone())
+            .cloned()
     }
 
-    fn store(&self, counts: CachedGitCounts) {
+    fn insert(&self, checkout_id: String, state: CachedGitSnapshot) {
         if let Ok(mut entries) = self.entries.lock() {
             entries.insert(
-                counts.checkout_id.clone(),
-                CachedGitCounts {
+                checkout_id,
+                CachedGitSnapshot {
                     stale: false,
-                    ..counts
+                    ..state
                 },
             );
         }
     }
 
-    fn mark_stale(&self, checkout_id: &str) {
+    /// Marks every checkout a change speaks for, so the refresh it triggers reads the tree
+    /// rather than what it looked like a moment ago.
+    fn mark_stale(&self, checkout_ids: &[String]) {
         if let Ok(mut entries) = self.entries.lock() {
-            if let Some(entry) = entries.get_mut(checkout_id) {
-                entry.stale = true;
+            for checkout_id in checkout_ids {
+                if let Some(entry) = entries.get_mut(checkout_id) {
+                    entry.stale = true;
+                }
             }
         }
     }
 
-    fn forget(&self, checkout_id: &str) {
+    fn forget_many(&self, checkout_ids: &[String]) {
         if let Ok(mut entries) = self.entries.lock() {
-            entries.remove(checkout_id);
+            for checkout_id in checkout_ids {
+                entries.remove(checkout_id);
+            }
         }
     }
 }
 
+/// Waits for the directory to go quiet, then names every checkout the quiet period touched.
+///
+/// A burst is one answer, so the checkouts are merged as they arrive: a save that rewrites a
+/// file and its lock, or a commit that moves a ref and an index, are two filesystem events
+/// describing one change, and answering them apart would refresh the same rows twice.
 fn receive_debounced_change(
     receiver: &mpsc::Receiver<WatchMessage>,
     debounce: Duration,
 ) -> WatchWakeup {
-    match receiver.recv() {
+    let mut merged = match receiver.recv() {
+        Ok(WatchMessage::Changed(update)) => update,
         Ok(WatchMessage::Stop) | Err(_) => return WatchWakeup::Stop,
-        Ok(WatchMessage::Changed) => {}
-    }
+    };
     loop {
         match receiver.recv_timeout(debounce) {
-            Ok(WatchMessage::Changed) => {}
+            Ok(WatchMessage::Changed(update)) => merge_update(&mut merged, update),
             Ok(WatchMessage::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return WatchWakeup::Stop;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => return WatchWakeup::Changed,
+            Err(mpsc::RecvTimeoutError::Timeout) => return WatchWakeup::Changed(merged),
         }
     }
 }
 
-fn should_refresh_for_event(event: &notify::Event) -> bool {
-    event.paths.iter().any(|path| should_refresh_path(path))
+fn merge_update(merged: &mut WatchUpdate, update: WatchUpdate) {
+    for checkout_id in update.status {
+        if !merged.status.contains(&checkout_id) {
+            merged.status.push(checkout_id);
+        }
+    }
+    for checkout_id in update.activity {
+        if !merged.activity.contains(&checkout_id) {
+            merged.activity.push(checkout_id);
+        }
+    }
 }
 
 fn should_refresh_path(path: &Path) -> bool {
@@ -398,8 +510,14 @@ fn is_checkout_file_activity(path: &Path, checkout_root: &Path) -> bool {
         .is_some_and(|component| !matches!(component, Component::Normal(name) if name == ".git"))
 }
 
-pub fn status(database: &Database, checkout_id: &str) -> Result<GitStatus, IpcError> {
-    Ok(snapshot(&registered_git_context(database, checkout_id)?)?.status)
+pub fn status(
+    database: &Database,
+    watchers: &GitWatcherManager,
+    checkout_id: &str,
+) -> Result<GitStatus, IpcError> {
+    let repos = workspace_repos(database)?;
+    let context = git_context(&repos, checkout_id)?;
+    Ok(snapshot_of(&context, watchers)?.status)
 }
 
 /// The counts of one checkout's changed files, from the same snapshot the file list is built
@@ -410,18 +528,25 @@ pub fn diff_stats(
     checkout_id: &str,
 ) -> Result<GitFileDiffStats, IpcError> {
     let repos = workspace_repos(database)?;
-    Ok(counts_for_checkout(&repos, watchers, checkout_id)?.files)
+    let context = git_context(&repos, checkout_id)?;
+    Ok(counts_of(&context, watchers)?.files)
 }
 
 /// The same counts folded into one number per checkout, for the rows that name every checkout
 /// at once. A checkout Git cannot answer for is left out rather than reported as zero, so a
 /// missing, plain or base-less checkout shows no counts instead of a false clean bill.
+///
+/// Every checkout the sidebar names is watched, so all but the ones a change just spoke for are
+/// answered from what was already read. The rest are read side by side rather than one after
+/// another: on a commit, a new worktree or the first paint, that is the whole sidebar at once,
+/// and each reading is several `git` processes of its own.
 pub fn checkout_diff_stats(
     database: &Database,
     watchers: &GitWatcherManager,
 ) -> Result<GitCheckoutDiffStats, IpcError> {
     let repos = workspace_repos(database)?;
     let mut totals = GitCheckoutDiffStats::new();
+    let mut unread: Vec<GitContext> = Vec::new();
     for repo in &repos {
         if repo.kind != RepoKind::Git {
             continue;
@@ -430,32 +555,95 @@ pub fn checkout_diff_stats(
             if checkout.is_missing {
                 continue;
             }
-            if let Ok(counts) = counts_for_checkout(&repos, watchers, &checkout.id) {
-                totals.insert(checkout.id.clone(), counts.totals);
+            let Ok(context) = git_context(&repos, &checkout.id) else {
+                continue;
+            };
+            match held_state(&context, watchers).and_then(|held| held.counts) {
+                Some(counts) => {
+                    totals.insert(checkout.id.clone(), counts.totals);
+                }
+                None => unread.push(context),
             }
+        }
+    }
+    for batch in unread.chunks(PARALLEL_READS) {
+        for (checkout_id, counts) in thread::scope(|scope| {
+            let reads: Vec<_> = batch
+                .iter()
+                .map(|context| {
+                    let watchers = &*watchers;
+                    scope.spawn(move || {
+                        counts_of(context, watchers)
+                            .ok()
+                            .map(|counts| (context.checkout.id.clone(), counts.totals))
+                    })
+                })
+                .collect();
+            reads
+                .into_iter()
+                .map(|read| read.join().unwrap_or(None))
+                .collect::<Vec<_>>()
+        })
+        .into_iter()
+        .flatten()
+        {
+            totals.insert(checkout_id, counts);
         }
     }
     Ok(totals)
 }
 
-fn counts_for_checkout(
-    repos: &[Repo],
-    watchers: &GitWatcherManager,
-    checkout_id: &str,
-) -> Result<GitCounts, IpcError> {
-    let context = git_context(repos, checkout_id)?;
+/// What the checkout was when it was last read, if a watcher has not said anything moved since.
+///
+/// The base ref is part of the entry rather than of the key alone, because choosing another
+/// default branch moves it and no filesystem event describes that.
+fn held_state(context: &GitContext, watchers: &GitWatcherManager) -> Option<CachedGitSnapshot> {
+    watchers.cached_state(&context.checkout.id, context.repo.default_branch.as_deref())
+}
+
+/// Reads the checkout and remembers it, so the next question about it is a lookup rather than
+/// another walk of the same working tree.
+fn snapshot_of(context: &GitContext, watchers: &GitWatcherManager) -> Result<Snapshot, IpcError> {
     let default_branch = context.repo.default_branch.clone();
-    if let Some(counts) = watchers.cached_diff_stats(checkout_id, default_branch.as_deref()) {
+    if let Some(held) = held_state(context, watchers) {
+        return Ok(held.snapshot);
+    }
+    let read = snapshot(context)?;
+    watchers.store_state(
+        context.checkout.id.clone(),
+        CachedGitSnapshot {
+            default_branch,
+            stale: false,
+            snapshot: read.clone(),
+            counts: None,
+        },
+    );
+    Ok(read)
+}
+
+/// The line counts, from the same snapshot the file list is served from, so a number and the
+/// row it decorates can never describe two change sets.
+fn counts_of(context: &GitContext, watchers: &GitWatcherManager) -> Result<GitCounts, IpcError> {
+    let default_branch = context.repo.default_branch.clone();
+    let held = held_state(context, watchers);
+    if let Some(counts) = held.as_ref().and_then(|held| held.counts.clone()) {
         return Ok(counts);
     }
-    let snapshot = snapshot(&context)?;
-    let counts = counted_files(&context, &snapshot)?;
-    watchers.store_diff_stats(CachedGitCounts {
-        checkout_id: checkout_id.to_owned(),
-        default_branch,
-        stale: false,
-        counts: counts.clone(),
-    });
+    // The file list is the expensive part and it is already held; only the lines are missing.
+    let read = match &held {
+        Some(held) => held.snapshot.clone(),
+        None => snapshot(context)?,
+    };
+    let counts = counted_files(context, &read)?;
+    watchers.store_state(
+        context.checkout.id.clone(),
+        CachedGitSnapshot {
+            default_branch,
+            stale: false,
+            snapshot: read,
+            counts: Some(counts.clone()),
+        },
+    );
     Ok(counts)
 }
 
@@ -519,33 +707,51 @@ fn numstat_counts(
         .iter()
         .filter(|file| file.status == "??")
     {
-        // `git diff` says nothing about an untracked path, so each one is counted on its own
-        // against an empty file, the same comparison the diff view makes.
+        // A path that leaves the checkout is not one of its files, whatever is at the other
+        // end of the symlink, so it is left out of the counts the same way it is left out of
+        // the diff.
         let Ok(path) = contained_untracked_path(context, &file.path) else {
             continue;
         };
-        let output = run_git(
-            &context.root,
-            vec![
-                "diff".into(),
-                "--no-ext-diff".into(),
-                "--no-textconv".into(),
-                "--numstat".into(),
-                "--no-index".into(),
-                "--".into(),
-                "/dev/null".into(),
-                path.into_os_string(),
-            ],
-        )?;
-        // `--no-index` reports a difference as exit code 1, the way `diff` does.
-        if !matches!(output.status.code(), Some(0) | Some(1)) {
-            continue;
-        }
-        if let Some(untracked) = first_numstat_record(&output.stdout) {
+        if let Some(untracked) = untracked_line_count(&path) {
             counts.insert(file.path.clone(), untracked);
         }
     }
     Ok(counts)
+}
+
+/// The lines an untracked file adds, counted the way `git diff --numstat` would count them.
+///
+/// An untracked file is a whole file Git has never seen, so every one of its lines is an
+/// addition and there is nothing to remove. That makes the count the number of lines in the
+/// file, which is what Git reports, and it is why this reads the file rather than asking Git to
+/// diff it against nothing: the answer needs one read, and `git diff --no-index` needs one
+/// process per untracked file. A worktree an agent has been working in holds a handful of
+/// them, and every sidebar refresh pays for each.
+///
+/// A file Git declines to count has no number at all rather than a zero: a binary file is one
+/// of those, and a row showing `+0` for it would be a claim about a file Git never measured.
+/// The test below is the parity that keeps this honest.
+fn untracked_line_count(path: &Path) -> Option<GitDiffStats> {
+    let bytes = fs::read(path).ok()?;
+    if is_binary(&bytes) {
+        return None;
+    }
+    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
+    // A file whose last line has no newline of its own is still a line, which is why Git
+    // reports one more for `a` and one for `a\nb` alike.
+    let trailing = !bytes.is_empty() && !bytes.ends_with(b"\n");
+    Some(GitDiffStats {
+        additions: newlines + u64::from(trailing),
+        deletions: 0,
+    })
+}
+
+/// Whether Git would call this file binary, by the same rule it uses: a NUL byte anywhere in
+/// the first block it looks at. A file that reads as binary after that block is counted as
+/// text, which is the same answer Git gives.
+fn is_binary(bytes: &[u8]) -> bool {
+    bytes.iter().take(BINARY_SNIFF_BYTES).any(|byte| *byte == 0)
 }
 
 /// Every `--numstat` record is one NUL-terminated field, so a path that holds a newline, a
@@ -579,18 +785,6 @@ fn parse_numstat(output: &[u8]) -> Result<BTreeMap<String, GitDiffStats>, IpcErr
         }
     }
     Ok(stats)
-}
-
-/// The counts of the only record a single-file `--numstat` produces. The path Git echoes back
-/// there names the two files it compared, not the checkout-relative path the file list is
-/// keyed by, so only the counts are read out of it.
-fn first_numstat_record(output: &[u8]) -> Option<GitDiffStats> {
-    let record = output.split(|byte| *byte == b'\n').next()?;
-    let (additions, deletions, _) = numstat_columns(record)?;
-    Some(GitDiffStats {
-        additions: additions?,
-        deletions: deletions?,
-    })
 }
 
 /// Splits one `--numstat` record into its two counts and its path, or `None` when the bytes
@@ -1035,31 +1229,102 @@ fn ensure_diff_succeeded(
     Ok(())
 }
 
-pub fn watch_paths(database: &Database, checkout_id: &str) -> Result<Vec<PathBuf>, IpcError> {
-    let context = registered_git_context(database, checkout_id)?;
-    let mut paths = vec![context.root.clone()];
-    let common_dir = output_text(&checked_git(
-        &context.root,
-        ["rev-parse", "--git-common-dir"],
-        "could not locate Git metadata for watcher",
-    )?);
-    let common_dir = Path::new(&common_dir);
-    let common_dir = if common_dir.is_absolute() {
-        common_dir.to_path_buf()
+/// What the repository watcher needs to know: every worktree still on disk, and the Git
+/// directory they share.
+///
+/// A missing checkout is left out because there is nothing to watch for it, and nothing to read
+/// either, so its row shows no counts rather than a false clean bill. A checkout whose
+/// directory cannot be resolved is left out for the same reason rather than failing the whole
+/// repository, which would leave every other worktree of it unwatched.
+pub fn watch_plan(database: &Database, repo_id: &str) -> Result<RepoWatchPlan, IpcError> {
+    let repos = workspace_repos(database)?;
+    let repo = repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "repository is not registered",
+            )
+        })?;
+    if repo.kind != RepoKind::Git {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "only a Git repository has changes to watch",
+        ));
+    }
+    let mut plan = RepoWatchPlan::default();
+    for checkout in &repo.checkouts {
+        if checkout.is_missing {
+            continue;
+        }
+        let Ok(context) = git_context(&repos, &checkout.id) else {
+            continue;
+        };
+        if plan.common_dir.is_none() {
+            plan.common_dir = common_git_dir(&context);
+        }
+        plan.all.push(checkout.id.clone());
+        plan.roots.insert(context.root.clone(), checkout.id.clone());
+        // The primary repository's own Git directory *is* the shared one, so it is left out:
+        // a ref written under it moves every sibling's merge base, and attributing it to the
+        // checkout that happens to live there would leave the other rows describing a change
+        // set that no longer exists.
+        if let Some(git_dir) =
+            own_git_dir(&context).filter(|dir| Some(dir) != plan.common_dir.as_ref())
+        {
+            plan.git_dirs.insert(git_dir, checkout.id.clone());
+        }
+    }
+    if plan.roots.is_empty() {
+        return Err(IpcError::new(
+            IpcErrorCode::FolderMissing,
+            "no worktree of this repository is on disk",
+        ));
+    }
+    Ok(plan)
+}
+
+/// The checkout ids a repository is registered with, so unwatching can drop exactly the
+/// snapshots that repository held.
+pub fn repo_checkout_ids(database: &Database, repo_id: &str) -> Vec<String> {
+    workspace_repos(database)
+        .map(|repos| {
+            repos
+                .iter()
+                .filter(|repo| repo.id == repo_id)
+                .flat_map(|repo| repo.checkouts.iter())
+                .map(|checkout| checkout.id.clone())
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
+/// The Git directory that belongs to this checkout alone, as an absolute path: the primary
+/// repository's own `.git`, or the `worktrees/<name>` directory a linked worktree gets. It is
+/// where that worktree's index and HEAD live, and staging there moves nothing for its siblings.
+fn own_git_dir(context: &GitContext) -> Option<PathBuf> {
+    let text = optional_git_text(&context.root, ["rev-parse", "--absolute-git-dir"])?;
+    absolute_git_path(&context.root, &text)
+}
+
+/// The Git directory the checkout shares with its siblings, as an absolute path.
+///
+/// A linked worktree resolves this to the primary repository's `.git`, which is what makes it
+/// worth watching: it is where a commit in one worktree is published to the others.
+fn common_git_dir(context: &GitContext) -> Option<PathBuf> {
+    let text = optional_git_text(&context.root, ["rev-parse", "--git-common-dir"])?;
+    absolute_git_path(&context.root, &text)
+}
+
+fn absolute_git_path(root: &Path, text: &str) -> Option<PathBuf> {
+    let path = Path::new(text);
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
     } else {
-        context.root.join(common_dir)
-    }
-    .canonicalize()
-    .map_err(|error| {
-        IpcError::new(
-            IpcErrorCode::GitFailed,
-            format!("could not resolve Git metadata for watcher: {error}"),
-        )
-    })?;
-    if !common_dir.starts_with(&context.root) {
-        paths.push(common_dir);
-    }
-    Ok(paths)
+        root.join(path)
+    };
+    absolute.canonicalize().ok()
 }
 
 fn registered_git_context(database: &Database, checkout_id: &str) -> Result<GitContext, IpcError> {
@@ -1538,10 +1803,11 @@ mod tests {
     };
 
     use super::{
-        diff, diff_page, first_numstat_record, parse_diff_display_line, parse_name_status,
+        affected_checkouts, diff, diff_page, parse_diff_display_line, parse_name_status,
         parse_numstat, parse_porcelain_v2, receive_debounced_change, resolve_default_ref,
-        should_refresh_path, status, CachedGitCounts, GitCounts, GitDiffStats, GitWatcherManager,
-        WatchMessage, WatchWakeup,
+        should_refresh_path, status, untracked_line_count, CachedGitSnapshot, GitCounts,
+        GitDiffStats, GitSnapshotCache, GitStatus, GitWatcherManager, PathBuf, RepoWatchPlan,
+        WatchMessage, WatchUpdate, WatchWakeup,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -1611,8 +1877,9 @@ mod tests {
         git(&root, &["checkout", "feature"]);
         fs::write(root.join("feature.txt"), "feature edited\n").unwrap();
         let (database, checkout_id) = git_database(temp.path(), &root);
+        let watchers = GitWatcherManager::default();
 
-        let snapshot = status(&database, &checkout_id).unwrap();
+        let snapshot = status(&database, &watchers, &checkout_id).unwrap();
 
         assert!(snapshot.files.iter().any(|file| file.path == "feature.txt"));
         assert_eq!(
@@ -1642,8 +1909,9 @@ mod tests {
         fs::write(root.join("base.txt"), "unstaged final\n").unwrap();
         fs::write(root.join("new file.txt"), "untracked\n").unwrap();
         fs::write(root.join("new binary.dat"), [0, 1, 2]).unwrap();
+        let watchers = GitWatcherManager::default();
 
-        let snapshot = status(&database, &checkout_id).unwrap();
+        let snapshot = status(&database, &watchers, &checkout_id).unwrap();
         let paths: Vec<_> = snapshot
             .files
             .iter()
@@ -1671,8 +1939,9 @@ mod tests {
 line.txt";
         fs::write(root.join(filename), "literal file content\n").unwrap();
         let (database, checkout_id) = git_database(temp.path(), &root);
+        let watchers = GitWatcherManager::default();
 
-        let status = status(&database, &checkout_id).unwrap();
+        let status = status(&database, &watchers, &checkout_id).unwrap();
         assert!(status.files.iter().any(|file| file.path == filename));
         let diff = diff(&database, &checkout_id, filename).unwrap();
 
@@ -1774,7 +2043,8 @@ line.txt";
         let state = workspace::register_folder(&database, &root).unwrap();
         assert_eq!(state.repos[0].kind, RepoKind::Plain);
 
-        let error = status(&database, &state.repos[0].checkouts[0].id).unwrap_err();
+        let watchers = GitWatcherManager::default();
+        let error = status(&database, &watchers, &state.repos[0].checkouts[0].id).unwrap_err();
 
         assert!(matches!(error.code, IpcErrorCode::InvalidCheckout));
     }
@@ -1817,42 +2087,166 @@ line.txt";
         assert_eq!(rename[0].path, "new name.txt");
     }
 
-    #[test]
-    fn watcher_debounces_a_burst_into_one_refresh_signal() {
-        let (sender, receiver) = mpsc::sync_channel(1);
-        sender.try_send(WatchMessage::Changed).unwrap();
-        assert!(sender.try_send(WatchMessage::Changed).is_err());
-        assert!(sender.try_send(WatchMessage::Changed).is_err());
+    fn touched(ids: &[&str]) -> WatchUpdate {
+        WatchUpdate {
+            status: ids.iter().map(|id| (*id).to_owned()).collect(),
+            activity: Vec::new(),
+        }
+    }
 
+    #[test]
+    fn watcher_debounces_a_burst_into_one_signal_naming_every_checkout_it_touched() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(WatchMessage::Changed(touched(&["a"]))).unwrap();
+        sender.send(WatchMessage::Changed(touched(&["b"]))).unwrap();
+        sender.send(WatchMessage::Changed(touched(&["a"]))).unwrap();
+
+        // One save rewrites a file and its lock, and a commit moves a ref and an index. Those
+        // are separate filesystem events describing one change, and answering them apart would
+        // refresh the same rows twice. A checkout named twice is still one row.
         assert_eq!(
             receive_debounced_change(&receiver, Duration::from_millis(1)),
-            WatchWakeup::Changed
+            WatchWakeup::Changed(touched(&["a", "b"]))
         );
         assert!(receiver.try_recv().is_err());
     }
 
     #[test]
-    fn checkout_watcher_observes_file_edits() {
+    fn repository_watcher_observes_file_edits_and_says_which_worktree_they_landed_in() {
         let temp = tempdir().unwrap();
-        let (sender, receiver) = mpsc::sync_channel(1);
+        fs::create_dir_all(temp.path().join("main")).unwrap();
+        fs::create_dir_all(temp.path().join("task")).unwrap();
+        // Resolved, because the filesystem reports resolved paths: a checkout reached
+        // through a symlink would otherwise match no event and quietly go stale forever.
+        let root = temp.path().join("main").canonicalize().unwrap();
+        let worktree = temp.path().join("task").canonicalize().unwrap();
+        let plan = RepoWatchPlan {
+            roots: [
+                (root.clone(), "main".to_owned()),
+                (worktree.clone(), "task".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            git_dirs: BTreeMap::new(),
+            common_dir: None,
+            all: vec!["main".to_owned(), "task".to_owned()],
+        };
+        let (sender, receiver) = mpsc::channel();
         let event_sender = sender.clone();
+        let event_plan = plan.clone();
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                if result.is_ok_and(|event| super::should_refresh_for_event(&event)) {
-                    let _ = event_sender.try_send(WatchMessage::Changed);
+                if let Some(update) = result
+                    .ok()
+                    .and_then(|event| affected_checkouts(&event_plan, &event))
+                {
+                    let _ = event_sender.send(WatchMessage::Changed(update));
                 }
             })
             .unwrap();
-        watcher
-            .watch(temp.path(), notify::RecursiveMode::Recursive)
-            .unwrap();
+        for path in [root, worktree.clone()] {
+            watcher
+                .watch(&path, notify::RecursiveMode::Recursive)
+                .unwrap();
+        }
 
-        fs::write(temp.path().join("terminal-edit.txt"), "changed\n").unwrap();
+        fs::write(worktree.join("terminal-edit.txt"), "changed\n").unwrap();
 
+        // Only the worktree that was written to is named. The row beside it is untouched, and
+        // saying otherwise would make a save in one worktree cost a re-read of every other.
+        let update = match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
+            WatchMessage::Changed(update) => update,
+            WatchMessage::Stop => panic!("watcher stopped"),
+        };
+        assert_eq!(update.status, vec!["task".to_owned()]);
+        assert_eq!(update.activity, vec!["task".to_owned()]);
+    }
+
+    #[test]
+    fn a_ref_write_speaks_for_every_worktree_because_a_commit_moves_the_merge_base() {
+        let plan = RepoWatchPlan {
+            roots: [
+                (PathBuf::from("/repo"), "main".to_owned()),
+                (PathBuf::from("/repo-task"), "task".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            // The primary's own Git directory is the shared one, so it is not here: a ref
+            // written under it is the repository's change, not the primary checkout's.
+            git_dirs: BTreeMap::from([(
+                PathBuf::from("/repo/.git/worktrees/task"),
+                "task".to_owned(),
+            )]),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned(), "task".to_owned()],
+        };
+        let write = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/repo/.git/refs/heads/main")],
+            attrs: Default::default(),
+        };
+
+        // The sibling on another branch counted its lines against a merge base that just moved,
+        // so its row is now describing a change set that does not exist.
         assert_eq!(
-            receiver.recv_timeout(Duration::from_secs(5)).unwrap(),
-            WatchMessage::Changed
+            affected_checkouts(&plan, &write).map(|update| update.status),
+            Some(vec!["main".to_owned(), "task".to_owned()])
         );
+    }
+
+    #[test]
+    fn staging_in_one_worktree_does_not_re_read_the_siblings() {
+        let plan = RepoWatchPlan {
+            roots: [
+                (PathBuf::from("/repo"), "main".to_owned()),
+                (PathBuf::from("/repo-task"), "task".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            // The primary's own Git directory is the shared one, so it is not here: a ref
+            // written under it is the repository's change, not the primary checkout's.
+            git_dirs: BTreeMap::from([(
+                PathBuf::from("/repo/.git/worktrees/task"),
+                "task".to_owned(),
+            )]),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned(), "task".to_owned()],
+        };
+        let staged = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/repo/.git/worktrees/task/index")],
+            attrs: Default::default(),
+        };
+
+        // The sibling is on another branch with another index: nothing it counts moved. An
+        // agent turn stages in the worktree it is working in, several times, and each of those
+        // is a save in every other row if the whole repository is re-read.
+        assert_eq!(
+            affected_checkouts(&plan, &staged).map(|update| update.status),
+            Some(vec!["task".to_owned()])
+        );
+    }
+
+    #[test]
+    fn a_write_outside_every_worktree_and_the_git_directory_is_not_a_change() {
+        let plan = RepoWatchPlan {
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            git_dirs: BTreeMap::new(),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned()],
+        };
+        // Objects and logs churn on every Git command. Re-reading every checkout because a
+        // blob was written is the cost this whole path exists to avoid.
+        for path in ["/repo/.git/objects/aa/object", "/repo/.git/logs/HEAD"] {
+            let event = notify::Event {
+                kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+                paths: vec![PathBuf::from(path)],
+                attrs: Default::default(),
+            };
+            assert_eq!(affected_checkouts(&plan, &event), None, "{path}");
+        }
     }
 
     #[test]
@@ -1929,20 +2323,83 @@ line.txt";
         assert!(parse_numstat(b"not a record\0").is_err());
     }
 
+    /// What `git diff --no-index --numstat /dev/null <file>` prints, which is the answer the
+    /// in-process count has to agree with.
+    fn git_says_for_an_untracked_file(root: &Path, name: &str) -> Option<GitDiffStats> {
+        let output = Command::new("git")
+            .args([
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--numstat",
+                "--no-index",
+                "--",
+                "/dev/null",
+                name,
+            ])
+            .current_dir(root)
+            .output()
+            .expect("Git is installed");
+        assert!(
+            matches!(output.status.code(), Some(0) | Some(1)),
+            "git diff --no-index failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let record = output
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .next()
+            .unwrap_or(b"");
+        let mut columns = record.split(|byte| *byte == b'\t');
+        let additions = columns.next()?;
+        let deletions = columns.next()?;
+        // Git prints `-` for both columns of a file it declined to count, and so does a row
+        // here: no numbers at all, rather than a zero nobody measured.
+        if additions == b"-" || deletions == b"-" {
+            return None;
+        }
+        Some(GitDiffStats {
+            additions: String::from_utf8_lossy(additions).parse().ok()?,
+            deletions: String::from_utf8_lossy(deletions).parse().ok()?,
+        })
+    }
+
+    /// The in-process count is a reimplementation of what Git does with `git diff --no-index`
+    /// against an empty file, so the only honest way to hold it to that is to ask Git.
     #[test]
-    fn a_single_file_numstat_reads_the_only_record_it_prints() {
-        assert_eq!(
-            first_numstat_record(b"2\t0\t/{dev/null => /tmp/checkout/added.txt}\n"),
-            Some(GitDiffStats {
-                additions: 2,
-                deletions: 0
-            })
-        );
-        assert_eq!(
-            first_numstat_record(b"-\t-\t/{dev/null => /tmp/checkout/a.dat}\n"),
-            None
-        );
-        assert_eq!(first_numstat_record(b""), None);
+    fn counting_an_untracked_file_agrees_with_asking_git_to_diff_it_against_nothing() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        let cases: &[(&str, &[u8])] = &[
+            ("empty.txt", b""),
+            ("one-line.txt", b"a\n"),
+            // The last line has no newline of its own and is still a line.
+            ("no-trailing-newline.txt", b"a\nb\nc"),
+            ("three-lines.txt", b"a\nb\nc\n"),
+            ("blank-lines.txt", b"\n\n\n"),
+            ("crlf.txt", b"a\r\nb\r\n"),
+            // A NUL byte is what makes Git call a file binary, and it looks only at the head.
+            ("binary.dat", &[0, 1, 2, 3]),
+            ("binary-late.dat", b"aaaa\nbbbb\n\0\n"),
+        ];
+        for (name, bytes) in cases {
+            fs::write(root.join(name), bytes).unwrap();
+        }
+
+        for (name, _) in cases {
+            assert_eq!(
+                untracked_line_count(&root.join(name)),
+                git_says_for_an_untracked_file(&root, name),
+                "{name} counted differently than Git counts it"
+            );
+        }
+    }
+
+    #[test]
+    fn an_untracked_file_git_cannot_read_is_left_out_rather_than_counted_as_zero() {
+        let temp = tempdir().unwrap();
+        assert_eq!(untracked_line_count(&temp.path().join("gone.txt")), None);
     }
 
     #[test]
@@ -1964,7 +2421,7 @@ line.txt";
         fs::write(root.join("binary.dat"), [0, 1, 2]).unwrap();
         fs::remove_file(root.join("gone.txt")).unwrap();
 
-        let listed = status(&database, &checkout_id).unwrap();
+        let listed = status(&database, &watchers, &checkout_id).unwrap();
         let counted = super::diff_stats(&database, &watchers, &checkout_id).unwrap();
         let totals = super::checkout_diff_stats(&database, &watchers).unwrap();
 
@@ -2017,7 +2474,7 @@ line.txt";
         let (database, checkout_id) = git_database(temp.path(), &root);
         let watchers = GitWatcherManager::default();
 
-        let listed = status(&database, &checkout_id).unwrap();
+        let listed = status(&database, &watchers, &checkout_id).unwrap();
         let counted = super::diff_stats(&database, &watchers, &checkout_id).unwrap();
         let counts: BTreeMap<_, _> = counted
             .iter()
@@ -2081,58 +2538,121 @@ line.txt";
             .is_empty());
     }
 
-    fn cached_counts(additions: u64) -> CachedGitCounts {
-        CachedGitCounts {
-            checkout_id: "checkout:a".to_owned(),
+    fn cached_state(counts: Option<GitCounts>) -> CachedGitSnapshot {
+        CachedGitSnapshot {
             default_branch: Some("trunk".to_owned()),
             stale: false,
-            counts: GitCounts {
-                files: Vec::new(),
-                totals: GitDiffStats {
-                    additions,
-                    deletions: 0,
+            snapshot: super::Snapshot {
+                status: GitStatus {
+                    branch: None,
+                    head: None,
+                    default_branch: "trunk".to_owned(),
+                    ahead_count: 0,
+                    files: Vec::new(),
                 },
+                merge_base: "abc123".to_owned(),
             },
+            counts,
         }
     }
 
     #[test]
-    fn a_watched_checkout_is_counted_once_until_its_watcher_reports_a_change() {
-        let cache = super::GitDiffStatsCache::default();
-        let stored = cached_counts(3);
+    fn a_checkout_is_read_once_until_its_watcher_says_a_change_moved_it() {
+        let cache = GitSnapshotCache::default();
 
         assert!(cache.fresh("checkout:a", Some("trunk")).is_none());
-        cache.store(stored.clone());
-        assert_eq!(
-            cache.fresh("checkout:a", Some("trunk")),
-            Some(stored.counts)
-        );
-        // Another default branch is another base ref, which no watcher can see.
-        assert!(cache.fresh("checkout:a", Some("main")).is_none());
-        cache.mark_stale("checkout:a");
-        assert!(cache.fresh("checkout:a", Some("trunk")).is_none());
-        cache.store(cached_counts(4));
+        cache.insert("checkout:a".to_owned(), cached_state(None));
+        // The file list is held, which is what lets a `git status` and the counts of the same
+        // checkout be one reading rather than two.
         assert_eq!(
             cache
                 .fresh("checkout:a", Some("trunk"))
-                .map(|counts| counts.totals),
-            Some(GitDiffStats {
-                additions: 4,
-                deletions: 0
-            })
+                .map(|held| held.snapshot.merge_base),
+            Some("abc123".to_owned())
         );
-        cache.forget("checkout:a");
+        // Another default branch is another base ref, which no watcher can see.
+        assert!(cache.fresh("checkout:a", Some("main")).is_none());
+        cache.mark_stale(&["checkout:a".to_owned()]);
+        assert!(cache.fresh("checkout:a", Some("trunk")).is_none());
+        cache.insert("checkout:a".to_owned(), cached_state(None));
+        assert_eq!(
+            cache
+                .fresh("checkout:a", Some("trunk"))
+                .map(|held| held.snapshot.merge_base),
+            Some("abc123".to_owned())
+        );
+        cache.forget_many(&["checkout:a".to_owned()]);
         assert!(cache.fresh("checkout:a", Some("trunk")).is_none());
     }
 
     #[test]
-    fn an_unwatched_checkout_has_no_held_counts_because_it_has_no_change_signal() {
+    fn a_change_drops_the_checkouts_it_speaks_for_and_leaves_the_others_held() {
+        let cache = GitSnapshotCache::default();
+        cache.insert("checkout:a".to_owned(), cached_state(None));
+        cache.insert("checkout:b".to_owned(), cached_state(None));
+
+        // A commit in one worktree moves the merge base every sibling counts against, so the
+        // signal names all of them. A save in one names only that one, and the rest of the
+        // sidebar is a lookup rather than another walk of the same working trees.
+        cache.mark_stale(&["checkout:a".to_owned()]);
+        assert!(cache.fresh("checkout:a", Some("trunk")).is_none());
+        assert!(cache.fresh("checkout:b", Some("trunk")).is_some());
+    }
+
+    #[test]
+    fn an_entry_holds_the_counts_once_something_has_asked_for_them() {
+        let cache = GitSnapshotCache::default();
+        let counts = GitCounts {
+            files: Vec::new(),
+            totals: GitDiffStats {
+                additions: 7,
+                deletions: 1,
+            },
+        };
+        cache.insert("checkout:a".to_owned(), cached_state(Some(counts.clone())));
+
+        // The sidebar and the Changes tab both want the lines on the same change, and neither
+        // should pay for the other.
+        assert_eq!(
+            cache
+                .fresh("checkout:a", Some("trunk"))
+                .and_then(|held| held.counts),
+            Some(counts)
+        );
+    }
+
+    #[test]
+    fn a_status_and_the_counts_of_one_checkout_are_the_same_reading() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join("added.txt"), "one\ntwo\n").unwrap();
+        let (database, checkout_id) = git_database(temp.path(), &root);
         let watchers = GitWatcherManager::default();
 
-        watchers.store_diff_stats(cached_counts(3));
+        let listed = status(&database, &watchers, &checkout_id).unwrap();
+        let counted = super::diff_stats(&database, &watchers, &checkout_id).unwrap();
+        let totals = super::checkout_diff_stats(&database, &watchers).unwrap();
 
-        assert!(watchers
-            .cached_diff_stats("checkout:a", Some("trunk"))
-            .is_none());
+        // The file list the status reports and the file list the counts decorate are the same
+        // list, which is only true if both came from one snapshot.
+        assert_eq!(
+            counted
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>(),
+            listed
+                .files
+                .iter()
+                .map(|file| file.path.as_str())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            totals[&checkout_id],
+            GitDiffStats {
+                additions: 2,
+                deletions: 0
+            }
+        );
     }
 }

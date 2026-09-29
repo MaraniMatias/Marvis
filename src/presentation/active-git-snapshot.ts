@@ -1,10 +1,10 @@
 import { listen } from "@tauri-apps/api/event";
-import { reactive, watch } from "vue";
-import type { ComputedRef } from "vue";
+import { reactive, ref, toValue, watch } from "vue";
+import type { ComputedRef, MaybeRefOrGetter } from "vue";
 import type { GitStatus } from "../domain/git";
 import { isIpcError } from "../domain/ipc";
 import type { Checkout, Repo } from "../domain/workspace";
-import { getGitStatus, unwatchGitCheckout, watchGitCheckout } from "../lib/ipc";
+import { getGitStatus } from "../lib/ipc";
 
 export interface ActiveGitSnapshot {
   checkoutId: string | null;
@@ -27,12 +27,16 @@ export function useActiveGitSnapshot(
   checkout: ComputedRef<Checkout | null>,
   repo: ComputedRef<Repo | null>,
   onDefaultBranchUnknown: () => void,
+  unwatchedRepos: MaybeRefOrGetter<ReadonlySet<string>>,
 ): ActiveGitSnapshot {
   let generation = 0;
   let requestedDefaultBranch = false;
   let refreshCurrentStatus: (() => Promise<void>) | undefined;
   let refreshCurrentStatusGeneration = 0;
-  const watcherOperations = new Map<string, Promise<void>>();
+  /** Why this checkout's change signal never arrived, when that is the listener's doing.
+   *  The panel reads it together with the repository watcher below, so the field has one
+   *  writer and both ways of losing live updates read the same way. */
+  const listenerError = ref("");
   const state = reactive<ActiveGitSnapshot>({
     checkoutId: null,
     status: null,
@@ -46,27 +50,11 @@ export function useActiveGitSnapshot(
     statusEventCheckoutId: null,
   });
 
-  function queueWatcherOperation(checkoutId: string, operation: () => Promise<void>): Promise<void> {
-    const previous = watcherOperations.get(checkoutId) ?? Promise.resolve();
-    const queued = previous.catch(() => undefined).then(operation);
-    watcherOperations.set(checkoutId, queued);
-    queued.then(
-      () => {
-        if (watcherOperations.get(checkoutId) === queued) watcherOperations.delete(checkoutId);
-      },
-      () => {
-        if (watcherOperations.get(checkoutId) === queued) watcherOperations.delete(checkoutId);
-      },
-    );
-    return queued;
-  }
-
   watch(
     [() => checkout.value?.id, () => checkout.value?.isMissing, () => repo.value?.kind],
     async ([checkoutId, isMissing, repoKind], _previous, onCleanup) => {
       const requestGeneration = ++generation;
       let current = true;
-      let watchQueued = false;
       let unlistenStatus: (() => void) | undefined;
       let statusRequest = 0;
       const isCurrent = () => current && requestGeneration === generation;
@@ -76,9 +64,6 @@ export function useActiveGitSnapshot(
         generation += 1;
         if (refreshCurrentStatusGeneration === requestGeneration) refreshCurrentStatus = undefined;
         unlistenStatus?.();
-        if (watchQueued && checkoutId) {
-          void queueWatcherOperation(checkoutId, () => unwatchGitCheckout(checkoutId)).catch(() => undefined);
-        }
       });
 
       state.checkoutId = checkoutId ?? null;
@@ -87,8 +72,8 @@ export function useActiveGitSnapshot(
       state.statusState = "ready";
       state.statusError = "";
       state.changesStatusError = "";
-      state.changesWatchError = "";
       state.statusEventCheckoutId = null;
+      listenerError.value = "";
       requestedDefaultBranch = false;
       if (!checkoutId) return;
       if (isMissing) {
@@ -132,8 +117,10 @@ export function useActiveGitSnapshot(
       refreshCurrentStatusGeneration = requestGeneration;
 
       try {
-        const dispose = await listen<string>("git-status-changed", (event) => {
-          if (event.payload === checkoutId && isCurrent()) {
+        // The signal names every checkout a change speaks for: a commit in one worktree moves
+        // the merge base its siblings count against, so one save can be about all of them.
+        const dispose = await listen<string[]>("git-status-changed", (event) => {
+          if (event.payload.includes(checkoutId) && isCurrent()) {
             state.statusEventCheckoutId = checkoutId;
             state.statusEventRevision += 1;
             void refreshStatus();
@@ -145,19 +132,29 @@ export function useActiveGitSnapshot(
         }
         unlistenStatus = dispose;
       } catch (cause) {
-        if (isCurrent()) state.changesWatchError = errorText(cause);
+        if (isCurrent()) listenerError.value = errorText(cause);
       }
       if (!isCurrent()) return;
+      await refreshStatus();
+    },
+    { immediate: true },
+  );
 
-      watchQueued = true;
-      try {
-        await queueWatcherOperation(checkoutId, async () => {
-          if (isCurrent()) await watchGitCheckout(checkoutId);
-        });
-      } catch (cause) {
-        if (isCurrent()) state.changesWatchError = errorText(cause);
-      }
-      if (isCurrent()) await refreshStatus();
+  // A repository whose watcher could not start never tells this panel that anything changed,
+  // so its rows would sit on numbers nothing can refresh. The reason belongs next to them.
+  watch(
+    [
+      () => repo.value?.id,
+      () => {
+        const repoId = repo.value?.id;
+        return repoId ? toValue(unwatchedRepos).has(repoId) : false;
+      },
+      () => listenerError.value,
+    ],
+    ([, unwatched, listener]) => {
+      state.changesWatchError = unwatched
+        ? "This repository is not being watched, so its changes will not refresh on their own."
+        : listener || "";
     },
     { immediate: true },
   );

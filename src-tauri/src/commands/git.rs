@@ -13,9 +13,11 @@ use crate::{
 pub async fn git_status(
     checkout_id: String,
     database: State<'_, Database>,
+    watchers: State<'_, std::sync::Arc<GitWatcherManager>>,
 ) -> Result<GitStatus, IpcError> {
     let database = database.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || git::status(&database, &checkout_id))
+    let watchers = watchers.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || git::status(&database, &watchers, &checkout_id))
         .await
         .map_err(operation_error)?
 }
@@ -102,9 +104,13 @@ pub async fn git_mark_viewed(
     Ok(())
 }
 
+/// Watches a whole repository rather than one checkout. Its worktrees share a Git directory, so
+/// a commit in one of them moves the merge base every sibling counts its lines against, and a
+/// watcher per checkout would report that commit N times while still leaving the N-1 rows
+/// describing a change set that no longer exists.
 #[tauri::command]
-pub async fn git_watch_checkout(
-    checkout_id: String,
+pub async fn git_watch_repo(
+    repo_id: String,
     app: AppHandle,
     database: State<'_, Database>,
     watchers: State<'_, std::sync::Arc<GitWatcherManager>>,
@@ -112,22 +118,27 @@ pub async fn git_watch_checkout(
     let database = database.inner().clone();
     let watchers = watchers.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        let paths = git::watch_paths(&database, &checkout_id)?;
-        watchers.watch(app, checkout_id, paths)
+        let plan = git::watch_plan(&database, &repo_id)?;
+        watchers.watch(app, repo_id, plan)
     })
     .await
     .map_err(operation_error)?
 }
 
 #[tauri::command]
-pub async fn git_unwatch_checkout(
-    checkout_id: String,
+pub async fn git_unwatch_repo(
+    repo_id: String,
+    database: State<'_, Database>,
     watchers: State<'_, std::sync::Arc<GitWatcherManager>>,
 ) -> Result<(), IpcError> {
+    let database = database.inner().clone();
     let watchers = watchers.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || watchers.unwatch(&checkout_id))
-        .await
-        .map_err(operation_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        let checkout_ids = git::repo_checkout_ids(&database, &repo_id);
+        watchers.unwatch(&repo_id, &checkout_ids);
+    })
+    .await
+    .map_err(operation_error)
 }
 
 fn operation_error(error: tauri::Error) -> IpcError {

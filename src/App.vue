@@ -30,6 +30,7 @@ import {
 import { useWorkspaceState } from "./presentation/workspace";
 import { useRecentPaths } from "./presentation/recent-paths";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
+import { useGitWatchers } from "./presentation/git-watchers";
 import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
 import type { ReviewSender } from "./presentation/review-notes";
 import { useAgentSessions } from "./presentation/agent-sessions";
@@ -80,7 +81,15 @@ const activeRepo = computed(
     workspace.value.repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === activeCheckout.value?.id)) ??
     null,
 );
-const gitSnapshot = useActiveGitSnapshot(activeCheckout, activeRepo, () => void promptForDefaultBranchIfNeeded(true));
+// The sidebar names every checkout at once, so every one of them needs a change signal and not
+// only the one on screen.
+const unwatchedRepos = useGitWatchers(() => workspace.value.repos);
+const gitSnapshot = useActiveGitSnapshot(
+  activeCheckout,
+  activeRepo,
+  () => void promptForDefaultBranchIfNeeded(true),
+  unwatchedRepos,
+);
 const review = useReviewNotes(activeCheckout, activeRepo);
 const agent = useAgentSessions(activeCheckout, activeRepo);
 const allCheckouts = computed(() => workspace.value.repos.flatMap((repo) => repo.checkouts));
@@ -581,11 +590,15 @@ onMounted(async () => {
     appLayoutReady.value = true;
   }
   try {
-    const dispose = await listen<string>("checkout-file-activity", (event) => {
-      documentRefreshRevisions.value = {
-        ...documentRefreshRevisions.value,
-        [event.payload]: (documentRefreshRevisions.value[event.payload] ?? 0) + 1,
-      };
+    const dispose = await listen<string[]>("checkout-file-activity", (event) => {
+      // One watcher covers a whole repository, so a write in one worktree arrives naming the
+      // worktree it landed in rather than the one that happened to be on screen.
+      for (const checkoutId of event.payload) {
+        documentRefreshRevisions.value = {
+          ...documentRefreshRevisions.value,
+          [checkoutId]: (documentRefreshRevisions.value[checkoutId] ?? 0) + 1,
+        };
+      }
     });
     if (activityListenerDisposed) dispose();
     else unlistenFileActivity = dispose;

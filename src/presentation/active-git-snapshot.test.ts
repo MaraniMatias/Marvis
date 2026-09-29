@@ -8,17 +8,13 @@ import type { Checkout, Repo } from "../domain/workspace";
 
 const mocks = vi.hoisted(() => ({
   getGitStatus: vi.fn(),
-  watchGitCheckout: vi.fn(),
-  unwatchGitCheckout: vi.fn(),
   listen: vi.fn(),
   unlisten: vi.fn(),
-  handlers: new Map<string, (event: { payload: string }) => void>(),
+  handlers: new Map<string, (event: { payload: string[] }) => void>(),
 }));
 
 vi.mock("../lib/ipc", () => ({
   getGitStatus: mocks.getGitStatus,
-  watchGitCheckout: mocks.watchGitCheckout,
-  unwatchGitCheckout: mocks.unwatchGitCheckout,
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 
@@ -54,16 +50,11 @@ function status(branch: string): GitStatus {
   return { branch, defaultBranch: "trunk", aheadCount: 0, files: [] };
 }
 
-function deferred<T>() {
-  let resolve!: (value: T) => void;
-  const promise = new Promise<T>((done) => (resolve = done));
-  return { promise, resolve };
-}
-
 function host(
   checkoutRef: Ref<Checkout | null>,
   repoRef: Ref<Repo | null>,
   onDefaultBranchUnknown: () => void = () => undefined,
+  unwatchedRepos: Ref<ReadonlySet<string>> = ref(new Set()),
 ) {
   return defineComponent({
     setup() {
@@ -71,8 +62,9 @@ function host(
         computed(() => checkoutRef.value),
         computed(() => repoRef.value),
         onDefaultBranchUnknown,
+        unwatchedRepos,
       );
-      return () => h("div", snapshot.status?.branch ?? "no status");
+      return () => h("div", [snapshot.status?.branch ?? "no status", snapshot.changesWatchError].join("|"));
     },
   });
 }
@@ -81,46 +73,41 @@ describe("useActiveGitSnapshot", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.handlers.clear();
-    mocks.listen.mockImplementation(async (name: string, handler: (event: { payload: string }) => void) => {
+    mocks.listen.mockImplementation(async (name: string, handler: (event: { payload: string[] }) => void) => {
       mocks.handlers.set(name, handler);
       return mocks.unlisten;
     });
     mocks.getGitStatus.mockImplementation(async (id: string) => status(id));
-    mocks.watchGitCheckout.mockResolvedValue(undefined);
-    mocks.unwatchGitCheckout.mockResolvedValue(undefined);
   });
 
-  it("owns one listener and watcher pair for the selected checkout and releases them on selection change/unmount", async () => {
+  it("owns one listener for the selected checkout and releases it on selection change/unmount", async () => {
     const activeCheckout = ref<Checkout | null>(checkout("first"));
     const activeRepo = ref<Repo | null>(repo());
     const wrapper = mount(host(activeCheckout, activeRepo));
     await flushPromises();
 
     expect(mocks.listen).toHaveBeenCalledTimes(1);
-    expect(mocks.watchGitCheckout).toHaveBeenCalledTimes(1);
-    expect(mocks.watchGitCheckout).toHaveBeenCalledWith("first");
     expect(mocks.getGitStatus).toHaveBeenCalledTimes(1);
     expect(wrapper.text()).toContain("first");
 
-    mocks.handlers.get("git-status-changed")?.({ payload: "not-active" });
+    // A commit in one worktree moves the merge base its siblings count against, so the signal
+    // names every checkout it speaks for and this one reads only its own.
+    mocks.handlers.get("git-status-changed")?.({ payload: ["other", "third"] });
     await flushPromises();
     expect(mocks.getGitStatus).toHaveBeenCalledTimes(1);
 
-    mocks.handlers.get("git-status-changed")?.({ payload: "first" });
+    mocks.handlers.get("git-status-changed")?.({ payload: ["other", "first"] });
     await flushPromises();
     expect(mocks.getGitStatus).toHaveBeenCalledTimes(2);
 
     activeCheckout.value = checkout("second");
     await flushPromises();
-    expect(mocks.unwatchGitCheckout).toHaveBeenCalledWith("first");
-    expect(mocks.watchGitCheckout).toHaveBeenLastCalledWith("second");
     expect(mocks.listen).toHaveBeenCalledTimes(2);
     expect(mocks.unlisten).toHaveBeenCalledTimes(1);
     expect(wrapper.text()).toContain("second");
 
     wrapper.unmount();
     await flushPromises();
-    expect(mocks.unwatchGitCheckout).toHaveBeenLastCalledWith("second");
     expect(mocks.unlisten).toHaveBeenCalledTimes(2);
   });
 
@@ -146,107 +133,25 @@ describe("useActiveGitSnapshot", () => {
     wrapper.unmount();
   });
 
-  it("does not advance to later registration phases when git-status-changed rejects after checkout change", async () => {
+  it("says so where the numbers are read when the repository is not being watched", async () => {
+    const unwatched = ref<ReadonlySet<string>>(new Set());
     const activeCheckout = ref<Checkout | null>(checkout("first"));
     const activeRepo = ref<Repo | null>(repo());
-    let rejectDelayed!: (cause: unknown) => void;
-    let delayed = false;
-    mocks.listen.mockImplementation(async (_name: string, handler: (event: { payload: string }) => void) => {
-      if (!delayed) {
-        delayed = true;
-        return await new Promise<() => void>((_resolve, reject) => (rejectDelayed = reject));
-      }
-      mocks.handlers.set("git-status-changed", handler);
-      return mocks.unlisten;
-    });
+    const wrapper = mount(host(activeCheckout, activeRepo, () => undefined, unwatched));
+    await flushPromises();
+    expect(wrapper.text()).not.toContain("not being watched");
 
-    const wrapper = mount(host(activeCheckout, activeRepo));
+    // Nothing can tell this panel that anything changed, so its rows would sit on numbers
+    // nothing can refresh. The reason belongs next to them rather than in a toast that expires.
+    unwatched.value = new Set(["repo:test"]);
     await flushPromises();
-    activeCheckout.value = checkout("second");
-    await flushPromises();
-    expect(mocks.watchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["second"]);
-    expect(mocks.getGitStatus.mock.calls.map(([id]) => id)).toEqual(["second"]);
+    expect(wrapper.text()).toContain("not being watched");
 
-    rejectDelayed(new Error("late listener registration failure"));
+    // Another repository failing to start says nothing about the one on screen.
+    unwatched.value = new Set(["repo:other"]);
     await flushPromises();
-    expect(mocks.watchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["second"]);
-    expect(mocks.getGitStatus.mock.calls.map(([id]) => id)).toEqual(["second"]);
-    expect(mocks.listen).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).not.toContain("not being watched");
     wrapper.unmount();
-  });
-
-  it("serializes same-checkout teardown/start across A→B→A transitions", async () => {
-    const activeCheckout = ref<Checkout | null>(checkout("A"));
-    const activeRepo = ref<Repo | null>(repo());
-    const firstWatchA = deferred<void>();
-    const firstUnwatchA = deferred<void>();
-    const backendWatchers = new Set<string>();
-    let watchACount = 0;
-    let unwatchACount = 0;
-    mocks.watchGitCheckout.mockImplementation((id: string) => {
-      if (id === "A" && ++watchACount === 1) {
-        return firstWatchA.promise.then(() => {
-          backendWatchers.add(id);
-        });
-      }
-      backendWatchers.add(id);
-      return Promise.resolve();
-    });
-    mocks.unwatchGitCheckout.mockImplementation((id: string) => {
-      if (id === "A" && ++unwatchACount === 1) {
-        return firstUnwatchA.promise.then(() => {
-          backendWatchers.delete(id);
-        });
-      }
-      backendWatchers.delete(id);
-      return Promise.resolve();
-    });
-
-    const wrapper = mount(host(activeCheckout, activeRepo));
-    await flushPromises();
-    expect(mocks.watchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["A"]);
-
-    activeCheckout.value = checkout("B");
-    await flushPromises();
-    activeCheckout.value = checkout("A");
-    await flushPromises();
-    expect(mocks.watchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["A", "B"]);
-
-    firstWatchA.resolve(undefined);
-    await flushPromises();
-    expect(mocks.unwatchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["B", "A"]);
-    expect(mocks.watchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["A", "B"]);
-
-    firstUnwatchA.resolve(undefined);
-    await flushPromises();
-    expect(mocks.watchGitCheckout.mock.calls.map(([id]) => id)).toEqual(["A", "B", "A"]);
-    expect([...backendWatchers]).toEqual(["A"]);
-
-    wrapper.unmount();
-    await flushPromises();
-    expect([...backendWatchers]).toEqual([]);
-  });
-
-  it("unwatches after a pending start resolves when the owner unmounts", async () => {
-    const activeCheckout = ref<Checkout | null>(checkout("A"));
-    const activeRepo = ref<Repo | null>(repo());
-    const pendingWatch = deferred<void>();
-    const backendWatchers = new Set<string>();
-    mocks.watchGitCheckout.mockImplementation((id: string) =>
-      pendingWatch.promise.then(() => void backendWatchers.add(id)),
-    );
-    mocks.unwatchGitCheckout.mockImplementation(async (id: string) => {
-      backendWatchers.delete(id);
-    });
-
-    const wrapper = mount(host(activeCheckout, activeRepo));
-    await flushPromises();
-    wrapper.unmount();
-    pendingWatch.resolve(undefined);
-    await flushPromises();
-
-    expect(mocks.unwatchGitCheckout).toHaveBeenCalledWith("A");
-    expect([...backendWatchers]).toEqual([]);
   });
 
   it("requests default-branch recovery once per checkout configuration", async () => {
@@ -258,15 +163,13 @@ describe("useActiveGitSnapshot", () => {
     await flushPromises();
     expect(onDefaultBranchUnknown).toHaveBeenCalledTimes(1);
 
-    mocks.handlers.get("git-status-changed")?.({ payload: "first" });
+    mocks.handlers.get("git-status-changed")?.({ payload: ["first"] });
     await flushPromises();
     expect(onDefaultBranchUnknown).toHaveBeenCalledTimes(1);
 
     activeRepo.value = repo("main");
     await flushPromises();
     expect(onDefaultBranchUnknown).toHaveBeenCalledTimes(2);
-    expect(mocks.watchGitCheckout).toHaveBeenCalledTimes(1);
-    expect(mocks.unwatchGitCheckout).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 });
