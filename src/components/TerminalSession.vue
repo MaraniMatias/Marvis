@@ -208,7 +208,14 @@ onMounted(() => {
   // the real face lands, xterm re-measures the cell and repaints at the same cols and rows, and
   // what is left unpainted is a strip down the right and along the bottom: flush at the top-left
   // corner, short everywhere else. Nothing else re-fits the terminal, so this does.
-  void document.fonts.ready.then(() => fitActiveView());
+  void document.fonts.ready.then(() => {
+    if (disposed) return;
+    // WebGL's glyph atlas may have rasterized fallback-font glyphs before the local face loaded.
+    // Selection uses differently colored atlas entries, so it can expose the now-loaded font only
+    // for selected cells unless the stale entries are discarded too.
+    terminal.clearTextureAtlas();
+    fitActiveView();
+  });
   resizeObserver = new ResizeObserver(() => fitActiveView());
   resizeObserver.observe(terminalElement.value);
   void startSession();

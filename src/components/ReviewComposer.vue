@@ -8,8 +8,9 @@ const props = withDefaults(
     /** Last line of the range, when the draft spans more than one line. */
     lineEnd?: number | null;
     code?: string;
+    error?: string;
   }>(),
-  { lineEnd: null, code: "" },
+  { lineEnd: null, code: "", error: "" },
 );
 const emit = defineEmits<{
   submit: [content: string];
@@ -36,7 +37,6 @@ watch(
 function submit() {
   if (!content.value.trim()) return;
   emit("submit", content.value);
-  content.value = "";
 }
 </script>
 
@@ -60,8 +60,9 @@ function submit() {
       class="w-full resize-y rounded-sm border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none placeholder:text-(--marvis-text-faint) focus:border-(--marvis-text-faint)"
     />
     <p v-if="isRange" class="mt-1 text-[10px] text-(--marvis-text-faint)">
-      Click another line to widen the range, or cancel to start over.
+      This note covers the selected lines. Cancel to start over.
     </p>
+    <p v-if="error" role="alert" class="mt-1 text-[10px] text-(--marvis-red)">{{ error }}</p>
     <div class="mt-1 flex items-center gap-2">
       <button
         type="submit"

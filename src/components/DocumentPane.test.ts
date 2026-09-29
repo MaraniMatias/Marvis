@@ -7,6 +7,7 @@ import { defineComponent, reactive, ref } from "vue";
 import type { VNodeChild } from "vue";
 import type { GitStatus } from "../domain/git";
 import type { DocumentMode, MainView } from "../domain/main-document";
+import { buildReviewMarkdown } from "../domain/review";
 import type { ReviewNote } from "../domain/review";
 import type { Checkout, Repo } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
@@ -91,7 +92,7 @@ vi.mock("@git-diff-view/vue", async () => {
     },
     DiffModeEnum: { Unified: 4 },
     // Renders the review slots the way the real diff view does for the active line.
-    DiffView: component({
+    DiffViewWithMultiSelect: component({
       name: "DiffView",
       props: {
         diffViewAddWidget: { type: Boolean, default: false },
@@ -110,7 +111,7 @@ vi.mock("@git-diff-view/vue", async () => {
             String(props.diffViewAddWidget),
             Object.keys(props.extendData?.newFile ?? {}).join(","),
             slots.extend?.({ data: props.extendData?.newFile?.["1"]?.data ?? [] } as never),
-            slots.widget?.({ lineNumber: 1, side: 2, onClose: () => undefined } as never),
+            slots.widget?.({ lineNumber: 1, fromLineNumber: 1, side: 2, onClose: () => undefined } as never),
           ]),
     }),
   };
@@ -1123,6 +1124,127 @@ describe("DocumentPane", () => {
       content: "these three lines belong together",
       code: "first line\nsecond line\nthird line",
     });
+    wrapper.unmount();
+  });
+
+  it("keeps range code from every loaded diff page when selection spans a scroll", async () => {
+    const checkoutId = "checkout:range-pages";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "large.ts", status: "M" }]);
+    const lines = [
+      { index: 0, kind: "hunk" as const, text: "@@ -0,0 +1,70 @@", oldLineNumber: null, newLineNumber: null },
+      ...Array.from({ length: 70 }, (_, index) => ({
+        index: index + 1,
+        kind: "added" as const,
+        text: `+line ${index + 1}`,
+        oldLineNumber: null,
+        newLineNumber: index + 1,
+      })),
+    ];
+    const code = Array.from({ length: 70 }, (_, index) => `line ${index + 1}`).join("\n");
+    mocks.getGitDiff.mockResolvedValue({
+      path: "large.ts",
+      patch: "",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: lines.length,
+      hunks: [{ startLine: 0, endLine: lines.length, title: "@@ -0,0 +1,70 @@" }],
+    });
+    mocks.getGitDiffPage.mockImplementation(async (_checkout: string, path: string, start: number, count: number) => ({
+      path,
+      startLine: start,
+      totalLines: lines.length,
+      lines: lines.slice(start, start + count),
+    }));
+    const review = reviewApi();
+    const wrapper = mount(FileDiff, {
+      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "large.ts", scrollTop: 0 },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+line 70"));
+
+    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
+    const viewport = wrapper.get('[aria-label="Diff contents"]');
+    (viewport.element as HTMLElement).scrollTop = 40 * 22;
+    await viewport.trigger("scroll");
+    await wrapper.get('[aria-label="Add review note on line 70"]').trigger("click");
+    (viewport.element as HTMLElement).scrollTop = 0;
+    await viewport.trigger("scroll");
+
+    await vi.waitFor(() =>
+      expect(wrapper.get('form[aria-label="New review note"]').text()).toContain("new lines 1-70"),
+    );
+    await wrapper.get('textarea[aria-label="Review note"]').setValue("review the whole block");
+    await wrapper.get('form[aria-label="New review note"]').trigger("submit");
+    await flushPromises();
+
+    expect(review.addNote).toHaveBeenCalledWith({
+      path: "large.ts",
+      side: "new",
+      lineStart: 1,
+      lineEnd: 70,
+      content: "review the whole block",
+      code,
+    });
+    const markdown = buildReviewMarkdown(
+      [reviewNote({ path: "large.ts", lineStart: 1, lineEnd: 70, code, content: "review the whole block" })],
+      { date: "2026-03-14" },
+    );
+    expect(markdown).toContain(`\`\`\`ts{1-70}\n${code}\n\`\`\``);
+    wrapper.unmount();
+  });
+
+  it("rejects a range when virtualized pages needed for its code were skipped", async () => {
+    const checkoutId = "checkout:range-unloaded";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "large.ts", status: "M" }]);
+    const lines = [
+      { index: 0, kind: "hunk" as const, text: "@@ -0,0 +1,520 @@", oldLineNumber: null, newLineNumber: null },
+      ...Array.from({ length: 520 }, (_, index) => ({
+        index: index + 1,
+        kind: "added" as const,
+        text: `+line ${index + 1}`,
+        oldLineNumber: null,
+        newLineNumber: index + 1,
+      })),
+    ];
+    mocks.getGitDiff.mockResolvedValue({
+      path: "large.ts",
+      patch: "",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: lines.length,
+      hunks: [{ startLine: 0, endLine: lines.length, title: "@@ -0,0 +1,520 @@" }],
+    });
+    mocks.getGitDiffPage.mockImplementation(async (_checkout: string, path: string, start: number, count: number) => ({
+      path,
+      startLine: start,
+      totalLines: lines.length,
+      lines: lines.slice(start, start + count),
+    }));
+    const review = reviewApi();
+    const wrapper = mount(FileDiff, {
+      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "large.ts", scrollTop: 0 },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+line 1"));
+    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
+
+    const viewport = wrapper.get('[aria-label="Diff contents"]');
+    (viewport.element as HTMLElement).scrollTop = 500 * 22;
+    await viewport.trigger("scroll");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+line 500"));
+    await wrapper.get('[aria-label="Add review note on line 500"]').trigger("click");
+    (viewport.element as HTMLElement).scrollTop = 0;
+    await viewport.trigger("scroll");
+
+    const form = wrapper.get('form[aria-label="New review note"]');
+    await form.get('textarea[aria-label="Review note"]').setValue("review this range");
+    await form.trigger("submit");
+
+    expect(form.get('[role="alert"]').text()).toContain("Some selected lines are unavailable");
+    expect((form.get('textarea[aria-label="Review note"]').element as HTMLTextAreaElement).value).toBe(
+      "review this range",
+    );
+    expect(review.addNote).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 

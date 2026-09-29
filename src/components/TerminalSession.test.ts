@@ -12,6 +12,7 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     output: [] as number[][],
     openCalls: 0,
     focusCalls: 0,
+    clearTextureAtlasCalls: 0,
     screenWidth: 0,
     terminal: null as MockTerminal | null,
   };
@@ -45,6 +46,9 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     }
     focus() {
       terminalMock.focusCalls += 1;
+    }
+    clearTextureAtlas() {
+      terminalMock.clearTextureAtlasCalls += 1;
     }
     dispose() {}
   }
@@ -130,6 +134,7 @@ describe("TerminalSession UI", () => {
     terminalMock.output = [];
     terminalMock.openCalls = 0;
     terminalMock.focusCalls = 0;
+    terminalMock.clearTextureAtlasCalls = 0;
     terminalMock.screenWidth = 0;
     terminalMock.terminal = null;
     terminalLib.fitCalls = 0;
@@ -169,6 +174,7 @@ describe("TerminalSession UI", () => {
     // columns and the row the two cells differ in — a strip down the right and along the bottom,
     // flush at the top-left corner, which is the one shape a padding bug cannot explain.
     expect(terminalLib.fitCalls).toBeGreaterThanOrEqual(2);
+    expect(terminalMock.clearTextureAtlasCalls).toBe(1);
     wrapper.unmount();
   });
 

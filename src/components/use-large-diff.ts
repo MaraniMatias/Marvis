@@ -174,5 +174,5 @@ export function useLargeDiff(
     reset();
   });
 
-  return { largeDiffLineCount, loadVisiblePages, reset, visibleLargeDiffWindow };
+  return { diffPages, largeDiffLineCount, loadVisiblePages, reset, visibleLargeDiffWindow };
 }

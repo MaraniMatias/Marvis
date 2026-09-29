@@ -75,10 +75,10 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   width: 100%;
   padding: 8px;
   border: 1px solid var(--marvis-border);
-  /* How loud a message is is a stripe down the right edge, and it took the dot's place with the
-     dot's colour: a grey note, a red failure. The edge is where a box states its own importance
-     from without putting a glyph in the text's way. */
-  border-right: 4px solid var(--marvis-text-secondary);
+  /* How loud a message is is a stripe down the left edge, opposite the dismiss button: a grey
+     note, a red failure. The edge states its own importance without putting a glyph in the text's
+     way. */
+  border-left: 4px solid var(--marvis-text-secondary);
   border-radius: var(--marvis-radius);
   background: var(--marvis-bg-2);
   color: var(--marvis-text);
@@ -88,7 +88,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 }
 
 .toast-error {
-  border-right-color: var(--marvis-red);
+  border-left-color: var(--marvis-red);
 }
 
 .toast-message {

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-indent, vue/html-closing-bracket-newline, vue/html-self-closing */
 import { Check as CheckIcon, ChevronDown as ChevronDownIcon } from "@lucide/vue";
-import { DiffFile, DiffModeEnum, DiffView } from "@git-diff-view/vue";
+import { DiffFile, DiffModeEnum, DiffViewWithMultiSelect } from "@git-diff-view/vue";
 import "@git-diff-view/vue/styles/diff-view-pure.css";
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui";
 import { computed, inject, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
@@ -9,7 +9,7 @@ import type { GitFileDiff, GitDiffPageLine } from "../domain/git";
 import { ALL_CHANGES_LABEL } from "../domain/main-document";
 import { isIpcError } from "../domain/ipc";
 import { agentAttention, sortAgentSessions } from "../domain/agent";
-import { buildDiffLineTexts, diffLineText, isReviewableNote, reviewRangeCode } from "../domain/review";
+import { buildDiffLineTexts, isReviewableNote, reviewRangeCode } from "../domain/review";
 import type { AnchorOutcome, ReviewNote, ReviewSide } from "../domain/review";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
@@ -66,16 +66,18 @@ const changedFiles = computed(() => props.gitSnapshot.status?.files ?? []);
 const title = computed(() => props.path ?? ALL_CHANGES_LABEL);
 const branch = computed(() => props.gitSnapshot.status?.branch ?? props.gitSnapshot.status?.head ?? "");
 const largeDiff = useLargeDiff(() => props.checkout.id, selectedPath, diff, collapsedHunks, diffScrollTop);
-const { largeDiffLineCount, loadVisiblePages, visibleLargeDiffWindow } = largeDiff;
+const { diffPages, largeDiffLineCount, loadVisiblePages, visibleLargeDiffWindow } = largeDiff;
 const draft = ref<{ side: ReviewSide; lineStart: number; lineEnd: number } | null>(null);
-/** Diff texts keyed by `${side}:${line}`, for the whole file or for the rendered window. */
+const draftError = ref("");
+/** Diff texts keyed by `${side}:${line}`, for the whole file or all retained virtual pages. */
 const lineTexts = computed(() => {
   if (!diff.value?.large || diff.value.tooLarge) return buildDiffLineTexts(diff.value?.patch ?? "");
   const texts = new Map<string, string>();
-  for (const row of visibleLargeDiffWindow.value.rows) {
-    if (!row.line) continue;
-    const anchor = rowAnchor(row.line);
-    if (anchor) texts.set(`${anchor.side}:${anchor.line}`, row.line.text.slice(1));
+  for (const page of Object.values(diffPages.value)) {
+    for (const line of page.lines) {
+      const anchor = rowAnchor(line);
+      if (anchor) texts.set(`${anchor.side}:${anchor.line}`, line.text.slice(1));
+    }
   }
   return texts;
 });
@@ -231,16 +233,13 @@ function chooseActiveTarget() {
 let diffGeneration = 0;
 let mounted = true;
 
-function lineCode(side: ReviewSide, line: number): string {
-  return diffLineText(lineTexts.value, side, line);
-}
-
 /**
  * Opens a draft, or extends the open one when the click lands on the same side.
  * Extending keeps the range as the span between the first and last clicked line; the
  * composer shows it, and Cancel is the way back to a single-line note.
  */
 function openDraft(side: ReviewSide, line: number) {
+  draftError.value = "";
   const open = draft.value;
   if (open && open.side === side) {
     draft.value = { ...open, lineStart: Math.min(open.lineStart, line), lineEnd: Math.max(open.lineEnd, line) };
@@ -251,6 +250,7 @@ function openDraft(side: ReviewSide, line: number) {
 
 function cancelDraft() {
   draft.value = null;
+  draftError.value = "";
 }
 
 function sideName(side: number): ReviewSide {
@@ -278,6 +278,16 @@ async function saveNoteAt(
 async function saveDraft(content: string): Promise<boolean> {
   const target = draft.value;
   if (!target) return false;
+  draftError.value = "";
+  if (diff.value?.large) {
+    for (let line = target.lineStart; line <= target.lineEnd; line += 1) {
+      if (!lineTexts.value.has(`${target.side}:${line}`)) {
+        draftError.value =
+          "Some selected lines are unavailable in the loaded diff pages. Choose a shorter range to include all its code.";
+        return false;
+      }
+    }
+  }
   const created = await saveNoteAt(target.side, target.lineStart, target.lineEnd, content);
   if (created) cancelDraft();
   return created;
@@ -294,6 +304,18 @@ function rowAnchor(line: GitDiffPageLine): { side: ReviewSide; line: number } | 
 function isDraftRow(line: GitDiffPageLine): boolean {
   const anchor = rowAnchor(line);
   return Boolean(anchor && draft.value && anchor.side === draft.value.side && anchor.line === draft.value.lineStart);
+}
+
+function isDraftSelection(line: GitDiffPageLine | undefined): boolean {
+  if (!line) return false;
+  const anchor = rowAnchor(line);
+  return Boolean(
+    anchor &&
+    draft.value &&
+    anchor.side === draft.value.side &&
+    anchor.line >= draft.value.lineStart &&
+    anchor.line <= draft.value.lineEnd,
+  );
 }
 
 function notesForRow(line: GitDiffPageLine): ReviewNote[] {
@@ -676,7 +698,11 @@ onUnmounted(() => {
       </p>
       <template v-else-if="(diffState === 'ready' || diffState === 'loading') && diff">
         <p v-if="diff.large" class="shrink-0 px-3 py-1 text-[10px] text-(--marvis-text-faint)">
-          {{ diff.totalLines.toLocaleString() }} diff rows · virtualized view · all rows available by scrolling
+          {{ diff.totalLines.toLocaleString() }} diff rows · virtualized view · click + note on two lines to comment on
+          a range
+        </p>
+        <p v-else class="shrink-0 px-3 py-1 text-[10px] text-(--marvis-text-faint)">
+          Drag across line numbers to select a range, then click + note on its last line.
         </p>
         <div
           ref="diffViewport"
@@ -695,6 +721,7 @@ onUnmounted(() => {
                 <div
                   data-testid="large-diff-row"
                   class="group flex h-6 min-w-max items-center overflow-hidden whitespace-pre text-[12px]"
+                  :class="{ 'review-range-selected': isDraftSelection(row.line) }"
                 >
                   <button
                     v-if="row.line?.kind === 'hunk'"
@@ -761,6 +788,7 @@ onUnmounted(() => {
                         draft?.lineEnd ?? null,
                       )
                     "
+                    :error="draftError"
                     @submit="saveDraft"
                     @cancel="cancelDraft"
                   />
@@ -788,7 +816,7 @@ onUnmounted(() => {
               >
                 {{ collapsedHunks.includes(index) ? "▸" : "▾" }} {{ hunk.title }}
               </button>
-              <DiffView
+              <DiffViewWithMultiSelect
                 v-if="!collapsedHunks.includes(index)"
                 :diff-file="hunk.file"
                 :diff-view-mode="DiffModeEnum.Unified"
@@ -799,14 +827,15 @@ onUnmounted(() => {
                 :diff-view-font-size="13"
                 class="min-w-0"
               >
-                <template #widget="{ lineNumber, side, onClose }">
+                <template #widget="{ lineNumber, fromLineNumber, side, onClose }">
                   <ReviewComposer
                     :side="sideName(side)"
-                    :line="lineNumber"
-                    :code="lineCode(sideName(side), lineNumber)"
+                    :line="fromLineNumber"
+                    :line-end="lineNumber !== fromLineNumber ? lineNumber : null"
+                    :code="reviewRangeCode(lineTexts, sideName(side), fromLineNumber, lineNumber)"
                     @submit="
                       async (content: string) => {
-                        if (await saveNoteAt(sideName(side), lineNumber, null, content)) onClose();
+                        if (await saveNoteAt(sideName(side), fromLineNumber, lineNumber, content)) onClose();
                       }
                     "
                     @cancel="onClose"
@@ -822,7 +851,7 @@ onUnmounted(() => {
                     @resolve-note="review.resolveNote"
                   />
                 </template>
-              </DiffView>
+              </DiffViewWithMultiSelect>
             </section>
           </div>
         </div>
@@ -921,6 +950,10 @@ onUnmounted(() => {
 
 .diff-file-header:hover {
   background: var(--marvis-bg-2);
+}
+
+.review-range-selected {
+  background: color-mix(in srgb, var(--marvis-accent) 16%, var(--marvis-bg-0));
 }
 
 .diff-status {

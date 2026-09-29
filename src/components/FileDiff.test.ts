@@ -6,11 +6,12 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, provide, reactive, ref } from "vue";
 import type { VNodeChild } from "vue";
 import type { AgentSession } from "../domain/agent";
+import { buildReviewMarkdown } from "../domain/review";
 import type { ReviewNote } from "../domain/review";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { REVIEW_SENDER } from "../presentation/review-notes";
-import type { ReviewSender } from "../presentation/review-notes";
+import type { NewReviewNoteInput, ReviewSender } from "../presentation/review-notes";
 
 const mocks = vi.hoisted(() => ({
   getGitDiff: vi.fn(),
@@ -25,7 +26,7 @@ vi.mock("../lib/ipc", () => ({
 // The diff view renders through the library; the send, the header and the notes are what is
 // under test here, so only the slots the library would fill are reproduced.
 vi.mock("@git-diff-view/vue", async () => {
-  const { defineComponent: component, h: createElement } = await import("vue");
+  const { defineComponent: component, h: createElement, ref: createRef } = await import("vue");
   return {
     DiffFile: class {
       initTheme() {}
@@ -33,18 +34,32 @@ vi.mock("@git-diff-view/vue", async () => {
       buildUnifiedDiffLines() {}
     },
     DiffModeEnum: { Unified: 4 },
-    DiffView: component({
+    DiffViewWithMultiSelect: component({
       name: "DiffView",
       props: { extendData: { type: Object, default: () => ({}) }, diffFile: { type: Object, default: null } },
-      setup:
-        (
-          props: { extendData: { newFile?: Record<string, { data: ReviewNote[] }> } },
-          { slots }: { slots: Record<string, ((payload: never) => VNodeChild) | undefined> },
-        ) =>
-        () =>
+      setup: (
+        props: { extendData: { newFile?: Record<string, { data: ReviewNote[] }> } },
+        { slots }: { slots: Record<string, ((payload: never) => VNodeChild) | undefined> },
+      ) => {
+        const selectedRange = createRef<[number, number] | null>(null);
+        return () =>
           createElement("div", { "data-testid": "diff-view" }, [
             slots.extend?.({ data: props.extendData?.newFile?.["1"]?.data ?? [] } as never),
-          ]),
+            selectedRange.value
+              ? slots.widget?.({
+                  lineNumber: selectedRange.value[1],
+                  fromLineNumber: selectedRange.value[0],
+                  side: 2,
+                  onClose: () => (selectedRange.value = null),
+                } as never)
+              : null,
+            createElement(
+              "button",
+              { "data-testid": "select-diff-range", onClick: () => (selectedRange.value = [1, 3]) },
+              "Select lines 1-3",
+            ),
+          ]);
+      },
     }),
   };
 });
@@ -145,7 +160,7 @@ function session(id: string, overrides: Partial<AgentSession> = {}): AgentSessio
 function reviewApi(notes: ReviewNote[] = []) {
   return reactive({
     notes,
-    addNote: vi.fn(async () => true),
+    addNote: vi.fn<(input: NewReviewNoteInput) => Promise<boolean>>(async () => true),
     updateNote: vi.fn(async () => true),
     deleteNote: vi.fn(async () => true),
     verifyAnchors: vi.fn(async () => true),
@@ -358,6 +373,50 @@ describe("FileDiff", () => {
     expect(wrapper.get('[data-testid="send-review"]').text()).toBe("Export as Markdown");
     await wrapper.get('[data-testid="send-review"]').trigger("click");
     expect(stub.send).toHaveBeenCalledWith(["note:1"], false);
+    wrapper.unmount();
+  });
+
+  it("saves a selected diff range and keeps its range in Markdown export", async () => {
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "@@ -1,3 +1,3 @@\n first\n-second\n+second changed\n third\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 5,
+      hunks: [{ startLine: 0, endLine: 5, title: "@@ -1,3 +1,3 @@" }],
+    });
+    const review = reviewApi();
+    const wrapper = mountDiff({ review });
+    await flushPromises();
+
+    await wrapper.get('[data-testid="select-diff-range"]').trigger("click");
+    expect(wrapper.get('form[aria-label="New review note"]').text()).toContain("new lines 1-3");
+    await wrapper.get('textarea[aria-label="Review note"]').setValue("keep these lines together");
+    await wrapper.get('form[aria-label="New review note"]').trigger("submit");
+    await flushPromises();
+
+    expect(review.addNote).toHaveBeenCalledWith({
+      path: "src/app.ts",
+      side: "new",
+      lineStart: 1,
+      lineEnd: 3,
+      content: "keep these lines together",
+      code: "first\nsecond changed\nthird",
+    });
+    const saved = review.addNote.mock.calls[0][0];
+    const markdown = buildReviewMarkdown(
+      [
+        note({
+          lineStart: saved.lineStart,
+          lineEnd: saved.lineEnd ?? null,
+          code: saved.code,
+          content: saved.content,
+        }),
+      ],
+      { date: "2026-03-14" },
+    );
+    expect(markdown).toContain("```ts{1-3}\nfirst\nsecond changed\nthird\n```");
     wrapper.unmount();
   });
 
