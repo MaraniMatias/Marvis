@@ -50,12 +50,18 @@ pub fn build<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R>> {
     Menu::with_items(handle, &[&app_menu, &edit_menu])
 }
 
-/// What the About panel says: the three fields macOS shows, and the only three it shows.
+/// What the About panel says: the fields macOS shows, and the only ones it shows.
+///
+/// `AboutMetadata` has a `website`, and macOS ignores it. Of the whole struct the platform draws
+/// the name, the version, the short version, the copyright, an icon and the credits, so the one
+/// line of free text is where the repository goes: read from `bundle.homepage` rather than written
+/// again here, so the About panel cannot name a checkout the bundle does not.
 fn about_metadata<R: Runtime>(handle: &AppHandle<R>) -> AboutMetadata<'_> {
     AboutMetadata {
         name: Some(handle.package_info().name.clone()),
         version: Some(handle.package_info().version.to_string()),
         copyright: handle.config().bundle.copyright.clone(),
+        credits: handle.config().bundle.homepage.clone(),
         ..Default::default()
     }
 }

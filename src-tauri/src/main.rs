@@ -437,6 +437,15 @@ mod startup_tests {
             );
         }
 
+        // And the About panel names the repository. macOS draws the name, the version, the short
+        // version, the copyright, an icon and the credits, and no `website`, so the credits are
+        // the only line of text in there that can say where the source is. Dropped, the panel
+        // says what the app is called and nothing about where to get it or read it.
+        assert!(
+            menus.contains("credits: handle.config().bundle.homepage.clone()"),
+            "the About panel stopped naming the repository"
+        );
+
         // And it is set, on macOS only. A menu set on Linux or Windows would draw a bar inside
         // the window, which is a second place for the app's menus to live.
         let main = include_str!("main.rs");
