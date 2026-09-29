@@ -24,16 +24,16 @@ concurrency:
 
 jobs:
   version:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     outputs:
       sha: ${{ steps.validate.outputs.sha }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
       - name: Validate tag ref and source commit
@@ -115,13 +115,13 @@ jobs:
             bundles: deb,appimage
     runs-on: ${{ matrix.platform }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.sha }}
       # pnpm before node: `cache: pnpm` shells out to pnpm to find the store, so a pnpm that is not
       # installed yet fails the step instead of skipping the cache.
-      - uses: pnpm/action-setup@v4
-      - uses: actions/setup-node@v4
+      - uses: pnpm/action-setup@v6
+      - uses: actions/setup-node@v7
         with:
           node-version: 22
           cache: pnpm
@@ -164,13 +164,13 @@ jobs:
   publish:
     if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
     needs: [build, version]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     permissions:
       # Only this job creates the GitHub Release and uploads the built artifacts.
       contents: write
     steps:
       # Only the changelog, and only to read the notes from it: this job builds nothing.
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           ref: ${{ needs.version.outputs.sha }}
           sparse-checkout: /CHANGELOG.md

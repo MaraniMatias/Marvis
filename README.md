@@ -75,13 +75,16 @@ One command ships a release. It checks the repository can take one, writes the v
 
 ```sh
 pnpm release v0.2.0                     # the whole thing
+pnpm release v0.2.0 --dry-run           # bump and build, no tag
 pnpm release:preview v0.2.0             # report the writes, change nothing
 RELEASE_SKIP_PUBLISH=1 pnpm release v0.2.0   # stop at the draft
 ```
 
-It refuses to run off `main`, on a working tree with uncommitted changes, without `gh auth login`, or on a tag that already exists. `pnpm release:check` runs on every pull request and reports any drift between the manifests.
+Every step is skipped when the state already satisfies it, so `--dry-run` followed by the plain command is the two-command version of the same release: the first leaves the version committed on `main` and builds it, the second finds that work done and only has the tag to push. The same command resumes a release whose build failed, or a draft that was never published, and it refuses to touch a release that is already public.
 
-Do not assume this workflow blocks old release tags: GitHub runs the workflow YAML stored at the tagged commit. For example, `v0.1.0` points to `57cda5e`, whose older workflow publishes directly on a tag push without the current checks. This YAML cannot block that workflow. Until the remote tag and release restrictions below have been configured and verified, releases are **unsafe and not ready**: do not create, push, or retag `v*` tags, and do not create or publish releases manually. Once those controls are verified, run the `Release` workflow manually from the default branch with the prospective `v<version>` input to run the full checks and builds without publishing. Create and push the version tag only at that exact successful SHA.
+It refuses to run off `main`, on a working tree with uncommitted changes, without `gh auth login`, or on a tag that does not point at the version. `pnpm release:check` runs on every pull request and reports any drift between the manifests.
+
+Do not assume this workflow blocks old release tags: GitHub runs the workflow YAML stored at the tagged commit. For example, `v0.1.0` points to `57cda5e`, whose older workflow publishes directly on a tag push without the current checks. This YAML cannot block that workflow. Until the remote tag and release restrictions below have been configured and verified, releases are **unsafe and not ready**: do not create, push, or retag `v*` tags, and do not create or publish releases manually. Once those controls are verified, `pnpm release <version> --dry-run` runs the full checks and builds on `main` without creating the tag.
 
 The tag is pushed before the build is known to pass, so the release lands as a **draft** first and is published only once every matrix job succeeded. A failed build therefore leaves a tag with no release at all rather than a half-built one, and `gh run rerun <id>` retries the same tag without a new version.
 
