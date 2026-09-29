@@ -39,7 +39,8 @@
     "shortDescription": "A focused workspace for repositories and checkouts",
     "longDescription": "Browse files, review diffs, leave notes, and keep a terminal per checkout, in one window.",
     "macOS": {
-      "hardenedRuntime": true
+      "hardenedRuntime": true,
+      "signingIdentity": "-"
     },
     "linux": {
       "deb": {
