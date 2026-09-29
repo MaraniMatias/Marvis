@@ -194,7 +194,7 @@ function messageOf(cause: unknown): string {
             autofocus
             required
             maxlength="120"
-            class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text) outline-none focus:border-(--marvis-accent)"
+            class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text) outline-none"
             @input="updateTaskName(($event.target as HTMLInputElement).value)"
           />
           <span class="mt-1 block text-[11px] text-(--marvis-text-faint)"
@@ -206,7 +206,7 @@ function messageOf(cause: unknown): string {
           <input
             v-model="branch"
             required
-            class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text) outline-none focus:border-(--marvis-accent)"
+            class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text) outline-none"
             @input="branchEdited = true"
           />
         </label>

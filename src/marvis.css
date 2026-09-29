@@ -67,15 +67,15 @@
   --marvis-font: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
-/* The focus ring is drawn for the keyboard and only for the keyboard. It used to be dropped
-   everywhere: the mockup's ring did not survive being ported onto controls the mockup never had,
-   and every control below inherited a focus nobody could see. A source view the Tab key walks
-   into makes that hole impossible to keep, so this is the rework the comment above promised —
-   `:focus-visible` is the whole of it, since a click still paints no ring and a click is what a
-   pointer user has. */
-.app-shell :focus-visible {
-  outline: 2px solid var(--marvis-accent);
-  outline-offset: 1px;
+/* No focus ring, anywhere in the window. The mockup's ring did not survive being ported onto the
+   controls the mockup never had, and a desktop window does not draw a web form's outline around
+   its buttons and its fields: it paints focus into what the control already is — the row that
+   lifts, the splitter that turns accent, the caret in the editor — and not around it. `:focus`
+   rather than `:focus-visible`, so a click on a field paints no ring either. Global rather than
+   `.app-shell`, because reka-ui portals the menus and the popovers out of the shell and a rule
+   scoped to the shell is a rule those two do not read. */
+:focus {
+  outline: none;
 }
 
 /* Resize handle: repaints the divider and grip the resizable renders with the marvis
@@ -225,9 +225,9 @@
 
 /* A menu over the app: roomy type and a shadow, so it reads as floating rather than as a
    surface of the pane it opened over. Global because reka-ui portals it out of the shell, which
-   is also why the shell's own "no focus ring" rule has to be repeated here. The column it
-   stands in is not part of it: the crumb menu is the wider of the two, because a branch name is
-   a long one and "C" is not. */
+   is also why the no-focus-ring rule above is written without a scope. The column it stands in
+   is not part of it: the crumb menu is the wider of the two, because a branch name is a long
+   one and "C" is not. */
 .marvis-menu {
   padding: 4px;
   font-size: 13px;

@@ -1010,6 +1010,14 @@ function onMarkdownLink(event: MouseEvent) {
   font-size: 13px;
 }
 
+/* CodeMirror's own focus ring, which is not ours to keep: its base theme draws a dotted outline
+   around a focused editor, and it is injected after this stylesheet with a selector longer than
+   any rule of ours, so the caret, the active line and the active gutter are what say where the
+   keyboard is. */
+.code-editor-host :deep(.cm-editor.cm-focused) {
+  outline: none;
+}
+
 /* CodeMirror paints the selection on its own layer, which the shell's `::selection` cannot reach,
    and it paints that layer and the caret for a light page: a lavender band and a black caret, both
    unreadable on `#17191f`. Its base theme owns these selectors with more specificity than a theme
@@ -1024,15 +1032,6 @@ function onMarkdownLink(event: MouseEvent) {
 .code-editor-host :deep(.cm-cursor),
 .code-editor-host :deep(.cm-dropCursor) {
   border-left-color: var(--marvis-accent);
-}
-
-/* The editor is the one focusable surface that gets no ring. CodeMirror is a contenteditable, so
-   the shell's `:focus-visible` rule would ring it like any other control, and a frame around the
-   whole pane is not what a keyboard user needs to find there: the caret, the active line and the
-   active gutter already say it, and they say it while the editor is being read rather than only
-   when it is tabbed into. */
-.code-editor-host :deep(.cm-content:focus-visible) {
-  outline: none;
 }
 
 .code-editor-host :deep(.cm-scroller) {

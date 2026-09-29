@@ -75,19 +75,9 @@ body {
   color: var(--marvis-text);
 }
 
-/* The field is the app's first Tab stop and has no border and no radius to ring, so the ring is
-   drawn inside it: an outset ring would sit outside a field that is meant to have no edge, and
-   the raised input the mockup rejected drew exactly the brighter rectangle that read as broken.
-   What is left is the field's own background lift, and that is not enough — `--marvis-border` on
-   `--marvis-bg-2` is a 1.15:1 change, invisible to the keyboard user the ring exists for. The
-   accent bar lands at 5.97:1 against the same field, with no radius and no offset. */
-.window-search:focus-visible {
-  color: var(--marvis-text);
-  outline: none;
-  box-shadow: inset 0 0 0 1px var(--marvis-accent);
-}
-
-/* The wrapper carries the surface, so the field lifts as one piece on hover or focus. */
+/* The wrapper carries the surface, so the field lifts as one piece on hover or focus. That lift
+   is the whole of the field's focus: the input itself is transparent and stays that way, the way
+   a window's toolbar field does. */
 .search-field {
   transition: background-color 120ms ease;
 }
