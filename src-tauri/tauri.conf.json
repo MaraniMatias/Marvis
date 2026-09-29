@@ -45,7 +45,6 @@
     "linux": {
       "deb": {
         "section": "devel",
-        "depends": ["libwebkit2gtk-4.1-0", "libgtk-3-0"],
         "files": {
           "/usr/share/doc/marvis/copyright": "../LICENSE",
           "/usr/share/metainfo/dev.marvis.workspace.metainfo.xml": "dev.marvis.workspace.metainfo.xml"

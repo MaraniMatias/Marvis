@@ -22,7 +22,16 @@ for x86_64 Linux, published as a GitHub release.
 - **Losing nothing quietly.** One schema with no migrations, dead sessions no longer hoarded, and
   the four ways this app could drop work or a database closed.
 
-## Unreleased
+## 0.2.0
 
-Nothing yet. The next release adds Linux arm64 builds, signs the macOS bundle ad-hoc, and gates
-tagged releases on the checks for the same commit.
+- **Linux arm64.** `.deb` and `.AppImage` built on a native arm64 runner, so Raspberry Pi and ARM
+  servers get a real binary instead of an emulated one.
+- **macOS signed ad-hoc.** The bundle carries an ad-hoc signature with the hardened runtime, which is
+  what keeps macOS from reporting a download from a release as damaged. It is not a Developer ID, so
+  Gatekeeper still asks once.
+- **Releases gated on their own commit.** A tag now runs the full CI against the tagged SHA before
+  anything is built, the release lands as a draft with a `SHA256SUMS` beside the artifacts, and it is
+  published only once every platform passed. The version is bumped, committed and tagged by
+  `pnpm release`.
+- **Builds are cached.** Neither workflow cached anything, so a release compiled the Rust graph
+  three times over.
