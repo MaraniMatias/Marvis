@@ -371,6 +371,63 @@ mod security_tests {
 
 #[cfg(test)]
 mod startup_tests {
+    /// The About panel carries the repository, and carries it as text macOS will draw.
+    ///
+    /// This one is a runtime assertion and not a grep over `menus.rs` on purpose. The first version
+    /// of it looked for `credits: handle.config().bundle.homepage.clone()`, found it, passed, and
+    /// shipped 0.3.1 with an About panel that named no repository: the codegen embedding the config
+    /// into the binary hardcodes `bundle.homepage` to `None`, so the panel was handed `None` and
+    /// muda left the credits out. A source match cannot tell a value that arrives from a value that
+    /// is already `None`, so this builds a real handle and reads what the panel is given.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_about_panel_carries_the_repository() {
+        use tauri::test::mock_app;
+
+        use crate::menus;
+
+        let app = mock_app();
+        let about = menus::about_metadata(app.handle());
+
+        assert_eq!(
+            about.credits.as_deref(),
+            Some("https://github.com/MaraniMatias/Marvis"),
+            "the About panel has no repository in it"
+        );
+        // The two lines above the credits. The mock runtime calls itself "test" and carries the
+        // version of whatever it was built from, so only the shape is pinned here: a `None` in
+        // either is what blanks those lines.
+        assert!(about.name.is_some(), "the About panel has no name in it");
+        assert!(
+            about.version.is_some(),
+            "the About panel has no version in it"
+        );
+    }
+
+    /// Nothing on the panel is read off `config().bundle`.
+    ///
+    /// `ToTokens for BundleConfig` in tauri-utils builds the embedded config and hardcodes
+    /// `homepage`, `publisher`, `copyright`, `category`, `targets` and `resources` to `None` or
+    /// `default`, so every one of them reads as absent in a shipped app no matter what
+    /// `tauri.conf.json` says. The test above would catch a panel that depends on one of those, so
+    /// this only has to say where the value may not come from.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn the_about_panel_reads_no_field_the_config_codegen_drops() {
+        let menus = include_str!("menus.rs");
+        let code: String = menus
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            !code.contains("config().bundle"),
+            "the About panel is reading a field the config codegen does not embed"
+        );
+    }
+
     #[test]
     fn a_second_launch_is_stopped_before_the_database_is_opened() {
         // The single-instance plugin works by being registered first, and "first" is the whole of
@@ -444,22 +501,6 @@ mod startup_tests {
         assert!(
             menus.contains(r#"credits: Some(env!("CARGO_PKG_HOMEPAGE").to_string())"#),
             "the About panel stopped naming the repository"
-        );
-
-        // Read from Cargo, never from the embedded config's bundle. Asserting the line above is not
-        // enough on its own: the first version of it read the bundle's homepage, passed this same
-        // check, and put nothing on screen, because the codegen that embeds the config hardcodes
-        // that field to `None`. A line can be here and still be worth `None` at runtime, so fail
-        // on the dropped field directly. Comments are stripped first: this paragraph names it too.
-        let menus_code: String = menus
-            .lines()
-            .map(str::trim)
-            .filter(|line| !line.starts_with("//"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        assert!(
-            !menus_code.contains("config().bundle"),
-            "the About panel is reading a field the config codegen does not embed"
         );
 
         // And it is set, on macOS only. A menu set on Linux or Windows would draw a bar inside

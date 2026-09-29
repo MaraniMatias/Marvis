@@ -61,7 +61,7 @@ pub fn build<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 /// one to `None` (`ToTokens for BundleConfig` in tauri-utils), along with `copyright` and
 /// `publisher`, so anything read off `config().bundle` for display is silently absent at runtime.
 /// `env!` is resolved by rustc and does land in the binary, and Cargo already carries the same URL.
-fn about_metadata<R: Runtime>(handle: &AppHandle<R>) -> AboutMetadata<'_> {
+pub(crate) fn about_metadata<R: Runtime>(handle: &AppHandle<R>) -> AboutMetadata<'_> {
     AboutMetadata {
         name: Some(handle.package_info().name.clone()),
         version: Some(handle.package_info().version.to_string()),

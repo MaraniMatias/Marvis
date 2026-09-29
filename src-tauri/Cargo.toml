@@ -42,3 +42,6 @@ dev-bridge = ["dep:tauri-plugin-mcp-bridge"]
 
 [dev-dependencies]
 tempfile = "3"
+# The mock runtime, to build a real AppHandle in tests and read the About panel's actual values
+# instead of grepping the source for them. Dev-only, so it is not in a shipped binary.
+tauri = { version = "2", features = ["test"] }
