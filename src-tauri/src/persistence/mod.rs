@@ -10,10 +10,11 @@ use serde::{Deserialize, Serialize};
 use crate::domain::review::{ReviewNote, ReviewRound};
 use crate::domain::terminal_layout::CheckoutTerminalLayout;
 use crate::domain::workspace::{
-    Checkout, RecentPath, Repo, RepoKind, Session, SessionStatus, SessionType, WorkspaceState,
+    ArchivedCheckout, Checkout, RecentPath, Repo, RepoKind, Session, SessionStatus, SessionType,
+    WorkspaceState,
 };
 
-const SCHEMA_VERSION: i64 = 10;
+const SCHEMA_VERSION: i64 = 11;
 const REVIEW_NOTE_COLUMNS: &str = "id, checkout_id, path, side, line_start, line_end, content, code, status, code_hash, outdated, round_id, created_at, updated_at";
 const ACTIVE_CHECKOUT: &str = "active_checkout_id";
 const ACTIVE_SESSION: &str = "active_session_id";
@@ -884,6 +885,106 @@ impl Database {
                 set_preference(&transaction, ACTIVE_SESSION, None)?;
             }
         }
+        transaction.commit().map_err(db_error)?;
+        drop(connection);
+        self.load_workspace()
+    }
+
+    /// Takes a worktree off the panel without forgetting it, and leaves the disk exactly
+    /// as it was: the branch, the commits and the files stay, and
+    /// [`Database::restore_archived_worktrees`] puts the row back.
+    ///
+    /// Only a live worktree of a Git repository can be archived. A repo root is the head
+    /// of the list its worktrees hang off, so archiving it would archive the list; a
+    /// plain folder is not a worktree at all; and a worktree whose directory is gone has
+    /// nothing to bring back, which is what closing it is for. A terminal still running
+    /// in it is refused for the same reason a close is: the process would outlive the
+    /// row that names it.
+    pub fn archive_checkout(&self, checkout_id: &str) -> Result<WorkspaceState, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        let (repo_id, is_primary, stored_missing, kind, path) = transaction
+            .query_row(
+                "SELECT c.repo_id, c.is_primary, c.is_missing, r.kind, c.canonical_path FROM checkouts c
+                 JOIN repos r ON r.id = c.repo_id WHERE c.id = ?1",
+                [checkout_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, bool>(1)?,
+                        row.get::<_, bool>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "checkout is no longer registered".to_string())?;
+        if is_primary || kind == "plain" {
+            return Err("only a worktree can be archived".into());
+        }
+        if stored_missing || !Path::new(&path).is_dir() {
+            return Err(
+                "a worktree whose directory is gone cannot be archived; close it instead".into(),
+            );
+        }
+        let has_active_sessions: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM sessions WHERE checkout_id = ?1 AND status = 'active')",
+                [checkout_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if has_active_sessions {
+            return Err("close active terminal sessions before archiving this worktree".into());
+        }
+        transaction
+            .execute(
+                "UPDATE checkouts SET is_archived = 1 WHERE id = ?1",
+                [checkout_id],
+            )
+            .map_err(db_error)?;
+        // The row leaves the panel, so the selection cannot stay on it: the workdir the
+        // user is looking at after archiving is the repo root, the same place a close
+        // hands the selection over to.
+        if get_preference(&transaction, ACTIVE_CHECKOUT)?.as_deref() == Some(checkout_id) {
+            let primary_id: String = transaction
+                .query_row(
+                    "SELECT id FROM checkouts WHERE repo_id = ?1 AND is_primary = 1",
+                    [&repo_id],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            set_preference(&transaction, ACTIVE_CHECKOUT, Some(&primary_id))?;
+            set_preference(&transaction, ACTIVE_SESSION, None)?;
+        }
+        transaction.commit().map_err(db_error)?;
+        drop(connection);
+        self.load_workspace()
+    }
+
+    /// Puts every archived worktree of one repository back on the panel, and leaves the
+    /// disk alone: nothing here creates, removes or checks out anything.
+    pub fn restore_archived_worktrees(&self, repo_id: &str) -> Result<WorkspaceState, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        let exists: bool = transaction
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM repos WHERE id = ?1)",
+                [repo_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        if !exists {
+            return Err("repository is no longer registered".into());
+        }
+        transaction
+            .execute(
+                "UPDATE checkouts SET is_archived = 0 WHERE repo_id = ?1 AND is_archived = 1",
+                [repo_id],
+            )
+            .map_err(db_error)?;
         transaction.commit().map_err(db_error)?;
         drop(connection);
         self.load_workspace()
@@ -1875,6 +1976,7 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
                 ahead_of_default INTEGER,
                 changed_files INTEGER NOT NULL DEFAULT 0,
                 is_missing INTEGER NOT NULL DEFAULT 0,
+                is_archived INTEGER NOT NULL DEFAULT 0 CHECK (is_archived IN (0, 1)),
                 position INTEGER NOT NULL,
                 UNIQUE (repo_id, position)
             );
@@ -1972,10 +2074,11 @@ fn load_workspace(connection: &Connection) -> Result<WorkspaceState, String> {
     drop(repos_statement);
 
     let mut repos = Vec::with_capacity(repo_rows.len());
+    let mut archived_worktrees = Vec::new();
     for (id, kind, name, root, default_branch, created_at, last_opened_at) in repo_rows {
         let mut checkouts_statement = connection
             .prepare(
-                "SELECT id, path, canonical_path, is_primary, branch, head, ahead_of_default, changed_files, is_missing
+                "SELECT id, path, canonical_path, is_primary, branch, head, ahead_of_default, changed_files, is_missing, is_archived
                  FROM checkouts WHERE repo_id = ?1 ORDER BY position",
             )
             .map_err(db_error)?;
@@ -1991,6 +2094,7 @@ fn load_workspace(connection: &Connection) -> Result<WorkspaceState, String> {
                     row.get::<_, Option<u32>>(6)?,
                     row.get::<_, u32>(7)?,
                     row.get::<_, bool>(8)?,
+                    row.get::<_, bool>(9)?,
                 ))
             })
             .map_err(db_error)?;
@@ -2010,8 +2114,21 @@ fn load_workspace(connection: &Connection) -> Result<WorkspaceState, String> {
             ahead_of_default,
             changed_files,
             is_missing,
+            is_archived,
         ) in checkout_rows
         {
+            // An archived worktree is registered and alive; it is off the panel, not gone.
+            // The two lists are one pass over one set of rows, so the panel and the list
+            // of what could come back to it can never disagree.
+            if is_archived {
+                archived_worktrees.push(ArchivedCheckout {
+                    id: checkout_id,
+                    repo_id: id.clone(),
+                    path,
+                    branch,
+                });
+                continue;
+            }
             let mut sessions_statement = connection
                 .prepare(
                     "SELECT id, session_type, name, created_at, status FROM sessions WHERE checkout_id = ?1 ORDER BY rowid",
@@ -2080,6 +2197,7 @@ fn load_workspace(connection: &Connection) -> Result<WorkspaceState, String> {
 
     Ok(WorkspaceState {
         repos,
+        archived_worktrees,
         active_checkout_id: get_preference(connection, ACTIVE_CHECKOUT)?,
         active_session_id: get_preference(connection, ACTIVE_SESSION)?,
     })
@@ -3033,6 +3151,35 @@ mod tests {
         assert!(state.repos[0].checkouts[0].is_missing);
     }
 
+    /// A Git repository with its primary and every given worktree on disk, without running
+    /// Git: the persistence layer only stores paths. The returned ids are the worktrees, in
+    /// the order they were given.
+    fn git_repo_with_worktrees(root: &Path, worktrees: &[&Path]) -> (Repo, Vec<String>) {
+        let root = fs::canonicalize(root).expect("root");
+        let repo_id = repo_id_for_path(&root.display().to_string());
+        let mut checkouts = vec![Checkout::new(repo_id.clone(), &root, true).expect("primary")];
+        let ids = worktrees
+            .iter()
+            .map(|worktree| {
+                let worktree = fs::canonicalize(worktree).expect("worktree");
+                let id = checkout_id_for_path(&worktree.display().to_string());
+                checkouts.push(Checkout::new(repo_id.clone(), &worktree, false).expect("worktree"));
+                id
+            })
+            .collect();
+        let repo = Repo {
+            id: repo_id,
+            kind: RepoKind::Git,
+            name: "repo".into(),
+            root: root.display().to_string(),
+            default_branch: None,
+            checkouts,
+            created_at: "1".into(),
+            last_opened_at: "1".into(),
+        };
+        (repo, ids)
+    }
+
     /// A Git repository whose primary is on disk and whose worktree is not, without running
     /// Git: the persistence layer only stores paths.
     fn git_repo_with_worktree(root: &Path, worktree: &Path) -> (Repo, String) {
@@ -3060,6 +3207,210 @@ mod tests {
             last_opened_at: "1".into(),
         };
         (repo, worktree_id)
+    }
+
+    /// Archiving is the reversible half of leaving a workdir: the row leaves the panel and
+    /// the worktree stays registered, so a repo root can put it back and the disk is
+    /// untouched either way. Closing is the half that forgets.
+    #[test]
+    fn archiving_a_worktree_takes_the_row_off_the_panel_and_keeps_it_restorable() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        fs::write(root.join("tracked.txt"), "kept\n").unwrap();
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo, &worktree_id).unwrap();
+
+        let archived = database.archive_checkout(&worktree_id).unwrap();
+
+        // Off the panel, and named on the shelf the repo root reads, with the branch it is
+        // known by rather than a bare path.
+        assert_eq!(archived.repos[0].checkouts.len(), 1);
+        assert!(archived.repos[0].checkouts[0].is_primary);
+        assert_eq!(archived.archived_worktrees.len(), 1);
+        assert_eq!(archived.archived_worktrees[0].id, worktree_id);
+        assert_eq!(
+            archived.archived_worktrees[0].repo_id,
+            repo_id_for_path(&root.canonicalize().unwrap().display().to_string())
+        );
+        // The worktree was the selected one, so the selection follows it off the panel.
+        assert_ne!(
+            archived.active_checkout_id.as_deref(),
+            Some(worktree_id.as_str())
+        );
+        assert_eq!(archived.active_session_id, None);
+        // Nothing on disk moved: the directory and its file are exactly where they were.
+        assert!(worktree.is_dir());
+        assert!(root.join("tracked.txt").exists());
+    }
+
+    #[test]
+    fn restoring_puts_every_archived_worktree_of_a_repository_back_on_the_panel() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let first = temp.path().join("one");
+        let second = temp.path().join("two");
+        for folder in [&root, &first, &second] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let (repo, ids) = git_repo_with_worktrees(&root, &[&first, &second]);
+        let repo_id = repo.id.clone();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo, &ids[0]).unwrap();
+        for id in &ids {
+            database.archive_checkout(id).unwrap();
+        }
+        let shelved = database.load_workspace().unwrap();
+        assert_eq!(shelved.repos[0].checkouts.len(), 1);
+        assert_eq!(shelved.archived_worktrees.len(), 2);
+
+        let restored = database.restore_archived_worktrees(&repo_id).unwrap();
+
+        // One action brings the whole set back, which is the point of counting them.
+        assert_eq!(restored.repos[0].checkouts.len(), 3);
+        assert!(restored.archived_worktrees.is_empty());
+        assert!(first.is_dir() && second.is_dir());
+    }
+
+    #[test]
+    fn restoring_leaves_the_archived_worktrees_of_another_repository_alone() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let other = temp.path().join("other");
+        let worktree = temp.path().join("worktree");
+        let other_worktree = temp.path().join("other-worktree");
+        for folder in [&root, &other, &worktree, &other_worktree] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let (first_repo, first_worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let (second_repo, second_worktree_id) = git_repo_with_worktree(&other, &other_worktree);
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database
+            .register_git_repo(first_repo, &first_worktree_id)
+            .unwrap();
+        database
+            .register_git_repo(second_repo, &second_worktree_id)
+            .unwrap();
+        database.archive_checkout(&first_worktree_id).unwrap();
+        database.archive_checkout(&second_worktree_id).unwrap();
+
+        let restored = database
+            .restore_archived_worktrees(&repo_id_for_path(
+                &root.canonicalize().unwrap().display().to_string(),
+            ))
+            .unwrap();
+
+        // The other repository's worktree is still on its own shelf: archiving is per repo,
+        // so restoring one repo cannot quietly put back another repo's work.
+        assert_eq!(restored.archived_worktrees.len(), 1);
+        assert_eq!(restored.archived_worktrees[0].id, second_worktree_id);
+    }
+
+    #[test]
+    fn archiving_is_refused_where_it_would_mean_more_than_taking_a_row_off_the_panel() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        let plain = temp.path().join("plain");
+        for folder in [&root, &worktree, &plain] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo, &worktree_id).unwrap();
+        let primary_id = checkout_id_for_path(&root.canonicalize().unwrap().display().to_string());
+        let plain_repo = plain_repo(&plain, "1");
+        let plain_id = plain_repo.checkouts[0].id.clone();
+        database.register_plain_repo(plain_repo).unwrap();
+
+        // A repo root is the head of the list its worktrees hang off: archiving it would
+        // archive the list, and closing is what the row's cross is for.
+        let root_error = database.archive_checkout(&primary_id).unwrap_err();
+        assert!(
+            root_error.contains("only a worktree can be archived"),
+            "{root_error}"
+        );
+
+        // A plain folder is not a worktree at all.
+        let plain_error = database.archive_checkout(&plain_id).unwrap_err();
+        assert!(
+            plain_error.contains("only a worktree can be archived"),
+            "{plain_error}"
+        );
+
+        // A worktree whose directory is gone has nothing to bring back.
+        fs::remove_dir(&worktree).unwrap();
+        let missing_error = database.archive_checkout(&worktree_id).unwrap_err();
+        assert!(
+            missing_error.contains("cannot be archived"),
+            "{missing_error}"
+        );
+
+        // Nothing was archived by any of the refusals.
+        assert!(database
+            .load_workspace()
+            .unwrap()
+            .archived_worktrees
+            .is_empty());
+    }
+
+    #[test]
+    fn archiving_a_worktree_is_refused_while_one_of_its_sessions_runs() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo, &worktree_id).unwrap();
+        database
+            .add_terminal_session(&Session {
+                id: "session:live".into(),
+                session_type: SessionType::Shell,
+                checkout_id: worktree_id.clone(),
+                name: "shell".into(),
+                created_at: "now".into(),
+                status: SessionStatus::Active,
+            })
+            .unwrap();
+
+        let error = database.archive_checkout(&worktree_id).unwrap_err();
+
+        // The process would outlive the row that names it, which is the same reason a close
+        // refuses: a terminal attached to a directory the panel no longer lists is unowned.
+        assert!(error.contains("close active terminal sessions"), "{error}");
+        assert_eq!(
+            database.load_workspace().unwrap().repos[0].checkouts.len(),
+            2
+        );
+        assert!(worktree.is_dir());
+    }
+
+    #[test]
+    fn an_archived_worktree_survives_a_restart_and_is_still_there_to_restore() {
+        let temp = tempdir().unwrap();
+        let db_path = temp.path().join("workspace.sqlite3");
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        fs::create_dir_all(&root).unwrap();
+        fs::create_dir_all(&worktree).unwrap();
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        {
+            let database = Database::open(&db_path).unwrap();
+            database.register_git_repo(repo, &worktree_id).unwrap();
+            database.archive_checkout(&worktree_id).unwrap();
+        }
+
+        // Reopened from the file, not from the handle that wrote it: archiving is a stored
+        // state, so it has to outlive the process that set it.
+        let restored = Database::open(&db_path).unwrap().load_workspace().unwrap();
+        assert_eq!(restored.repos[0].checkouts.len(), 1);
+        assert_eq!(restored.archived_worktrees.len(), 1);
+        assert_eq!(restored.archived_worktrees[0].id, worktree_id);
     }
 
     #[test]

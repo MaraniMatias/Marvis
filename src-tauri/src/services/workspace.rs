@@ -227,6 +227,44 @@ pub fn close_checkout(
         .map_err(operation_error)
 }
 
+/// Takes a worktree off the panel and keeps it, so the repo root can offer it back.
+///
+/// Archiving is the reversible half of leaving a workdir: the row stays registered and the
+/// disk is untouched, and [`restore_archived_worktrees`] is the way back. Closing is the
+/// other half and forgets the checkout entirely.
+pub fn archive_checkout(
+    database: &Database,
+    checkout_id: &str,
+) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
+    let state = database.load_workspace().map_err(operation_error)?;
+    crate::services::checkout::registered_checkout(
+        &state.repos,
+        checkout_id,
+        "checkout ID is not registered",
+    )?;
+    database
+        .archive_checkout(checkout_id)
+        .map_err(operation_error)
+}
+
+/// Puts back every worktree this repository archived, so one action brings the whole set
+/// to the panel rather than making the user walk them one at a time.
+pub fn restore_archived_worktrees(
+    database: &Database,
+    repo_id: &str,
+) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
+    let state = database.load_workspace().map_err(operation_error)?;
+    if !state.repos.iter().any(|repo| repo.id == repo_id) {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "repository ID is not registered",
+        ));
+    }
+    database
+        .restore_archived_worktrees(repo_id)
+        .map_err(operation_error)
+}
+
 pub fn close_missing_checkout(
     database: &Database,
     backend: &crate::terminal::TerminalBackend,
@@ -376,8 +414,8 @@ mod tests {
     };
 
     use super::{
-        close_checkout, close_missing_checkout, locate_missing_checkout, register_folder, restore,
-        set_default_branch,
+        archive_checkout, close_checkout, close_missing_checkout, locate_missing_checkout,
+        register_folder, restore, set_default_branch,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -678,6 +716,40 @@ mod tests {
             restored.repos[0].checkouts[1].branch.as_deref(),
             Some("external")
         );
+    }
+
+    /// Launching the app re-reads Git's own worktree list and writes it back over what is
+    /// registered, so an archived worktree is re-inserted on every start. It has to come
+    /// back archived: otherwise archiving would last until the next launch, and the user
+    /// would find their panel rearranged by a restart they did nothing to cause.
+    #[test]
+    fn a_restart_keeps_an_archived_worktree_archived() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let linked = temp.path().join("feature worktree");
+        init_repo(&primary);
+        git(
+            &primary,
+            &["worktree", "add", "-b", "feature", linked.to_str().unwrap()],
+        );
+        let db = database(temp.path());
+        let opened = register_folder(&db, &linked).unwrap();
+        let worktree_id = opened
+            .repos
+            .iter()
+            .flat_map(|repo| repo.checkouts.iter())
+            .find(|checkout| checkout.branch.as_deref() == Some("feature"))
+            .expect("the feature worktree")
+            .id
+            .clone();
+
+        archive_checkout(&db, &worktree_id).unwrap();
+        let restored = restore(&db).unwrap();
+
+        assert_eq!(restored.repos[0].checkouts.len(), 1);
+        assert!(restored.repos[0].checkouts[0].is_primary);
+        assert_eq!(restored.archived_worktrees.len(), 1);
+        assert_eq!(restored.archived_worktrees[0].id, worktree_id);
     }
 
     #[test]

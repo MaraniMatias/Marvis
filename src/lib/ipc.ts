@@ -220,6 +220,16 @@ export function closeMissingCheckout(checkoutId: string): Promise<WorkspaceState
   return invoke<WorkspaceState>("close_missing_checkout", { checkoutId });
 }
 
+/** Takes a worktree off the panel and keeps it: `restoreArchivedWorktrees` brings it back. */
+export function archiveCheckout(checkoutId: string): Promise<WorkspaceState> {
+  return invoke<WorkspaceState>("archive_checkout", { checkoutId });
+}
+
+/** Puts every worktree this repository archived back on the panel. */
+export function restoreArchivedWorktrees(repoId: string): Promise<WorkspaceState> {
+  return invoke<WorkspaceState>("restore_archived_worktrees", { repoId });
+}
+
 export function selectCheckout(checkoutId: string | null): Promise<WorkspaceState> {
   return invoke<WorkspaceState>("select_checkout", { checkoutId });
 }

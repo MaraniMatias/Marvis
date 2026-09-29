@@ -23,7 +23,7 @@ Marvis is not an IDE, a GitHub or GitLab client, or a plain terminal. It is a wo
 
 Open a folder that contains a git repository and Marvis remembers it. A repository can have several checkouts (git worktrees) open at the same time, such as `main`, `feature/x`, and `fix/y`. The sidebar lists your repositories, their checkouts, and the terminals and sessions in each one, with the current state of each. When you restart Marvis, everything comes back as you left it.
 
-You can create a new worktree from any checkout. When you delete one, Marvis first checks for uncommitted files, unmerged commits, and running sessions or agents, and asks you to confirm. If you moved a checkout's folder, you can point Marvis to the new location. If the folder is gone, you can close the checkout without touching the original repository.
+You can create a new worktree from any checkout. A worktree you are done with can be archived instead of deleted: it leaves the sidebar and its files stay exactly where they are, and the repo row brings back everything you archived from it in one click. When you delete one, Marvis first checks for uncommitted files, unmerged commits, and running sessions or agents, and asks you to confirm. If you moved a checkout's folder, you can point Marvis to the new location. If the folder is gone, you can close the checkout without touching the original repository.
 
 ### Browse and edit files
 

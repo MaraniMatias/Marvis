@@ -96,10 +96,30 @@ pub enum TerminalProcessState {
     Exited,
 }
 
+/// A worktree that is off the panel and can be put back on it.
+///
+/// It is a checkout like any other, so it names itself the way a row on the panel does,
+/// and it keeps the repository it belongs to: the repo root is the one row that can
+/// restore it, so the panel has to know which root to hang the action under.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ArchivedCheckout {
+    pub id: String,
+    pub repo_id: String,
+    pub path: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceState {
     pub repos: Vec<Repo>,
+    /// The worktrees that are registered but off the panel, so the repo root can offer
+    /// them back. Empty on every workspace with nothing archived, which is why it is not
+    /// always on the wire.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub archived_worktrees: Vec<ArchivedCheckout>,
     pub active_checkout_id: Option<String>,
     pub active_session_id: Option<String>,
 }

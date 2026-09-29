@@ -48,8 +48,27 @@ export interface Session {
   status: SessionStatus;
 }
 
+/**
+ * A worktree that is registered and alive but off the panel.
+ *
+ * It is what archiving leaves behind: the row goes, the directory and its branch stay,
+ * and the repo root is the one row that can put it back.
+ */
+export interface ArchivedCheckout {
+  id: string;
+  repoId: string;
+  path: string;
+  branch?: string;
+}
+
 export interface WorkspaceState {
   repos: Repo[];
+  /**
+   * The worktrees that could be put back, so the repo root can offer them.
+   *
+   * Absent when there are none, which is every workspace that has never archived one.
+   */
+  archivedWorktrees?: ArchivedCheckout[];
   activeCheckoutId: string | null;
   activeSessionId: string | null;
 }

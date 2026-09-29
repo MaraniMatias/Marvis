@@ -6,6 +6,8 @@
 /* eslint-disable vue/html-self-closing */
 import { computed, nextTick, ref, shallowRef, toRef } from "vue";
 import {
+  Archive as ArchiveIcon,
+  ArchiveRestore as ArchiveRestoreIcon,
   Folder as FolderIcon,
   FolderGit2 as FolderGit2Icon,
   GitFork as GitForkIcon,
@@ -14,7 +16,7 @@ import {
   Trash as TrashIcon,
   X as XIcon,
 } from "@lucide/vue";
-import type { Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
+import type { ArchivedCheckout, Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
 import { workdirTitle } from "../domain/workspace";
 import type { AgentHeadline } from "../presentation/agent-sessions";
 import { useDiffStats } from "../presentation/diff-stats";
@@ -29,6 +31,12 @@ const props = withDefaults(
     isOpening: boolean;
     sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
     /**
+     * The worktrees that were archived, so a repo root can offer its own back.
+     *
+     * The sidebar draws the list of what is on the panel; this is what is behind it.
+     */
+    archivedWorktrees?: ArchivedCheckout[];
+    /**
      * The agent of the active checkout, which is the only one with a server behind it.
      *
      * It is a property of the checkout, not of any one terminal, so the rows under the active
@@ -39,6 +47,7 @@ const props = withDefaults(
   }>(),
   {
     sessionRuntimeStatuses: () => ({}),
+    archivedWorktrees: () => [],
     agent: null,
   },
 );
@@ -52,6 +61,8 @@ const emit = defineEmits<{
   removeWorktree: [checkoutId: string];
   closeWorkdir: [checkoutId: string];
   closeMissing: [checkoutId: string];
+  archiveWorktree: [checkoutId: string];
+  restoreArchived: [repoId: string];
   closeSession: [sessionId: string];
   renameSession: [sessionId: string, name: string];
 }>();
@@ -132,6 +143,14 @@ interface Workdir {
   /** Worktrees can be removed; repo roots cannot. */
   worktree: boolean;
   /**
+   * How many worktrees this repo has archived.
+   *
+   * Only the repo root carries the action that brings them back, and it carries it only
+   * when there is something to bring back: a button that can only ever answer "nothing
+   * archived" is a button that teaches the row it belongs to means nothing.
+   */
+  archived: number;
+  /**
    * The directory is gone, so the row keeps only its reason for existing and its one way out
    * (closing it). Nothing behind it can be selected, run or created.
    */
@@ -151,6 +170,15 @@ const groups = computed(() =>
     workdirs: repo.checkouts.map((checkout) => toWorkdir(repo, checkout)),
   })),
 );
+
+/** How many worktrees each repo archived, counted once so no row walks the list itself. */
+const archivedByRepo = computed(() => {
+  const counts = new Map<string, number>();
+  for (const archived of props.archivedWorktrees) {
+    counts.set(archived.repoId, (counts.get(archived.repoId) ?? 0) + 1);
+  }
+  return counts;
+});
 
 /**
  * Whether the row is advertising changes, which is what makes clicking it open the full diff.
@@ -200,6 +228,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     kind: !isGit ? "folder" : checkout.isPrimary ? "git" : "worktree",
     gitdir: isGit && checkout.isPrimary,
     worktree: isGit && !checkout.isPrimary,
+    archived: archivedByRepo.value.get(repo.id) ?? 0,
     missing: checkout.isMissing,
     active: checkout.id === props.activeCheckoutId,
     items: checkout.sessions.map((session) => {
@@ -253,7 +282,11 @@ const agentTitle = computed(() =>
         <template v-for="workdir in group.workdirs" :key="workdir.checkout.id">
           <div
             class="workdir-item"
-            :class="{ active: workdir.active, 'has-active': workdir.items.some((item) => item.active) }"
+            :class="{
+              active: workdir.active,
+              'has-active': workdir.items.some((item) => item.active),
+              'has-three-actions': workdir.gitdir && !workdir.missing && workdir.archived > 0,
+            }"
           >
             <div class="workdir-row">
               <button
@@ -290,12 +323,11 @@ const agentTitle = computed(() =>
               </button>
 
               <div class="workdir-actions">
-                <!-- Taking a workdir off the list is not the same as deleting it: the directory,
-                     its branch and its files stay exactly where they are, and opening the folder
-                     again brings the row back. The worktree action beside it is the one that
-                     removes files, and it keeps the trash for that reason. -->
+                <!-- A repo root is the head of the list its worktrees hang off, so taking it
+                     off the panel takes the whole list with it. It is not the trash's business
+                     either: nothing here deletes a file. -->
                 <button
-                  v-if="!workdir.missing"
+                  v-if="!workdir.missing && !workdir.worktree"
                   type="button"
                   class="workdir-action"
                   :aria-label="`Remove from list: ${workdir.title}`"
@@ -316,6 +348,20 @@ const agentTitle = computed(() =>
                 >
                   <XIcon class="icon-xs" aria-hidden="true" />
                 </button>
+                <!-- Archiving is the reversible way off the panel: the worktree stays
+                     registered and the repo root can bring it back, which is what the cross
+                     used to do without leaving a way in. The trash beside it is the one that
+                     removes files, and it keeps the bin for that reason. -->
+                <button
+                  v-if="workdir.worktree && !workdir.missing"
+                  type="button"
+                  class="workdir-action"
+                  :aria-label="`Archive worktree ${workdir.title}`"
+                  title="Archive worktree"
+                  @click="emit('archiveWorktree', workdir.checkout.id)"
+                >
+                  <ArchiveIcon class="icon-xs" aria-hidden="true" />
+                </button>
                 <button
                   v-if="workdir.worktree && !workdir.missing"
                   type="button"
@@ -325,6 +371,18 @@ const agentTitle = computed(() =>
                   @click="emit('removeWorktree', workdir.checkout.id)"
                 >
                   <TrashIcon class="icon-xs" aria-hidden="true" />
+                </button>
+                <!-- Only a repo root has worktrees to put back, and only while it has any:
+                     the button is the way to the ones this repo archived. -->
+                <button
+                  v-if="workdir.gitdir && !workdir.missing && workdir.archived > 0"
+                  type="button"
+                  class="workdir-action"
+                  :aria-label="`Restore ${workdir.archived} archived worktree${workdir.archived === 1 ? '' : 's'} from ${workdir.checkout.branch || workdir.checkout.path}`"
+                  title="Restore archived worktrees"
+                  @click="emit('restoreArchived', workdir.checkout.repoId)"
+                >
+                  <ArchiveRestoreIcon class="icon-xs" aria-hidden="true" />
                 </button>
                 <button
                   v-if="workdir.gitdir && !workdir.missing"
@@ -598,10 +656,15 @@ const agentTitle = computed(() =>
 }
 
 /* Make room under the overlay so a long title ellipsizes instead of running
-   beneath the icons. Two icons plus the gap is the widest strip a row can have. */
+   beneath the icons. Two icons plus the gap is the widest strip most rows need;
+   a repo root with archived worktrees carries a third, and reserves its own. */
 .workdir-item:hover .workdir-select {
   padding-right: 46px;
   transition: padding-right 0.12s ease;
+}
+
+.workdir-item.has-three-actions:hover .workdir-select {
+  padding-right: 68px;
 }
 
 .workdir-action {

@@ -6,6 +6,14 @@ the part a reader should read and the generated list is the part they can skip. 
 under `Unreleased` and rename that heading to the version when you tag it; a version with no section
 here still gets its generated notes.
 
+## Unreleased
+
+- **Archiving a worktree instead of losing it.** The cross on a worktree row now archives it: the
+  row leaves the sidebar and nothing on disk moves — the branch, its commits and its files stay
+  exactly where they are. The repo root grows a restore action that brings back every worktree
+  that repository archived, in one click. Both actions ask first, in a dialog drawn like the rest
+  of the app.
+
 ## 0.1.0
 
 The first build anyone else could install: a `.dmg` for Apple Silicon and a `.deb` and `.AppImage`

@@ -135,6 +135,8 @@ fn main() {
             commands::workspace::locate_missing_checkout,
             commands::workspace::close_missing_checkout,
             commands::workspace::close_checkout,
+            commands::workspace::archive_checkout,
+            commands::workspace::restore_archived_worktrees,
             commands::workspace::set_default_branch,
             commands::workspace::select_checkout,
             commands::workspace::select_session,

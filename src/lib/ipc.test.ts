@@ -8,6 +8,8 @@ import {
   closeCheckout,
   closeMissingCheckout,
   closeTerminal,
+  archiveCheckout,
+  restoreArchivedWorktrees,
   createAgentSession,
   createReviewNote,
   createTerminal,
@@ -65,6 +67,14 @@ describe("workspace IPC client", () => {
     await closeMissingCheckout("checkout:/work/gone");
 
     expect(invoke).toHaveBeenNthCalledWith(1, "close_missing_checkout", { checkoutId: "checkout:/work/gone" });
+  });
+
+  it("archives by checkout and restores by repository, which is the row each hangs on", async () => {
+    await archiveCheckout("checkout:/work/feature");
+    await restoreArchivedWorktrees("repo:/work");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "archive_checkout", { checkoutId: "checkout:/work/feature" });
+    expect(invoke).toHaveBeenNthCalledWith(2, "restore_archived_worktrees", { repoId: "repo:/work" });
   });
 
   it("sends the expected content with a checkout-scoped file write", async () => {

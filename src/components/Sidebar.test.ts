@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Checkout, Repo, Session } from "../domain/workspace";
+import type { ArchivedCheckout, Checkout, Repo, Session } from "../domain/workspace";
 
 const mocks = vi.hoisted(() => ({
   getGitCheckoutDiffStats: vi.fn(),
@@ -852,25 +852,85 @@ describe("Sidebar workdir rows", () => {
     expect(
       wrapper.findAll('button[aria-label^="New terminal for"]').map((row) => row.attributes("aria-label")),
     ).toEqual(["New terminal for feature"]);
-    // A live worktree keeps both actions, and they say different things: the cross takes the
-    // row off the list, the trash is what deletes the worktree from disk.
-    expect(wrapper.find('button[aria-label="Remove from list: feature"]').exists()).toBe(true);
+    // A live worktree keeps both actions, and they say different things: the archive takes
+    // the row off the panel and keeps the worktree, the trash is what deletes it from disk.
+    expect(wrapper.find('button[aria-label="Archive worktree feature"]').exists()).toBe(true);
     expect(wrapper.find('button[aria-label="Remove worktree feature"]').exists()).toBe(true);
     expect(wrapper.find('button[aria-label="Remove worktree temporary"]').exists()).toBe(false);
-    // One cross per workdir row: the live worktree's own, and the missing one's close.
+    // One action per thing the row can do: the live worktree's own two, and the missing
+    // one's close.
     expect(wrapper.findAll(".workdir-group > .workdir-item .workdir-actions button")).toHaveLength(3);
-    expect(wrapper.get('button[aria-label="Remove from list: feature"]').attributes("title")).toBe("Remove from panel");
+    expect(wrapper.get('button[aria-label="Archive worktree feature"]').attributes("title")).toBe("Archive worktree");
     const close = wrapper.get('button[aria-label="Close missing checkout: temporary"]');
     expect(close.attributes("title")).toBe("Remove from list");
 
     await gone!.trigger("click");
     await live!.trigger("click");
     await close.trigger("click");
-    await wrapper.get('button[aria-label="Remove from list: feature"]').trigger("click");
+    await wrapper.get('button[aria-label="Archive worktree feature"]').trigger("click");
 
     expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature", false]]);
     expect(wrapper.emitted("closeMissing")).toEqual([["checkout:gone"]]);
-    expect(wrapper.emitted("closeWorkdir")).toEqual([["checkout:feature"]]);
+    expect(wrapper.emitted("archiveWorktree")).toEqual([["checkout:feature"]]);
+    wrapper.unmount();
+  });
+
+  it("hangs the restore action on the repo root, and only while it has something to restore", async () => {
+    const gitdir = { ...checkout({ id: "checkout:primary" }), branch: "main" };
+    const worktree = {
+      ...checkout({
+        id: "checkout:feature",
+        path: "/test-feature",
+        canonicalPath: "/test-feature",
+        isPrimary: false,
+        branch: "feature",
+      }),
+    };
+    const mounted = (archivedWorktrees: ArchivedCheckout[]) =>
+      mount(Sidebar, {
+        props: {
+          repos: [repo({ checkouts: [gitdir, worktree] })],
+          activeCheckoutId: null,
+          activeSessionId: null,
+          isOpening: false,
+          archivedWorktrees,
+        },
+      });
+
+    // Nothing archived, nothing to offer: a button that can only answer "nothing archived"
+    // is a button that teaches the row it sits on means nothing.
+    const empty = mounted([]);
+    expect(empty.find('button[aria-label^="Restore"]').exists()).toBe(false);
+    empty.unmount();
+
+    const wrapper = mounted([{ id: "checkout:gone", repoId: "repo:test", path: "/test-gone", branch: "temporary" }]);
+    const restore = wrapper.get('button[aria-label="Restore 1 archived worktree from main"]');
+    expect(restore.attributes("title")).toBe("Restore archived worktrees");
+    // The root reserves room for its own two actions plus the third it only sometimes has,
+    // so a long branch name cannot end up underneath them.
+    expect(wrapper.get(".workdir-item").classes()).toContain("has-three-actions");
+
+    await restore.trigger("click");
+
+    expect(wrapper.emitted("restoreArchived")).toEqual([["repo:test"]]);
+    wrapper.unmount();
+  });
+
+  it("counts the plural in what it says, so the row never promises one of many", () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [repo({ checkouts: [checkout({ id: "checkout:primary", branch: "main" })] })],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+        archivedWorktrees: [
+          { id: "checkout:a", repoId: "repo:test", path: "/test-a", branch: "a" },
+          { id: "checkout:b", repoId: "repo:test", path: "/test-b", branch: "b" },
+        ],
+      },
+    });
+
+    expect(wrapper.find('button[aria-label="Restore 2 archived worktrees from main"]').exists()).toBe(true);
     wrapper.unmount();
   });
 });

@@ -70,6 +70,32 @@ pub async fn close_checkout(
 }
 
 #[tauri::command]
+pub async fn archive_checkout(
+    checkout_id: String,
+    database: State<'_, Database>,
+) -> Result<WorkspaceState, IpcError> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        services::workspace::archive_checkout(&database, &checkout_id)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+#[tauri::command]
+pub async fn restore_archived_worktrees(
+    repo_id: String,
+    database: State<'_, Database>,
+) -> Result<WorkspaceState, IpcError> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        services::workspace::restore_archived_worktrees(&database, &repo_id)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+#[tauri::command]
 pub async fn close_missing_checkout(
     checkout_id: String,
     database: State<'_, Database>,

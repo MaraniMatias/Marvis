@@ -14,13 +14,16 @@ import MainPane from "./components/MainPane.vue";
 import Sidebar from "./components/Sidebar.vue";
 import TitlebarMenu from "./components/TitlebarMenu.vue";
 import ToastStack from "./components/ToastStack.vue";
+import ConfirmDialog from "./components/ConfirmDialog.vue";
 import WorktreeDialog from "./components/WorktreeDialog.vue";
 import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
 import { workdirTitle } from "./domain/workspace";
 import {
+  archiveCheckout as persistCheckoutArchive,
   closeCheckout as persistCheckoutClose,
   closeMissingCheckout as persistMissingCheckoutClose,
   renameTerminal,
+  restoreArchivedWorktrees as persistArchivedRestore,
   selectCheckout as persistCheckoutSelection,
 } from "./lib/ipc";
 
@@ -682,6 +685,84 @@ async function closeWorkdir(checkoutId: string) {
   }
 }
 
+/**
+ * The one question the app has open, and what answering "yes" does.
+ *
+ * The action is held rather than run, because the question is the point: archiving a
+ * worktree and putting a set of them back are both things a misclick would undo a
+ * stranger's afternoon over, and neither is destructive enough to deserve a dialog of
+ * its own the way removing a worktree from disk does.
+ */
+const pendingConfirm = ref<{
+  title: string;
+  message: string;
+  confirmLabel: string;
+  run(): Promise<void>;
+} | null>(null);
+
+function askConfirm(question: NonNullable<typeof pendingConfirm.value>) {
+  pendingConfirm.value = question;
+}
+
+async function answerConfirm(confirmed: boolean) {
+  const question = pendingConfirm.value;
+  if (!question) return;
+  if (!confirmed) {
+    pendingConfirm.value = null;
+    return;
+  }
+  try {
+    await question.run();
+    pendingConfirm.value = null;
+  } catch (cause) {
+    // The question stays open on a failure, so the answer is not lost to a toast the user
+    // has to read while the dialog is still covering the panel.
+    reportCause(cause);
+  }
+}
+
+/**
+ * Takes a worktree off the panel and keeps it, so the repo root can put it back.
+ *
+ * Nothing on disk moves: the branch, its commits and its files stay exactly where they
+ * are. That is what the confirmation has to say, because the row cannot — an icon with
+ * a box around it reads as "delete" to anyone who has not read this comment.
+ */
+function archiveWorktree(checkoutId: string) {
+  const checkout = allCheckouts.value.find((item) => item.id === checkoutId);
+  if (!checkout) return;
+  askConfirm({
+    title: "Archive worktree",
+    message: `“${workdirTitle(checkout)}” leaves the sidebar. No files will be deleted, and you can bring it back from the repo row.`,
+    confirmLabel: "Archive",
+    run: async () => {
+      applyWorkspace(await persistCheckoutArchive(checkoutId));
+    },
+  });
+}
+
+/**
+ * Puts every worktree this repository archived back on the panel, in one action.
+ *
+ * It is one action because they were archived one at a time and the panel has room for
+ * all of them; walking a set of worktrees back individually is the work the archive was
+ * meant to end.
+ */
+function restoreArchivedWorktrees(repoId: string) {
+  const repo = workspace.value.repos.find((item) => item.id === repoId);
+  const archived = (workspace.value.archivedWorktrees ?? []).filter((item) => item.repoId === repoId);
+  if (!repo || !archived.length) return;
+  const plural = archived.length === 1 ? "worktree" : "worktrees";
+  askConfirm({
+    title: `Restore archived ${plural}`,
+    message: `${archived.length} archived ${plural} return to the sidebar. Nothing on disk changes.`,
+    confirmLabel: "Restore",
+    run: async () => {
+      applyWorkspace(await persistArchivedRestore(repoId));
+    },
+  });
+}
+
 async function requestShell(checkoutId: string) {
   showView(checkoutId, { kind: "terminal", sessionId: null });
   try {
@@ -933,6 +1014,7 @@ function reportWarning(message: string) {
           :session-runtime-statuses="sessionRuntimeStatuses"
           :agent="agent.headline"
           :is-opening="isOpening"
+          :archived-worktrees="workspace.archivedWorktrees"
           @open-folder="chooseFolder"
           @select-checkout="activateCheckoutTerminal"
           @select-session="activateTerminalSession"
@@ -941,6 +1023,8 @@ function reportWarning(message: string) {
           @remove-worktree="openWorktreeDialog('remove', $event)"
           @close-workdir="closeWorkdir"
           @close-missing="closeMissingCheckout"
+          @archive-worktree="archiveWorktree"
+          @restore-archived="restoreArchivedWorktrees"
           @close-session="closeTerminalSession"
           @rename-session="renameTerminalSession"
         />
@@ -1020,6 +1104,14 @@ function reportWarning(message: string) {
         />
       </SplitterPanel>
     </SplitterGroup>
+    <ConfirmDialog
+      :open="!!pendingConfirm"
+      :title="pendingConfirm?.title ?? ''"
+      :message="pendingConfirm?.message ?? ''"
+      :confirm-label="pendingConfirm?.confirmLabel ?? 'Confirm'"
+      @confirm="answerConfirm(true)"
+      @close="answerConfirm(false)"
+    />
     <WorktreeDialog
       :open="!!lifecycle"
       :mode="lifecycle?.mode ?? 'create'"

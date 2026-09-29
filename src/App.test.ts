@@ -22,6 +22,8 @@ const mocks = vi.hoisted(() => ({
   saveCheckoutUiState: vi.fn(),
   closeCheckout: vi.fn(),
   closeMissingCheckout: vi.fn(),
+  archiveCheckout: vi.fn(),
+  restoreArchivedWorktrees: vi.fn(),
   renameTerminal: vi.fn(),
   listRecentPaths: vi.fn(),
   openPath: vi.fn(),
@@ -145,8 +147,10 @@ vi.mock("@tauri-apps/api/window", () => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./lib/ipc", () => ({
+  archiveCheckout: mocks.archiveCheckout,
   closeCheckout: mocks.closeCheckout,
   closeMissingCheckout: mocks.closeMissingCheckout,
+  restoreArchivedWorktrees: mocks.restoreArchivedWorktrees,
   listRecentPaths: mocks.listRecentPaths,
   loadAppLayout: mocks.loadAppLayout,
   loadCheckoutUiState: mocks.loadCheckoutUiState,
@@ -263,7 +267,15 @@ import App from "./App.vue";
 
 const SidebarStub = defineComponent({
   name: "SidebarStub",
-  emits: ["selectCheckout", "selectSession", "closeWorkdir", "closeMissing", "renameSession"],
+  emits: [
+    "selectCheckout",
+    "selectSession",
+    "closeWorkdir",
+    "closeMissing",
+    "archiveWorktree",
+    "restoreArchived",
+    "renameSession",
+  ],
   setup(_, { emit }) {
     return () =>
       h("div", [
@@ -274,6 +286,14 @@ const SidebarStub = defineComponent({
         h("button", { "data-testid": "close-workdir-worktree", onClick: () => emit("closeWorkdir", "checkout:two") }),
         h("button", { "data-testid": "close-missing-base", onClick: () => emit("closeMissing", "checkout:one") }),
         h("button", { "data-testid": "close-missing-worktree", onClick: () => emit("closeMissing", "checkout:two") }),
+        h("button", {
+          "data-testid": "archive-worktree-two",
+          onClick: () => emit("archiveWorktree", "checkout:two"),
+        }),
+        h("button", {
+          "data-testid": "restore-archived-shared",
+          onClick: () => emit("restoreArchived", "repo:shared"),
+        }),
         h("button", {
           "data-testid": "rename-session-one",
           onClick: () => emit("renameSession", "session:one", "build logs"),
@@ -976,6 +996,104 @@ describe("App UI integration", () => {
       expect(mocks.closeMissingCheckout).not.toHaveBeenCalled();
       wrapper.unmount();
       confirm.mockRestore();
+    });
+  });
+
+  describe("archiving a worktree and putting it back", () => {
+    const archived = [
+      { id: "checkout:three", repoId: "repo:shared", path: "/checkout:three", branch: "three" },
+      { id: "checkout:four", repoId: "repo:shared", path: "/checkout:four", branch: "four" },
+    ];
+
+    it("asks before the worktree leaves the panel, and does nothing until it is answered", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two")));
+
+      await wrapper.get('[data-testid="archive-worktree-two"]').trigger("click");
+
+      // The question is the point: an icon with a box around it reads as "delete" to anyone
+      // who has not read the code, so the dialog has to say what is left alone.
+      const dialog = wrapper.get('[role="dialog"]');
+      expect(dialog.text()).toContain("Archive worktree");
+      // The worktree is named, so the user can tell which of several rows they are answering for.
+      expect(dialog.text()).toContain("leaves the sidebar");
+      expect(dialog.text()).toContain("No files will be deleted");
+      expect(mocks.archiveCheckout).not.toHaveBeenCalled();
+
+      // Answered no: nothing ran, and the question is closed rather than left hanging.
+      await dialog.findAll("footer button")[0]!.trigger("click");
+      expect(mocks.archiveCheckout).not.toHaveBeenCalled();
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+      wrapper.unmount();
+    });
+
+    it("archives once confirmed, and takes the workspace the command hands back", async () => {
+      mocks.archiveCheckout.mockResolvedValue({
+        repos: [],
+        archivedWorktrees: [{ id: "checkout:two", repoId: "repo:shared", path: "/checkout:two", branch: "main" }],
+        activeCheckoutId: null,
+        activeSessionId: null,
+      });
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two")));
+
+      await wrapper.get('[data-testid="archive-worktree-two"]').trigger("click");
+      await wrapper.get('[role="dialog"] button:last-of-type').trigger("click");
+      await flushPromises();
+
+      expect(mocks.archiveCheckout).toHaveBeenCalledWith("checkout:two");
+      // The row is gone and the worktree is on the shelf the repo root reads, which is the
+      // whole difference between archiving a worktree and closing it.
+      expect(mocks.workspaceRef?.value.repos).toEqual([]);
+      expect(mocks.workspaceRef?.value.archivedWorktrees).toHaveLength(1);
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+      wrapper.unmount();
+    });
+
+    it("restores a whole repository's archived worktrees in one confirmed action", async () => {
+      mocks.restoreArchivedWorktrees.mockResolvedValue({
+        ...workspaceWith(checkout("checkout:one"), checkout("checkout:two"), checkout("checkout:three")),
+        archivedWorktrees: [],
+      });
+      const wrapper = await mountApp({ ...workspaceWith(checkout("checkout:one")), archivedWorktrees: archived });
+
+      await wrapper.get('[data-testid="restore-archived-shared"]').trigger("click");
+
+      // Two, said as two: the count is what the user is about to see change.
+      const dialog = wrapper.get('[role="dialog"]');
+      expect(dialog.text()).toContain("Restore archived worktrees");
+      expect(dialog.text()).toContain("2 archived worktrees");
+      expect(mocks.restoreArchivedWorktrees).not.toHaveBeenCalled();
+
+      await dialog.findAll("footer button")[0]!.trigger("click");
+      expect(mocks.restoreArchivedWorktrees).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("says one when there is only one, so the row never promises a set of none", async () => {
+      const wrapper = await mountApp({
+        ...workspaceWith(checkout("checkout:one")),
+        archivedWorktrees: [archived[0]!],
+      });
+
+      await wrapper.get('[data-testid="restore-archived-shared"]').trigger("click");
+      await flushPromises();
+
+      expect(wrapper.get('[role="dialog"]').text()).toContain("Restore archived worktree");
+      expect(wrapper.get('[role="dialog"]').text()).toContain("1 archived worktree");
+      wrapper.unmount();
+    });
+
+    it("keeps the question open when the action behind it fails, so the answer is not lost", async () => {
+      mocks.archiveCheckout.mockRejectedValue(new Error("close active terminal sessions before archiving"));
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two")));
+
+      await wrapper.get('[data-testid="archive-worktree-two"]').trigger("click");
+      await wrapper.get('[role="dialog"] button:last-of-type').trigger("click");
+      await flushPromises();
+
+      // The dialog is the only thing between the user and a failed command, so it stays up
+      // with the failure reported rather than closing on top of the reason.
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(true);
+      wrapper.unmount();
     });
   });
 
