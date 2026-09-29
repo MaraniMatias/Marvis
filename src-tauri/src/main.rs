@@ -442,8 +442,24 @@ mod startup_tests {
         // the only line of text in there that can say where the source is. Dropped, the panel
         // says what the app is called and nothing about where to get it or read it.
         assert!(
-            menus.contains("credits: handle.config().bundle.homepage.clone()"),
+            menus.contains(r#"credits: Some(env!("CARGO_PKG_HOMEPAGE").to_string())"#),
             "the About panel stopped naming the repository"
+        );
+
+        // Read from Cargo, never from the embedded config's bundle. Asserting the line above is not
+        // enough on its own: the first version of it read the bundle's homepage, passed this same
+        // check, and put nothing on screen, because the codegen that embeds the config hardcodes
+        // that field to `None`. A line can be here and still be worth `None` at runtime, so fail
+        // on the dropped field directly. Comments are stripped first: this paragraph names it too.
+        let menus_code: String = menus
+            .lines()
+            .map(str::trim)
+            .filter(|line| !line.starts_with("//"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(
+            !menus_code.contains("config().bundle"),
+            "the About panel is reading a field the config codegen does not embed"
         );
 
         // And it is set, on macOS only. A menu set on Linux or Windows would draw a bar inside

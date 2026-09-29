@@ -54,14 +54,18 @@ pub fn build<R: Runtime>(handle: &AppHandle<R>) -> tauri::Result<Menu<R>> {
 ///
 /// `AboutMetadata` has a `website`, and macOS ignores it. Of the whole struct the platform draws
 /// the name, the version, the short version, the copyright, an icon and the credits, so the one
-/// line of free text is where the repository goes: read from `bundle.homepage` rather than written
-/// again here, so the About panel cannot name a checkout the bundle does not.
+/// line of free text is where the repository goes.
+///
+/// The credits are read from Cargo's `homepage` and not from `bundle.homepage`, which looks like
+/// the field to read and is not: the codegen that embeds the config into the binary hardcodes that
+/// one to `None` (`ToTokens for BundleConfig` in tauri-utils), along with `copyright` and
+/// `publisher`, so anything read off `config().bundle` for display is silently absent at runtime.
+/// `env!` is resolved by rustc and does land in the binary, and Cargo already carries the same URL.
 fn about_metadata<R: Runtime>(handle: &AppHandle<R>) -> AboutMetadata<'_> {
     AboutMetadata {
         name: Some(handle.package_info().name.clone()),
         version: Some(handle.package_info().version.to_string()),
-        copyright: handle.config().bundle.copyright.clone(),
-        credits: handle.config().bundle.homepage.clone(),
+        credits: Some(env!("CARGO_PKG_HOMEPAGE").to_string()),
         ..Default::default()
     }
 }
