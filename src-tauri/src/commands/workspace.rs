@@ -19,6 +19,22 @@ pub async fn restore_workspace(database: State<'_, Database>) -> Result<Workspac
         .map_err(operation_error)?
 }
 
+/// Reads one repository's worktrees again, so a worktree another hand added reaches the panel
+/// while the app is open. `None` is an answer too: the caller already holds the workspace, and a
+/// change that turned out to be nothing should not make it re-read one.
+#[tauri::command]
+pub async fn sync_workspace_repo(
+    repo_id: String,
+    database: State<'_, Database>,
+) -> Result<Option<WorkspaceState>, IpcError> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        services::workspace::sync_repo(&database, &repo_id)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
 #[tauri::command]
 pub async fn register_folder(
     path: PathBuf,

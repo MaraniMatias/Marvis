@@ -148,6 +148,7 @@ fn main() {
             commands::agent::agent_stop,
             commands::folder::open_folder,
             commands::workspace::restore_workspace,
+            commands::workspace::sync_workspace_repo,
             commands::workspace::register_folder,
             commands::workspace::list_recent_paths,
             commands::workspace::locate_missing_checkout,

@@ -26,6 +26,7 @@ use crate::{
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(220);
 const STATUS_CHANGED_EVENT: &str = "git-status-changed";
 const FILE_ACTIVITY_EVENT: &str = "checkout-file-activity";
+const WORKTREES_CHANGED_EVENT: &str = "git-worktrees-changed";
 const SMALL_DIFF_LINES: usize = 1000;
 const SMALL_DIFF_BYTES: usize = 512 * 1024;
 const MAX_DIFF_LINES: usize = 100_000;
@@ -149,11 +150,16 @@ pub struct GitWatcherManager {
 struct RepoWatcher {
     _watcher: RecommendedWatcher,
     sender: mpsc::Sender<WatchMessage>,
+    /// The plan this watcher was built for, so a worktree joining or leaving the repository is
+    /// answered by a watcher that knows about it rather than by the one that predates it.
+    plan: RepoWatchPlan,
 }
 
 /// What one repository's watcher has to know to say which checkouts a change speaks for.
-#[derive(Clone, Default)]
+#[derive(Clone, Default, PartialEq, Eq, Debug)]
 pub struct RepoWatchPlan {
+    /// The repository this plan watches, named in the one signal no checkout can speak for.
+    pub repo_id: String,
     /// Each live worktree's directory, mapped to the checkout that lives in it, so a file
     /// written there is attributed to one row rather than to the whole repo.
     pub roots: BTreeMap<PathBuf, String>,
@@ -167,12 +173,17 @@ pub struct RepoWatchPlan {
     pub all: Vec<String>,
 }
 
-/// The checkouts a batch of filesystem changes speaks for: the ones whose own files moved, and
-/// the whole repository when what moved was a ref every one of them reads.
+/// The checkouts a batch of filesystem changes speaks for: the ones whose own files moved, the
+/// whole repository when what moved was a ref every one of them reads, and the repository whose
+/// own list of worktrees moved.
 #[derive(Debug, Default, PartialEq, Eq)]
 struct WatchUpdate {
     status: Vec<String>,
     activity: Vec<String>,
+    /// Repositories a worktree joined or left. The rows a repository is made of are not a change
+    /// any checkout can speak for, so the repository is named and its registration is read again
+    /// rather than refreshed.
+    worktrees: Vec<String>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -246,7 +257,15 @@ impl GitWatcherManager {
             .watchers
             .lock()
             .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error.to_string()))?;
-        if watchers.contains_key(&repo_id) {
+        // A repository that is already watched for the plan it was given has nothing to ask for.
+        // A plan that grew is another matter: the worktree that just joined has a directory and a
+        // Git directory nothing is watching yet, so its row would describe changes nobody reports.
+        // Replacing the watcher is what covers it, and it costs a new watch rather than a second
+        // watcher per repository.
+        if watchers
+            .get(&repo_id)
+            .is_some_and(|watched| watched.plan == plan)
+        {
             return Ok(());
         }
 
@@ -295,9 +314,17 @@ impl GitWatcherManager {
                     // Before the event, so a refresh it triggers never reads what the same
                     // change just invalidated.
                     worker_snapshots.mark_stale(&update.status);
-                    let _ = app.emit(STATUS_CHANGED_EVENT, &update.status);
+                    if !update.status.is_empty() {
+                        let _ = app.emit(STATUS_CHANGED_EVENT, &update.status);
+                    }
                     if !update.activity.is_empty() {
                         let _ = app.emit(FILE_ACTIVITY_EVENT, &update.activity);
+                    }
+                    if !update.worktrees.is_empty() {
+                        // The rows themselves are not a status refresh, so the repository is named
+                        // and its registration read again: a worktree created by an agent belongs
+                        // in the sidebar the same way one created here does.
+                        let _ = app.emit(WORKTREES_CHANGED_EVENT, &update.worktrees);
                     }
                 }
             })
@@ -308,11 +335,14 @@ impl GitWatcherManager {
                 )
             })?;
 
+        // The replaced watcher is dropped with its sender, which is what ends the worker reading
+        // the plan this one supersedes.
         watchers.insert(
             repo_id,
             RepoWatcher {
                 _watcher: watcher,
                 sender,
+                plan,
             },
         );
         Ok(())
@@ -353,48 +383,132 @@ impl GitWatcherManager {
 /// Anything outside all of them belongs to none of them, and a change that touches no checkout
 /// is not a change at all: Git writes an object for every commit, and re-reading the sidebar
 /// because a blob landed is the cost this whole path exists to avoid.
+///
+/// The one exception is a change in the list of worktrees themselves, which is not a change any
+/// checkout can speak for: it is answered by naming the repository, and the workspace is read
+/// again to find the worktree that joined or the one that left.
 fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<WatchUpdate> {
     let mut status: BTreeSet<String> = BTreeSet::new();
     let mut activity: BTreeSet<String> = BTreeSet::new();
+    let mut worktrees: BTreeSet<String> = BTreeSet::new();
     let mut repo_wide = false;
     for path in &event.paths {
+        // Check registration before a known worktree's Git directory: its `gitdir` file is
+        // inside that directory, but removing it means the row's membership changed, not just
+        // that checkout's status did.
+        if let Some(common) = plan.common_dir.as_deref() {
+            if path.starts_with(common) && is_worktree_registration_path(event, path, common) {
+                worktrees.insert(plan.repo_id.clone());
+                continue;
+            }
+        }
         if let Some(checkout_id) = longest_match(&plan.git_dirs, path) {
             status.insert(checkout_id.clone());
             continue;
         }
-        if plan
-            .common_dir
-            .as_ref()
-            .is_some_and(|common| path.starts_with(common))
-        {
-            repo_wide |= should_refresh_path(path);
-            continue;
+        if let Some(common) = plan.common_dir.as_deref() {
+            if path.starts_with(common) {
+                repo_wide |= should_refresh_path(path);
+                continue;
+            }
         }
-        for (root, checkout_id) in &plan.roots {
-            if path.starts_with(root) {
-                status.insert(checkout_id.clone());
-                if is_checkout_file_activity(path, root) {
-                    activity.insert(checkout_id.clone());
-                }
+        if let Some((root, checkout_id)) = longest_path_match(&plan.roots, path) {
+            // Marvis's default location is inside the repository root. Until the registration
+            // event has brought a new worktree into the plan, its files would look like primary
+            // checkout edits; ignore that reserved folder and let the shared Git metadata event
+            // add its real root to the next watch plan.
+            if is_pending_worktree_path(path, root) {
+                continue;
+            }
+            status.insert(checkout_id.clone());
+            if is_checkout_file_activity(path, root) {
+                activity.insert(checkout_id.clone());
             }
         }
     }
     if repo_wide {
         status.extend(plan.all.iter().cloned());
     }
-    (!status.is_empty()).then(|| WatchUpdate {
+    let nothing_moved = status.is_empty() && activity.is_empty() && worktrees.is_empty();
+    (!nothing_moved).then(|| WatchUpdate {
         status: status.into_iter().collect(),
         activity: activity.into_iter().collect(),
+        worktrees: worktrees.into_iter().collect(),
     })
+}
+
+/// Whether a change in the shared Git directory is the list of worktrees moving.
+///
+/// Git registers a linked worktree as `<common>/worktrees/<name>`, and it does so whichever hand
+/// added it: a worktree an agent created with `git worktree add` in a terminal is registered the
+/// same way one Marvis created itself is, so the same write is what the sidebar has to notice.
+///
+/// The registration is also where a checkout does its own bookkeeping, and that is the part to
+/// refuse. A `git add` creates `index.lock` and rewrites `index`, a commit moves `HEAD`, and a
+/// checkout a user is typing in does it several times a minute: none of that adds or removes a
+/// worktree, and answering it with a read of the whole repository is the cost this signal must not
+/// pay. Registration directories only count as they appear or go; within them only Git's own
+/// pointers to a checkout count, not the files a worktree uses.
+fn is_worktree_registration_path(event: &notify::Event, path: &Path, common_dir: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(common_dir) else {
+        return false;
+    };
+    let mut components = relative.components();
+    if !matches!(components.next(), Some(Component::Normal(name)) if name.to_str() == Some("worktrees"))
+    {
+        return false;
+    }
+    match (components.next(), components.next()) {
+        // The directory holding the registrations itself.
+        (None, _) => is_worktree_lifecycle_event(event),
+        // The worktree's own Git directory, appearing or going.
+        (Some(Component::Normal(_)), None) => is_worktree_lifecycle_event(event),
+        // A file directly in it, one Git writes to register a worktree rather than to use one.
+        (Some(Component::Normal(_)), Some(Component::Normal(file)))
+            if matches!(file.to_str(), Some("gitdir" | "commondir")) =>
+        {
+            matches!(
+                event.kind,
+                notify::EventKind::Create(_)
+                    | notify::EventKind::Modify(_)
+                    | notify::EventKind::Remove(_)
+            )
+        }
+        _ => false,
+    }
+}
+
+fn is_worktree_lifecycle_event(event: &notify::Event) -> bool {
+    matches!(
+        event.kind,
+        notify::EventKind::Create(_)
+            | notify::EventKind::Remove(_)
+            | notify::EventKind::Modify(notify::event::ModifyKind::Name(_))
+    )
 }
 
 /// The checkout owning a directory the path sits in, when it sits in one of them. The longest
 /// match wins, so a worktree nested under another is its own and not its parent.
 fn longest_match(dirs: &BTreeMap<PathBuf, String>, path: &Path) -> Option<String> {
+    longest_path_match(dirs, path).map(|(_, checkout_id)| checkout_id.clone())
+}
+
+fn longest_path_match<'a>(
+    dirs: &'a BTreeMap<PathBuf, String>,
+    path: &Path,
+) -> Option<(&'a PathBuf, &'a String)> {
     dirs.iter()
         .filter(|(dir, _)| path.starts_with(dir))
         .max_by_key(|(dir, _)| dir.components().count())
-        .map(|(_, checkout_id)| checkout_id.clone())
+}
+
+fn is_pending_worktree_path(path: &Path, checkout_root: &Path) -> bool {
+    path.strip_prefix(checkout_root)
+        .ok()
+        .and_then(|relative| relative.components().next())
+        .is_some_and(|component| {
+            matches!(component, Component::Normal(name) if name.to_str() == Some(".worktrees"))
+        })
 }
 
 impl GitSnapshotCache {
@@ -475,6 +589,11 @@ fn merge_update(merged: &mut WatchUpdate, update: WatchUpdate) {
             merged.activity.push(checkout_id);
         }
     }
+    for repo_id in update.worktrees {
+        if !merged.worktrees.contains(&repo_id) {
+            merged.worktrees.push(repo_id);
+        }
+    }
 }
 
 fn should_refresh_path(path: &Path) -> bool {
@@ -488,10 +607,10 @@ fn should_refresh_path(path: &Path) -> bool {
     let metadata = &components[git_directory + 1..];
     let ends_with =
         |name: &str| matches!(metadata.last(), Some(Component::Normal(value)) if *value == name);
-    let head_changed = (metadata.len() == 1 && ends_with("HEAD"))
-        || (metadata.len() >= 3
-            && matches!(metadata[metadata.len() - 3], Component::Normal(name) if name == "worktrees")
-            && ends_with("HEAD"));
+    // A linked worktree's HEAD is private to that checkout, not a repo-wide ref. Known worktree
+    // Git directories are matched before this helper; an unregistered one is not a reason to
+    // refresh every existing checkout while the membership signal adds its row.
+    let head_changed = metadata.len() == 1 && ends_with("HEAD");
     let index_changed = ends_with("index") || ends_with("index.lock");
     let packed_refs_changed = metadata.len() == 1 && ends_with("packed-refs");
     head_changed
@@ -1253,7 +1372,10 @@ pub fn watch_plan(database: &Database, repo_id: &str) -> Result<RepoWatchPlan, I
             "only a Git repository has changes to watch",
         ));
     }
-    let mut plan = RepoWatchPlan::default();
+    let mut plan = RepoWatchPlan {
+        repo_id: repo_id.to_owned(),
+        ..RepoWatchPlan::default()
+    };
     for checkout in &repo.checkouts {
         if checkout.is_missing {
             continue;
@@ -1790,7 +1912,12 @@ fn output_text(output: &Output) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap, fs, path::Path, process::Command, sync::mpsc, time::Duration,
+        collections::BTreeMap,
+        fs,
+        path::Path,
+        process::Command,
+        sync::mpsc,
+        time::{Duration, Instant},
     };
 
     use notify::Watcher;
@@ -2091,6 +2218,7 @@ line.txt";
         WatchUpdate {
             status: ids.iter().map(|id| (*id).to_owned()).collect(),
             activity: Vec::new(),
+            worktrees: Vec::new(),
         }
     }
 
@@ -2121,6 +2249,7 @@ line.txt";
         let root = temp.path().join("main").canonicalize().unwrap();
         let worktree = temp.path().join("task").canonicalize().unwrap();
         let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
             roots: [
                 (root.clone(), "main".to_owned()),
                 (worktree.clone(), "task".to_owned()),
@@ -2165,6 +2294,7 @@ line.txt";
     #[test]
     fn a_ref_write_speaks_for_every_worktree_because_a_commit_moves_the_merge_base() {
         let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
             roots: [
                 (PathBuf::from("/repo"), "main".to_owned()),
                 (PathBuf::from("/repo-task"), "task".to_owned()),
@@ -2197,6 +2327,7 @@ line.txt";
     #[test]
     fn staging_in_one_worktree_does_not_re_read_the_siblings() {
         let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
             roots: [
                 (PathBuf::from("/repo"), "main".to_owned()),
                 (PathBuf::from("/repo-task"), "task".to_owned()),
@@ -2228,8 +2359,254 @@ line.txt";
     }
 
     #[test]
+    fn a_worktree_joining_the_repository_asks_for_its_own_list_to_be_read_again() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            git_dirs: BTreeMap::new(),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned()],
+        };
+        // Git registers the worktree, writes its metadata and only then the checkout, wherever
+        // the new directory landed: the registration is the one write every way of adding a
+        // worktree goes through, and an agent running `git worktree add` is the same event.
+        for (path, kind) in [
+            (
+                "/repo/.git/worktrees/task",
+                notify::EventKind::Create(notify::event::CreateKind::Folder),
+            ),
+            (
+                "/repo/.git/worktrees/task/gitdir",
+                notify::EventKind::Create(notify::event::CreateKind::File),
+            ),
+        ] {
+            let event = notify::Event {
+                kind,
+                paths: vec![PathBuf::from(path)],
+                attrs: Default::default(),
+            };
+            // No row of the repository is stale — there is no row for the new worktree yet — so
+            // the answer is the repository itself, and nothing is refreshed for the worktree it
+            // just joined.
+            assert_eq!(
+                affected_checkouts(&plan, &event),
+                Some(WatchUpdate {
+                    status: Vec::new(),
+                    activity: Vec::new(),
+                    worktrees: vec!["repo".to_owned()],
+                }),
+                "{path}"
+            );
+        }
+    }
+
+    #[test]
+    fn a_real_git_worktree_add_and_remove_emit_membership_changes() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::create_dir_all(root.join(".worktrees")).unwrap();
+        git(&root, &["branch", "external"]);
+        let (database, _) = git_database(temp.path(), &root);
+        let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
+        let plan = super::watch_plan(&database, &repo_id).unwrap();
+        let common_dir = plan.common_dir.clone().unwrap();
+        let (sender, receiver) = mpsc::channel();
+        let event_sender = sender.clone();
+        let event_plan = plan.clone();
+        let mut watcher =
+            notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
+                if let Some(update) = result
+                    .ok()
+                    .and_then(|event| affected_checkouts(&event_plan, &event))
+                {
+                    let _ = event_sender.send(update);
+                }
+            })
+            .unwrap();
+        watcher
+            .watch(&common_dir, notify::RecursiveMode::Recursive)
+            .unwrap();
+        for root in plan.roots.keys() {
+            watcher
+                .watch(root, notify::RecursiveMode::Recursive)
+                .unwrap();
+        }
+
+        let added = root.join(".worktrees/external");
+        git(
+            &root,
+            &["worktree", "add", added.to_str().unwrap(), "external"],
+        );
+        assert_membership_signal(&receiver, &repo_id);
+
+        git(&root, &["worktree", "remove", added.to_str().unwrap()]);
+        assert_membership_signal(&receiver, &repo_id);
+    }
+
+    fn assert_membership_signal(receiver: &mpsc::Receiver<WatchUpdate>, repo_id: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let update = receiver
+                .recv_timeout(remaining)
+                .expect("Git worktree add/remove should notify the shared Git directory");
+            if update.worktrees.iter().any(|id| id == repo_id) {
+                return;
+            }
+            assert!(
+                update.status.is_empty() && update.activity.is_empty(),
+                "the new worktree's files must not be reported as primary-checkout changes"
+            );
+        }
+    }
+
+    #[test]
+    fn removing_a_known_worktree_registration_is_not_mistaken_for_status() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            git_dirs: BTreeMap::from([(
+                PathBuf::from("/repo/.git/worktrees/task"),
+                "task".to_owned(),
+            )]),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned(), "task".to_owned()],
+        };
+        let removed = notify::Event {
+            kind: notify::EventKind::Remove(notify::event::RemoveKind::File),
+            paths: vec![PathBuf::from("/repo/.git/worktrees/task/gitdir")],
+            attrs: Default::default(),
+        };
+
+        let update = affected_checkouts(&plan, &removed).unwrap();
+
+        assert!(update.status.is_empty());
+        assert_eq!(update.worktrees, ["repo"]);
+    }
+
+    #[test]
+    fn a_worktree_under_the_reserved_container_is_not_counted_as_primary_checkout_activity() {
+        let mut plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned()],
+            ..RepoWatchPlan::default()
+        };
+        let added_file = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/repo/.worktrees/task/new-file.txt")],
+            attrs: Default::default(),
+        };
+
+        // The default worktree lives inside the root, but it is not part of the primary checkout.
+        // Before the shared Git event registers it, treating these writes as primary edits would
+        // repeatedly refresh and announce files from the new checkout.
+        assert_eq!(affected_checkouts(&plan, &added_file), None);
+
+        plan.roots
+            .insert(PathBuf::from("/repo/.worktrees/task"), "task".to_owned());
+        plan.all.push("task".to_owned());
+
+        let update = affected_checkouts(&plan, &added_file).unwrap();
+        assert_eq!(update.status, ["task"]);
+        assert_eq!(update.activity, ["task"]);
+    }
+
+    #[test]
+    fn a_worktree_staging_does_not_ask_the_whole_repository_to_be_read_again() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            git_dirs: BTreeMap::from([(
+                PathBuf::from("/repo/.git/worktrees/task"),
+                "task".to_owned(),
+            )]),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned(), "task".to_owned()],
+        };
+        // A checkout's own index, lock and HEAD move on every command, and the lock appears and
+        // disappears, so kind alone cannot tell them from a registration. Reading the whole
+        // repository because an agent ran `git add` is the cost this signal has to refuse.
+        let events = [
+            notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            notify::EventKind::Create(notify::event::CreateKind::File),
+            notify::EventKind::Remove(notify::event::RemoveKind::File),
+        ];
+        for path in [
+            "/repo/.git/worktrees/task/HEAD",
+            "/repo/.git/worktrees/task/index",
+            "/repo/.git/worktrees/task/index.lock",
+            "/repo/.git/worktrees/task/ORIG_HEAD",
+        ] {
+            for kind in events {
+                let event = notify::Event {
+                    kind,
+                    paths: vec![PathBuf::from(path)],
+                    attrs: Default::default(),
+                };
+                assert_eq!(
+                    affected_checkouts(&plan, &event).map(|update| update.worktrees),
+                    Some(Vec::new()),
+                    "{path}"
+                );
+            }
+        }
+    }
+
+    /// The whole chain a worktree an agent created travels, as far as the backend is concerned.
+    /// A plan names the worktrees that are registered, so it is built from the database rather
+    /// than from disk, and it grows only once something has read the disk. That something is the
+    /// sync the worktree signal asks for, and the plan the watcher is then rebuilt for is the one
+    /// that has the new worktree's directory and Git directory in it — a plan that did not grow
+    /// is a watcher whose reach stops before the worktree the user is about to look at.
+    #[test]
+    fn a_worktree_added_outside_marvis_reaches_the_plan_and_is_therefore_watched() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        let (database, _) = git_database(temp.path(), &root);
+        let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "task",
+                temp.path().join("task").to_str().unwrap(),
+            ],
+        );
+        // Resolved, because the plan resolves: the filesystem reports resolved paths, and a
+        // temporary directory reached through the `/var` symlink names a checkout the plan would
+        // not match an event against.
+        let added = temp.path().join("task").canonicalize().unwrap();
+
+        // On disk and in Git, but nothing has registered it: the plan still watches the one
+        // worktree, which is the whole reason the signal exists.
+        let before = super::watch_plan(&database, &repo_id).unwrap();
+        assert!(!before.roots.keys().any(|path| path == &added));
+
+        workspace::sync_repo(&database, &repo_id).unwrap();
+
+        let after = super::watch_plan(&database, &repo_id).unwrap();
+        assert!(after.roots.keys().any(|path| path == &added));
+        assert_ne!(before, after);
+    }
+
+    #[test]
     fn a_write_outside_every_worktree_and_the_git_directory_is_not_a_change() {
         let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
             roots: [(PathBuf::from("/repo"), "main".to_owned())]
                 .into_iter()
                 .collect(),
@@ -2256,7 +2633,7 @@ line.txt";
         )));
         assert!(!should_refresh_path(Path::new("/repo/.git/logs/HEAD")));
         assert!(should_refresh_path(Path::new("/repo/.git/index")));
-        assert!(should_refresh_path(Path::new(
+        assert!(!should_refresh_path(Path::new(
             "/repo/.git/worktrees/task/HEAD"
         )));
         assert!(should_refresh_path(Path::new(

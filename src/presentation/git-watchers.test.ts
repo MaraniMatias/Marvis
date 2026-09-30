@@ -119,24 +119,62 @@ describe("useGitWatchers", () => {
     wrapper.unmount();
   });
 
-  it("starts one watcher per repository however often the workspace changes under it", async () => {
+  it("re-registers the latest worktree plan after a watch already in flight settles", async () => {
     const pending = deferred<void>();
     mocks.watchGitRepo.mockImplementation(() => pending.promise);
     const repos = ref([repo("repo:a", [checkout("one")])]);
     const wrapper = mount(host(repos));
     await settle();
 
-    // Several edits arrive while the first watch is still in flight. The backend keeps the
-    // first watcher it is given, so starting several would leave a worktree unwatched.
+    // Several edits arrive while the first plan is still being registered. They collapse to the
+    // latest one: starting multiple watchers would waste resources, but forgetting the change
+    // would leave the new worktree unwatched.
     repos.value = [repo("repo:a", [checkout("one"), checkout("two")])];
     await settle();
     expect(mocks.watchGitRepo).toHaveBeenCalledTimes(1);
 
     pending.resolve(undefined);
     await settle();
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(2);
+
     repos.value = [repo("repo:a", [checkout("one"), checkout("two"), checkout("three")])];
     await settle();
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(3);
+    wrapper.unmount();
+  });
+
+  it("unwatches after a repository leaves while its watcher is starting", async () => {
+    const pending = deferred<void>();
+    mocks.watchGitRepo.mockImplementation(() => pending.promise);
+    const repos = ref([repo("repo:a", [checkout("one")])]);
+    const wrapper = mount(host(repos));
+    await settle();
+
+    repos.value = [];
+    await settle();
+    pending.resolve(undefined);
+    await settle();
+
+    expect(mocks.unwatchGitRepo).toHaveBeenCalledWith("repo:a");
+    wrapper.unmount();
+  });
+
+  it("does not let a delayed unwatch remove a repository that rejoined while starting", async () => {
+    const pending = deferred<void>();
+    mocks.watchGitRepo.mockImplementationOnce(() => pending.promise).mockResolvedValue(undefined);
+    const repos = ref([repo("repo:a", [checkout("one")])]);
+    const wrapper = mount(host(repos));
+    await settle();
+
+    repos.value = [];
+    await settle();
+    repos.value = [repo("repo:a", [checkout("one"), checkout("two")])];
+    await settle();
+    pending.resolve(undefined);
+    await settle();
+
     expect(mocks.watchGitRepo).toHaveBeenCalledTimes(2);
+    expect(mocks.unwatchGitRepo).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 

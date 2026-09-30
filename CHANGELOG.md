@@ -6,6 +6,17 @@ the part a reader should read and the generated list is the part they can skip. 
 under `Unreleased` and rename that heading to the version when you tag it; a version with no section
 here still gets its generated notes.
 
+## Unreleased
+
+- **A worktree somebody else created shows up in the panel.** More than one hand adds a worktree:
+  Marvis's own dialog, an agent running `git worktree add` in a terminal, a script. Until now only
+  the first was noticed while the app was open — a worktree added any other way appeared at the
+  next launch, and its row was never watched once it did, so the numbers on it did not refresh.
+  Marvis now watches the list of worktrees in the Git directory they share, so a worktree joining
+  or leaving a repository is read again and the panel agrees with the disk. An archived worktree
+  stays archived, and a worktree removed elsewhere becomes a row that says its directory is gone,
+  which is what closing it from the panel has always done.
+
 ## 0.6.0
 
 - **Markdown export is now the default review destination.** With no saved choice, sending review
