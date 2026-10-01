@@ -12,6 +12,7 @@
  * while it is being picked.
  */
 import { computed, nextTick, ref, watch } from "vue";
+import { ACKNOWLEDGEMENT, CREDITS, REPOSITORY } from "../domain/credits";
 import { DEFAULT_SETTINGS, SETTINGS_SECTIONS, cloneSettings, valueAt, withValue } from "../domain/settings";
 import type { AppSettings, SettingsField, SettingsPath, SettingsValue } from "../domain/settings";
 import SelectControl from "./ui/select/SelectControl.vue";
@@ -218,6 +219,31 @@ function onDialogKeydown(event: KeyboardEvent) {
               </div>
             </template>
           </div>
+        </section>
+
+        <!-- What the app is made of, which is a matter of record rather than of preference: no row
+             here is written to the config file, and nothing about it is applied by the footer. The
+             rule above it is what says so, because until then the whole dialog was about changing
+             something and this is the one part of it that is only reading. -->
+        <section data-testid="about-section" class="border-t border-(--marvis-border) pt-5">
+          <h3 class="mb-2 text-[0.6875rem] font-semibold tracking-wide text-(--marvis-text-faint) uppercase">About</h3>
+          <p class="text-xs text-(--marvis-text-secondary)">{{ ACKNOWLEDGEMENT }}</p>
+
+          <dl class="mt-4 space-y-3">
+            <div v-for="group in CREDITS" :key="group.title">
+              <dt class="text-[0.6875rem] text-(--marvis-text-faint)">{{ group.title }}</dt>
+              <dd class="mt-1 space-y-1">
+                <p v-for="entry in group.entries" :key="entry.name">
+                  <span class="text-xs text-(--marvis-text)">{{ entry.name }}</span>
+                  <span class="text-(--marvis-text-faint)"> — {{ entry.role }}, {{ entry.license }}</span>
+                </p>
+              </dd>
+            </div>
+          </dl>
+
+          <p class="mt-4 text-xs text-(--marvis-text-faint)">
+            Source and releases: <span class="text-(--marvis-text-secondary)">{{ REPOSITORY }}</span>
+          </p>
         </section>
       </div>
 
