@@ -1,4 +1,10 @@
-use std::{ffi::OsString, fs, path::Path, process::Command};
+use std::{
+    collections::BTreeSet,
+    ffi::OsString,
+    fs,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use crate::{
     domain::{
@@ -343,6 +349,110 @@ pub fn restore(database: &Database) -> Result<crate::domain::workspace::Workspac
         .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
 }
 
+/// Reads one repository's worktrees again and registers the ones Git now lists.
+///
+/// More than one hand adds a worktree: Marvis's own dialog, an agent running `git worktree add`
+/// in a terminal, a script. The disk is what they all wrote to and what the panel has to agree
+/// with, so this asks Git for one repository's list and reconciles the answer — the same reading
+/// [`restore`] takes for every repository, asked for one because a change said this one moved.
+///
+/// The archived stay archived: reconciliation writes what Git lists and leaves every other
+/// column of a checkout it already knows alone, so a worktree the user put on the shelf is not
+/// brought back by another hand adding a sibling.
+pub fn sync_repo(
+    database: &Database,
+    repo_id: &str,
+) -> Result<Option<crate::domain::workspace::WorkspaceState>, IpcError> {
+    let state = database
+        .load_workspace()
+        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?;
+    let repo = state
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id && repo.kind == RepoKind::Git)
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "Git repository is not registered",
+            )
+        })?;
+    let Some(path) = repo
+        .checkouts
+        .iter()
+        .map(|checkout| PathBuf::from(&checkout.canonical_path))
+        .chain(
+            state
+                .archived_worktrees
+                .iter()
+                .filter(|checkout| checkout.repo_id == repo_id)
+                .map(|checkout| PathBuf::from(&checkout.path)),
+        )
+        .find(|path| path.is_dir())
+    else {
+        return Ok(None);
+    };
+
+    // Git lists all live and missing worktrees; the workspace splits those same rows between
+    // the panel and the archive shelf. Compare just their paths first: most filesystem events
+    // near `.git/worktrees` are not a membership change, and one `worktree list` is cheaper than
+    // resolving every checkout, updating the database and returning the workspace again.
+    let registered: BTreeSet<PathBuf> = repo
+        .checkouts
+        .iter()
+        .map(|checkout| PathBuf::from(&checkout.canonical_path))
+        .chain(
+            state
+                .archived_worktrees
+                .iter()
+                .filter(|checkout| checkout.repo_id == repo_id)
+                .map(|checkout| PathBuf::from(&checkout.path)),
+        )
+        .collect();
+    if worktree::registered_paths(&path)? == registered {
+        return Ok(None);
+    }
+
+    // A membership change is a reason to reconcile, not a reason to ignore Git errors. Unlike
+    // startup's best-effort scan, this is a live request with a panel waiting for its answer.
+    let Some(resolved) = resolve_repo(database, repo_id)? else {
+        return Ok(None);
+    };
+    database
+        .reconcile_git_repo(&resolved)
+        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?;
+    database
+        .load_workspace()
+        .map(Some)
+        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
+}
+
+/// Re-resolves one registered repository from any checkout that still exists.
+///
+/// A repository whose checkouts are all gone has nothing to reconcile, and one Git no longer
+/// recognizes is left as it is rather than deleted: the directory may be coming back, and the row
+/// that says so is the one that offers to look for it.
+fn resolve_repo(
+    database: &Database,
+    repo_id: &str,
+) -> Result<Option<crate::domain::workspace::Repo>, IpcError> {
+    let Some(path) = database
+        .existing_git_checkout(repo_id)
+        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?
+    else {
+        return Ok(None);
+    };
+    let Some((resolved, _)) = git::resolve_repository(&path, &timestamp())? else {
+        return Ok(None);
+    };
+    if resolved.id != repo_id {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "checkout no longer belongs to the registered Git repository",
+        ));
+    }
+    Ok(Some(resolved))
+}
+
 pub fn set_default_branch(
     database: &Database,
     repo_id: &str,
@@ -415,7 +525,7 @@ mod tests {
 
     use super::{
         archive_checkout, close_checkout, close_missing_checkout, locate_missing_checkout,
-        register_folder, restore, set_default_branch,
+        register_folder, restore, set_default_branch, sync_repo,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -716,6 +826,154 @@ mod tests {
             restored.repos[0].checkouts[1].branch.as_deref(),
             Some("external")
         );
+    }
+
+    /// A worktree is created by more than one hand: an agent running `git worktree add` in a
+    /// terminal, a script, this app's own dialog. Whichever one it was, the panel has to show it
+    /// while the app is open rather than at the next launch, and the registration Marvis holds is
+    /// the only place that reconciliation can happen.
+    #[test]
+    fn sync_repo_lists_a_worktree_created_outside_the_app_while_it_is_open() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let linked = temp.path().join("external worktree");
+        init_repo(&primary);
+        let db = database(temp.path());
+        let opened = register_folder(&db, &primary).unwrap();
+        let repo_id = opened.repos[0].id.clone();
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "external",
+                linked.to_str().unwrap(),
+            ],
+        );
+
+        let synced = sync_repo(&db, &repo_id)
+            .unwrap()
+            .expect("a worktree joined");
+
+        assert_eq!(synced.repos.len(), 1);
+        assert_eq!(synced.repos[0].checkouts.len(), 2);
+        assert_eq!(
+            synced.repos[0].checkouts[1].branch.as_deref(),
+            Some("external")
+        );
+        // The panel grows rather than the selection moving: an agent adding a worktree is not
+        // something the user asked the app to open.
+        assert_eq!(synced.active_checkout_id, opened.active_checkout_id);
+    }
+
+    #[test]
+    fn sync_repo_does_not_reload_the_workspace_when_the_worktree_list_is_unchanged() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        init_repo(&primary);
+        let db = database(temp.path());
+        let opened = register_folder(&db, &primary).unwrap();
+
+        let synced = sync_repo(&db, &opened.repos[0].id).unwrap();
+
+        assert!(synced.is_none());
+    }
+
+    #[test]
+    fn sync_repo_reports_a_failed_git_worktree_list() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        init_repo(&primary);
+        let db = database(temp.path());
+        let opened = register_folder(&db, &primary).unwrap();
+        fs::rename(primary.join(".git"), primary.join(".git unavailable")).unwrap();
+
+        let result = sync_repo(&db, &opened.repos[0].id);
+
+        assert!(result.is_err());
+    }
+
+    /// A worktree that is gone from disk stops being one of the rows, the same way a restart
+    /// leaves it: as a row that says its directory is missing and can be closed, rather than a row
+    /// describing changes nobody can read any more.
+    #[test]
+    fn sync_repo_marks_a_worktree_removed_outside_the_app_as_missing() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let linked = temp.path().join("external worktree");
+        init_repo(&primary);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "external",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let db = database(temp.path());
+        let opened = register_folder(&db, &primary).unwrap();
+        let repo_id = opened.repos[0].id.clone();
+        let worktree_id = opened.repos[0].checkouts[1].id.clone();
+        git(&primary, &["worktree", "remove", linked.to_str().unwrap()]);
+
+        let synced = sync_repo(&db, &repo_id).unwrap().expect("a worktree left");
+
+        let checkout = synced.repos[0]
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.id == worktree_id)
+            .expect("the row is still there to close");
+        assert!(checkout.is_missing);
+    }
+
+    /// An archived worktree is registered and alive but off the panel, so reading the disk again
+    /// has to leave it there. Otherwise the shelf emptied itself the moment an agent added a
+    /// sibling, and the row the user had put away came back on its own.
+    #[test]
+    fn sync_repo_keeps_an_archived_worktree_archived() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let archived = temp.path().join("archived worktree");
+        let added = temp.path().join("added worktree");
+        init_repo(&primary);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "archived",
+                archived.to_str().unwrap(),
+            ],
+        );
+        let db = database(temp.path());
+        let opened = register_folder(&db, &archived).unwrap();
+        let repo_id = opened.repos[0].id.clone();
+        let worktree_id = opened.repos[0].checkouts[1].id.clone();
+        archive_checkout(&db, &worktree_id).unwrap();
+        git(
+            &primary,
+            &["worktree", "add", "-b", "added", added.to_str().unwrap()],
+        );
+
+        let synced = sync_repo(&db, &repo_id)
+            .unwrap()
+            .expect("a worktree joined");
+
+        assert_eq!(synced.repos[0].checkouts.len(), 2);
+        assert!(synced.repos[0]
+            .checkouts
+            .iter()
+            .all(|checkout| checkout.branch.as_deref() != Some("archived")));
+        assert!(synced.repos[0]
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.branch.as_deref() == Some("added")));
+        assert_eq!(synced.archived_worktrees.len(), 1);
+        assert_eq!(synced.archived_worktrees[0].id, worktree_id);
     }
 
     /// Launching the app re-reads Git's own worktree list and writes it back over what is

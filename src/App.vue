@@ -39,6 +39,7 @@ import { useWorkspaceState } from "./presentation/workspace";
 import { useRecentPaths } from "./presentation/recent-paths";
 import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
 import { useGitWatchers } from "./presentation/git-watchers";
+import { useWorktreeSync } from "./presentation/worktree-sync";
 import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
 import type { ReviewSender, ReviewTarget } from "./presentation/review-notes";
 import { useAgentSessions } from "./presentation/agent-sessions";
@@ -1051,6 +1052,11 @@ async function renameTerminalSession(sessionId: string, name: string) {
 function applyWorkspace(next: WorkspaceState) {
   updateWorkspace(next);
 }
+
+// A worktree added by something other than this app — an agent running `git worktree add`, a
+// script — belongs in the panel the same way one added here does, and the only reading that can
+// put it there is the one a launch takes.
+useWorktreeSync(() => workspace.value, applyWorkspace, reportCause);
 
 function reportWarning(message: string) {
   pushToast(message, "info");

@@ -221,6 +221,13 @@ export function registerFolder(path: string): Promise<WorkspaceState> {
   return invoke<WorkspaceState>("register_folder", { path });
 }
 
+/** Re-reads one repository's worktree list, for a worktree something other than this app added.
+ *  `null` means the list did not move after all, so a caller already holding the workspace has
+ *  nothing to apply. */
+export function syncWorkspaceRepo(repoId: string): Promise<WorkspaceState | null> {
+  return invoke<WorkspaceState | null>("sync_workspace_repo", { repoId });
+}
+
 /** The folders Marvis has had open before, newest first. The backend keeps the ten newest. */
 export function listRecentPaths(): Promise<RecentPath[]> {
   return invoke<RecentPath[]>("list_recent_paths");

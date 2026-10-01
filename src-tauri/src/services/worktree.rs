@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     ffi::OsString,
     fs,
     io::Write,
@@ -499,6 +500,14 @@ fn ensure_available_source(context: &Context) -> Result<(), IpcError> {
 struct WorktreeEntry {
     path: Option<PathBuf>,
     branch: Option<String>,
+}
+
+pub(crate) fn registered_paths(root: &Path) -> Result<BTreeSet<PathBuf>, IpcError> {
+    Ok(worktrees(root)?
+        .into_iter()
+        .filter_map(|entry| entry.path)
+        .map(|path| path.canonicalize().unwrap_or(path))
+        .collect())
 }
 
 fn worktrees(root: &Path) -> Result<Vec<WorktreeEntry>, IpcError> {
