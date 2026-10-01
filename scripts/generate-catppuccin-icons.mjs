@@ -1,12 +1,20 @@
 /**
- * Generates the file-type icon table from Catppuccin's icon set, Mocha flavour.
+ * Generates the file-type icon table from Catppuccin's icon set.
  *
  * The drawings are Catppuccin's. They reach us packaged as a Zed extension, which is why there is
  * nothing to install and no package to depend on: the theme is a JSON file mapping names and
- * extensions to SVG files, and the SVGs are 16x16 single-stroke shapes whose colour is already
- * baked in per type. This reads one flavour and writes a TypeScript module holding just the rules
- * and the inner markup of the icons they reach, so nothing is fetched at runtime and the CSP is
- * untouched: the markup is rendered inline rather than through `img-src`.
+ * extensions to SVG files, and the SVGs are 16x16 single-stroke shapes. This reads one flavour and
+ * writes a TypeScript module holding just the rules and the inner markup of the icons they reach,
+ * so nothing is fetched at runtime and the CSP is untouched: the markup is rendered inline rather
+ * than through `img-src`.
+ *
+ * One flavour is read because Catppuccin's light and dark flavours are the same 656 drawings with
+ * the palette swapped — verified shape by shape, and named the same way in the theme file — so the
+ * colour is written as a `--marvis-icon-*` token rather than baked in, and `src/marvis.css` answers
+ * with the palette the theme in effect asks for. Which palette a colour belongs to is Catppuccin's
+ * own naming, and it is the same name in every flavour, so the token is that name. The three
+ * colours the set paints with outside the palette (`#3700ff`, `#df8e1d` and `#fff`) are the same in
+ * every flavour and stay where they are.
  *
  * Usage: node scripts/generate-catppuccin-icons.mjs <path-to-icons-checkout>
  * The checkout is not vendored; see the header of the generated module for the source.
@@ -25,6 +33,30 @@ const OUTPUT = join("src", "lib", "catppuccin-icons.ts");
 
 /** The one shape every icon shares, so the wrapper supplies it instead of each icon. */
 const VIEWBOX = "0 0 16 16";
+
+/**
+ * Mocha's palette colours, by the name Catppuccin gives them. These are the only hexes the set
+ * paints with that belong to a palette, and the token is named after the entry rather than the
+ * value because the value is what changes between one flavour and the next.
+ */
+const PALETTE = {
+  "#cdd6f4": "text",
+  "#7f849c": "overlay1",
+  "#f38ba8": "red",
+  "#eba0ac": "maroon",
+  "#f2cdcd": "flamingo",
+  "#f5e0dc": "rosewater",
+  "#f5c2e7": "pink",
+  "#cba6f7": "mauve",
+  "#b4befe": "lavender",
+  "#89b4fa": "blue",
+  "#89dceb": "sky",
+  "#74c7ec": "sapphire",
+  "#94e2d5": "teal",
+  "#a6e3a1": "green",
+  "#f9e2af": "yellow",
+  "#fab387": "peach",
+};
 
 const checkout = process.argv[2];
 if (!checkout) {
@@ -72,6 +104,8 @@ const referenced = new Set([
  * further compression but delete zero-length paths, and in these icons such a path is a
  * deliberate dot: a zero-length stroke under `stroke-linecap="round"`. The full preset drops one
  * of those from seven icons, so the list stays one plugin long and `painted` guards the result.
+ *
+ * The paints come out as tokens, which is what lets one table serve both palettes.
  */
 function inner(icon) {
   const source = readFileSync(join(checkout, "icons", FLAVOUR.split(" ").pop().toLowerCase(), `${icon}.svg`), "utf8");
@@ -88,7 +122,31 @@ function inner(icon) {
   if (painted(optimised) !== painted(markup)) {
     throw new Error(`optimising ${icon} changed which shapes it paints`);
   }
-  return optimised;
+  return paintAsTokens(optimised);
+}
+
+/**
+ * Every palette colour becomes a `--marvis-icon-<name>` declaration, so the colour follows the
+ * palette rather than the drawing.
+ *
+ * A declaration rather than a presentation attribute: `var()` is not a value a `stroke` attribute
+ * can hold. Whatever `style` an icon already carries is merged into rather than replaced, and the
+ * tag is rebuilt with the self-closing form it came in with — in an inline `<svg>` the HTML parser
+ * reads that slash, and dropping it nests one path inside another.
+ */
+function paintAsTokens(svg) {
+  return svg.replace(/<[a-z]+(?:\s+[^<>]*?)?\/?>/gi, (tag) => {
+    const paints = [...tag.matchAll(/\s(stroke|fill)="(#[0-9a-fA-F]{3,8})"/gi)]
+      .map(([, property, color]) => [property, color, PALETTE[color]])
+      .filter(([, , name]) => name !== undefined);
+    if (paints.length === 0) return tag;
+
+    const declarations = paints.map(([property, , name]) => `${property}:var(--marvis-icon-${name})`);
+    const stripped = paints.reduce((markup, [property, color]) => markup.replace(` ${property}="${color}"`, ""), tag);
+    return stripped.includes('style="')
+      ? stripped.replace(/style="([^"]*)"/, (_, held) => `style="${held};${declarations.join(";")}"`)
+      : stripped.replace(/\s*(\/?)>$/, (_, slash) => ` style="${declarations.join(";")}"${slash}>`);
+  });
 }
 
 /** The markup without the box, since the renderer supplies that. */
@@ -127,9 +185,14 @@ const icons = Object.fromEntries([...referenced].sort().map((icon) => [icon, inn
 
 const module = `// Generated by scripts/generate-catppuccin-icons.mjs. Do not edit.
 //
-// Catppuccin's drawings, flavour "${FLAVOUR}" (dark, 16x16), from
-// https://github.com/catppuccin/zed-icons. The theme's rules plus the markup of the
-// ${Object.keys(icons).length} icons they reach.
+// Catppuccin's drawings (16x16) from https://github.com/catppuccin/zed-icons: the theme's rules
+// plus the markup of the ${Object.keys(icons).length} icons they reach, read from flavour
+// "${FLAVOUR}".
+//
+// The colour of a stroke is a \`--marvis-icon-*\` token rather than a value, because Catppuccin's
+// light and dark flavours are these same drawings with the palette swapped. \`src/marvis.css\`
+// carries both, named for the theme they belong to: One Dark draws them in Mocha and One Light in
+// Latte.
 //
 // Catppuccin is MIT-licensed, and that licence requires the notice below to travel with any copy
 // or substantial portion of these drawings. Editing this file by hand would only throw the notice

@@ -48,6 +48,8 @@ import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
 import type { ReviewSender, ReviewTarget } from "./presentation/review-notes";
 import { useAgentSessions } from "./presentation/agent-sessions";
 import { useToasts } from "./presentation/toasts";
+import { theme } from "./presentation/theme";
+import type { Theme } from "./presentation/theme";
 import { defaultAgentSession } from "./domain/agent";
 import { DEFAULT_ZOOM, zoomKeyFor, zoomLabel, zoomStep } from "./domain/zoom";
 import type { Zoom, ZoomModifier } from "./domain/zoom";
@@ -528,6 +530,11 @@ function leaveSplitStrip() {
 }
 
 function enterSplitDrawer() {
+  // The narrow focus drawer is this same element without the split layout, and a pointer over it
+  // there says nothing about a strip that does not exist. A flag left set is a drawer that cannot
+  // be closed: the close is refused while either is set, and a hidden drawer fires no leave to
+  // clear it — so the drawer opened for one arrangement stays up over the next.
+  if (!isSplitLayout.value) return;
   pointerOverSplitDrawer.value = true;
   openSplitInspector();
 }
@@ -574,6 +581,11 @@ function onSidebarKeydown(event: KeyboardEvent) {
   sidePanelsVisible.value = !sidePanelsVisible.value;
   const show = sidePanelsVisible.value;
   sidebarPanel.value?.[show ? "expand" : "collapse"]();
+  // The drawer is the one thing the shortcut can put away without any pointer being over it, and
+  // a hidden drawer fires no leave to correct the flags that say one is. Those flags refuse every
+  // later close, so the drawer would come back unable to close. Restoring the panels should not
+  // find it already open either, which is why this runs in both directions.
+  closeSplitInspector();
   // A drawer has no width to give back and no width to take, so what shows it is the state the
   // drawer is bound to. The panel is only the panel's own when it sits beside the main view.
   if (!inspectorInDrawer.value) inspectorPanel.value?.[show ? "expand" : "collapse"]();
@@ -677,6 +689,28 @@ watch(
   },
   { immediate: true },
 );
+
+/**
+ * The palette the window is drawn in, which is the preference resolved: `system` asks the operating
+ * system, and the answer changes while the window is open, so this follows it rather than asking
+ * once. The attribute is the whole of it for everything a stylesheet paints — the two palettes in
+ * `src/marvis.css` are keyed off it — and `theme` carries the answer to the two things CSS cannot
+ * reach, the terminal and the diff view.
+ *
+ * It is asked for and applied while `settings` still holds the defaults, because a first paint in
+ * the wrong palette is a frame of a theme the person did not choose.
+ */
+function applyTheme() {
+  const preference = settings.value.ui.theme;
+  const resolved: Theme = preference === "system" ? (systemPrefersDark.matches ? "dark" : "light") : preference;
+  theme.value = resolved;
+  document.documentElement.dataset.theme = resolved;
+}
+
+const systemPrefersDark = window.matchMedia("(prefers-color-scheme: dark)");
+
+watch(() => settings.value.ui.theme, applyTheme, { immediate: true });
+systemPrefersDark.addEventListener("change", applyTheme);
 
 /**
  * The window is scaled from the root element, so everything inside it is laid out in the space a
@@ -833,9 +867,10 @@ watch(
   { immediate: true, flush: "post" },
 );
 
-watch(isSplitLayout, (split) => {
-  if (!split) closeSplitInspector();
-});
+// Either way the pointer is answering a question about an arrangement that no longer exists, and
+// the flags that recorded it cannot be corrected by a leave: the strip and the drawer are different
+// elements afterwards, so both directions have to start from the drawer closed.
+watch(isSplitLayout, () => closeSplitInspector());
 
 watch(
   () => activeCheckout.value?.id,
@@ -942,6 +977,7 @@ onUnmounted(() => {
   // The capture flag is part of the registration: a listener removed without it is not the one
   // that was added, and this one would outlive the window it belongs to.
   window.removeEventListener("keydown", onSidebarKeydown, true);
+  systemPrefersDark.removeEventListener("change", applyTheme);
   unlistenFileActivity?.();
   if (inspectorCloseTimer !== undefined) window.clearTimeout(inspectorCloseTimer);
   if (uiLayoutSaveTimer !== undefined) window.clearTimeout(uiLayoutSaveTimer);

@@ -2,6 +2,7 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
+import { theme } from "../presentation/theme";
 import TerminalSession from "./TerminalSession.vue";
 
 const { MockTerminal, terminalMock } = vi.hoisted(() => {
@@ -30,7 +31,7 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
   class MockTerminal {
     cols = 80;
     rows = 24;
-    options = {};
+    options: Record<string, unknown> = {};
     element?: HTMLElement;
     constructor() {
       terminalMock.terminal = this;
@@ -105,6 +106,8 @@ const terminalLib = vi.hoisted(() => ({
   setTerminalLigatures: vi.fn(),
   enableTerminalSelectionCopy: vi.fn(() => ({ dispose: vi.fn() })),
   fitCalls: 0,
+  /** Stand-in for the palette the lib reads out of the stylesheet, so a switch is visible here. */
+  theme: { background: "#282c33" } as Record<string, string>,
 }));
 
 // happy-dom has no font loading API. Record the requests so this test can pin that xterm opens only
@@ -140,6 +143,7 @@ vi.mock("../lib/marvis-terminal", () => ({
     return new MockTerminal();
   },
   terminalFontSize: (fontSize: number, zoom: number) => fontSize * zoom,
+  marvisTerminalTheme: () => terminalLib.theme,
   setTerminalLigatures: terminalLib.setTerminalLigatures,
   enableTerminalSelectionCopy: terminalLib.enableTerminalSelectionCopy,
   attachTerminalRenderer: terminalLib.attachTerminalRenderer,
@@ -215,6 +219,10 @@ describe("TerminalSession UI", () => {
     vi.mocked(createTerminal).mockResolvedValue(created);
     vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running" });
     vi.mocked(closeTerminal).mockResolvedValue(workspace);
+    // `clearAllMocks` empties the calls but keeps an implementation, so a test that leaves this one
+    // refusing every size would refuse them for the rest of the file too.
+    vi.mocked(resizeTerminal).mockReset();
+    vi.mocked(writeTerminal).mockReset();
   });
 
   it("keeps channel output binary and sends Unicode input and fitted dimensions to the session", async () => {
@@ -458,6 +466,24 @@ describe("TerminalSession UI", () => {
     wrapper.unmount();
   });
 
+  it("repaints an open terminal in the new palette, and keeps its session", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+    const closes = vi.mocked(closeTerminal).mock.calls.length;
+
+    // xterm.js' colors are an object rather than declarations, so the stylesheet cannot reach a
+    // terminal on its own: the panel reads the palette again and hands it over. The PTY is not told
+    // anything, so nothing is lost to a change of palette.
+    terminalLib.theme = { background: "#fafafa" };
+    theme.value = "light";
+    await flushPromises();
+
+    expect(terminalMock.terminal?.options.theme).toEqual({ background: "#fafafa" });
+    expect(vi.mocked(closeTerminal).mock.calls.length).toBe(closes);
+    wrapper.unmount();
+    theme.value = "dark";
+  });
+
   it("reads a drag on the scaled track as a position in the track's own units", async () => {
     terminalMock.buffer = { length: 120, viewportY: 0 };
     const wrapper = mount(TerminalSession, {
@@ -688,6 +714,112 @@ describe("TerminalSession UI", () => {
     expect(resizeTerminal).toHaveBeenNthCalledWith(1, "checkout:repo", "session:new", 97, 31);
     expect(resizeTerminal).toHaveBeenNthCalledWith(2, "checkout:repo", "session:new", 104, 34);
     wrapper.unmount();
+  });
+
+  it("sends a resize that lands while the previous one is still in flight", async () => {
+    // The window between a send resolving and the queue draining: the loop has already compared
+    // its size against the latest and found them equal, so it breaks, but the chain has not
+    // reached the point where new work is accepted again. A measurement arriving in that window is
+    // refused by the queue and has to be picked up when it drains, or the shell keeps wrapping to
+    // the width the pane had before the layout moved.
+    let finishResize!: () => void;
+    vi.mocked(resizeTerminal).mockImplementationOnce(() => new Promise<void>((resolve) => (finishResize = resolve)));
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    terminalMock.resizes[0]?.({ cols: 97, rows: 31 });
+    await flushPromises();
+    expect(resizeTerminal).toHaveBeenCalledTimes(1);
+
+    finishResize();
+    // Inside the window, and not after it: one hop past the comparison, three before the drain.
+    await Promise.resolve();
+    terminalMock.resizes[0]?.({ cols: 104, rows: 34 });
+    await flushPromises();
+
+    expect(resizeTerminal).toHaveBeenNthCalledWith(2, "checkout:repo", "session:new", 104, 34);
+    wrapper.unmount();
+  });
+
+  it("stops asking once the backend refuses a size", async () => {
+    vi.mocked(resizeTerminal).mockRejectedValue(new Error("PTY dimensions must be non-zero"));
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    terminalMock.resizes[0]?.({ cols: 97, rows: 31 });
+    await flushPromises();
+    expect(resizeTerminal).toHaveBeenCalledTimes(1);
+
+    // The refused size counts as attempted, so the drain does not ask for it again on its own.
+    await flushPromises();
+    await flushPromises();
+    expect(resizeTerminal).toHaveBeenCalledTimes(1);
+    expect(wrapper.get('[role="alert"]').text()).toContain("PTY dimensions must be non-zero");
+    wrapper.unmount();
+  });
+
+  it("sends no resize after the close has begun, however late it arrives", async () => {
+    // The drain re-checks the last measurement as it finishes, so a size that arrives during the
+    // close would otherwise be picked up and sent behind the close, against a session the backend
+    // is about to shut down.
+    let finishResize!: () => void;
+    vi.mocked(resizeTerminal).mockImplementationOnce(() => new Promise<void>((resolve) => (finishResize = resolve)));
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+    vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running" });
+
+    terminalMock.resizes[0]?.({ cols: 97, rows: 31 });
+    await flushPromises();
+    expect(resizeTerminal).toHaveBeenCalledTimes(1);
+
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const closed = wrapper.vm.requestClose();
+    await flushPromises();
+    finishResize();
+    terminalMock.resizes[0]?.({ cols: 104, rows: 34 });
+    await closed;
+    await flushPromises();
+
+    expect(resizeTerminal).toHaveBeenCalledTimes(1);
+    expect(closeTerminal).toHaveBeenCalledOnce();
+    wrapper.unmount();
+    confirm.mockRestore();
+  });
+
+  it("waits for a resize the drain starts as it finishes before it closes the session", async () => {
+    // The close has to be the end of the queue rather than a moment in it: a send still in flight
+    // when the PTY goes is a size the session never learns about.
+    let finishResize!: () => void;
+    vi.mocked(resizeTerminal).mockImplementationOnce(() => new Promise<void>((resolve) => (finishResize = resolve)));
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+    vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running" });
+
+    terminalMock.resizes[0]?.({ cols: 97, rows: 31 });
+    await flushPromises();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(true);
+    const closed = wrapper.vm.requestClose();
+    await flushPromises();
+    expect(closeTerminal).not.toHaveBeenCalled();
+
+    finishResize();
+    await closed;
+
+    expect(closeTerminal).toHaveBeenCalledOnce();
+    wrapper.unmount();
+    confirm.mockRestore();
+  });
+
+  it("drops a resize that arrives after the pane is gone", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+    vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running" });
+
+    wrapper.unmount();
+    terminalMock.resizes[0]?.({ cols: 104, rows: 34 });
+    await flushPromises();
+
+    expect(resizeTerminal).not.toHaveBeenCalled();
   });
 
   it("closes the session when its process exits, so an ended shell does not linger", async () => {

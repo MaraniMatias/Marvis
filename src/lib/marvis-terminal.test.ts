@@ -1,11 +1,22 @@
 // @vitest-environment happy-dom
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   attachTerminalRenderer,
   createMarvisTerminal,
   enableTerminalSelectionCopy,
+  marvisTerminalTheme,
   setTerminalLigatures,
 } from "./marvis-terminal";
+
+/**
+ * The token table as it is written down. Read from disk rather than imported, because vitest hands
+ * back an empty string for a stylesheet it does not run, and an empty table would make every
+ * assertion below pass for the wrong reason.
+ */
+const stylesheet = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "marvis.css"), "utf8");
 
 const stubs = vi.hoisted(() => ({
   loaded: [] as string[],
@@ -136,17 +147,32 @@ describe("createMarvisTerminal", () => {
     expect(stubs.terminal?.options).toMatchObject({
       allowProposedApi: true,
       cursorBlink: true,
+      // A block is what a terminal looks like when it is not asking you to wait for it.
+      cursorStyle: "block",
       fontFamily: '"Marvis Nerd Mono", monospace',
       fontSize: 16,
       lineHeight: 1.2,
       scrollback: 10000,
-      theme: {
-        background: "#17191f", // --marvis-bg-0
-        foreground: "#d6d9e0", // --marvis-text
-        cursor: "#7c9eff", // --marvis-accent
-        selectionBackground: "#22252e", // --marvis-selection
-      },
     });
+  });
+
+  it("paints itself out of the stylesheet rather than out of a palette of its own", () => {
+    // Every color is a `--marvis-*` token, so which one arrives is the theme's answer rather than
+    // this file's: a terminal opened in the light palette gets the light one without a second copy
+    // of the values anywhere.
+    const style = document.createElement("style");
+    style.textContent = `:root { --marvis-bg-0: #282c33; --marvis-text: #dce0e5; }
+      :root[data-theme="light"] { --marvis-bg-0: #fafafa; --marvis-text: #242529; }`;
+    document.head.append(style);
+    try {
+      document.documentElement.dataset.theme = "dark";
+      expect(marvisTerminalTheme()).toMatchObject({ background: "#282c33", foreground: "#dce0e5" });
+
+      document.documentElement.dataset.theme = "light";
+      expect(marvisTerminalTheme()).toMatchObject({ background: "#fafafa", foreground: "#242529" });
+    } finally {
+      style.remove();
+    }
   });
 
   it("builds the terminal at the size and cursor the settings ask for", () => {
@@ -158,22 +184,44 @@ describe("createMarvisTerminal", () => {
     expect(stubs.terminal?.options).toMatchObject({ fontSize: 24, cursorBlink: false });
   });
 
-  it("gives the terminal a full ANSI palette instead of xterm.js' own", () => {
-    const theme = createMarvisTerminal().options.theme as Record<string, string>;
+  it("hands xterm.js a full ANSI palette, and every color of it out of the stylesheet", () => {
+    // The names are read out of the real stylesheet rather than listed here, because the list that
+    // matters is the one `marvis.css` carries: a token renamed there has to take this down with it,
+    // and xterm.js' own palette — which is not this window's — is what a missing one falls back to.
+    const names = [...new Set([...stylesheet.matchAll(/(--marvis-[a-z0-9-]+):/g)].map(([, name]) => name))];
+    const colors = names.map((_, index) => `#${(index + 1).toString(16).padStart(6, "0")}`);
+    const style = document.createElement("style");
+    style.textContent = `:root { ${names.map((name, index) => `${name}: ${colors[index]};`).join(" ")} }`;
+    document.head.append(style);
+    try {
+      const theme = marvisTerminalTheme();
 
-    for (const name of [
-      "black",
-      "red",
-      "green",
-      "yellow",
-      "blue",
-      "magenta",
-      "cyan",
-      "white",
-      "brightBlack",
-      "brightWhite",
-    ]) {
-      expect(theme[name], name).toMatch(/^#[0-9a-f]{6}$/);
+      expect(Object.keys(theme).sort()).toEqual([
+        "background",
+        "black",
+        "blue",
+        "brightBlack",
+        "brightBlue",
+        "brightCyan",
+        "brightGreen",
+        "brightMagenta",
+        "brightRed",
+        "brightWhite",
+        "brightYellow",
+        "cursor",
+        "cursorAccent",
+        "cyan",
+        "foreground",
+        "green",
+        "magenta",
+        "red",
+        "selectionBackground",
+        "white",
+        "yellow",
+      ]);
+      for (const value of Object.values(theme)) expect(colors).toContain(value);
+    } finally {
+      style.remove();
     }
   });
 

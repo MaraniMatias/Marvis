@@ -65,6 +65,7 @@ impl Default for AppSettings {
 pub struct UiSettings {
     pub font_size: f64,
     pub zoom: f64,
+    pub theme: String,
 }
 
 impl Default for UiSettings {
@@ -72,6 +73,7 @@ impl Default for UiSettings {
         Self {
             font_size: 14.0,
             zoom: 1.0,
+            theme: "system".into(),
         }
     }
 }
@@ -137,6 +139,9 @@ impl AppSettings {
     fn normalized(mut self) -> Self {
         self.ui.font_size = bounded(self.ui.font_size, UI_FONT_SIZE_MIN, UI_FONT_SIZE_MAX, 14.0);
         self.ui.zoom = bounded(self.ui.zoom, ZOOM_MIN, ZOOM_MAX, 1.0);
+        if !matches!(self.ui.theme.as_str(), "system" | "light" | "dark") {
+            self.ui.theme = "system".into();
+        }
         self.terminal.font_size = bounded(
             self.terminal.font_size,
             TERMINAL_FONT_SIZE_MIN,
@@ -310,6 +315,7 @@ mod tests {
             ui: UiSettings {
                 font_size: 16.0,
                 zoom: 1.2,
+                theme: "light".into(),
             },
             terminal: TerminalSettings {
                 font_size: 18.0,
@@ -408,7 +414,7 @@ mod tests {
         std::fs::write(
             &path,
             concat!(
-                "ui:\n  fontSize: .nan\n  zoom: 99\n",
+                "ui:\n  fontSize: .nan\n  zoom: 99\n  theme: solarized\n",
                 "terminal:\n  fontSize: 2\n  scrollbar: sometimes\n",
                 "editor:\n  fontSize: 400\n  indentation:\n    size: 0\n",
             ),
@@ -417,6 +423,7 @@ mod tests {
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.ui.font_size, 14.0);
         assert_eq!(loaded.ui.zoom, ZOOM_MAX);
+        assert_eq!(loaded.ui.theme, "system");
         assert_eq!(loaded.terminal.font_size, TERMINAL_FONT_SIZE_MIN);
         assert_eq!(loaded.terminal.scrollbar, "hidden");
         assert_eq!(loaded.editor.font_size, EDITOR_FONT_SIZE_MAX);
@@ -442,6 +449,7 @@ mod tests {
                 ui: UiSettings {
                     font_size: 15.0,
                     zoom: 1.0,
+                    theme: "dark".into(),
                 },
                 ..AppSettings::default()
             },

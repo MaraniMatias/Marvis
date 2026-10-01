@@ -33,26 +33,170 @@
    in a scoped component block. Imported before style.css so the unlayered rules
    below win over tailwind's `utilities` layer. */
 :root {
-  --marvis-bg-0: #17191f;
-  --marvis-bg-1: #1c1f27;
-  --marvis-bg-2: #22252e;
-  --marvis-border: #2c2f3a;
-  --marvis-text: #d6d9e0;
-  --marvis-text-secondary: #979a9f;
-  --marvis-text-dim: #8b8fa3;
-  --marvis-text-faint: #5c6072;
-  --marvis-accent: #7c9eff;
-  --marvis-green: #7fd88f;
-  --marvis-red: #e08585;
-  --marvis-scrollbar: #5d5f70;
-  /* One selection, for the DOM and for the terminal canvas: the same value in two places that
-     cannot read each other, since the terminal's theme is an object and this is a stylesheet. It
-     is the raised surface, one step off the page, so it reads as a band and not as a glow. */
-  --marvis-selection: #22252e;
   --marvis-radius: 6px;
   /* The terminal and editor use one family; system monospace faces are fallbacks if the bundled
      webfont cannot be loaded. */
   --marvis-font: "Marvis Nerd Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  color-scheme: dark;
+}
+
+/* Two palettes, One Dark and One Light, modeled on the themes Zed ships
+   (https://github.com/zed-industries/zed/blob/main/assets/themes/one/one.json, MIT). The theme the
+   window is drawn in is the `data-theme` attribute on this element, which App.vue writes from the
+   `ui.theme` preference; the dark half is the `:root` block itself rather than a second selector,
+   so a page nobody has told which theme it is in is still painted in a complete palette instead of
+   in nothing. `src-tauri/tauri.conf.json` opens the window on this page's background, and
+   `src-tauri/src/main.rs` is the test that keeps the two from drifting apart.
+
+   Zed's values are the ones here where they are readable, moved a step darker where they are not:
+   One Light draws its green, its dimmed text and its comments at 2.4–3.8:1, which is a band wider
+   than text can be read across. */
+:root {
+  --marvis-bg-0: #282c33;
+  --marvis-bg-1: #2f343e;
+  --marvis-bg-2: #363c46;
+  --marvis-border: #464b57;
+  --marvis-text: #dce0e5;
+  --marvis-text-secondary: #a9afbc;
+  --marvis-text-dim: #8d94a3;
+  --marvis-text-faint: #767d8d;
+  --marvis-accent: #74ade8;
+  --marvis-green: #a1c181;
+  --marvis-red: #d97f84;
+  --marvis-scrollbar: #c8ccd44c;
+  /* One selection, for the DOM and for the terminal canvas: the terminal reads its colors out of
+     here rather than carrying a second copy of the value. It is the accent at a quarter, so a
+     selection reads as a band over what it covers rather than as a fill that hides it. */
+  --marvis-selection: #74ade83d;
+
+  /* The ANSI palette a terminal is painted with. A colorscheme that uses these would otherwise
+     draw xterm.js' own, which has nothing to do with this window. */
+  --marvis-ansi-black: #282c34;
+  --marvis-ansi-red: #e06c75;
+  --marvis-ansi-green: #98c379;
+  --marvis-ansi-yellow: #e5c07b;
+  --marvis-ansi-blue: #61afef;
+  --marvis-ansi-magenta: #c678dd;
+  --marvis-ansi-cyan: #56b6c2;
+  --marvis-ansi-white: #abb2bf;
+  --marvis-ansi-bright-black: #636d83;
+  --marvis-ansi-bright-red: #ea858b;
+  --marvis-ansi-bright-green: #aad581;
+  --marvis-ansi-bright-yellow: #ffd885;
+  --marvis-ansi-bright-blue: #85c1ff;
+  --marvis-ansi-bright-magenta: #d398eb;
+  --marvis-ansi-bright-cyan: #6ed5de;
+  --marvis-ansi-bright-white: #fafafa;
+
+  /* Catppuccin Mocha, by the name the palette gives each entry: the file-type icons stroke themselves
+   with these, named for the palette rather than for the value because the value is what changes
+   between the two flavours of the same 656 drawings. */
+  --marvis-icon-text: #cdd6f4;
+  --marvis-icon-overlay1: #7f849c;
+  --marvis-icon-red: #f38ba8;
+  --marvis-icon-maroon: #eba0ac;
+  --marvis-icon-flamingo: #f2cdcd;
+  --marvis-icon-rosewater: #f5e0dc;
+  --marvis-icon-pink: #f5c2e7;
+  --marvis-icon-mauve: #cba6f7;
+  --marvis-icon-lavender: #b4befe;
+  --marvis-icon-blue: #89b4fa;
+  --marvis-icon-sky: #89dceb;
+  --marvis-icon-sapphire: #74c7ec;
+  --marvis-icon-teal: #94e2d5;
+  --marvis-icon-green: #a6e3a1;
+  --marvis-icon-yellow: #f9e2af;
+  --marvis-icon-peach: #fab387;
+
+  /* Syntax, for the read-only preview (Shiki, whose theme names these) and for the editor
+     (CodeMirror, which points at the same names): one palette, so a file does not change color
+     when it becomes editable. */
+  --marvis-syntax-foreground: #acb2be;
+  --marvis-syntax-token-comment: #878e98;
+  --marvis-syntax-token-constant: #dfc184;
+  --marvis-syntax-token-keyword: #bd81d6;
+  --marvis-syntax-token-string: #a1c181;
+  --marvis-syntax-token-parameter: #acb2be;
+  --marvis-syntax-token-function: #73ade9;
+  --marvis-syntax-token-string-expression: #dfc184;
+  --marvis-syntax-token-punctuation: #b2b9c6;
+  --marvis-syntax-token-link: #74ade8;
+  --marvis-syntax-token-inserted: #98c379;
+  --marvis-syntax-token-deleted: #e06c75;
+  --marvis-syntax-token-changed: #dec184;
+}
+
+:root[data-theme="light"] {
+  color-scheme: light;
+  --marvis-bg-0: #fafafa;
+  --marvis-bg-1: #ebebec;
+  --marvis-bg-2: #dfdfe0;
+  --marvis-border: #c9c9ca;
+  --marvis-text: #242529;
+  --marvis-text-secondary: #58585a;
+  --marvis-text-dim: #6c6d70;
+  --marvis-text-faint: #8a8b8f;
+  /* Zed's `#5c78e2` is the accent on a link and on a hunk header, and at 3.8:1 on `#fafafa` that
+     is text that cannot be read comfortably. One step deeper is the same blue at 5.3:1. */
+  --marvis-accent: #455fd0;
+  --marvis-green: #3f7a35;
+  --marvis-red: #b8453a;
+  --marvis-scrollbar: #383a414c;
+  --marvis-selection: #455fd03d;
+
+  --marvis-ansi-black: #000000;
+  --marvis-ansi-red: #c33a2f;
+  --marvis-ansi-green: #2f7530;
+  --marvis-ansi-yellow: #8a5f00;
+  --marvis-ansi-blue: #2f5af3;
+  --marvis-ansi-magenta: #950095;
+  --marvis-ansi-cyan: #086676;
+  --marvis-ansi-white: #6c6d70;
+  --marvis-ansi-bright-black: #555555;
+  --marvis-ansi-bright-red: #b8352c;
+  --marvis-ansi-bright-green: #2b6927;
+  --marvis-ansi-bright-yellow: #6f4c00;
+  --marvis-ansi-bright-blue: #2140ab;
+  --marvis-ansi-bright-magenta: #a00095;
+  --marvis-ansi-bright-cyan: #0a7b92;
+  /* Zed's bright white is `#ffffff`, which on a `#fafafa` page is a cell nobody can find a cursor
+     in, so this is the ink the page is printed in. */
+  --marvis-ansi-bright-white: #242529;
+
+  /* Catppuccin Latte, the same entries: the drawings are one set, so this is the light answer to the
+   dark half above rather than a second set of icons. These are the palette's own values, unshifted
+   — its base is `#eff1f5` and this page's is `#fafafa`, so what a Latte icon looks like here is
+   what it looks like there. */
+  --marvis-icon-text: #4c4f69;
+  --marvis-icon-overlay1: #8c8fa1;
+  --marvis-icon-red: #d20f39;
+  --marvis-icon-maroon: #e64553;
+  --marvis-icon-flamingo: #dd7878;
+  --marvis-icon-rosewater: #dc8a78;
+  --marvis-icon-pink: #ea76cb;
+  --marvis-icon-mauve: #8839ef;
+  --marvis-icon-lavender: #7287fd;
+  --marvis-icon-blue: #1e66f5;
+  --marvis-icon-sky: #04a5e5;
+  --marvis-icon-sapphire: #209fb5;
+  --marvis-icon-teal: #179299;
+  --marvis-icon-green: #40a02b;
+  --marvis-icon-yellow: #df8e1d;
+  --marvis-icon-peach: #fe640b;
+
+  --marvis-syntax-foreground: #242529;
+  --marvis-syntax-token-comment: #6f7176;
+  --marvis-syntax-token-constant: #8a6000;
+  --marvis-syntax-token-keyword: #a449ab;
+  --marvis-syntax-token-string: #3f7a35;
+  --marvis-syntax-token-parameter: #4a4b4f;
+  --marvis-syntax-token-function: #3f5fcc;
+  --marvis-syntax-token-string-expression: #5b5d62;
+  --marvis-syntax-token-punctuation: #4d4f52;
+  --marvis-syntax-token-link: #2f5af3;
+  --marvis-syntax-token-inserted: #3f7a35;
+  --marvis-syntax-token-deleted: #c13c2c;
+  --marvis-syntax-token-changed: #8a6000;
 }
 
 /* No focus ring. A window does not draw a web form's outline around its controls, and the browser

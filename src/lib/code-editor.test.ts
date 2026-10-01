@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { defaultHighlightStyle, forceParsing, syntaxTree } from "@codemirror/language";
+import { forceParsing, syntaxTree } from "@codemirror/language";
 import { redo, undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
 import type { IndentationSettings } from "../domain/settings";
@@ -58,7 +58,10 @@ function tokensByLine(view: EditorView): Map<string, string[]> {
   return tokens;
 }
 
-/** The color the editor actually painted a token with, read back out of the injected stylesheet. */
+/**
+ * The color the editor actually painted a token with, read back out of the injected stylesheet. It
+ * is whatever the rule carries: a hex, or the `var(--marvis-syntax-*)` the theme resolves.
+ */
 function colorForSpan(span: Element): string | undefined {
   const classes = span.className.split(/\s+/);
   if (classes.length === 0) return undefined;
@@ -66,7 +69,7 @@ function colorForSpan(span: Element): string | undefined {
     .map((style) => style.textContent ?? "")
     .join("}");
   for (const block of css.split("}")) {
-    const rule = block.match(/^\s*\.(.+?)\s*\{\s*(?:color:\s*(#[0-9a-f]{3,8}))?/i);
+    const rule = block.match(/^\s*\.(.+?)\s*\{\s*(?:color:\s*(#[0-9a-f]{3,8}|var\(--marvis-[a-z0-9-]+\)))?/i);
     if (rule?.[2] && rule[1].split(/\s+/).some((name) => classes.includes(name))) return rule[2];
   }
   return undefined;
@@ -116,8 +119,8 @@ describe("code editor", () => {
 
     // A key and its value are YAML, so they take the colors YAML gives them rather than the flat
     // text the Markdown grammar would leave the block as. The comment is YAML's too.
-    expect(colorPaintedOn(view, "name")).toBe("#79c0ff");
-    expect(colorPaintedOn(view, "# a note")).toBe("#8b949e");
+    expect(colorPaintedOn(view, "name")).toBe("var(--marvis-syntax-token-constant)");
+    expect(colorPaintedOn(view, "# a note")).toBe("var(--marvis-syntax-token-comment)");
 
     // The document behind the block is still read as Markdown: a heading is still a heading.
     expect(nodeNames(view)).toContain("ATXHeading1");
@@ -134,25 +137,23 @@ describe("code editor", () => {
     expect(nodeNames(view)).toContain("ATXHeading1");
   });
 
-  it("paints tokens in the dark palette the read-only preview already uses", () => {
+  it("paints tokens in the palette the read-only preview already uses", () => {
     const view = mount("typescript", "const answer: number = 42;\n// note");
 
-    // `defaultHighlightStyle` is a light palette — dark red keywords, mid-blue strings — that was
-    // laid over Marvis' `#17191f` editor background, where the darker half is barely readable.
-    expect(colorPaintedOn(view, "const")).toBe("#ff7b72");
-    expect(colorPaintedOn(view, "answer")).toBe("#ffa657");
-    expect(colorPaintedOn(view, "number")).toBe("#7ee787");
-    expect(colorPaintedOn(view, "42")).toBe("#79c0ff");
-    expect(colorPaintedOn(view, "// note")).toBe("#8b949e");
+    // The tokens are the ones the Shiki theme names for the same grammar, so a file stops changing
+    // color when it becomes editable — and `var()` rather than a hex, which is what makes the same
+    // markup readable in either palette without a second render.
+    expect(colorPaintedOn(view, "const")).toBe("var(--marvis-syntax-token-keyword)");
+    expect(colorPaintedOn(view, "answer")).toBe("var(--marvis-syntax-foreground)");
+    expect(colorPaintedOn(view, "number")).toBe("var(--marvis-syntax-token-string-expression)");
+    expect(colorPaintedOn(view, "42")).toBe("var(--marvis-syntax-token-constant)");
+    expect(colorPaintedOn(view, "// note")).toBe("var(--marvis-syntax-token-comment)");
   });
 
-  it("paints no token in the light palette, which is the one it no longer carries", () => {
-    // Nothing injects `defaultHighlightStyle` as a fallback any more, so this list is the only
-    // palette in play. A token still painted from the light one is a dark red keyword on `#17191f`,
+  it("paints every token with a token, and with no palette of its own", () => {
+    // Nothing injects `defaultHighlightStyle` as a fallback and this list names no color, so a hex
+    // here is a palette that survived the change: it would be unreadable in one of the two themes,
     // and it would only show up in a language nobody happened to open while this was written.
-    const light = new Set(
-      defaultHighlightStyle.specs.flatMap((spec) => (spec.color ? [spec.color.toLowerCase()] : [])),
-    );
     const documents = [
       ["typescript", "const answer: number = 42;\n// note"],
       ["python", "def answer():\n    return 42"],
@@ -164,11 +165,14 @@ describe("code editor", () => {
 
     for (const [language, content] of documents) {
       const view = mount(language, content);
-      const fromLightPalette = Array.from(view.contentDOM.querySelectorAll("span"))
+      const painted = Array.from(view.contentDOM.querySelectorAll("span"))
         .map((span) => colorForSpan(span))
-        .filter((color): color is string => color !== undefined && light.has(color.toLowerCase()));
+        .filter((color): color is string => color !== undefined);
 
-      expect({ language, fromLightPalette }).toEqual({ language, fromLightPalette: [] });
+      expect({ language, painted }).toEqual({
+        language,
+        painted: painted.filter((color) => color.startsWith("var(--marvis-")),
+      });
     }
   });
 

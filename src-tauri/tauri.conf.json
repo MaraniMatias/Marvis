@@ -18,7 +18,7 @@
         "height": 800,
         "minWidth": 900,
         "minHeight": 600,
-        "backgroundColor": "#17191f",
+        "backgroundColor": "#282c33",
         "decorations": true,
         "titleBarStyle": "Overlay",
         "hiddenTitle": true

@@ -5,6 +5,7 @@ import {
   INDENTATION_SIZE_LIMITS,
   SETTINGS_SECTIONS,
   TERMINAL_FONT_SIZE_LIMITS,
+  THEME_PREFERENCES,
   UI_FONT_SIZE_LIMITS,
   normalizeSettings,
   uiFontScale,
@@ -16,7 +17,7 @@ import { ZOOM_STEPS } from "./zoom";
 describe("the settings file", () => {
   it("names the three surfaces and everything they carry", () => {
     expect(DEFAULT_SETTINGS).toEqual({
-      ui: { fontSize: 14, zoom: 1 },
+      ui: { fontSize: 14, zoom: 1, theme: "system" },
       terminal: { fontSize: 16, ligatures: true, cursorBlink: true, scrollbar: "hidden" },
       editor: { fontSize: 13, ligatures: true, indentation: { useSpaces: true, size: 2 } },
     });
@@ -24,7 +25,7 @@ describe("the settings file", () => {
 
   it("reads what was written, and a file with lines missing from it", () => {
     const written = {
-      ui: { fontSize: 16, zoom: 1.2 as const },
+      ui: { fontSize: 16, zoom: 1.2 as const, theme: "light" as const },
       terminal: { fontSize: 18, ligatures: false, cursorBlink: false, scrollbar: "always" as const },
       editor: { fontSize: 15, ligatures: false, indentation: { useSpaces: false, size: 4 } },
     };
@@ -54,6 +55,14 @@ describe("the settings file", () => {
     expect(normalizeSettings({ ui: { fontSize: Number.NaN } }).ui.fontSize).toBe(DEFAULT_SETTINGS.ui.fontSize);
     expect(normalizeSettings({ ui: { zoom: 4 } }).ui.zoom).toBe(1.5);
     expect(normalizeSettings({ ui: { zoom: 0.1 } }).ui.zoom).toBe(0.8);
+  });
+
+  it("keeps a theme it knows and falls back to the system for one it does not", () => {
+    expect(normalizeSettings({ ui: { theme: "light" } }).ui.theme).toBe("light");
+    expect(normalizeSettings({ ui: { theme: "dark" } }).ui.theme).toBe("dark");
+    // A preference rather than state worth refusing a file over, and there is a default that
+    // answers for whatever the system is set to.
+    expect(normalizeSettings({ ui: { theme: "solarized" } }).ui.theme).toBe("system");
   });
 
   it("keeps a scrollbar mode it knows and falls back to hidden for one it does not", () => {
@@ -106,8 +115,13 @@ describe("the form's schema", () => {
       SETTINGS_SECTIONS.flatMap((section) => section.fields).find((field) => field.path === path);
     const indent = select("editor.indentation.useSpaces");
     const scrollbar = select("terminal.scrollbar");
+    const theme = select("ui.theme");
     expect(indent?.kind === "select" && indent.parse("false")).toBe(false);
     expect(indent?.kind === "select" && String(indent.parse("true"))).toBe("true");
     expect(scrollbar?.kind === "select" && scrollbar.parse("always")).toBe("always");
+    // The two palettes and the answer to both, in that order: following the system is what somebody
+    // who has never opened this dialog is doing, so it is what the field starts on.
+    expect(theme?.kind === "select" && theme.options.map((option) => option.value)).toEqual([...THEME_PREFERENCES]);
+    expect(theme?.kind === "select" && theme.parse("light")).toBe("light");
   });
 });

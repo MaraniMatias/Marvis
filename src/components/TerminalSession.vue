@@ -10,6 +10,7 @@ import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, write
 import {
   attachTerminalRenderer,
   createMarvisTerminal,
+  marvisTerminalTheme,
   setTerminalLigatures,
   enableTerminalSelectionCopy,
   preloadTerminalFonts,
@@ -18,6 +19,7 @@ import {
 import { renderPtyOutput } from "../lib/terminal-renderer";
 import { scrollbarOffsetForTop, terminalScrollbarGeometry } from "../lib/terminal-scrollbar";
 import type { TerminalScrollbarGeometry } from "../lib/terminal-scrollbar";
+import { theme } from "../presentation/theme";
 import { useToasts } from "../presentation/toasts";
 
 const props = withDefaults(
@@ -72,6 +74,8 @@ let started = false;
 let terminalReady = false;
 let selectionCopy: { dispose(): void } | undefined;
 let latestSize = { cols: 0, rows: 0 };
+/** What the queue is working on: the last size handed to the PTY, or the one it refused. */
+let attemptedSize = { cols: 0, rows: 0 };
 let geometry: TerminalScrollbarGeometry = { top: 0, height: 0, scrollable: false, maxOffset: 0, travel: 0 };
 let scrollbarFadeTimer: number | undefined;
 let scrollbarDrag: { pointerId: number; grabOffset: number } | null = null;
@@ -299,16 +303,29 @@ function fitActiveView() {
   if (cols > terminal.cols) terminal.resize(cols, terminal.rows);
 }
 
+/**
+ * Whether a resize has anywhere to go.
+ *
+ * A session that is closing or already unmounted has no pane left to size: the PTY is either about
+ * to be shut down or already is, and a send after that is a call the backend refuses at best. This
+ * is the same guard `queueInput` uses, for the same reason — once the session is on its way out,
+ * nothing about the layout is worth another round trip.
+ */
+function resizeAllowed() {
+  return !closing.value && !disposed && state.value.state === "running";
+}
+
 function queueResize(cols: number, rows: number) {
   latestSize = { cols, rows };
-  if (!sessionId || state.value.state !== "running" || resizeScheduled) return;
+  if (!sessionId || !resizeAllowed() || resizeScheduled) return;
   resizeScheduled = true;
   resizeQueue = resizeQueue
     .catch(() => {})
     .then(async () => {
-      while (sessionId && state.value.state === "running") {
+      while (sessionId && resizeAllowed()) {
         const size = latestSize;
         const id = sessionId;
+        attemptedSize = size;
         await resizeTerminal(props.checkoutId, id, size.cols, size.rows);
         if (size.cols === latestSize.cols && size.rows === latestSize.rows) break;
       }
@@ -316,6 +333,17 @@ function queueResize(cols: number, rows: number) {
     .catch(showError)
     .finally(() => {
       resizeScheduled = false;
+      // A drain that ended because the session is going away has nothing left to correct, and
+      // re-queuing here would put a resize behind the close.
+      if (!sessionId || !resizeAllowed()) return;
+      // Otherwise, a measurement that landed after the loop's last comparison and before here is
+      // refused by the guard above while the queue is still draining, and nothing sends it
+      // afterwards. The pane would keep the size it just had while the space around it had already
+      // changed, which is what a shell wrapping to the old width looks like after the layout
+      // moves. A size the backend refused counts as attempted, so it is not asked again.
+      if (attemptedSize.cols !== latestSize.cols || attemptedSize.rows !== latestSize.rows) {
+        queueResize(latestSize.cols, latestSize.rows);
+      }
     });
 }
 
@@ -343,6 +371,9 @@ async function requestClose() {
       return false;
     }
     await inputQueue;
+    // A resize still in flight when the PTY is closed is a size the session never learns about.
+    // One promise is the whole of the queue from here: the guard in `queueResize` refuses new work
+    // the moment closing begins, so the drain cannot hand back a replacement while this waits.
     await resizeQueue;
     emit("closed", await closeTerminal(props.checkoutId, sessionId));
     return true;
@@ -423,6 +454,17 @@ watch(
     wakeScrollbar();
   },
 );
+
+/**
+ * The palette, repainted onto a terminal that is already open.
+ *
+ * The stylesheet repaints itself the moment the theme changes; xterm.js does not, because its
+ * colors are an object rather than declarations. Assigning the theme is enough and the buffer stays
+ * where it is, so the switch costs a repaint and not the session behind it.
+ */
+watch(theme, () => {
+  terminal.options.theme = marvisTerminalTheme();
+});
 
 /**
  * The size and the two faces of the terminal's own type, watched together because they all end in

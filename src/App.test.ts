@@ -640,6 +640,7 @@ describe("App UI integration", () => {
     // that set it and would be the next test's starting point.
     document.documentElement.style.removeProperty("zoom");
     document.documentElement.style.removeProperty("--marvis-ui-font-scale");
+    delete document.documentElement.dataset.theme;
     vi.useRealTimers();
   });
 
@@ -1478,6 +1479,66 @@ describe("App UI integration", () => {
       expect(wrapper.findComponent({ name: "MainPane" }).props("split")).toBe(true);
       wrapper.unmount();
     });
+
+    it("forgets a drawer hovered under another layout, so it can still be closed", async () => {
+      // The drawer is the same element in the narrow focus layout and in the split one, so a
+      // pointerenter while focused says nothing about a strip that does not exist yet. Carried
+      // over, the flag refuses every close: the drawer is hidden, a hidden drawer fires no leave,
+      // and the panel stays up over the split layout with nothing on screen able to put it away.
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
+      window.dispatchEvent(new Event("resize"));
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), { ...DEFAULT_APP_LAYOUT });
+      // Unmounted in a finally because a failed assertion in here used to leave a live tree behind,
+      // and the drawers its watchers answer leaked into the layout tests that follow.
+      try {
+        const inspector = wrapper.findComponent({ name: "InspectorPane" });
+        expect(inspector.classes()).toContain("right-inspector-drawer");
+
+        await inspector.trigger("pointerenter");
+        await wrapper.get('[data-testid="layout-toggle"]').trigger("click");
+        await flushPromises();
+        expect(wrapper.findComponent({ name: "MainPane" }).props("split")).toBe(true);
+
+        await wrapper.get(".inspector-hover-strip").trigger("pointerenter");
+        await wrapper.get(".inspector-hover-strip").trigger("pointerleave");
+        await vi.advanceTimersByTimeAsync(300);
+        expect(wrapper.findComponent({ name: "InspectorPane" }).classes()).toContain("split-inspector-closed");
+      } finally {
+        wrapper.unmount();
+      }
+    });
+
+    it("does not bring a drawer back open when the shortcut hides it", async () => {
+      // ⌘B is the only way to put the drawer away without a pointer over it, so it is also the
+      // only way to strand the flag that refuses every close: a hidden drawer fires no leave.
+      // Attached and dispatched from a panel, because that is the path the capture listener on the
+      // window actually answers to.
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT, mode: "split" },
+        { attachTo: document.body },
+      );
+      try {
+        const press = () =>
+          wrapper
+            .get("#navigation-panel")
+            .element.dispatchEvent(new KeyboardEvent("keydown", { key: "b", metaKey: true, bubbles: true }));
+        const inspector = wrapper.findComponent({ name: "InspectorPane" });
+        await wrapper.get(".inspector-hover-strip").trigger("pointerenter");
+        expect(inspector.classes()).not.toContain("split-inspector-closed");
+
+        expect(press()).toBe(true); // not cancelled: the event was handled
+        await flushPromises();
+        expect(inspector.isVisible()).toBe(false);
+
+        press();
+        await flushPromises();
+        expect(inspector.isVisible()).toBe(true);
+        expect(inspector.classes()).toContain("split-inspector-closed");
+      } finally {
+        wrapper.unmount();
+      }
+    });
   });
 
   describe("the window scale", () => {
@@ -2112,7 +2173,7 @@ describe("App UI integration", () => {
       expect(zoom.defaultPrevented).toBe(false);
       expect(mocks.saveSettings).not.toHaveBeenCalled();
 
-      resolveSettings({ ...cloneSettings(DEFAULT_SETTINGS), ui: { fontSize: 18, zoom: 1 } });
+      resolveSettings({ ...cloneSettings(DEFAULT_SETTINGS), ui: { fontSize: 18, zoom: 1, theme: "system" as const } });
       await flushPromises();
       expect(wrapper.find('[data-testid="settings-button"]').exists()).toBe(true);
       expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe(String(18 / 14));
@@ -2141,6 +2202,45 @@ describe("App UI integration", () => {
       expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
       expect(mocks.saveSettings).not.toHaveBeenCalled();
       wrapper.unmount();
+    });
+
+    it("paints the window in the theme the preference names, and in the system's while it does not", async () => {
+      const listeners: Array<() => void> = [];
+      const system = {
+        matches: true,
+        addEventListener: (_: string, listener: () => void) => listeners.push(listener),
+        removeEventListener: vi.fn(),
+      };
+      vi.spyOn(window, "matchMedia").mockReturnValue(system as unknown as MediaQueryList);
+
+      // The attribute is the whole of it: the two palettes in `marvis.css` are keyed off it, and a
+      // palette the preference names outright is followed rather than argued with.
+      const light = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        {
+          settings: { ...cloneSettings(DEFAULT_SETTINGS), ui: { ...DEFAULT_SETTINGS.ui, theme: "light" } },
+        },
+      );
+      expect(document.documentElement.dataset.theme).toBe("light");
+      // A window told what to draw in does not consult the system, but it still listens for it:
+      // the listener is registered once for the shell's lifetime, not per preference change.
+      system.matches = false;
+      for (const listener of listeners) listener();
+      expect(document.documentElement.dataset.theme).toBe("light");
+      light.unmount();
+      expect(system.removeEventListener).toHaveBeenCalledWith("change", expect.any(Function));
+
+      system.matches = true;
+      const following = await mountApp(workspaceWith(checkout("checkout:one")));
+      expect(document.documentElement.dataset.theme).toBe("dark");
+
+      // `system` is the preference that says to keep asking: the answer changes while the window is
+      // open, and a window that was asked once would sit in the palette it started in.
+      system.matches = false;
+      for (const listener of listeners) listener();
+      expect(document.documentElement.dataset.theme).toBe("light");
+      following.unmount();
     });
 
     it("moves focus into the dialog, traps Tab, and restores the gear on close", async () => {
@@ -2309,7 +2409,7 @@ describe("App UI integration", () => {
       const wrapper = await mountApp(
         workspaceWith(checkout("checkout:one")),
         { ...DEFAULT_APP_LAYOUT },
-        { settings: { ...cloneSettings(DEFAULT_SETTINGS), ui: { fontSize: 16, zoom: 1 } } },
+        { settings: { ...cloneSettings(DEFAULT_SETTINGS), ui: { fontSize: 16, zoom: 1, theme: "system" as const } } },
       );
       mocks.saveSettings.mockRejectedValueOnce(new Error("the settings file could not be read"));
 

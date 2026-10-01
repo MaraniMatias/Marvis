@@ -22,38 +22,60 @@ export function terminalFontSize(fontSize: number, zoom: number): number {
 }
 
 /**
- * Only the colors come from the design tokens (B.1); the face and the size are the ones the app
- * has always had. The background is in the theme rather than left to CSS because xterm.js paints
- * it as an inline style: the stylesheet has one declaration for the surface and out-specifies that
- * one, rather than pretending the canvas is not painted.
+ * The terminal's colors, read out of the stylesheet rather than written here (B.1).
  *
- * The ANSI entries are there because a colorscheme that uses them would otherwise draw xterm.js'
- * own palette, which has nothing to do with this window. Yellow, magenta and cyan have no token
- * yet: these three are proposals that sit with the rest.
+ * Every color xterm.js wants is a `--marvis-*` token, so this is a table of what to ask for rather
+ * than a palette: the two themes live in `src/marvis.css` and switching between them is a matter
+ * of reading the same names again. A name the stylesheet does not answer is left out instead of
+ * defaulted here, which leaves xterm.js to draw that one with its own color rather than to paint it
+ * with a value nothing else in the app agrees on.
+ *
+ * The background is in the theme rather than left to CSS because xterm.js paints it as an inline
+ * style: the stylesheet has one declaration for the surface and out-specifies that one, rather than
+ * pretending the canvas is not painted.
  */
-const TERMINAL_THEME: ITheme = {
-  background: "#17191f", // --marvis-bg-0
-  foreground: "#d6d9e0", // --marvis-text
-  cursor: "#7c9eff", // --marvis-accent
-  cursorAccent: "#17191f", // --marvis-bg-0
-  selectionBackground: "#22252e", // --marvis-selection, the same value ::selection paints with
-  black: "#22252e", // --marvis-bg-2
-  red: "#e08585", // --marvis-red
-  green: "#7fd88f", // --marvis-green
-  yellow: "#ddc07f",
-  blue: "#7c9eff", // --marvis-accent
-  magenta: "#c39ae0",
-  cyan: "#7fc9c4",
-  white: "#979a9f", // --marvis-text-secondary
-  brightBlack: "#5c6072", // --marvis-text-faint
-  brightRed: "#ef9d9d",
-  brightGreen: "#93e5a2",
-  brightYellow: "#ecd08f",
-  brightBlue: "#98b2ff",
-  brightMagenta: "#d4b0ec",
-  brightCyan: "#95dcd8",
-  brightWhite: "#d6d9e0", // --marvis-text
-};
+const TERMINAL_THEME_TOKENS = {
+  background: "--marvis-bg-0",
+  foreground: "--marvis-text",
+  cursor: "--marvis-accent",
+  cursorAccent: "--marvis-bg-0",
+  selectionBackground: "--marvis-selection",
+  black: "--marvis-ansi-black",
+  red: "--marvis-ansi-red",
+  green: "--marvis-ansi-green",
+  yellow: "--marvis-ansi-yellow",
+  blue: "--marvis-ansi-blue",
+  magenta: "--marvis-ansi-magenta",
+  cyan: "--marvis-ansi-cyan",
+  white: "--marvis-ansi-white",
+  brightBlack: "--marvis-ansi-bright-black",
+  brightRed: "--marvis-ansi-bright-red",
+  brightGreen: "--marvis-ansi-bright-green",
+  brightYellow: "--marvis-ansi-bright-yellow",
+  brightBlue: "--marvis-ansi-bright-blue",
+  brightMagenta: "--marvis-ansi-bright-magenta",
+  brightCyan: "--marvis-ansi-bright-cyan",
+  brightWhite: "--marvis-ansi-bright-white",
+} as const;
+
+/**
+ * The palette as it is right now, for a terminal that is already on screen.
+ *
+ * A theme switch reaches a terminal through this and not through the terminal itself: xterm.js
+ * repaints on `options.theme` and keeps its buffer, so the PTY behind it is never told anything and
+ * no session is lost to a change of palette.
+ */
+export function marvisTerminalTheme(): ITheme {
+  const computed = getComputedStyle(document.documentElement);
+  const theme: ITheme = {};
+  for (const [name, token] of Object.entries(TERMINAL_THEME_TOKENS)) {
+    const value = computed.getPropertyValue(token).trim();
+    // Assigning by name rather than by index: `ITheme` carries properties of other types, so a
+    // keyed write is the only one of the three that type-checks against the table above.
+    if (value) Object.assign(theme, { [name]: value });
+  }
+  return theme;
+}
 
 /** Which renderer ended up on screen. `dom` is the one that always works. */
 export type RendererLevel = "webgl" | "dom";
@@ -70,16 +92,21 @@ export type RendererLevel = "webgl" | "dom";
  * its first frame measuring a grid that is already the wrong size. The size and the cursor are
  * preferences from `~/.marvis/config.yml`, read here for the same reason; the ligatures are not,
  * because the joiner only exists once the terminal is on the page.
+ *
+ * The cursor is a block because that is what a terminal that is not telling you it is waiting for
+ * you looks like; whether it blinks is a preference, and a program that asks for another shape
+ * through DECSCUSR is answered out of this one rather than fought with it.
  */
 export function createMarvisTerminal(fontSize = 16, cursorBlink = true, zoom = 1): Terminal {
   const terminal = new Terminal({
     allowProposedApi: true,
     cursorBlink,
+    cursorStyle: "block",
     fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: terminalFontSize(fontSize, zoom),
     lineHeight: 1.2,
     scrollback: 10000,
-    theme: TERMINAL_THEME,
+    theme: marvisTerminalTheme(),
   });
   // Widths and combining marks as Unicode 11 sees them, so emoji and CJK stop breaking the
   // grid that Neovim and the agent TUI draw their panels on. It has to be the active version

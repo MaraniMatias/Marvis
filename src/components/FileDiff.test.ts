@@ -12,6 +12,13 @@ import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { REVIEW_SENDER } from "../presentation/review-notes";
 import type { NewReviewNoteInput, ReviewSender } from "../presentation/review-notes";
+import { theme } from "../presentation/theme";
+
+/** The library's `DiffFile`, as the stub above stands in for it. */
+interface DiffFileStub {
+  palette: string | undefined;
+  notified: number;
+}
 
 const mocks = vi.hoisted(() => ({
   getGitDiff: vi.fn(),
@@ -29,7 +36,15 @@ vi.mock("@git-diff-view/vue", async () => {
   const { defineComponent: component, h: createElement, ref: createRef } = await import("vue");
   return {
     DiffFile: class {
-      initTheme() {}
+      /** What the library is told to paint in, which is the whole of what a palette switch reaches. */
+      palette: string | undefined;
+      notified = 0;
+      initTheme(theme?: string) {
+        this.palette = theme;
+      }
+      notifyAll() {
+        this.notified += 1;
+      }
       init() {}
       buildUnifiedDiffLines() {}
     },
@@ -288,6 +303,23 @@ describe("FileDiff", () => {
     expect(all.get("header").text()).toContain("All changes");
     expect(all.get("header").text()).toContain("bug/1310-timeline");
     all.unmount();
+  });
+
+  it("paints what is open in the theme in effect, and repaints it when the theme changes", async () => {
+    const wrapper = mountDiff({});
+    await flushPromises();
+    const hunk = () => wrapper.getComponent({ name: "DiffView" }).props("diffFile") as DiffFileStub;
+    expect(hunk().palette).toBe("dark");
+
+    // A diff already on screen is told, rather than rebuilt: the library reads the theme off the
+    // file it was handed, so a switch that only reached a new diff would leave this one painted in
+    // the palette it was opened in.
+    theme.value = "light";
+    await flushPromises();
+    expect(hunk().palette).toBe("light");
+    expect(hunk().notified).toBe(1);
+    wrapper.unmount();
+    theme.value = "dark";
   });
 
   it("does not redraw a diff that git reports unchanged", async () => {

@@ -17,6 +17,7 @@ import type { ActiveReviewNotes } from "../presentation/review-notes";
 import { REVIEW_SENDER } from "../presentation/review-notes";
 import type { ReviewAnchorCheck } from "../lib/ipc";
 import { getGitDiff } from "../lib/ipc";
+import { theme } from "../presentation/theme";
 import { DIFF_ROW_HEIGHT, useLargeDiff } from "./use-large-diff";
 import ReviewComposer from "./ReviewComposer.vue";
 import ReviewNoteList from "./ReviewNoteList.vue";
@@ -351,7 +352,7 @@ function createHunks(path: string, patch: string) {
   if (current) sections.push({ title, patch: [...preamble, ...current].join("\n") });
   return sections.map((section) => {
     const file = new DiffFile(`a/${path}`, "", `b/${path}`, "", [section.patch]);
-    file.initTheme("dark");
+    file.initTheme(theme.value);
     file.init();
     file.buildUnifiedDiffLines();
     return { title: section.title, file };
@@ -438,6 +439,19 @@ watch(
   },
   { immediate: true, flush: "sync" },
 );
+
+/**
+ * The library writes the theme onto the wrapper from the `DiffFile` it was handed, so a switch
+ * reaches the diffs that are already open by telling each of them, which then repaints what it has
+ * already built. Nothing is re-fetched and nothing is rebuilt, so a theme change costs a repaint and
+ * not the scroll position, the expanded hunks or a half-written note under it.
+ */
+watch(theme, (palette) => {
+  for (const hunk of diffHunks.value) {
+    hunk.file.initTheme(palette);
+    hunk.file.notifyAll();
+  }
+});
 
 // What is open in the change set belongs to the workdir it was opened in.
 watch(
@@ -840,7 +854,7 @@ onUnmounted(() => {
                 v-if="!collapsedHunks.includes(index)"
                 :diff-file="hunk.file"
                 :diff-view-mode="DiffModeEnum.Unified"
-                diff-view-theme="dark"
+                :diff-view-theme="theme"
                 :diff-view-add-widget="true"
                 :extend-data="extendData"
                 :diff-view-highlight="true"
@@ -899,10 +913,17 @@ onUnmounted(() => {
  * The diff library paints itself with `--diff-*` custom properties on `.diff-style-root`, one
  * pair per kind of line. That is the only seam it offers, so F.5 repaints those with the
  * marvis palette instead of replacing its renderer. The selector is deliberately longer than
- * the library's own `[data-theme="dark"]` rules: same-specificity rules would be settled by
+ * the library's own `[data-theme]` rules: same-specificity rules would be settled by
  * stylesheet order, which is not something a component can rely on.
+ *
+ * Both attributes are matched at once through `:is()` because the library ships one copy of
+ * each of its rules per theme and a diff is repainted as the theme changes: writing this once
+ * for the theme in effect would leave the other palette's rules standing.
  */
-.diff-viewport :deep(.diff-tailwindcss-wrapper[data-theme="dark"] .diff-style-root) {
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"]) .diff-style-root
+  ) {
   --diff-border--: var(--marvis-border);
   --diff-plain-content--: var(--marvis-bg-0);
   --diff-plain-lineNumber--: var(--marvis-bg-0);
@@ -928,10 +949,137 @@ onUnmounted(() => {
   --diff-multi-select-border: var(--marvis-accent);
 }
 
-.diff-viewport :deep(.diff-tailwindcss-wrapper[data-theme="dark"] [data-state="diff"]),
-.diff-viewport :deep(.diff-tailwindcss-wrapper[data-theme="dark"] [data-state="plain"]),
-.diff-viewport :deep(.diff-tailwindcss-wrapper[data-theme="dark"] [data-state="hunk"]) {
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"]) [data-state="diff"]
+  ),
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      [data-state="plain"]
+  ),
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"]) [data-state="hunk"]
+  ) {
   color: var(--marvis-text);
+}
+
+/* The syntax inside a diff is highlighted by the library's own highlight.js, which ships a GitHub
+   light and a GitHub dark palette and knows nothing about these two. The classes are its own, so
+   the tokens are named by what the token is rather than by what the library calls it: a diff and
+   the same file read-only in the editor are one palette. */
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      .hljs
+  ) {
+  color: var(--marvis-syntax-foreground);
+  background: transparent;
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      :is(
+        .hljs-doctag,
+        .hljs-keyword,
+        .hljs-template-tag,
+        .hljs-template-variable,
+        .hljs-type,
+        .hljs-variable.language_
+      )
+  ) {
+  color: var(--marvis-syntax-token-keyword);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      :is(.hljs-title, .hljs-title.class_, .hljs-title.class_.inherited__, .hljs-title.function_, .hljs-section)
+  ) {
+  color: var(--marvis-syntax-token-function);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      :is(
+        .hljs-attr,
+        .hljs-attribute,
+        .hljs-literal,
+        .hljs-meta,
+        .hljs-number,
+        .hljs-operator,
+        .hljs-variable,
+        .hljs-selector-attr,
+        .hljs-selector-class,
+        .hljs-selector-id,
+        .hljs-built_in,
+        .hljs-symbol
+      )
+  ) {
+  color: var(--marvis-syntax-token-constant);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      :is(.hljs-regexp, .hljs-string, .hljs-meta .hljs-string)
+  ) {
+  color: var(--marvis-syntax-token-string);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      :is(.hljs-comment, .hljs-code, .hljs-formula)
+  ) {
+  color: var(--marvis-syntax-token-comment);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      :is(.hljs-name, .hljs-selector-tag, .hljs-selector-pseudo)
+  ) {
+  color: var(--marvis-syntax-token-string-expression);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      :is(.hljs-char.escape_, .hljs-link, .hljs-params, .hljs-property, .hljs-punctuation, .hljs-tag, .hljs-quote)
+  ) {
+  color: var(--marvis-syntax-token-punctuation);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      .hljs-addition
+  ) {
+  color: var(--marvis-syntax-token-inserted);
+  background-color: transparent;
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      .hljs-deletion
+  ) {
+  color: var(--marvis-syntax-token-deleted);
+  background-color: transparent;
 }
 
 /* Hunk headers sit on the change's own surface, as the mockup's group rows do. */

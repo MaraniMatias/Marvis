@@ -1104,7 +1104,7 @@ function onMarkdownLink(event: MouseEvent) {
    color it carried. Unstyled runs of a code block have no span of their own, so the text color
    has to come from here or those runs fall back to the dimmer document color. */
 .markdown-preview :deep(pre code) {
-  color: #e6edf3;
+  color: var(--marvis-syntax-foreground);
   font-family: var(--marvis-font);
 }
 

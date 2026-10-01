@@ -1,9 +1,23 @@
 import DOMPurify from "dompurify";
-import { createHighlighterCore } from "shiki/core";
+import { createCssVariablesTheme, createHighlighterCore } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
 import type typescript from "shiki/langs/typescript.mjs";
-import githubDarkDefault from "shiki/themes/github-dark-default.mjs";
 import { detectedLanguageName } from "./source-languages";
+
+/**
+ * Shiki renders with CSS variables rather than with colors of its own.
+ *
+ * A bundled theme would mean one highlighter per palette and a second render on every switch, and
+ * its colors would be a copy of the ones the rest of the app is painted in. This names the tokens in
+ * `src/marvis.css` instead, so the markup a render produces is the same in both palettes and the
+ * browser resolves it against whichever one is in effect.
+ */
+const MARVIS_SYNTAX_NAME = "marvis";
+
+const MARVIS_SYNTAX = createCssVariablesTheme({
+  name: MARVIS_SYNTAX_NAME,
+  variablePrefix: "--marvis-syntax-",
+});
 
 type SourceLanguage = (typeof typescript)[number];
 type LanguageLoader = () => Promise<SourceLanguage[]>;
@@ -437,7 +451,7 @@ function highlighterFor(language: LanguageDefinition) {
   const request = language.load().then((langs) =>
     createHighlighterCore({
       langs,
-      themes: [githubDarkDefault],
+      themes: [MARVIS_SYNTAX],
       engine: createJavaScriptRegexEngine(),
     }),
   );
@@ -492,7 +506,7 @@ export function highlightCodeBlock(language: LanguageDefinition, code: string): 
   }
   const request = highlighterFor(language)
     .then((instance) =>
-      instance.codeToHtml(code, { lang: language.shikiName ?? language.name, theme: "github-dark-default" }),
+      instance.codeToHtml(code, { lang: language.shikiName ?? language.name, theme: MARVIS_SYNTAX_NAME }),
     )
     .then((html) => sanitizeShikiFragment(html)?.innerHTML || null)
     .catch(() => null);
@@ -519,7 +533,7 @@ export function highlightSourceAs(languageName: string, source: string): Promise
 
   const request = highlighterFor(language)
     .then((instance) =>
-      instance.codeToHtml(source, { lang: language.shikiName ?? language.name, theme: "github-dark-default" }),
+      instance.codeToHtml(source, { lang: language.shikiName ?? language.name, theme: MARVIS_SYNTAX_NAME }),
     )
     .then(sanitizeHighlightedHtml)
     .then((lines) => {

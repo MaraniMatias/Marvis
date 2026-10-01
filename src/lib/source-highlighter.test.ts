@@ -10,6 +10,15 @@ import {
 import { PLAIN_TEXT } from "./source-languages";
 
 describe("source highlighter", () => {
+  it("renders in the stylesheet's tokens rather than in a palette of its own", async () => {
+    // One render, resolved by the browser against whichever palette is in effect. A hex here is a
+    // palette of its own: it is what would stop a file from repainting when the theme changes.
+    const lines = await highlightSource("src/tokens.ts", "const answer: number = 42;\n// note");
+
+    expect(lines?.join("")).toContain("var(--marvis-syntax-token-keyword)");
+    expect(lines?.join("")).not.toMatch(/#[0-9a-f]{6}\b/i);
+  });
+
   it("highlights known source and reuses the path/content cache entry", async () => {
     const first = highlightSource("src/cache.ts", "const answer: number = 42;\nreturn answer;");
     const second = highlightSource("src/cache.ts", "const answer: number = 42;\nreturn answer;");
@@ -46,9 +55,9 @@ describe("source highlighter", () => {
     // If the indirection ever drops that name, this is the file that goes back to plain.
     const lines = await highlightSource(".gitignore", "# deps\nnode_modules\n!.env.example");
     expect(lines).toHaveLength(3);
-    expect(lines?.[0]).toContain("#8B949E");
+    expect(lines?.[0]).toContain("var(--marvis-syntax-token-comment)");
     // `!.env.example` re-includes a pattern, so it must not be painted as the `#` comment above.
-    expect(lines?.[2]).not.toContain("#8B949E");
+    expect(lines?.[2]).not.toContain("var(--marvis-syntax-token-comment)");
 
     const env = await highlightSource(".env.local", "# local\nNODE_ENV=development");
     expect(env).toHaveLength(2);

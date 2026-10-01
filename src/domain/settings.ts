@@ -13,10 +13,19 @@ export const TERMINAL_SCROLLBAR_MODES = ["hidden", "auto", "always"] as const;
 
 export type TerminalScrollbarMode = (typeof TERMINAL_SCROLLBAR_MODES)[number];
 
+/**
+ * Which palette the window is drawn in. `system` is what the operating system asks for; the other
+ * two say so out loud, because a window that follows the system cannot be argued with.
+ */
+export const THEME_PREFERENCES = ["system", "light", "dark"] as const;
+
+export type ThemePreference = (typeof THEME_PREFERENCES)[number];
+
 export interface UiSettings {
   /** CSS pixels. The whole interface's type scale is a ratio of this one number. */
   fontSize: number;
   zoom: Zoom;
+  theme: ThemePreference;
 }
 
 export interface TerminalSettings {
@@ -55,7 +64,7 @@ export const EDITOR_FONT_SIZE_LIMITS = { min: 9, max: 32 };
 export const INDENTATION_SIZE_LIMITS = { min: 1, max: 8 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
-  ui: { fontSize: 14, zoom: 1 },
+  ui: { fontSize: 14, zoom: 1, theme: "system" },
   terminal: { fontSize: 16, ligatures: true, cursorBlink: true, scrollbar: "hidden" },
   editor: {
     fontSize: 13,
@@ -66,6 +75,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
 
 export function isTerminalScrollbarMode(value: unknown): value is TerminalScrollbarMode {
   return TERMINAL_SCROLLBAR_MODES.some((mode) => mode === value);
+}
+
+export function isThemePreference(value: unknown): value is ThemePreference {
+  return THEME_PREFERENCES.some((preference) => preference === value);
 }
 
 function boundedNumber(value: unknown, limits: { min: number; max: number }, fallback: number) {
@@ -99,6 +112,7 @@ export function normalizeSettings(value: unknown): AppSettings {
     ui: {
       fontSize: boundedNumber(ui.fontSize, UI_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.ui.fontSize),
       zoom: normalizeZoom(ui.zoom),
+      theme: isThemePreference(ui.theme) ? ui.theme : DEFAULT_SETTINGS.ui.theme,
     },
     terminal: {
       fontSize: boundedNumber(terminal.fontSize, TERMINAL_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.terminal.fontSize),
@@ -126,6 +140,7 @@ export function uiFontScale(fontSize: number) {
 export type SettingsPath =
   | "ui.fontSize"
   | "ui.zoom"
+  | "ui.theme"
   | "terminal.fontSize"
   | "terminal.ligatures"
   | "terminal.cursorBlink"
@@ -192,6 +207,18 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         description: "Scales every size the interface draws itself in, from the sidebar to the dialogs.",
         limits: UI_FONT_SIZE_LIMITS,
         unit: "px",
+      },
+      {
+        kind: "select",
+        path: "ui.theme",
+        label: "Theme",
+        description: "One Dark and One Light, as Zed draws them.",
+        options: [
+          { value: "system", label: "System" },
+          { value: "light", label: "One Light" },
+          { value: "dark", label: "One Dark" },
+        ],
+        parse: IDENTIFIER,
       },
       {
         kind: "select",

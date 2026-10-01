@@ -70,58 +70,68 @@ export interface CodeEditorOptions {
 }
 
 /**
- * `defaultHighlightStyle` is a light palette — dark red keywords, mid-blue strings — and it was
- * being laid over Marvis' `#17191f` editor background, where the darker half of it is barely
- * readable. These are the colors the `github-dark-default` Shiki theme already uses to render the
- * same file read-only, so a file stops changing color when it becomes editable.
+ * The syntax tokens from `src/marvis.css`, named the way Shiki's own theme names them so the same
+ * declaration paints a read-only file and an editable one, and the way `HighlightStyle` takes them:
+ * a custom property rather than a color, which is the whole of how this follows the theme.
+ */
+const syntax = (token: string) => `var(--marvis-syntax-token-${token})`;
+
+/**
+ * `defaultHighlightStyle` is a light palette — dark red keywords, mid-blue strings — laid over
+ * whatever editor background is in effect, where the darker half of it is barely readable in the
+ * light theme and washed out in the dark one. These are the tokens the read-only preview already
+ * renders the same file with, so a file stops changing color when it becomes editable.
  *
- * This has to name every tag a readable color is wanted for, and it is now the only palette in
- * play: nothing injects `defaultHighlightStyle` as a fallback, so a tag missing here is painted in
- * the editor's own text color rather than in a light one.
+ * This has to name every tag a readable color is wanted for, and it is the only palette in play:
+ * nothing injects `defaultHighlightStyle` as a fallback, so a tag missing here is painted in the
+ * editor's own text color rather than in a light one.
  */
 export const marvisHighlightStyle = HighlightStyle.define([
-  { tag: tags.comment, color: "#8b949e" },
-  { tag: tags.keyword, color: "#ff7b72" },
-  { tag: tags.controlKeyword, color: "#ff7b72" },
-  { tag: tags.moduleKeyword, color: "#ff7b72" },
-  { tag: tags.definitionKeyword, color: "#ff7b72" },
-  { tag: tags.operatorKeyword, color: "#ff7b72" },
-  { tag: tags.string, color: "#a5d6ff" },
-  { tag: tags.special(tags.string), color: "#a5d6ff" },
-  { tag: tags.escape, color: "#a5d6ff" },
-  { tag: tags.regexp, color: "#a5d6ff" },
-  { tag: tags.atom, color: "#79c0ff" },
-  { tag: tags.bool, color: "#79c0ff" },
-  { tag: tags.literal, color: "#79c0ff" },
-  { tag: tags.null, color: "#79c0ff" },
-  { tag: tags.number, color: "#79c0ff" },
-  { tag: tags.contentSeparator, color: "#79c0ff" },
-  { tag: tags.meta, color: "#79c0ff" },
-  { tag: tags.propertyName, color: "#79c0ff" },
-  { tag: tags.constant(tags.variableName), color: "#79c0ff" },
-  { tag: tags.special(tags.variableName), color: "#79c0ff" },
-  { tag: tags.function(tags.variableName), color: "#d2a8ff" },
-  { tag: tags.macroName, color: "#d2a8ff" },
-  { tag: tags.definition(tags.variableName), color: "#ffa657" },
-  { tag: tags.definition(tags.propertyName), color: "#79c0ff" },
-  { tag: tags.inserted, color: "#7ee787" },
-  { tag: tags.deleted, color: "#ffa198" },
-  { tag: tags.labelName, color: "#ffa657" },
-  { tag: tags.local(tags.variableName), color: "#ffa657" },
-  { tag: tags.variableName, color: "#ffa657" },
-  { tag: tags.namespace, color: "#ffa657" },
-  { tag: tags.url, color: "#a5d6ff" },
-  { tag: tags.className, color: "#7ee787" },
-  { tag: tags.tagName, color: "#7ee787" },
-  { tag: tags.attributeName, color: "#7ee787" },
-  { tag: tags.typeName, color: "#7ee787" },
-  { tag: tags.heading, color: "#79c0ff", fontWeight: "bold" },
-  { tag: tags.quote, color: "#7ee787" },
+  { tag: tags.comment, color: syntax("comment") },
+  {
+    tag: [tags.keyword, tags.controlKeyword, tags.moduleKeyword, tags.definitionKeyword, tags.operatorKeyword],
+    color: syntax("keyword"),
+  },
+  { tag: [tags.string, tags.special(tags.string), tags.escape, tags.regexp], color: syntax("string") },
+  {
+    tag: [
+      tags.atom,
+      tags.bool,
+      tags.literal,
+      tags.null,
+      tags.number,
+      tags.propertyName,
+      tags.definition(tags.propertyName),
+      tags.constant(tags.variableName),
+    ],
+    color: syntax("constant"),
+  },
+  { tag: [tags.function(tags.variableName), tags.macroName], color: syntax("function") },
+  // An identifier Zed leaves in the plain text color, which is what the read-only preview leaves it
+  // in too; naming it here rather than omitting the tag keeps both views reading alike.
+  {
+    tag: [
+      tags.variableName,
+      tags.definition(tags.variableName),
+      tags.labelName,
+      tags.local(tags.variableName),
+      tags.special(tags.variableName),
+    ],
+    color: "var(--marvis-syntax-foreground)",
+  },
+  { tag: [tags.contentSeparator, tags.meta, tags.namespace], color: syntax("punctuation") },
+  { tag: [tags.url, tags.link], color: syntax("link") },
+  { tag: tags.inserted, color: syntax("inserted") },
+  { tag: tags.deleted, color: syntax("deleted") },
+  {
+    tag: [tags.className, tags.tagName, tags.attributeName, tags.typeName, tags.quote],
+    color: syntax("string-expression"),
+  },
+  { tag: tags.heading, color: syntax("function"), fontWeight: "bold" },
   { tag: tags.emphasis, fontStyle: "italic" },
   { tag: tags.strong, fontWeight: "bold" },
   { tag: tags.strikethrough, textDecoration: "line-through" },
-  { tag: tags.link, color: "#a5d6ff" },
-  { tag: tags.invalid, color: "#ffa198" },
+  { tag: tags.invalid, color: syntax("deleted") },
 ]);
 
 /**
