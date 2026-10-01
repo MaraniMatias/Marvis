@@ -5,6 +5,7 @@ import type { Checkout, Repo, WorkspaceState } from "../domain/workspace";
 import WorktreeDialog from "./WorktreeDialog.vue";
 
 const ipc = vi.hoisted(() => ({
+  archiveCheckout: vi.fn(),
   createWorktree: vi.fn(),
   getWorktreeDefaults: vi.fn(),
   getWorktreeRemovalInfo: vi.fn(),
@@ -107,7 +108,7 @@ describe("WorktreeDialog", () => {
     expect(wrapper.text()).toContain("uncommitted.txt");
     expect(wrapper.text()).toContain("zsh · feature");
     expect((wrapper.get("select").element as HTMLSelectElement).value).toBe("keep");
-    const removeButton = wrapper.findAll("button").find((button) => button.text() === "Remove worktree");
+    const removeButton = wrapper.findAll("button").find((button) => button.text() === "Delete");
     expect(removeButton?.attributes("disabled")).toBeDefined();
 
     await wrapper.findAll('input[type="checkbox"]')[0].setValue(true);
@@ -115,7 +116,7 @@ describe("WorktreeDialog", () => {
     await wrapper.get("select").setValue("delete");
     await wrapper
       .findAll("button")
-      .find((button) => button.text() === "Remove worktree")
+      .find((button) => button.text() === "Delete")
       ?.trigger("click");
     await flushPromises();
 
@@ -152,12 +153,113 @@ describe("WorktreeDialog", () => {
     expect(
       wrapper
         .findAll("button")
-        .find((button) => button.text() === "Remove worktree")
+        .find((button) => button.text() === "Delete")
         ?.attributes("disabled"),
     ).toBeDefined();
     await wrapper.get("button.underline").trigger("click");
 
     expect(wrapper.emitted("requestShell")).toEqual([["checkout:feature"]]);
     expect(ipc.removeWorktree).not.toHaveBeenCalled();
+  });
+
+  it("offers both answers to one question, and Delete is the one painted in the failure colour", async () => {
+    ipc.getWorktreeRemovalInfo.mockResolvedValue({
+      checkoutId: "checkout:feature",
+      isPrimary: false,
+      isMissing: false,
+      branch: "feature",
+      dirtyFiles: [],
+      unmergedCommits: 0,
+      activeSessions: [],
+      activeAgentSessions: [],
+    });
+    const worktree = { ...checkout, id: "checkout:feature", isPrimary: false, branch: "feature" };
+    const wrapper = mount(WorktreeDialog, {
+      props: { open: true, mode: "remove", repo, checkout: worktree },
+    });
+    await flushPromises();
+
+    // The two answers are named before either is offered, because they differ in what they
+    // leave behind and an icon cannot say that.
+    expect(wrapper.text()).toContain("keeps every file");
+    expect(wrapper.text()).toContain("removes its directory from disk");
+    const del = wrapper.findAll("button").find((button) => button.text() === "Delete");
+    expect(del?.classes()).toContain("bg-(--marvis-red)");
+    expect(wrapper.findAll("button").map((button) => button.text())).toContain("Archive");
+    expect(wrapper.findAll("button").map((button) => button.text())).toContain("Cancel");
+    // Focus opens on the answer that does nothing, so a stray Enter cannot delete a worktree.
+    expect(wrapper.get("button[autofocus]").text()).toBe("Cancel");
+  });
+
+  it("archives without the confirmations Delete needs, and keeps the dialog open when it fails", async () => {
+    ipc.getWorktreeRemovalInfo.mockResolvedValue({
+      checkoutId: "checkout:feature",
+      isPrimary: false,
+      isMissing: false,
+      branch: "feature",
+      dirtyFiles: ["uncommitted.txt"],
+      unmergedCommits: 0,
+      activeSessions: [],
+      activeAgentSessions: [],
+    });
+    const worktree = { ...checkout, id: "checkout:feature", isPrimary: false, branch: "feature" };
+    const wrapper = mount(WorktreeDialog, {
+      props: { open: true, mode: "remove", repo, checkout: worktree },
+    });
+    await flushPromises();
+
+    // Nothing on disk moves, so an uncommitted file is no reason to ask twice.
+    ipc.archiveCheckout.mockResolvedValue(workspace);
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "Archive")
+      ?.trigger("click");
+    await flushPromises();
+
+    expect(ipc.archiveCheckout).toHaveBeenCalledWith("checkout:feature");
+    expect(ipc.removeWorktree).not.toHaveBeenCalled();
+    expect(wrapper.emitted("workspaceUpdated")).toEqual([[workspace]]);
+    expect(wrapper.emitted("close")).toEqual([[]]);
+
+    ipc.archiveCheckout.mockRejectedValue(new Error("close active terminal sessions before archiving"));
+    const retry = mount(WorktreeDialog, {
+      props: { open: true, mode: "remove", repo, checkout: worktree },
+    });
+    await flushPromises();
+    await retry
+      .findAll("button")
+      .find((button) => button.text() === "Archive")
+      ?.trigger("click");
+    await flushPromises();
+
+    // The dialog is the only thing between the user and a failed command, so it stays up with
+    // the failure in it rather than closing on top of the reason.
+    expect(retry.get('[role="alert"]').text()).toContain("close active terminal sessions");
+    expect(retry.emitted("close")).toBeUndefined();
+  });
+
+  it("refuses to archive while a session runs in the worktree, and says so", async () => {
+    ipc.getWorktreeRemovalInfo.mockResolvedValue({
+      checkoutId: "checkout:feature",
+      isPrimary: false,
+      isMissing: false,
+      branch: "feature",
+      dirtyFiles: [],
+      unmergedCommits: 0,
+      activeSessions: [{ id: "session:1", type: "shell", name: "zsh · feature" }],
+      activeAgentSessions: [],
+    });
+    const worktree = { ...checkout, id: "checkout:feature", isPrimary: false, branch: "feature" };
+    const wrapper = mount(WorktreeDialog, {
+      props: { open: true, mode: "remove", repo, checkout: worktree },
+    });
+    await flushPromises();
+
+    const archive = wrapper.findAll("button").find((button) => button.text() === "Archive");
+    expect(archive?.attributes("disabled")).toBeDefined();
+    expect(wrapper.text()).toContain("Archive stays unavailable while a session runs here");
+    await archive?.trigger("click");
+
+    expect(ipc.archiveCheckout).not.toHaveBeenCalled();
   });
 });

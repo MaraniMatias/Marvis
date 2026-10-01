@@ -4,7 +4,13 @@ import { computed, ref, watch } from "vue";
 import type { Checkout, Repo, WorkspaceState } from "../domain/workspace";
 import type { WorktreeRemovalInfo } from "../domain/worktree";
 import { isIpcError } from "../domain/ipc";
-import { createWorktree, getWorktreeDefaults, getWorktreeRemovalInfo, removeWorktree } from "../lib/ipc";
+import {
+  archiveCheckout,
+  createWorktree,
+  getWorktreeDefaults,
+  getWorktreeRemovalInfo,
+  removeWorktree,
+} from "../lib/ipc";
 
 const props = defineProps<{
   open: boolean;
@@ -38,6 +44,18 @@ const canRemove = computed(
     removal.value.activeAgentSessions.length === 0 &&
     (removal.value.dirtyFiles.length === 0 || dirtyConfirmed.value) &&
     (removal.value.activeSessions.length === 0 || sessionsConfirmed.value),
+);
+
+/**
+ * Archiving is the reversible answer, and it is refused while a session runs in the
+ * worktree for the same reason removing one is: the process would outlive the row that
+ * names it. The dialog says so rather than letting the command refuse behind it.
+ */
+const archiveBlocked = computed(
+  () =>
+    !!removal.value &&
+    !removal.value.isMissing &&
+    (removal.value.activeSessions.length > 0 || removal.value.activeAgentSessions.length > 0),
 );
 
 watch(
@@ -135,6 +153,27 @@ async function submitRemove() {
   }
 }
 
+/**
+ * Takes the worktree off the panel and keeps it, so the repo row can put it back.
+ *
+ * Nothing on disk moves: the branch, its commits and its files stay exactly where they
+ * are. That is what the dialog has to say, because the row cannot — a cross with a box
+ * around it reads as "delete" to anyone who has not read this comment.
+ */
+async function submitArchive() {
+  if (!props.checkout || archiveBlocked.value) return;
+  loading.value = true;
+  error.value = null;
+  try {
+    emit("workspaceUpdated", await archiveCheckout(props.checkout.id));
+    emit("close");
+  } catch (cause) {
+    error.value = messageOf(cause);
+  } finally {
+    loading.value = false;
+  }
+}
+
 function openShell() {
   if (!props.checkout) return;
   emit("close");
@@ -155,8 +194,10 @@ function messageOf(cause: unknown): string {
     <section
       role="dialog"
       aria-modal="true"
+      tabindex="-1"
       :aria-labelledby="mode === 'create' ? 'worktree-create-title' : 'worktree-remove-title'"
       class="surface-popover w-full max-w-xl rounded-[var(--marvis-radius)] p-5 shadow-2xl"
+      @keydown.esc.stop.prevent="$emit('close')"
     >
       <header class="mb-4 flex items-start justify-between gap-4">
         <div>
@@ -164,7 +205,7 @@ function messageOf(cause: unknown): string {
             :id="mode === 'create' ? 'worktree-create-title' : 'worktree-remove-title'"
             class="text-base font-semibold text-(--marvis-text)"
           >
-            {{ mode === "create" ? "Create worktree from main" : "Remove worktree" }}
+            {{ mode === "create" ? "Create worktree from main" : "Remove or archive worktree" }}
           </h2>
           <p
             class="mt-1 truncate text-xs text-(--marvis-text-faint)"
@@ -248,6 +289,14 @@ function messageOf(cause: unknown): string {
       </div>
 
       <div v-else-if="removal" class="space-y-4">
+        <!-- Two answers to one question, and they differ in what they leave behind, so the
+             dialog says which is which before it offers either. Archive hides the row and
+             keeps every file; Delete takes the directory off the disk. -->
+        <p class="text-sm text-(--marvis-text-secondary)">
+          <span class="text-(--marvis-text)">Archive</span> takes this worktree off the sidebar and keeps every file, so
+          the repo row can bring it back. <span class="text-(--marvis-text)">Delete</span> removes its directory from
+          disk.
+        </p>
         <p
           v-if="removal.isMissing"
           class="rounded border border-(--marvis-border) bg-(--marvis-bg-0) p-3 text-sm text-(--marvis-text-secondary)"
@@ -293,6 +342,9 @@ function messageOf(cause: unknown): string {
             Stop the listed sessions and remove this checkout.
           </label>
         </div>
+        <p v-if="archiveBlocked" class="text-xs text-(--marvis-text-faint)">
+          Archive stays unavailable while a session runs here: close it first.
+        </p>
         <p
           v-if="removal.activeAgentSessions.length"
           role="alert"
@@ -314,9 +366,21 @@ function messageOf(cause: unknown): string {
           </select>
         </label>
         <p v-if="error" role="alert" class="text-sm text-(--marvis-red)">{{ error }}</p>
-        <footer class="flex justify-end gap-2 pt-1">
+        <footer class="flex items-center gap-2 pt-1">
+          <!-- Delete is the only answer that reaches the disk, so it is the only one painted
+               in the failure colour, and it sits apart from the two that do not. -->
           <button
             type="button"
+            :disabled="isBusy || !canRemove"
+            class="rounded-[var(--marvis-radius)] bg-(--marvis-red) px-3 py-2 text-xs font-medium text-(--marvis-bg-0) disabled:cursor-not-allowed disabled:opacity-40 hover:enabled:opacity-80"
+            @click="submitRemove"
+          >
+            {{ isBusy ? "Working…" : "Delete" }}
+          </button>
+          <span class="flex-1" />
+          <button
+            type="button"
+            autofocus
             class="marvis-control px-3 py-2 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
             @click="$emit('close')"
           >
@@ -324,11 +388,11 @@ function messageOf(cause: unknown): string {
           </button>
           <button
             type="button"
-            :disabled="isBusy || !canRemove"
-            class="marvis-control px-3 py-2 text-xs text-(--marvis-red)"
-            @click="submitRemove"
+            :disabled="isBusy || archiveBlocked"
+            class="marvis-control px-3 py-2 text-xs text-(--marvis-text) hover:text-(--marvis-text)"
+            @click="submitArchive"
           >
-            {{ isBusy ? "Removing…" : "Remove worktree" }}
+            {{ isBusy ? "Working…" : "Archive" }}
           </button>
         </footer>
       </div>

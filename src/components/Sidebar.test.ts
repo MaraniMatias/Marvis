@@ -123,8 +123,8 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.get(".workdir-item.active .workdir-select").attributes("title")).toBe("feature — /test-feature");
 
     expect(wrapper.find('button[aria-label="Add worktree from main"]').exists()).toBe(true);
-    expect(wrapper.find('button[aria-label="Remove worktree main"]').exists()).toBe(false);
-    expect(wrapper.find('button[aria-label="Remove worktree feature"]').exists()).toBe(true);
+    expect(wrapper.find('button[aria-label="Remove or archive worktree main"]').exists()).toBe(false);
+    expect(wrapper.find('button[aria-label="Remove or archive worktree feature"]').exists()).toBe(true);
     // A workdir with nothing open still offers a terminal: picking a workdir no longer opens
     // one by itself, so this row is the way in.
     expect(wrapper.find('button[aria-label="New terminal for main"]').exists()).toBe(true);
@@ -133,7 +133,7 @@ describe("Sidebar workdir rows", () => {
 
     await wrapper.get(".workdir-item.active .workdir-select").trigger("click");
     await wrapper.get('button[aria-label="Add worktree from main"]').trigger("click");
-    await wrapper.get('button[aria-label="Remove worktree feature"]').trigger("click");
+    await wrapper.get('button[aria-label="Remove or archive worktree feature"]').trigger("click");
     await wrapper.get('button[aria-label="New terminal for main"]').trigger("click");
 
     expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature", false]]);
@@ -193,7 +193,7 @@ describe("Sidebar workdir rows", () => {
     // never has is a worktree action, which belongs to Git alone.
     expect(wrapper.get(".workdir-actions button").attributes("aria-label")).toBe("Remove from list: Base");
     expect(wrapper.find("button[aria-label^='Add worktree']").exists()).toBe(false);
-    expect(wrapper.find("button[aria-label^='Remove worktree']").exists()).toBe(false);
+    expect(wrapper.find("button[aria-label^='Remove or archive']").exists()).toBe(false);
     expect(wrapper.find("button[aria-label='New terminal for Base']").exists()).toBe(true);
   });
 
@@ -852,26 +852,27 @@ describe("Sidebar workdir rows", () => {
     expect(
       wrapper.findAll('button[aria-label^="New terminal for"]').map((row) => row.attributes("aria-label")),
     ).toEqual(["New terminal for feature"]);
-    // A live worktree keeps both actions, and they say different things: the archive takes
-    // the row off the panel and keeps the worktree, the trash is what deletes it from disk.
-    expect(wrapper.find('button[aria-label="Archive worktree feature"]').exists()).toBe(true);
-    expect(wrapper.find('button[aria-label="Remove worktree feature"]').exists()).toBe(true);
-    expect(wrapper.find('button[aria-label="Remove worktree temporary"]').exists()).toBe(false);
-    // One action per thing the row can do: the live worktree's own two, and the missing
+    // A live worktree offers one way out, and it asks before it acts: archiving and deleting
+    // are both answers to the same question, so the cross opens the dialog that holds them.
+    expect(wrapper.find('button[aria-label="Remove or archive worktree feature"]').exists()).toBe(true);
+    expect(wrapper.find('button[aria-label="Remove or archive worktree temporary"]').exists()).toBe(false);
+    // One action per thing the row can do: the live worktree's own one, and the missing
     // one's close.
-    expect(wrapper.findAll(".workdir-group > .workdir-item .workdir-actions button")).toHaveLength(3);
-    expect(wrapper.get('button[aria-label="Archive worktree feature"]').attributes("title")).toBe("Archive worktree");
+    expect(wrapper.findAll(".workdir-group > .workdir-item .workdir-actions button")).toHaveLength(2);
+    expect(wrapper.get('button[aria-label="Remove or archive worktree feature"]').attributes("title")).toBe(
+      "Remove or archive worktree",
+    );
     const close = wrapper.get('button[aria-label="Close missing checkout: temporary"]');
     expect(close.attributes("title")).toBe("Remove from list");
 
     await gone!.trigger("click");
     await live!.trigger("click");
     await close.trigger("click");
-    await wrapper.get('button[aria-label="Archive worktree feature"]').trigger("click");
+    await wrapper.get('button[aria-label="Remove or archive worktree feature"]').trigger("click");
 
     expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature", false]]);
     expect(wrapper.emitted("closeMissing")).toEqual([["checkout:gone"]]);
-    expect(wrapper.emitted("archiveWorktree")).toEqual([["checkout:feature"]]);
+    expect(wrapper.emitted("removeWorktree")).toEqual([["checkout:feature"]]);
     wrapper.unmount();
   });
 

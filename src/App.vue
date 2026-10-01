@@ -28,7 +28,6 @@ import WorktreeDialog from "./components/WorktreeDialog.vue";
 import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
 import { workdirTitle } from "./domain/workspace";
 import {
-  archiveCheckout as persistCheckoutArchive,
   closeCheckout as persistCheckoutClose,
   closeMissingCheckout as persistMissingCheckoutClose,
   exportReviewMarkdown,
@@ -921,26 +920,6 @@ async function answerConfirm(confirmed: boolean) {
 }
 
 /**
- * Takes a worktree off the panel and keeps it, so the repo root can put it back.
- *
- * Nothing on disk moves: the branch, its commits and its files stay exactly where they
- * are. That is what the confirmation has to say, because the row cannot — an icon with
- * a box around it reads as "delete" to anyone who has not read this comment.
- */
-function archiveWorktree(checkoutId: string) {
-  const checkout = allCheckouts.value.find((item) => item.id === checkoutId);
-  if (!checkout) return;
-  askConfirm({
-    title: "Archive worktree",
-    message: `“${workdirTitle(checkout)}” leaves the sidebar. No files will be deleted, and you can bring it back from the repo row.`,
-    confirmLabel: "Archive",
-    run: async () => {
-      applyWorkspace(await persistCheckoutArchive(checkoutId));
-    },
-  });
-}
-
-/**
  * Puts every worktree this repository archived back on the panel, in one action.
  *
  * It is one action because they were archived one at a time and the panel has room for
@@ -1282,7 +1261,6 @@ function reportWarning(message: string) {
           @remove-worktree="openWorktreeDialog('remove', $event)"
           @close-workdir="closeWorkdir"
           @close-missing="closeMissingCheckout"
-          @archive-worktree="archiveWorktree"
           @restore-archived="restoreArchivedWorktrees"
           @close-session="closeTerminalSession"
           @rename-session="renameTerminalSession"

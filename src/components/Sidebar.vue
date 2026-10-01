@@ -6,14 +6,12 @@
 /* eslint-disable vue/html-self-closing */
 import { computed, nextTick, ref, shallowRef, toRef } from "vue";
 import {
-  Archive as ArchiveIcon,
   ArchiveRestore as ArchiveRestoreIcon,
   Folder as FolderIcon,
   FolderGit2 as FolderGit2Icon,
   GitFork as GitForkIcon,
   Plus as PlusIcon,
   SquareTerminal as SquareTerminalIcon,
-  Trash as TrashIcon,
   X as XIcon,
 } from "@lucide/vue";
 import type { ArchivedCheckout, Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
@@ -61,7 +59,6 @@ const emit = defineEmits<{
   removeWorktree: [checkoutId: string];
   closeWorkdir: [checkoutId: string];
   closeMissing: [checkoutId: string];
-  archiveWorktree: [checkoutId: string];
   restoreArchived: [repoId: string];
   closeSession: [sessionId: string];
   renameSession: [sessionId: string, name: string];
@@ -348,29 +345,18 @@ const agentTitle = computed(() =>
                 >
                   <XIcon class="icon-xs" aria-hidden="true" />
                 </button>
-                <!-- Archiving is the reversible way off the panel: the worktree stays
-                     registered and the repo root can bring it back, which is what the cross
-                     used to do without leaving a way in. The trash beside it is the one that
-                     removes files, and it keeps the bin for that reason. -->
+                <!-- Archiving and deleting are two answers to one question, so the row asks it
+                     once: the cross opens the dialog that holds both, and nothing is removed,
+                     hidden or deleted before the answer comes back. -->
                 <button
                   v-if="workdir.worktree && !workdir.missing"
                   type="button"
                   class="workdir-action"
-                  :aria-label="`Archive worktree ${workdir.title}`"
-                  title="Archive worktree"
-                  @click="emit('archiveWorktree', workdir.checkout.id)"
-                >
-                  <ArchiveIcon class="icon-xs" aria-hidden="true" />
-                </button>
-                <button
-                  v-if="workdir.worktree && !workdir.missing"
-                  type="button"
-                  class="workdir-action workdir-action-danger"
-                  :aria-label="`Remove worktree ${workdir.title}`"
-                  title="Remove worktree"
+                  :aria-label="`Remove or archive worktree ${workdir.title}`"
+                  title="Remove or archive worktree"
                   @click="emit('removeWorktree', workdir.checkout.id)"
                 >
-                  <TrashIcon class="icon-xs" aria-hidden="true" />
+                  <XIcon class="icon-xs" aria-hidden="true" />
                 </button>
                 <!-- Only a repo root has worktrees to put back, and only while it has any:
                      the button is the way to the ones this repo archived. -->
@@ -685,10 +671,6 @@ const agentTitle = computed(() =>
 .workdir-action:hover {
   background: var(--marvis-border);
   color: var(--marvis-text);
-}
-
-.workdir-action-danger:hover {
-  color: var(--marvis-red);
 }
 
 /* Centered on the title's line box, so it needs no nudging */

@@ -297,7 +297,7 @@ const SidebarStub = defineComponent({
     "selectSession",
     "closeWorkdir",
     "closeMissing",
-    "archiveWorktree",
+    "removeWorktree",
     "restoreArchived",
     "renameSession",
     "newTerminal",
@@ -313,9 +313,11 @@ const SidebarStub = defineComponent({
         h("button", { "data-testid": "close-workdir-worktree", onClick: () => emit("closeWorkdir", "checkout:two") }),
         h("button", { "data-testid": "close-missing-base", onClick: () => emit("closeMissing", "checkout:one") }),
         h("button", { "data-testid": "close-missing-worktree", onClick: () => emit("closeMissing", "checkout:two") }),
+        // The row's own way off a worktree: one cross, and it opens the dialog that holds both
+        // answers rather than picking one for the user.
         h("button", {
-          "data-testid": "archive-worktree-two",
-          onClick: () => emit("archiveWorktree", "checkout:two"),
+          "data-testid": "remove-worktree-two",
+          onClick: () => emit("removeWorktree", "checkout:two"),
         }),
         h("button", {
           "data-testid": "restore-archived-shared",
@@ -1110,46 +1112,16 @@ describe("App UI integration", () => {
       { id: "checkout:four", repoId: "repo:shared", path: "/checkout:four", branch: "four" },
     ];
 
-    it("asks before the worktree leaves the panel, and does nothing until it is answered", async () => {
+    it("opens one dialog for both answers when the row asks to take the worktree off the panel", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two")));
 
-      await wrapper.get('[data-testid="archive-worktree-two"]').trigger("click");
+      await wrapper.get('[data-testid="remove-worktree-two"]').trigger("click");
 
-      // The question is the point: an icon with a box around it reads as "delete" to anyone
-      // who has not read the code, so the dialog has to say what is left alone.
-      const dialog = wrapper.get('[role="dialog"]');
-      expect(dialog.text()).toContain("Archive worktree");
-      // The worktree is named, so the user can tell which of several rows they are answering for.
-      expect(dialog.text()).toContain("leaves the sidebar");
-      expect(dialog.text()).toContain("No files will be deleted");
-      expect(mocks.archiveCheckout).not.toHaveBeenCalled();
-
-      // Answered no: nothing ran, and the question is closed rather than left hanging.
-      await dialog.findAll("footer button")[0]!.trigger("click");
-      expect(mocks.archiveCheckout).not.toHaveBeenCalled();
-      expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
-      wrapper.unmount();
-    });
-
-    it("archives once confirmed, and takes the workspace the command hands back", async () => {
-      mocks.archiveCheckout.mockResolvedValue({
-        repos: [],
-        archivedWorktrees: [{ id: "checkout:two", repoId: "repo:shared", path: "/checkout:two", branch: "main" }],
-        activeCheckoutId: null,
-        activeSessionId: null,
-      });
-      const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two")));
-
-      await wrapper.get('[data-testid="archive-worktree-two"]').trigger("click");
-      await wrapper.get('[role="dialog"] button:last-of-type').trigger("click");
-      await flushPromises();
-
-      expect(mocks.archiveCheckout).toHaveBeenCalledWith("checkout:two");
-      // The row is gone and the worktree is on the shelf the repo root reads, which is the
-      // whole difference between archiving a worktree and closing it.
-      expect(mocks.workspaceRef?.value.repos).toEqual([]);
-      expect(mocks.workspaceRef?.value.archivedWorktrees).toHaveLength(1);
-      expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+      // Archiving and deleting are one question, so the row asks it once and the dialog
+      // answers with both, against the worktree that was clicked.
+      const dialog = wrapper.get('[data-testid="worktree-dialog"]');
+      expect(dialog.attributes("data-mode")).toBe("remove");
+      expect(dialog.attributes("data-checkout")).toBe("checkout:two");
       wrapper.unmount();
     });
 
@@ -1184,20 +1156,6 @@ describe("App UI integration", () => {
 
       expect(wrapper.get('[role="dialog"]').text()).toContain("Restore archived worktree");
       expect(wrapper.get('[role="dialog"]').text()).toContain("1 archived worktree");
-      wrapper.unmount();
-    });
-
-    it("keeps the question open when the action behind it fails, so the answer is not lost", async () => {
-      mocks.archiveCheckout.mockRejectedValue(new Error("close active terminal sessions before archiving"));
-      const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two")));
-
-      await wrapper.get('[data-testid="archive-worktree-two"]').trigger("click");
-      await wrapper.get('[role="dialog"] button:last-of-type').trigger("click");
-      await flushPromises();
-
-      // The dialog is the only thing between the user and a failed command, so it stays up
-      // with the failure reported rather than closing on top of the reason.
-      expect(wrapper.find('[role="dialog"]').exists()).toBe(true);
       wrapper.unmount();
     });
   });
