@@ -26,6 +26,15 @@ export interface FileContent {
   content: string;
 }
 
+/**
+ * A path a terminal printed that this checkout holds and the preview can open, as the
+ * checkout-relative spelling the rest of the app asks for. Absent rather than a flag, so nothing
+ * can be opened that the probe did not confirm.
+ */
+export interface FileProbe {
+  path: string;
+}
+
 export interface CheckoutImage {
   mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
   dataBase64: string;

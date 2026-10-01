@@ -12,7 +12,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use crate::{
     domain::review::MAX_ROUND_PROMPT_BYTES,
     domain::{
-        files::{CheckoutImage, FileContent, FileEntry, FileEntryKind, FileSearchResult, FileTree},
+        files::{
+            CheckoutImage, FileContent, FileEntry, FileEntryKind, FileProbe, FileSearchResult,
+            FileTree,
+        },
         ipc::{IpcError, IpcErrorCode},
         workspace::{Checkout, Repo, RepoKind},
     },
@@ -301,6 +304,36 @@ fn search_plain_files(root: &Path) -> Result<(Vec<FileEntry>, bool), IpcError> {
     Ok((entries, false))
 }
 
+/**
+ * The bytes of one text file, under the limits the preview draws at: at most a mebibyte, no NUL,
+ * and valid UTF-8. What this refuses is what the preview cannot show, which is the whole
+ * definition of a file this app opens as text.
+ */
+fn read_preview_text(path: &Path) -> Result<String, IpcError> {
+    let metadata =
+        fs::metadata(path).map_err(|error| filesystem_error("could not inspect file", error))?;
+    if !metadata.is_file() {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidPath,
+            "selected path is not a file",
+        ));
+    }
+    if metadata.len() > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len() as usize);
+    File::open(path)
+        .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| filesystem_error("could not read file", error))?;
+    if bytes.len() as u64 > MAX_FILE_BYTES {
+        return Err(too_large());
+    }
+    if bytes.contains(&0) {
+        return Err(binary_file());
+    }
+    String::from_utf8(bytes).map_err(|_| binary_file())
+}
+
 pub fn read(
     database: &Database,
     checkout_id: &str,
@@ -330,33 +363,88 @@ pub fn read(
         }
         _ => return Err(invalid_origin()),
     };
-    let metadata =
-        fs::metadata(&path).map_err(|error| filesystem_error("could not inspect file", error))?;
-    if !metadata.is_file() {
-        return Err(IpcError::new(
-            IpcErrorCode::InvalidPath,
-            "selected path is not a file",
-        ));
-    }
-    if metadata.len() > MAX_FILE_BYTES {
-        return Err(too_large());
-    }
-
-    let mut bytes = Vec::with_capacity(metadata.len() as usize);
-    File::open(&path)
-        .and_then(|file| file.take(MAX_FILE_BYTES + 1).read_to_end(&mut bytes))
-        .map_err(|error| filesystem_error("could not read file", error))?;
-    if bytes.len() as u64 > MAX_FILE_BYTES {
-        return Err(too_large());
-    }
-    if bytes.contains(&0) {
-        return Err(binary_file());
-    }
-    let content = String::from_utf8(bytes).map_err(|_| binary_file())?;
+    let content = read_preview_text(&path)?;
     let path = relative_path
         .to_string_lossy()
         .replace(std::path::MAIN_SEPARATOR, "/");
     Ok(FileContent { path, content })
+}
+
+/// Whether a path a terminal printed names a file the preview can open, and the checkout-relative
+/// path to open it as.
+///
+/// This is `read` without the content, and it exists because the terminal asks the question on
+/// hover: the answer has to be cheap and it has to agree with the reader, or a link would
+/// underline itself for a file that then refuses to open. So it is the same limits, the same
+/// containment, and the same checks, minus the string it throws away.
+pub fn probe(
+    database: &Database,
+    checkout_id: &str,
+    path: &str,
+) -> Result<Option<FileProbe>, IpcError> {
+    let (repo, checkout) = registered_checkout(database, checkout_id)?;
+    if checkout.is_missing {
+        return Ok(None);
+    }
+    // A terminal prints what the shell hands it, so the same file arrives as `src/lib/x.ts`,
+    // `./src/lib/x.ts` and `/Users/me/work/src/lib/x.ts`. All three name one path, and only the
+    // relative form is what the preview's own reader takes.
+    let relative_path = match checkout_relative_path(&checkout.canonical_path, path) {
+        Some(relative) => relative,
+        None => return Ok(None),
+    };
+    let relative_path = match parse_relative_path(&relative_path) {
+        Ok(relative_path) => relative_path,
+        Err(_) => return Ok(None),
+    };
+    let resolved = match crate::services::checkout::resolve_checkout_path(
+        &repo,
+        checkout_id,
+        &relative_path,
+    ) {
+        Ok(resolved) => resolved,
+        Err(_) => return Ok(None),
+    };
+    if read_preview_text(&resolved).is_err() {
+        return Ok(None);
+    }
+    Ok(Some(FileProbe {
+        path: relative_path
+            .to_string_lossy()
+            .replace(std::path::MAIN_SEPARATOR, "/"),
+    }))
+}
+
+/// The checkout-relative form of a path a terminal printed, or `None` when it names nothing this
+/// checkout holds.
+///
+/// An absolute path is only this checkout's when it sits under its root, and the root is
+/// canonicalized first because that is how it is stored, while a symlinked or relative
+/// `./`-prefixed spelling of the same file is not. Nothing outside the root is resolved at all,
+/// which is what keeps a path printed by a program the terminal happens to be running from
+/// reading the rest of the disk.
+fn checkout_relative_path(root: &str, path: &str) -> Option<String> {
+    let path = path.trim();
+    if path.is_empty() || path.contains('\0') {
+        return None;
+    }
+    let requested = Path::new(path);
+    if requested.is_absolute() {
+        // Both sides are canonicalized because containment is asked about the real file, not
+        // about the spelling: a checkout reached through a symlink, and a path printed through
+        // the same one, are the same directory and have to be recognized as it. A path that
+        // cannot be canonicalized does not exist, so there is nothing here to resolve.
+        let requested = fs::canonicalize(requested).ok()?;
+        let root = fs::canonicalize(root).ok()?;
+        return Some(
+            requested
+                .strip_prefix(root)
+                .ok()?
+                .to_string_lossy()
+                .into_owned(),
+        );
+    }
+    Some(path.strip_prefix("./").unwrap_or(path).to_string())
 }
 
 pub fn write(
@@ -950,7 +1038,7 @@ mod tests {
     };
 
     use super::{
-        export_review_markdown, list, read, read_markdown_image, search, write, FileContent,
+        export_review_markdown, list, probe, read, read_markdown_image, search, write, FileContent,
         IpcError, MAX_ROUND_PROMPT_BYTES,
     };
 
@@ -1289,6 +1377,58 @@ mod tests {
 
         assert!(matches!(large.code, IpcErrorCode::FileTooLarge));
         assert!(matches!(binary.code, IpcErrorCode::BinaryFile));
+    }
+
+    #[test]
+    fn probe_confirms_only_text_files_this_checkout_holds() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("plain");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("notes.txt"), "hello").unwrap();
+        fs::create_dir_all(root.join("nested")).unwrap();
+        fs::write(root.join("nested/deep.rs"), "fn main() {}").unwrap();
+        fs::write(root.join("binary.bin"), [0, 1, 2]).unwrap();
+        fs::write(root.join("large.txt"), vec![b'x'; 1024 * 1024 + 1]).unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+
+        assert_eq!(
+            probe(&database, checkout_id, "notes.txt")
+                .unwrap()
+                .map(|hit| hit.path),
+            Some("notes.txt".to_string())
+        );
+
+        // A terminal prints the same file three ways and all three name it.
+        for printed in [
+            "./notes.txt",
+            "nested/deep.rs",
+            root.join("notes.txt").to_string_lossy().as_ref(),
+        ] {
+            assert!(
+                probe(&database, checkout_id, printed).unwrap().is_some(),
+                "{printed} should name a file the preview can open"
+            );
+        }
+
+        // Everything the preview would refuse to draw, the probe refuses to underline.
+        for printed in [
+            "missing.txt",
+            "binary.bin",
+            "large.txt",
+            "nested",
+            "../escape.txt",
+            "/etc/hosts",
+            ".git/config",
+            "~/notes.txt",
+            "",
+        ] {
+            assert!(
+                probe(&database, checkout_id, printed).unwrap().is_none(),
+                "{printed} should not be offered as a file"
+            );
+        }
     }
 
     #[test]

@@ -36,6 +36,7 @@ const emit = defineEmits<{
   openFolder: [];
   workspaceUpdated: [workspace: WorkspaceState];
   sessionStatusChanged: [sessionId: string, status: TerminalSessionStatus | null];
+  openFile: [path: string];
 }>();
 
 interface TerminalView {
@@ -280,6 +281,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
           @closed="onClosed(view.key, $event)"
           @status-changed="onStatusChanged(view.session?.id ?? view.key, $event)"
           @failed="onFailed(view.key, $event)"
+          @open-file="emit('openFile', $event)"
         />
       </div>
 

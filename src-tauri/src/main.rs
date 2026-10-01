@@ -166,6 +166,7 @@ fn main() {
             commands::files::files_list,
             commands::files::files_search,
             commands::files::file_read,
+            commands::files::file_probe,
             commands::files::file_write,
             commands::files::review_export_markdown,
             commands::files::review_root_path,

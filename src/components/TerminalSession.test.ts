@@ -84,6 +84,15 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     clearTextureAtlas() {
       terminalMock.clearTextureAtlasCalls += 1;
     }
+    registerLinkProvider() {
+      return { dispose: () => {} };
+    }
+    registerMarker() {
+      return { dispose: () => {} };
+    }
+    registerDecoration() {
+      return { dispose: () => {} };
+    }
     dispose() {}
   }
   return { MockTerminal, terminalMock };

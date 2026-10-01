@@ -16,6 +16,7 @@ import {
   preloadTerminalFonts,
   terminalFontSize,
 } from "../lib/marvis-terminal";
+import { registerFilePathLinks } from "../lib/terminal-file-links";
 import { renderPtyOutput } from "../lib/terminal-renderer";
 import { scrollbarOffsetForTop, terminalScrollbarGeometry } from "../lib/terminal-scrollbar";
 import type { TerminalScrollbarGeometry } from "../lib/terminal-scrollbar";
@@ -41,6 +42,7 @@ const emit = defineEmits<{
   closed: [workspace: Awaited<ReturnType<typeof closeTerminal>>];
   statusChanged: [status: TerminalSessionStatus];
   failed: [message: string];
+  openFile: [path: string];
 }>();
 
 const terminalElement = ref<HTMLElement | null>(null);
@@ -73,6 +75,7 @@ let disposed = false;
 let started = false;
 let terminalReady = false;
 let selectionCopy: { dispose(): void } | undefined;
+let fileLinks: { dispose(): void } | undefined;
 let latestSize = { cols: 0, rows: 0 };
 /** What the queue is working on: the last size handed to the PTY, or the one it refused. */
 let attemptedSize = { cols: 0, rows: 0 };
@@ -518,6 +521,13 @@ onMounted(async () => {
       pushCause(cause);
     });
   });
+  // After the copy, because both own the mouse: a path that turns out to be a file is also a
+  // path a person might want to select, and the click that opens it is already narrowed to
+  // ctrl+click, so the two do not contend for the same gesture.
+  fileLinks = registerFilePathLinks(terminal, {
+    checkoutId: props.checkoutId,
+    open: (path) => emit("openFile", path),
+  });
   fitActiveView();
   resizeObserver = new ResizeObserver(() => fitActiveView());
   resizeObserver.observe(terminalElement.value);
@@ -531,6 +541,7 @@ onUnmounted(() => {
   scrollbarDrag = null;
   resizeObserver?.disconnect();
   selectionCopy?.dispose();
+  fileLinks?.dispose();
   if (channel) channel.onmessage = () => {};
   terminal.dispose();
 });

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Channel } from "@tauri-apps/api/core";
 import type { OpenedFolder } from "../domain/folder";
-import type { CheckoutImage, FileContent, FileSearchResult, FileTree } from "../domain/files";
+import type { CheckoutImage, FileContent, FileProbe, FileSearchResult, FileTree } from "../domain/files";
 import type { GitCheckoutDiffStats, GitDiffPage, GitFileDiff, GitFileDiffStats, GitStatus } from "../domain/git";
 import type { ReviewNote, ReviewRound, ReviewSide } from "../domain/review";
 import type { RecentPath, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
@@ -28,6 +28,14 @@ export function searchCheckoutFiles(checkoutId: string): Promise<FileSearchResul
 
 export function readCheckoutFile(checkoutId: string, path: string, origin: DocumentOrigin): Promise<FileContent> {
   return invoke<FileContent>("file_read", { checkoutId, path, origin });
+}
+
+/**
+ * Whether a path a terminal printed names a file the preview can open, resolved to its
+ * checkout-relative spelling. `null` is the ordinary answer for a path that names nothing here.
+ */
+export function probeCheckoutFile(checkoutId: string, path: string): Promise<FileProbe | null> {
+  return invoke<FileProbe | null>("file_probe", { checkoutId, path });
 }
 
 export function writeCheckoutFile(

@@ -58,6 +58,7 @@ const emit = defineEmits<{
   readingPositionChanged: [position: { top: number; left: number }];
   diffPositionChanged: [top: number];
   openMarkdownLink: [path: string];
+  openFile: [path: string];
   resizePreview: [width: number];
 }>();
 
@@ -125,6 +126,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
         @open-folder="$emit('openFolder')"
         @workspace-updated="$emit('workspaceUpdated', $event)"
         @session-status-changed="(sessionId, status) => $emit('sessionStatusChanged', sessionId, status)"
+        @open-file="$emit('openFile', $event)"
       />
     </section>
     <div

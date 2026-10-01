@@ -40,6 +40,14 @@ pub struct FileContent {
     pub content: String,
 }
 
+/// A path a terminal printed that this checkout holds and the preview can open. Absent rather than
+/// a flag on a bare path, so the caller cannot open something the probe never confirmed.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FileProbe {
+    pub path: String,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckoutImage {

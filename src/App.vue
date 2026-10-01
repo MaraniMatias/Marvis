@@ -1519,6 +1519,7 @@ function reportWarning(message: string) {
           @diff-position-changed="activeCheckout && updateDiffReadingPosition(activeCheckout.id, $event)"
           @resize-preview="resizeAppPreview"
           @open-markdown-link="activeCheckout && openFileDocument({ checkoutId: activeCheckout.id, path: $event })"
+          @open-file="activeCheckout && openFileDocument({ checkoutId: activeCheckout.id, path: $event })"
         />
       </SplitterPanel>
       <SplitterResizeHandle
