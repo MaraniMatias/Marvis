@@ -10,7 +10,7 @@ const props = withDefaults(
     /** The body of the question: what the action does, and what it leaves alone. */
     message: string;
     confirmLabel: string;
-    /** Paints the confirming button in the failure colour, for the answers that are not neutral. */
+    /** Fills the confirming button in the failure colour, for the answers that are not neutral. */
     destructive?: boolean;
     busy?: boolean;
   }>(),
@@ -32,14 +32,18 @@ const titleId = computed(() => `confirm-${props.title.replace(/\W+/g, "-").toLow
     <section
       role="dialog"
       aria-modal="true"
+      tabindex="-1"
       :aria-labelledby="titleId"
       class="surface-popover w-full max-w-md rounded-[var(--marvis-radius)] p-5 shadow-2xl"
+      @keydown.esc.stop.prevent="emit('close')"
     >
       <h2 :id="titleId" class="text-base font-semibold text-(--marvis-text)">{{ title }}</h2>
       <p class="mt-2 text-sm text-(--marvis-text-secondary)">{{ message }}</p>
       <footer class="mt-5 flex justify-end gap-2">
+        <!-- Focus opens on the answer that does nothing, so a stray Enter cannot answer yes. -->
         <button
           type="button"
+          autofocus
           class="marvis-control px-3 py-2 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
           @click="emit('close')"
         >
@@ -48,8 +52,7 @@ const titleId = computed(() => `confirm-${props.title.replace(/\W+/g, "-").toLow
         <button
           type="button"
           :disabled="busy"
-          class="marvis-control px-3 py-2 text-xs hover:opacity-70"
-          :class="destructive ? 'text-(--marvis-red)' : 'text-(--marvis-text)'"
+          :class="destructive ? 'marvis-button-danger' : 'marvis-control px-3 py-2 text-xs text-(--marvis-text)'"
           @click="emit('confirm')"
         >
           {{ busy ? "Working…" : confirmLabel }}

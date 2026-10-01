@@ -46,8 +46,20 @@ describe("ConfirmDialog", () => {
   });
 
   it("paints the confirming button in the failure colour only when the answer is one", () => {
-    expect(dialog({ destructive: true }).get("button:last-of-type").classes()).toContain("text-(--marvis-red)");
-    expect(dialog().get("button:last-of-type").classes()).toContain("text-(--marvis-text)");
+    expect(dialog({ destructive: true }).get("button:last-of-type").classes()).toContain("marvis-button-danger");
+    expect(dialog().get("button:last-of-type").classes()).not.toContain("marvis-button-danger");
+  });
+
+  it("opens on the answer that does nothing, and Escape backs out", async () => {
+    const wrapper = dialog();
+
+    // Focus opens on Cancel, so a stray Enter cannot answer a question nobody read.
+    expect(wrapper.get("button[autofocus]").text()).toBe("Cancel");
+    expect(wrapper.emitted("confirm")).toBeUndefined();
+
+    await wrapper.get('[role="dialog"]').trigger("keydown.esc");
+    expect(wrapper.emitted("close")).toEqual([[]]);
+    expect(wrapper.emitted("confirm")).toBeUndefined();
   });
 
   it("cannot be answered twice while the action behind it is still running", () => {

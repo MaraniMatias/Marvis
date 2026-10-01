@@ -11,6 +11,7 @@ import {
   getWorktreeRemovalInfo,
   removeWorktree,
 } from "../lib/ipc";
+import SelectControl from "./ui/select/SelectControl.vue";
 
 const props = defineProps<{
   open: boolean;
@@ -57,6 +58,15 @@ const archiveBlocked = computed(
     !removal.value.isMissing &&
     (removal.value.activeSessions.length > 0 || removal.value.activeAgentSessions.length > 0),
 );
+
+/** What the two answers to the branch are called, which changes with what the branch holds. */
+const branchActions = computed(() => [
+  { value: "keep", label: "Keep branch (recommended)" },
+  {
+    value: "delete",
+    label: `Delete branch${removal.value?.unmergedCommits ? " and its unmerged commits" : ""}`,
+  },
+]);
 
 watch(
   () => [props.open, props.mode, props.checkout?.id] as const,
@@ -355,15 +365,13 @@ function messageOf(cause: unknown): string {
         </p>
         <label v-if="removal.branch" class="block text-xs text-(--marvis-text-secondary)">
           Local branch
-          <select
+          <SelectControl
             v-model="branchAction"
-            class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text)"
-          >
-            <option value="keep">Keep branch (recommended)</option>
-            <option value="delete">
-              Delete branch{{ removal.unmergedCommits ? " and its unmerged commits" : "" }}
-            </option>
-          </select>
+            :options="branchActions"
+            variant="field"
+            label="Local branch"
+            class="mt-1.5"
+          />
         </label>
         <p v-if="error" role="alert" class="text-sm text-(--marvis-red)">{{ error }}</p>
         <footer class="flex items-center gap-2 pt-1">
@@ -372,10 +380,10 @@ function messageOf(cause: unknown): string {
           <button
             type="button"
             :disabled="isBusy || !canRemove"
-            class="rounded-[var(--marvis-radius)] bg-(--marvis-red) px-3 py-2 text-xs font-medium text-(--marvis-bg-0) disabled:cursor-not-allowed disabled:opacity-40 hover:enabled:opacity-80"
+            class="marvis-button-danger"
             @click="submitRemove"
           >
-            {{ isBusy ? "Working…" : "Delete" }}
+            {{ isBusy ? "Deleting…" : "Delete" }}
           </button>
           <span class="flex-1" />
           <button
@@ -392,7 +400,7 @@ function messageOf(cause: unknown): string {
             class="marvis-control px-3 py-2 text-xs text-(--marvis-text) hover:text-(--marvis-text)"
             @click="submitArchive"
           >
-            {{ isBusy ? "Working…" : "Archive" }}
+            {{ isBusy ? "Archiving…" : "Archive" }}
           </button>
         </footer>
       </div>

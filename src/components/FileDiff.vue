@@ -20,6 +20,7 @@ import { getGitDiff } from "../lib/ipc";
 import { DIFF_ROW_HEIGHT, useLargeDiff } from "./use-large-diff";
 import ReviewComposer from "./ReviewComposer.vue";
 import ReviewNoteList from "./ReviewNoteList.vue";
+import SelectControl from "./ui/select/SelectControl.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -215,8 +216,13 @@ function chooseTarget(sessionId: string) {
   targetOpen.value = false;
 }
 
-function chooseReviewTarget(event: Event) {
-  const target = (event.currentTarget as HTMLSelectElement).value;
+/** The two destinations a review can leave by, so the picker is a list rather than a control. */
+const reviewTargets = [
+  { value: "markdown", label: "Markdown" },
+  { value: "opencode", label: "OpenCode" },
+];
+
+function chooseReviewTarget(target?: string) {
   if (target === "markdown" || target === "opencode") sender?.selectReviewTarget(target);
 }
 
@@ -537,16 +543,13 @@ onUnmounted(() => {
           >
             {{ sender.target === "markdown" ? "Export as Markdown" : "Send to opencode" }}
           </button>
-          <select
-            :value="sender.target"
-            data-testid="review-target"
-            aria-label="Review destination"
-            class="marvis-control h-7 px-2 text-xs"
-            @change="chooseReviewTarget"
-          >
-            <option value="markdown">Markdown</option>
-            <option value="opencode">OpenCode</option>
-          </select>
+          <SelectControl
+            :model-value="sender.target"
+            :options="reviewTargets"
+            label="Review destination"
+            testid="review-target"
+            @update:model-value="chooseReviewTarget"
+          />
           <!-- One session is the default target, so the picker only earns its place above one.
                It is the app's own menu rather than a native select, and it earns a search only
                once there are more rows than a short list is worth reading. -->

@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 // The diff view is stubbed inline, the way the other component tests stub what they cannot mount.
-/* eslint-disable vue/one-component-per-file */
+/* eslint-disable vue/one-component-per-file, vue/require-default-prop */
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, provide, reactive, ref } from "vue";
@@ -65,7 +65,7 @@ vi.mock("@git-diff-view/vue", async () => {
 });
 
 vi.mock("reka-ui", async () => {
-  const { h: createElement } = await import("vue");
+  const { h: createElement, defineComponent, inject, provide } = await import("vue");
   // The destination menu always renders here, so a target can be picked without driving the open
   // state, the way DocumentPane.test.ts stubs the toolbar's own popover.
   const passThrough = (name: string) => ({
@@ -78,15 +78,55 @@ vi.mock("reka-ui", async () => {
       () =>
         createElement("div", context.attrs, context.slots.default?.() as never),
   });
+  // The select is stubbed with its wiring intact: the root holds the value and the rows report
+  // a pick back to it, so a destination can be chosen here the way the keyboard would choose it.
+  const select = Symbol("select");
+  const selectRoot = defineComponent({
+    name: "SelectRoot",
+    props: { modelValue: String },
+    emits: ["update:modelValue"],
+    setup(props, { emit, slots }) {
+      provide(select, (value: string) => emit("update:modelValue", value));
+      return () => createElement("div", slots.default?.());
+    },
+  });
+  const selectItem = defineComponent({
+    name: "SelectItem",
+    inheritAttrs: false,
+    props: { value: String },
+    // The row is an option here the way it is in the library, so a query for the destination
+    // finds it by the role a screen reader would hear.
+    setup(props, { attrs, slots }) {
+      const pick = inject<((value: string) => void) | undefined>(select);
+      return () =>
+        createElement(
+          "button",
+          { role: "option", ...attrs, onClick: () => pick?.(props.value ?? "") },
+          slots.default?.(),
+        );
+    },
+  });
   return {
     PopoverRoot: passThrough("PopoverRoot"),
     PopoverTrigger: passThrough("PopoverTrigger"),
     PopoverPortal: passThrough("PopoverPortal"),
     PopoverContent: passThrough("PopoverContent"),
+    SelectRoot: selectRoot,
+    SelectTrigger: passThrough("SelectTrigger"),
+    SelectValue: passThrough("SelectValue"),
+    SelectPortal: passThrough("SelectPortal"),
+    SelectContent: passThrough("SelectContent"),
+    SelectViewport: passThrough("SelectViewport"),
+    SelectItem: selectItem,
+    SelectItemText: passThrough("SelectItemText"),
+    SelectItemIndicator: passThrough("SelectItemIndicator"),
   };
 });
 
 import FileDiff from "./FileDiff.vue";
+
+/** The session rows, named by the listbox that holds them: the destination select offers rows too. */
+const SESSION_OPTION = '[aria-label="Send review to"] [role="option"]';
 
 const checkout: Checkout = {
   id: "checkout:one",
@@ -348,7 +388,7 @@ describe("FileDiff", () => {
     await flushPromises();
 
     expect(wrapper.get('[data-testid="send-target"]').text()).toContain("review two");
-    const options = wrapper.findAll('[role="option"]');
+    const options = wrapper.findAll(SESSION_OPTION);
     expect(options.map((option) => option.text())).toEqual(["ses_one", "review two"]);
     // The chosen one is the one that carries the check, so the list says where it already points.
     expect(options[1].attributes("aria-selected")).toBe("true");
@@ -425,7 +465,12 @@ describe("FileDiff", () => {
     const wrapper = mountDiff({ review: reviewApi([note()]) }, stub.sender);
     await flushPromises();
 
-    await wrapper.get('[data-testid="review-target"]').setValue("opencode");
+    // The rows render without the list being opened, and they are found through the listbox's
+    // own name because the session menu above offers options of its own.
+    await wrapper
+      .findAll('[aria-label="Review destination"] [role="option"]')
+      .find((row) => row.text() === "OpenCode")!
+      .trigger("click");
     expect(stub.selectReviewTarget).toHaveBeenCalledWith("opencode");
     expect(wrapper.get('[data-testid="send-review"]').text()).toBe("Send to opencode");
     wrapper.unmount();
@@ -458,7 +503,7 @@ describe("FileDiff", () => {
     const short = mountDiff({ review: reviewApi([note()]) }, two.sender);
     await flushPromises();
     // A send goes to the session that was last used, so the newest one leads the list.
-    expect(short.findAll('[role="option"]').map((option) => option.text())).toEqual(["new work", "old work"]);
+    expect(short.findAll(SESSION_OPTION).map((option) => option.text())).toEqual(["new work", "old work"]);
     expect(short.find('input[aria-label="Search sessions"]').exists()).toBe(false);
     short.unmount();
 
@@ -469,7 +514,7 @@ describe("FileDiff", () => {
     const wrapper = mountDiff({ review: reviewApi([note()]) }, six.sender);
     await flushPromises();
 
-    expect(wrapper.findAll('[role="option"]').map((option) => option.text())).toEqual([
+    expect(wrapper.findAll(SESSION_OPTION).map((option) => option.text())).toEqual([
       "session 5",
       "session 4",
       "CanvasForm work",
@@ -479,9 +524,9 @@ describe("FileDiff", () => {
     ]);
     const search = wrapper.get('input[aria-label="Search sessions"]');
     await search.setValue("canvas");
-    expect(wrapper.findAll('[role="option"]').map((option) => option.text())).toEqual(["CanvasForm work"]);
+    expect(wrapper.findAll(SESSION_OPTION).map((option) => option.text())).toEqual(["CanvasForm work"]);
     await search.setValue("nothing");
-    expect(wrapper.findAll('[role="option"]')).toHaveLength(0);
+    expect(wrapper.findAll(SESSION_OPTION)).toHaveLength(0);
     expect(wrapper.get(".menu-note").text()).toBe('No session matches "nothing".');
     wrapper.unmount();
   });

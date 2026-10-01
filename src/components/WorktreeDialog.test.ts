@@ -107,13 +107,23 @@ describe("WorktreeDialog", () => {
 
     expect(wrapper.text()).toContain("uncommitted.txt");
     expect(wrapper.text()).toContain("zsh · feature");
-    expect((wrapper.get("select").element as HTMLSelectElement).value).toBe("keep");
+    // The branch choice is a list the app draws, and what it says is what is chosen.
+    const trigger = wrapper.get('[aria-label="Local branch"]');
+    expect(trigger.text()).toContain("Keep branch (recommended)");
     const removeButton = wrapper.findAll("button").find((button) => button.text() === "Delete");
     expect(removeButton?.attributes("disabled")).toBeDefined();
 
     await wrapper.findAll('input[type="checkbox"]')[0].setValue(true);
     await wrapper.findAll('input[type="checkbox"]')[1].setValue(true);
-    await wrapper.get("select").setValue("delete");
+    // The list is the app's own, drawn where the pointer is: opening it and picking the row is
+    // what choosing a branch is, and the popup is portalled out of the dialog's own tree.
+    await wrapper.get('[aria-label="Local branch"]').trigger("pointerdown", { button: 0 });
+    await flushPromises();
+    const rows = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
+    const pick = rows.find((row) => row.textContent?.startsWith("Delete branch"))!;
+    pick.dispatchEvent(new Event("pointerup", { bubbles: true }));
+    await flushPromises();
+    expect(wrapper.get('[aria-label="Local branch"]').text()).toContain("Delete branch");
     await wrapper
       .findAll("button")
       .find((button) => button.text() === "Delete")
@@ -184,7 +194,7 @@ describe("WorktreeDialog", () => {
     expect(wrapper.text()).toContain("keeps every file");
     expect(wrapper.text()).toContain("removes its directory from disk");
     const del = wrapper.findAll("button").find((button) => button.text() === "Delete");
-    expect(del?.classes()).toContain("bg-(--marvis-red)");
+    expect(del?.classes()).toContain("marvis-button-danger");
     expect(wrapper.findAll("button").map((button) => button.text())).toContain("Archive");
     expect(wrapper.findAll("button").map((button) => button.text())).toContain("Cancel");
     // Focus opens on the answer that does nothing, so a stray Enter cannot delete a worktree.

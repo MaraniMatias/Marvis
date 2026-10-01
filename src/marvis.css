@@ -136,6 +136,92 @@
   opacity: 0.6;
 }
 
+/* The trigger of a select, drawn as one of the app's own controls so it reads the same on
+   every platform. The native element it replaces could not be styled at all: its popup is
+   the system's, and on Linux that popup arrives unstyled. Global because the list portals
+   out of the shell, the same reason the menu rules are. */
+.marvis-select {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 3px 8px;
+  border: none;
+  border-radius: var(--marvis-radius);
+  height: 28px;
+  background: color-mix(in srgb, var(--marvis-accent) 14%, transparent);
+  color: var(--marvis-text-secondary);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+.marvis-select:hover,
+.marvis-select[data-state="open"] {
+  background: color-mix(in srgb, var(--marvis-accent) 24%, transparent);
+  color: var(--marvis-text);
+}
+/* The field variant is the one inside a dialog, where every input around it carries a border
+   and spans the column: a picker that reads as a toolbar button there is a control in the
+   wrong family. */
+.marvis-select-field {
+  width: 100%;
+  height: auto;
+  padding: 8px 12px;
+  border: 1px solid var(--marvis-border);
+  background: var(--marvis-bg-0);
+  font-size: 14px;
+  color: var(--marvis-text);
+}
+.marvis-select-field:hover,
+.marvis-select-field[data-state="open"] {
+  border-color: var(--marvis-text-faint);
+  background: var(--marvis-bg-0);
+}
+.marvis-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.6;
+}
+
+/* The list takes the trigger's width so a short choice does not open a narrower menu, and the
+   rows reuse the menu's own classes: one vocabulary for every list in the app. */
+.marvis-select-content {
+  min-width: var(--reka-select-trigger-width);
+  max-width: min(24rem, var(--reka-select-content-available-width));
+  max-height: min(60vh, var(--reka-select-content-available-height));
+}
+
+/* The three answers a dialog's footer carries, so a dialog in this app is built the same way
+   wherever it is asked from. Cancel and the neutral answer are `.marvis-control` and stay in the
+   mockup's vocabulary; the destructive one is the only filled button in the app, because it is
+   the only one that reaches the disk. The focus ring is here rather than left to the browser,
+   which draws one this design does not have. */
+.marvis-button-danger {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  border: none;
+  border-radius: var(--marvis-radius);
+  padding: 8px 12px;
+  background: var(--marvis-red);
+  color: var(--marvis-bg-0);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: opacity 120ms ease;
+}
+.marvis-button-danger:hover:enabled {
+  opacity: 0.8;
+}
+.marvis-button-danger:disabled {
+  cursor: not-allowed;
+  opacity: 0.4;
+}
+
 /* A control that is nothing but its own name with a list of things behind it: no surface at
    rest, none under the pointer and none while the list is open, which is what the chip on the
    last crumb used to be. The cursor is the whole affordance and the text clears a step under
