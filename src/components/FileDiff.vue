@@ -356,10 +356,12 @@ async function loadDiff(path: string, preservePosition = false) {
   const request = ++diffGeneration;
   const checkoutId = props.checkout.id;
   const oldScrollTop = preservePosition ? diffScrollTop.value : props.scrollTop;
+  // Whether this reload is the same file again. A different one resets the pages through the
+  // path watcher inside the composable, so it is the only case left to cover here.
+  const sameFile = selectedPath.value === path;
   // E.3: a different file is a different selection, so the previous diff goes away rather
   // than sitting under the loading state. A refresh of the same file keeps its place.
-  const keepPreviousDiff = diff.value !== null && selectedPath.value === path;
-  if (selectedPath.value === path) largeDiff.reset();
+  const keepPreviousDiff = diff.value !== null && sameFile;
   selectedPath.value = path;
   if (!keepPreviousDiff) {
     diff.value = null;
@@ -384,6 +386,11 @@ async function loadDiff(path: string, preservePosition = false) {
     // workdir, not just in the file on screen: rebuilding on each one closed the composer the
     // moment the user started typing, for a diff that had not moved.
     if (result.patch !== diff.value?.patch) {
+      // A moved patch moves every line after the edit, so the pages on hand are stale and go.
+      // An unmoved one leaves the line numbers they are indexed by exactly as they were, and
+      // dropping them is what put a virtualized diff in a permanent "Loading diff page" loop:
+      // each refresh blanked the window and the next one arrived before the refill had landed.
+      if (sameFile) largeDiff.reset();
       diff.value = result;
       collapsedHunks.value = [];
       if (!result.isBinary && !result.symlinkTarget && result.patch.includes("@@")) {
@@ -451,20 +458,30 @@ watch(
   { deep: true },
 );
 
+// Git reports every write in the workdir, on a 220ms debounce, and an agent writing a file
+// produces a steady stream of them. Reloading on each one spends the whole stream fetching a
+// diff the user never sees land, so a burst collapses into the single reload it amounts to.
+const STATUS_REFRESH_DEBOUNCE = 400;
+
 watch(
   () => props.gitSnapshot.statusRevision,
-  async (revision, previous) => {
+  (revision, previous, onCleanup) => {
     if (revision === previous || props.path === null) return;
     if (props.gitSnapshot.checkoutId !== props.checkout.id || !props.gitSnapshot.status) return;
-    if (props.gitSnapshot.status.files.some((file) => file.path === props.path)) await loadDiff(props.path, true);
-    else {
+    const path = props.path;
+    const timer = setTimeout(() => {
+      if (props.gitSnapshot.status?.files.some((file) => file.path === path)) {
+        void loadDiff(path, true);
+        return;
+      }
       diffGeneration += 1;
       diff.value = null;
       diffHunks.value = [];
       diffScrollTop.value = 0;
       diffError.value = "This file is no longer in the current Git changes.";
       diffState.value = "error";
-    }
+    }, STATUS_REFRESH_DEBOUNCE);
+    onCleanup(() => clearTimeout(timer));
   },
 );
 

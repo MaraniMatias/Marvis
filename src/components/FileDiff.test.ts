@@ -261,10 +261,10 @@ describe("FileDiff", () => {
 
     // Git reports every write in the workdir, not only in the file on screen, so a refresh lands
     // here after any save anywhere. It has to hand the view the same file: a new one takes the
-    // open note composer down with it, which closed the composer the moment typing began.
+    // open note composer down with it, which closed the composer the moment typing began. The
+    // refresh is debounced, so the wait is for the timer rather than for the microtask queue.
     gitSnapshot.statusRevision += 1;
-    await flushPromises();
-    expect(mocks.getGitDiff).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(mocks.getGitDiff).toHaveBeenCalledTimes(2));
     expect(diffFile()).toBe(first);
 
     mocks.getGitDiff.mockResolvedValue({
@@ -277,7 +277,7 @@ describe("FileDiff", () => {
       hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
     });
     gitSnapshot.statusRevision += 1;
-    await flushPromises();
+    await vi.waitFor(() => expect(diffFile()).not.toBe(first));
     // A diff that did move is redrawn, or the view would keep showing lines git no longer has.
     expect(diffFile()).not.toBe(first);
     wrapper.unmount();

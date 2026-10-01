@@ -960,6 +960,47 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("keeps a large diff's pages across a status refresh that moved no line", async () => {
+    const checkoutId = "checkout:large-diff-unchanged";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "large.txt", status: "M" }]);
+    mocks.getGitDiff.mockResolvedValue({
+      path: "large.txt",
+      patch: "",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: 2,
+      hunks: [{ startLine: 0, endLine: 2, title: "@@ -1 +1 @@" }],
+    });
+    mocks.getGitDiffPage.mockResolvedValue({
+      path: "large.txt",
+      startLine: 0,
+      totalLines: 2,
+      lines: [
+        { index: 0, kind: "hunk", text: "@@ -1 +1 @@", oldLineNumber: null, newLineNumber: null },
+        { index: 1, kind: "added", text: "+new line", oldLineNumber: null, newLineNumber: 1 },
+      ],
+    });
+    const wrapper = mount(FileDiff, {
+      props: { checkout: checkout(checkoutId), gitSnapshot, review: reviewApi(), path: "large.txt", scrollTop: 0 },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+new line"));
+
+    // The agent writing any other file in the workdir moves statusRevision with this one on
+    // screen. The patch is the diff, so an equal patch means the pages already fetched are
+    // still the pages git has, and dropping them is what put a large diff in a permanent
+    // "Loading diff page" cycle: each refresh blanked the window and the next arrived before
+    // the refill had landed. The call count is the assertion that carries it, since the
+    // refetch lands fast enough to go unnoticed; putting the reset back at the top of
+    // loadDiff, where it ran before the patch was known, fails this on the first bump.
+    gitSnapshot.statusRevision += 1;
+    await vi.waitFor(() => expect(mocks.getGitDiff).toHaveBeenCalledTimes(2));
+    expect(wrapper.text()).toContain("+new line");
+    expect(wrapper.text()).not.toContain("Loading diff page");
+    expect(mocks.getGitDiffPage).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
   it("restores a diff position independently and reports later scrolling", async () => {
     const checkoutId = "checkout:diff-position";
     const wrapper = mount(FileDiff, {
@@ -1400,9 +1441,9 @@ describe("DocumentPane", () => {
     });
     await flushPromises();
     expect(mocks.getGitDiff).toHaveBeenCalledTimes(1);
+    // Debounced: a burst of writes is one reload, so the second call waits out the timer.
     gitSnapshot.statusRevision += 1;
-    await flushPromises();
-    expect(mocks.getGitDiff).toHaveBeenCalledTimes(2);
+    await vi.waitFor(() => expect(mocks.getGitDiff).toHaveBeenCalledTimes(2));
     wrapper.unmount();
 
     for (const result of [

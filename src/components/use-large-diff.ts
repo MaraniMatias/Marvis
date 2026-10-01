@@ -6,7 +6,9 @@ import { useToasts } from "../presentation/toasts";
 import { getGitDiffPage } from "../lib/ipc";
 
 const DIFF_PAGE_SIZE = 32;
-export const DIFF_ROW_HEIGHT = 22;
+/** The height the row markup renders at (`h-6`). The window math only lands on the rows the
+ *  user is looking at while the two agree, and it is also the max-scroll clamp in `toggleHunk`. */
+export const DIFF_ROW_HEIGHT = 24;
 const DIFF_WINDOW_SIZE = 80;
 const MAX_CACHED_DIFF_PAGES = 8;
 const MAX_CONCURRENT_DIFF_PAGE_REQUESTS = 3;
@@ -114,6 +116,9 @@ export function useLargeDiff(
     diffPages.value = {};
     diffPageErrors.value = {};
     pageUseOrder = [];
+    // The generation check already throws these responses away, so leaving them queued only
+    // spends the concurrency budget on pages nobody can use and starves the ones that are needed.
+    pending.clear();
   }
 
   function isCurrent(request: number, path: string, requestCheckoutId: string): boolean {
