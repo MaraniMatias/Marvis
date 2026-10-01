@@ -37,16 +37,18 @@ pub struct AppLayoutState {
     pub sidebar_width: u32,
     pub inspector_width: u32,
     pub preview_width: u32,
+    pub terminal_scrollbar: String,
 }
 
 impl Default for AppLayoutState {
     fn default() -> Self {
         Self {
-            version: 2,
+            version: 3,
             mode: "focus".into(),
             sidebar_width: 240,
             inspector_width: 280,
             preview_width: 360,
+            terminal_scrollbar: "hidden".into(),
         }
     }
 }
@@ -56,6 +58,12 @@ impl AppLayoutState {
     fn normalized(mut self) -> Self {
         if self.mode != "focus" && self.mode != "split" {
             self.mode = "focus".into();
+        }
+        if !matches!(
+            self.terminal_scrollbar.as_str(),
+            "hidden" | "auto" | "always"
+        ) {
+            self.terminal_scrollbar = "hidden".into();
         }
         self.sidebar_width = self
             .sidebar_width
@@ -695,7 +703,7 @@ impl Database {
         let layout = serde_json::from_str::<AppLayoutState>(&serialized)
             .ok()
             .map(AppLayoutState::normalized)
-            .filter(|layout| layout.version == 2)
+            .filter(|layout| layout.version == 3)
             .unwrap_or_default();
         if serde_json::to_string(&layout).map_err(|error| error.to_string())? != serialized {
             connection
@@ -707,7 +715,7 @@ impl Database {
 
     pub fn save_app_layout(&self, layout: &AppLayoutState) -> Result<(), String> {
         let layout = layout.clone().normalized();
-        if layout.version != 2 {
+        if layout.version != 3 {
             return Err("saved UI layout has an unsupported version".into());
         }
         let serialized = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
@@ -2533,6 +2541,7 @@ mod tests {
             sidebar_width: 340,
             inspector_width: 420,
             preview_width: 720,
+            terminal_scrollbar: "auto".into(),
             ..AppLayoutState::default()
         };
         database.save_app_layout(&layout).unwrap();
@@ -2576,7 +2585,7 @@ mod tests {
             connection
                 .execute(
                     "UPDATE preferences SET value = ?1 WHERE key = 'ui_layout_v1'",
-                    [r#"{"version":1,"sidebarWidth":300,"inspectorWidth":320}"#],
+                    [r#"{"version":2,"sidebarWidth":300,"inspectorWidth":320,"previewWidth":500}"#],
                 )
                 .unwrap();
         }
@@ -2723,11 +2732,12 @@ mod tests {
     #[test]
     fn app_layout_normalizes_dimensions_and_unknown_modes() {
         let layout = serde_json::from_value::<AppLayoutState>(serde_json::json!({
-            "version": 2,
+            "version": 3,
             "mode": "unknown",
             "sidebarWidth": 260,
             "inspectorWidth": 320,
-            "previewWidth": 1200
+            "previewWidth": 1200,
+            "terminalScrollbar": "always"
         }))
         .unwrap()
         .normalized();
@@ -2738,14 +2748,17 @@ mod tests {
                 sidebar_width: 260,
                 inspector_width: 320,
                 preview_width: 900,
+                terminal_scrollbar: "always".into(),
                 ..Default::default()
             }
         );
 
         let out_of_range = serde_json::from_value::<AppLayoutState>(serde_json::json!({
+            "version": 3,
             "sidebarWidth": 220,
             "inspectorWidth": 560,
-            "previewWidth": 200
+            "previewWidth": 200,
+            "terminalScrollbar": "warp"
         }))
         .unwrap()
         .normalized();
@@ -2755,6 +2768,7 @@ mod tests {
                 sidebar_width: 240,
                 inspector_width: 480,
                 preview_width: 260,
+                terminal_scrollbar: "hidden".into(),
                 ..Default::default()
             }
         );

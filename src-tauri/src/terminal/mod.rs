@@ -363,6 +363,45 @@ mod tests {
         }
     }
 
+    /// A shell that ends is the ordinary way a terminal session is used up — `exit`, `:q`, a
+    /// logout — and the app that hosted it has to still be there afterwards. That is the invariant
+    /// this pins: the process that spawned the shell outlives it, the ending is *reported* rather
+    /// than the session quietly vanishing, and the next session in the same backend works. A
+    /// backend that mistook its shell's exit for its own would take this test process down with
+    /// it, so the assertions after the `exit` are the ones that carry the weight.
+    #[cfg(unix)]
+    #[test]
+    fn a_shell_that_exits_leaves_the_backend_running_and_the_next_session_usable() {
+        let backend = TerminalBackend::default();
+        let (output, _receiver) = sink();
+        spawn(&backend, "exiting", "/bin/sh", &["-i"], output);
+
+        backend.write("exiting", b"exit\n").unwrap();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            let status = backend.status("exiting").unwrap();
+            if status.state == TerminalProcessState::Exited {
+                assert_eq!(status.exit_code, Some(0));
+                break;
+            }
+            assert!(Instant::now() < deadline, "shell exit status timed out");
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Still a session to close, which is what the panel does when it reads that exit.
+        assert!(backend.close("exiting").unwrap());
+
+        let (output, echoed) = sink();
+        spawn(&backend, "next", "/bin/cat", &[], output);
+        backend.write("next", b"still here\n").unwrap();
+        let written = echoed.recv_timeout(Duration::from_secs(3)).unwrap();
+        assert!(written.windows(10).any(|window| window == b"still here"));
+        assert_eq!(
+            backend.status("next").unwrap().state,
+            TerminalProcessState::Running
+        );
+        backend.close("next").unwrap();
+    }
+
     #[test]
     fn shell_receives_the_requested_working_directory_and_terminal_environment() {
         let backend = TerminalBackend::default();

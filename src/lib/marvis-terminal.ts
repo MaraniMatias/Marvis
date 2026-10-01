@@ -5,18 +5,8 @@ import { Terminal } from "@xterm/xterm";
 import type { ITheme, IDisposable } from "@xterm/xterm";
 import { ligatureRanges } from "./ligature-joiner";
 
-/**
- * The face is one local Nerd Font, declared under this name in `marvis.css`, so whichever of
- * them is installed is the one the panel draws with. A Nerd Font is not optional here: without
- * it the agent TUI's icons and the code's ligatures have no glyphs at all.
- *
- * There is no "font missing" warning, and there is no way to have an honest one: in WKWebView
- * `document.fonts.check()` answers `false` for this face while it is still unloaded and `true`
- * for a family that does not exist, and `document.fonts.load()` never settles for a family that
- * cannot be found. The only check left would be a timeout race, and a false alarm on a machine
- * that has the font is worse than a quiet fallback.
- */
-const TERMINAL_FONT_FAMILY = '"Marvis Nerd Mono", monospace';
+/** The face shared by the terminal and editor and bundled in `src/assets/fonts`. */
+export const TERMINAL_FONT_FAMILY = '"Marvis Nerd Mono", monospace';
 const TERMINAL_FONT_SIZE = 16;
 
 /**

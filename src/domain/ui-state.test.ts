@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_APP_LAYOUT,
   DEFAULT_CHECKOUT_UI_STATE,
+  TERMINAL_SCROLLBAR_MODES,
   normalizeAppLayout,
   normalizeCheckoutUiState,
   needsInspectorDrawer,
@@ -11,11 +12,12 @@ import {
 describe("persisted UI state", () => {
   it("keeps the marvis default panel widths", () => {
     expect(DEFAULT_APP_LAYOUT).toEqual({
-      version: 2,
+      version: 3,
       mode: "focus",
       sidebarWidth: 240,
       inspectorWidth: 280,
       previewWidth: 360,
+      terminalScrollbar: "hidden",
     });
   });
 
@@ -26,6 +28,7 @@ describe("persisted UI state", () => {
       sidebarWidth: 340,
       inspectorWidth: 420,
       previewWidth: 720,
+      terminalScrollbar: "auto" as const,
     };
     expect(normalizeAppLayout(JSON.parse(JSON.stringify(saved)))).toEqual(saved);
     expect(
@@ -42,14 +45,32 @@ describe("persisted UI state", () => {
   it("uses defaults for unknown versions and clamps corrupt dimensions", () => {
     expect(normalizeAppLayout({ version: 1, mode: "split", sidebarWidth: 400 })).toEqual(DEFAULT_APP_LAYOUT);
     expect(normalizeAppLayout({ version: 9 })).toEqual(DEFAULT_APP_LAYOUT);
-    expect(normalizeAppLayout({ version: 2, sidebarWidth: 900, inspectorWidth: -1, previewWidth: 1200 })).toEqual({
-      version: 2,
+    // The layout a version-2 build wrote is refused whole rather than read field by field: it has
+    // no scrollbar to say which of the three it wanted, and guessing would pick for it.
+    expect(normalizeAppLayout({ version: 2, sidebarWidth: 345, inspectorWidth: 450, previewWidth: 720 })).toEqual(
+      DEFAULT_APP_LAYOUT,
+    );
+    expect(normalizeAppLayout({ version: 3, sidebarWidth: 900, inspectorWidth: -1, previewWidth: 1200 })).toEqual({
+      version: 3,
       mode: "focus",
       sidebarWidth: 500,
       inspectorWidth: 200,
       previewWidth: 900,
+      terminalScrollbar: "hidden",
     });
-    expect(normalizeAppLayout({ version: 2 })).toEqual(DEFAULT_APP_LAYOUT);
+    expect(normalizeAppLayout({ version: 3 })).toEqual(DEFAULT_APP_LAYOUT);
+  });
+
+  it("keeps a scrollbar mode it knows and falls back to hidden for one it does not", () => {
+    for (const mode of TERMINAL_SCROLLBAR_MODES) {
+      expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, terminalScrollbar: mode }).terminalScrollbar).toBe(mode);
+    }
+    // The scrollbar is a preference and not state worth refusing a whole layout over, so only this
+    // field is replaced: a name from a build that no longer exists leaves the panels as they were.
+    expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, sidebarWidth: 400, terminalScrollbar: "warp" })).toMatchObject({
+      sidebarWidth: 400,
+      terminalScrollbar: "hidden",
+    });
   });
 
   it("clamps user resizing to the supported range", () => {

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref } from "vue";
 import type { DocumentMode, MainView } from "../domain/main-document";
+import type { TerminalScrollbarMode } from "../domain/ui-state";
 import type { Checkout, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
@@ -31,6 +32,7 @@ const props = withDefaults(
     diffScrollTop?: number;
     split?: boolean;
     previewWidth?: number;
+    terminalScrollbar?: TerminalScrollbarMode;
   }>(),
   {
     refreshRevision: 0,
@@ -40,6 +42,7 @@ const props = withDefaults(
     registeredSessionIds: () => [],
     split: false,
     previewWidth: 360,
+    terminalScrollbar: "hidden",
   },
 );
 const emit = defineEmits<{
@@ -110,6 +113,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
         :visible="ready && (split || terminal)"
         :shell-request="shellRequest"
         :registered-session-ids="registeredSessionIds"
+        :terminal-scrollbar="terminalScrollbar"
         @open-folder="$emit('openFolder')"
         @workspace-updated="$emit('workspaceUpdated', $event)"
         @session-status-changed="(sessionId, status) => $emit('sessionStatusChanged', sessionId, status)"

@@ -196,6 +196,10 @@ body {
   background: var(--marvis-bg-0);
 }
 
+.terminal-region {
+  position: relative;
+}
+
 .terminal-host .xterm {
   height: 100%;
   /* No padding: a Neovim window or the agent's TUI draws its own statusline against the last row
@@ -245,6 +249,54 @@ body {
   display: none;
 }
 
+/* What is drawn over the right edge of the terminal in place of the scrollbar hidden above, in
+   the two modes that draw one. Ten pixels wide because that is the width the native ones are,
+   so a pointer aimed where the scrollbar always was lands on it; the thumb is narrower than that
+   and grows to almost all of it under the pointer, which is the one affordance an overlay
+   scrollbar has and the reason it is here rather than in the flow. It takes no width from
+   anything, which is what the rules above are protecting.
+
+   The thumb's own top and height are set from the buffer by TerminalSession, in `terminal-
+   scrollbar.ts`; there is no groove and no arrow, because an overlay that appears and disappears
+   cannot have a button you have to be able to hit the first time. */
+.terminal-scrollbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 2;
+  width: 10px;
+  transition: opacity 160ms ease-out;
+}
+
+.terminal-scrollbar-idle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.terminal-scrollbar-idle:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.terminal-scrollbar-thumb {
+  position: absolute;
+  right: 2px;
+  width: 6px;
+  border-radius: 3px;
+  background: var(--marvis-scrollbar);
+  transition:
+    width 120ms ease-out,
+    right 120ms ease-out;
+}
+
+.terminal-scrollbar:hover .terminal-scrollbar-thumb,
+.terminal-scrollbar:active .terminal-scrollbar-thumb,
+.terminal-scrollbar:focus-visible .terminal-scrollbar-thumb {
+  right: 1px;
+  width: 8px;
+}
+
 /* The chrome is not a text document. A click that lands on a sidebar row, a title-bar crumb or a
    pane header should not paint a selection nobody asked for, and on those the pointer is the whole
    affordance. The content is the other way round, and it is listed rather than assumed: a diff, a
@@ -274,14 +326,14 @@ textarea {
   background: var(--marvis-selection);
 }
 
-/* Every scrollbar in the app, the editor's and the terminal's included, is that one grey. The
-   track is nothing, so a scrollbar does not paint a groove behind itself. No width is named, and
-   that is the whole reason this is one declaration: naming a width is what makes macOS honour the
-   colour at all, and it honours it by drawing the scrollbar itself instead of using the system's
-   overlay one — which is a scrollbar that is always there, taking a gutter out of every scrolling
-   box. That is too much to pay for a colour, so this is inert while the system draws its own
-   overlay scrollbars and takes effect the moment it does not: System Settings > Appearance >
-   Show scroll bars: Always. */
+/* Every scrollbar the browser draws is that one grey, which is the same grey the terminal's own
+   overlay thumb is painted with. The track is nothing, so a scrollbar does not paint a groove
+   behind itself. No width is named, and that is the whole reason this is one declaration: naming a
+   width is what makes macOS honour the colour at all, and it honours it by drawing the scrollbar
+   itself instead of using the system's overlay one — which is a scrollbar that is always there,
+   taking a gutter out of every scrolling box. That is too much to pay for a colour, so this is
+   inert while the system draws its own overlay scrollbars and takes effect the moment it does not:
+   System Settings > Appearance > Show scroll bars: Always. */
 * {
   scrollbar-color: var(--marvis-scrollbar) transparent;
 }

@@ -713,6 +713,36 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
+    it("offers the three scrollbar modes from the terminal crumb and keeps the one that is picked", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+
+      // The terminal crumb is where this lives rather than behind a settings button, for the same
+      // reason the rest of it is there: it is a choice about the terminal, it is one click from the
+      // pane it changes, and there is no settings surface in the app for it to live in.
+      const rows = wrapper.findAll('[data-testid^="menu-item-terminal-scrollbar-"]');
+      expect(rows.map((row) => row.text())).toEqual(["HiddenScrollbar", "AutoScrollbar", "AlwaysScrollbar"]);
+      // These are one of three answers, so they say so: a reader is told each row's state rather
+      // than only being shown a mark on one of them, which is the difference between knowing the
+      // current mode and knowing there are modes.
+      expect(rows.map((row) => [row.attributes("role"), row.attributes("aria-checked")])).toEqual([
+        ["menuitemradio", "true"],
+        ["menuitemradio", "false"],
+        ["menuitemradio", "false"],
+      ]);
+      expect(rows[0]!.find(".menu-check").exists()).toBe(true);
+      expect(rows[0]!.find(".menu-check").attributes("aria-hidden")).toBe("true");
+      expect(rows[1]!.find(".menu-check").exists()).toBe(false);
+
+      await wrapper.get('[data-testid="menu-item-terminal-scrollbar-always"]').trigger("click");
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+
+      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({ ...DEFAULT_APP_LAYOUT, terminalScrollbar: "always" });
+      const afterPick = wrapper.findAll('[data-testid^="menu-item-terminal-scrollbar-"]');
+      expect(afterPick.map((row) => row.attributes("aria-checked"))).toEqual(["false", "false", "true"]);
+      wrapper.unmount();
+    });
+
     it("draws a file path as the steps it is made of", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
 
@@ -1111,11 +1141,12 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 2,
+        version: 3,
         mode: "focus",
         sidebarWidth: 310,
         inspectorWidth: 340,
         previewWidth: 360,
+        terminalScrollbar: "hidden",
       });
       wrapper.unmount();
     });
@@ -1128,22 +1159,27 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 2,
+        version: 3,
         mode: "focus",
         sidebarWidth: 500,
         inspectorWidth: 200,
         previewWidth: 360,
+        terminalScrollbar: "hidden",
       });
       wrapper.unmount();
     });
 
     it("keeps the inspector width when the narrow drawer reports a collapsed panel", async () => {
+      // The scrollbar mode is carried through the same save rather than checked on its own, so
+      // this one is stored as `always`: a preference read back as the default would be invisible
+      // everywhere else, because the default is what a layout with no preference in it gives.
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 2,
+        version: 3,
         mode: "focus",
         sidebarWidth: 345,
         inspectorWidth: 450,
         previewWidth: 360,
+        terminalScrollbar: "always",
       });
       const group = wrapper.getComponent(SplitterGroup);
       const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
@@ -1158,22 +1194,24 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 2,
+        version: 3,
         mode: "focus",
         sidebarWidth: 400,
         inspectorWidth: 450,
         previewWidth: 360,
+        terminalScrollbar: "always",
       });
       wrapper.unmount();
     });
 
     it("lets double-click on a handle reset just that panel", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 2,
+        version: 3,
         mode: "focus",
         sidebarWidth: 345,
         inspectorWidth: 450,
         previewWidth: 360,
+        terminalScrollbar: "hidden",
       });
       const resizeCalls = vi.fn();
       mocks.onProgrammaticPanelResize = resizeCalls;
@@ -1187,22 +1225,24 @@ describe("App UI integration", () => {
       await vi.advanceTimersByTimeAsync(300);
       await flushPromises();
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 2,
+        version: 3,
         mode: "focus",
         sidebarWidth: DEFAULT_APP_LAYOUT.sidebarWidth,
         inspectorWidth: 450,
         previewWidth: 360,
+        terminalScrollbar: "hidden",
       });
       wrapper.unmount();
     });
 
     it("gives the inspector its full width back when space returns", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 2,
+        version: 3,
         mode: "focus",
         sidebarWidth: 300,
         inspectorWidth: 300,
         previewWidth: 360,
+        terminalScrollbar: "hidden",
       });
       const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
       const resizeCalls = vi.fn();

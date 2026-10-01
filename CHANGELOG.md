@@ -6,6 +6,24 @@ the part a reader should read and the generated list is the part they can skip. 
 under `Unreleased` and rename that heading to the version when you tag it; a version with no section
 here still gets its generated notes.
 
+## Unreleased
+
+- **`exit` closes the terminal it was typed in.** Ending a shell with `exit` or an alias of it like
+  `:q` now takes the pane with it, instead of leaving a frozen last frame that reads as a hung app
+  and an entry in the sidebar that looks alive. Closing a terminal whose process is still running
+  still asks first.
+
+- **The terminal and editor share a bundled typeface.** Fira Code Nerd Font Mono is no longer
+  dependent on fonts installed on the machine; both surfaces use the same regular and bold faces.
+  The terminal waits for them before opening xterm, so the initial grid and glyph atlas are created
+  with the bundled font. This also addresses the reported selection-rendering inconsistency; visual
+  verification on the affected macOS setup is still needed.
+
+- **The terminal scrollbar is a choice.** It is hidden by default, which is what the terminal has
+  always done; `Auto` shows it while you scroll and takes it away when you stop, and `Always` keeps
+  it there to be dragged. All three are under the terminal breadcrumb. The thumb is drawn over the
+  right edge rather than beside it, so it does not cost the grid a column.
+
 ## 0.6.0
 
 - **Markdown export is now the default review destination.** With no saved choice, sending review

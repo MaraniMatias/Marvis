@@ -95,9 +95,17 @@ function onOpenChange(open: boolean) {
               :disabled="item.disabled"
               :title="item.title"
               :data-testid="`menu-item-${item.id}`"
+              :role="item.choice ? 'menuitemradio' : undefined"
+              :aria-checked="item.choice ? item.checked === true : undefined"
               @select="item.run()"
             >
               <span class="menu-item-label">{{ item.label }}</span>
+              <!-- On a set of alternatives the check is the only thing saying which one, and a
+                   screen reader is told so through the row's role rather than through this glyph:
+                   every row of the set carries `aria-checked`, the ones that are not current included,
+                   because a radio group that only reports the selected item leaves the reader to
+                   infer the size of the set. A check on a row that only names what is open is a
+                   different thing, so the glyph there is hidden from it and nothing else changes. -->
               <CheckIcon v-if="item.checked" class="icon-xxs menu-check" aria-hidden="true" />
               <span v-if="item.hint" class="menu-item-hint">{{ item.hint }}</span>
             </DropdownMenuItem>

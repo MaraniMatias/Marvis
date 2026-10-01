@@ -51,12 +51,13 @@ import {
   DEFAULT_CHECKOUT_UI_STATE,
   INSPECTOR_WIDTH_LIMITS,
   SIDEBAR_WIDTH_LIMITS,
+  TERMINAL_SCROLLBAR_MODES,
   needsInspectorDrawer,
   normalizeAppLayout,
   normalizeCheckoutUiState,
   resizeLayoutPanel,
 } from "./domain/ui-state";
-import type { AppLayoutState, CheckoutUiState } from "./domain/ui-state";
+import type { AppLayoutState, CheckoutUiState, TerminalScrollbarMode } from "./domain/ui-state";
 import { loadAppLayout, loadCheckoutUiState, saveAppLayout, saveCheckoutUiState } from "./lib/ipc";
 
 const {
@@ -340,6 +341,23 @@ const worktreeMenu = computed<TitlebarMenuSection[]>(() => {
   ];
 });
 
+/**
+ * What the three scrollbar modes are called, in the order they are offered. The names are the
+ * behaviour rather than a description of it, because the behaviour is the thing being chosen and
+ * "Always" next to "Auto" is read correctly by somebody who has never seen a settings pane about
+ * scrollbars before.
+ */
+const TERMINAL_SCROLLBAR_LABELS: Record<TerminalScrollbarMode, string> = {
+  hidden: "Hidden",
+  auto: "Auto",
+  always: "Always",
+};
+
+function setTerminalScrollbar(mode: TerminalScrollbarMode) {
+  if (appLayout.value.terminalScrollbar === mode) return;
+  appLayout.value = { ...appLayout.value, terminalScrollbar: mode };
+}
+
 /** The subitems of the active workdir: the terminals it has open, and how to start another. */
 const terminalMenu = computed<TitlebarMenuSection[]>(() => {
   const checkout = activeCheckout.value;
@@ -353,6 +371,22 @@ const terminalMenu = computed<TitlebarMenuSection[]>(() => {
   }));
   return [
     { kind: "group", label: "Terminals", items: sessions },
+    { kind: "separator" },
+    {
+      kind: "group",
+      label: "Scrollbar",
+      // The word is on every row rather than only on the group header because the header is not
+      // searched: typing "scrollbar" into the menu has to leave these three standing, and a
+      // header alone would filter the group away and answer the question with an empty menu.
+      items: TERMINAL_SCROLLBAR_MODES.map((mode) => ({
+        id: `terminal-scrollbar-${mode}`,
+        label: TERMINAL_SCROLLBAR_LABELS[mode],
+        hint: "Scrollbar",
+        checked: appLayout.value.terminalScrollbar === mode,
+        choice: true,
+        run: () => setTerminalScrollbar(mode),
+      })),
+    },
     { kind: "separator" },
     {
       kind: "list",
@@ -1187,6 +1221,7 @@ function reportWarning(message: string) {
           :view="activeMainView"
           :split="isSplitLayout"
           :preview-width="appLayout.previewWidth"
+          :terminal-scrollbar="appLayout.terminalScrollbar"
           :ready="checkoutUiReady"
           :git-snapshot="gitSnapshot"
           :review="review"

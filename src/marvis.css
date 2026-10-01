@@ -1,44 +1,32 @@
-/* The terminal's face under this one name, so whichever Nerd Font is installed is the one it
-   draws with. The names below are the real family names of the fonts people actually have,
-   because a name that does not match is not a fallback: the face fails as a whole and
-   `monospace` takes over, which has no icons and no ligatures.
+/* The app's face, under one name, shipped with the app. A `local()` chain made the typography
+   depend on which fonts happened to be installed; bundling this face makes the terminal and editor
+   use the same font on every machine and ensures xterm can load it before measuring its grid.
 
-   The weights are separate faces on purpose. A `local()` by family name resolves the Regular for
-   every weight, and `font-synthesis: none` (style.css) means the browser will not invent the
-   rest either, so a bold request quietly comes back at 400 — the whole of the agent's and Neovim's
-   TUI, drawn regular, with the metrics unchanged, which is why it reads as "another font" and not
-   as a missing weight. So each face names one weight, and the bold and the italic ones ask for the
-   font's *full* name, the only name a bold face answers to. A machine with none of the bolds
-   installed falls back to the regular face: not bold, which is honest, rather than synthesised. */
+   FiraCode Nerd Font Mono because it is the face this app was already asking for first, and
+   because it carries the ligatures and the icon range in one file. The two weights are separate
+   faces, each naming one weight, because `font-synthesis: none` (style.css) means the browser will
+   not invent a bold: a bold request has to find a face that claims to be one, or it comes back at
+   400 with the metrics unchanged — the whole of the agent's and Neovim's TUI, drawn regular, which
+   reads as "another font" rather than as a missing weight. There is no italic face because this
+   font ships none, so SGR 3 and CodeMirror's emphasis stay flat instead of borrowing a slope from a
+   face that has nothing to do with the document.
+
+   `block` because a fallback-face swap would redraw the interface and force the terminal grid to
+   be measured again. The file ships with the app, so loading it is local. */
 @font-face {
   font-family: "Marvis Nerd Mono";
   font-style: normal;
   font-weight: 400;
-  src:
-    local("FiraCode Nerd Font Mono"), local("FiraCode NF"), local("CaskaydiaCove NFM"), local("CaskaydiaMono NFM"),
-    local("CaskaydiaMono NF"), local("MesloLGS NF"), local("JetBrainsMono Nerd Font Mono"), local("Hack Nerd Font Mono");
+  font-display: block;
+  src: url("./assets/fonts/FiraCodeNerdFontMono-Regular.ttf") format("truetype");
 }
 
 @font-face {
   font-family: "Marvis Nerd Mono";
   font-style: normal;
   font-weight: 700;
-  src:
-    local("FiraCode Nerd Font Mono Bold"), local("CaskaydiaCove NFM Bold"), local("CaskaydiaMono NFM Bold"),
-    local("MesloLGS NF Bold"), local("JetBrainsMono Nerd Font Mono Bold"), local("Hack Nerd Font Mono Bold");
-}
-
-/* Italic is the same question with a shorter answer: it resolves on fewer machines than the bold
-   does, because FiraCode Nerd Font Mono — first in the list above — ships no italic at all. SGR 3
-   stays flat there, which is better than a slope borrowed from a face that has nothing to do with
-   this document. */
-@font-face {
-  font-family: "Marvis Nerd Mono";
-  font-style: italic;
-  font-weight: 400;
-  src:
-    local("FiraCode Nerd Font Mono Italic"), local("CaskaydiaCove NFM Italic"), local("CaskaydiaMono NFM Italic"),
-    local("MesloLGS NF Italic"), local("JetBrainsMono Nerd Font Mono Italic"), local("Hack Nerd Font Mono Italic");
+  font-display: block;
+  src: url("./assets/fonts/FiraCodeNerdFontMono-Bold.ttf") format("truetype");
 }
 
 /* Marvis design tokens. Custom properties resolve globally, so they cannot live
@@ -62,9 +50,9 @@
      is the raised surface, one step off the page, so it reads as a band and not as a glow. */
   --marvis-selection: #22252e;
   --marvis-radius: 6px;
-  /* Named families first, generic last: `ui-monospace` always resolves to the system UI
-     monospace, so leading with it meant "JetBrains Mono" was never reached. */
-  --marvis-font: "JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  /* The terminal and editor use one family; system monospace faces are fallbacks if the bundled
+     webfont cannot be loaded. */
+  --marvis-font: "Marvis Nerd Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
 }
 
 /* No focus ring. A window does not draw a web form's outline around its controls, and the browser

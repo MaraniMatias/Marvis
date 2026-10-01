@@ -3,16 +3,20 @@ import { Channel } from "@tauri-apps/api/core";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
-import { nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type { TerminalSessionStatus } from "../domain/workspace";
+import type { TerminalScrollbarMode } from "../domain/ui-state";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
 import {
   attachTerminalRenderer,
   createMarvisTerminal,
   enableTerminalLigatures,
   enableTerminalSelectionCopy,
+  TERMINAL_FONT_FAMILY,
 } from "../lib/marvis-terminal";
 import { renderPtyOutput } from "../lib/terminal-renderer";
+import { scrollbarOffsetForTop, terminalScrollbarGeometry } from "../lib/terminal-scrollbar";
+import type { TerminalScrollbarGeometry } from "../lib/terminal-scrollbar";
 import { useToasts } from "../presentation/toasts";
 
 const props = withDefaults(
@@ -21,8 +25,9 @@ const props = withDefaults(
     active: boolean;
     visible?: boolean;
     focused?: boolean;
+    scrollbar?: TerminalScrollbarMode;
   }>(),
-  { visible: true, focused: false },
+  { visible: true, focused: false, scrollbar: "hidden" },
 );
 const emit = defineEmits<{
   created: [result: Awaited<ReturnType<typeof createTerminal>>];
@@ -32,6 +37,11 @@ const emit = defineEmits<{
 }>();
 
 const terminalElement = ref<HTMLElement | null>(null);
+const scrollbarTrack = ref<HTMLElement | null>(null);
+const scrollbarThumb = ref({ top: 0, height: 0 });
+const scrollbarLit = ref(false);
+const scrollbarPosition = ref(0);
+const scrollbarMaximum = ref(0);
 const state = ref<TerminalSessionStatus>({ state: "running", foregroundProcess: false });
 const error = ref<string | null>(null);
 const closing = ref(false);
@@ -39,6 +49,11 @@ const terminal = createMarvisTerminal();
 const fit = new FitAddon();
 terminal.loadAddon(fit);
 const { pushCause } = useToasts();
+
+/** The scrollbar is Marvis' own and only exists in the two modes that draw one. */
+const scrollbarEnabled = computed(() => props.scrollbar !== "hidden");
+/** `always` has no fade to get to, so its thumb is simply there. */
+const scrollbarVisible = computed(() => props.scrollbar === "always" || scrollbarLit.value);
 
 let sessionId: string | null = null;
 let channel: Channel<ArrayBuffer> | undefined;
@@ -49,20 +64,204 @@ let resizeQueue: Promise<void> = Promise.resolve();
 let resizeScheduled = false;
 let disposed = false;
 let started = false;
+let terminalReady = false;
 let selectionCopy: { dispose(): void } | undefined;
 let latestSize = { cols: 0, rows: 0 };
+let geometry: TerminalScrollbarGeometry = { top: 0, height: 0, scrollable: false, maxOffset: 0, travel: 0 };
+let scrollbarFadeTimer: number | undefined;
+let scrollbarDrag: { pointerId: number; grabOffset: number } | null = null;
+let wheelRemainderPx = 0;
+
+/**
+ * How long `auto` leaves the thumb up after the last scroll.
+ *
+ * Long enough to read where the thumb landed and to catch it again, short enough that a terminal
+ * nobody is scrolling looks like a terminal with no scrollbar — which is what the setting is for
+ * people who scrolled once and decided they did not need one.
+ */
+const SCROLLBAR_FADE_MS = 900;
 
 function showError(cause: unknown) {
   error.value = cause instanceof Error ? cause.message : String(cause);
 }
 
+/**
+ * Reads the scrollback and puts the thumb where it belongs.
+ *
+ * The track's own height is measured rather than assumed because the pane is whatever height the
+ * splitter and the layout leave it, and the arithmetic is in `terminal-scrollbar.ts` over four
+ * numbers. Writing the style only when the numbers moved is what keeps this cheap enough to call
+ * on every scroll: a terminal that prints for a minute fires this on every line, and a scrollback
+ * whose length is not a multiple of anything will otherwise re-render the pane at the same size
+ * a thousand times.
+ */
+function updateScrollbar() {
+  if (!scrollbarEnabled.value) return;
+  const scrollback = terminal.buffer.active;
+  geometry = terminalScrollbarGeometry(
+    { length: scrollback.length, viewportY: scrollback.viewportY, rows: terminal.rows },
+    scrollbarTrack.value?.clientHeight ?? 0,
+  );
+  scrollbarPosition.value = Math.min(geometry.maxOffset, Math.max(0, scrollback.viewportY));
+  scrollbarMaximum.value = geometry.maxOffset;
+  // A terminal whose whole history fits on screen has nothing to say with a thumb, so in `auto` it
+  // does not get to flash one. `always` still draws it: a full-height thumb is an honest answer,
+  // and a person who asked for a permanent scrollbar is entitled to see that there is nothing to
+  // scroll rather than to wonder whether the setting took.
+  if (!geometry.scrollable) scrollbarLit.value = false;
+  if (geometry.top === scrollbarThumb.value.top && geometry.height === scrollbarThumb.value.height) return;
+  scrollbarThumb.value = { top: geometry.top, height: geometry.height };
+}
+
+/**
+ * `auto` shows the thumb while something is moving and takes it away when nothing is.
+ *
+ * The timer restarts on every scroll instead of running once, so a build that prints for a minute
+ * keeps its scrollbar up for that minute — the thumb genuinely is moving the whole time — and the
+ * fade happens when the output stops. Dragging counts as scrolling, and so does the wheel over
+ * the track, or the thumb would fade out from under a pointer that is still holding it.
+ */
+function wakeScrollbar() {
+  if (!scrollbarEnabled.value || props.scrollbar === "always" || !geometry.scrollable) return;
+  scrollbarLit.value = true;
+  if (scrollbarFadeTimer !== undefined) window.clearTimeout(scrollbarFadeTimer);
+  scrollbarFadeTimer = undefined;
+  if (scrollbarDrag) return;
+  scrollbarFadeTimer = window.setTimeout(() => {
+    scrollbarFadeTimer = undefined;
+    scrollbarLit.value = false;
+  }, SCROLLBAR_FADE_MS);
+}
+
+/** Moves the viewport to where a thumb dropped at `top` would stand, and re-reads it. */
+function scrollbarTo(top: number) {
+  terminal.scrollToLine(scrollbarOffsetForTop(top, geometry));
+  updateScrollbar();
+}
+
+function onScrollbarPointerDown(event: PointerEvent) {
+  if (event.button !== 0) return;
+  const track = scrollbarTrack.value;
+  if (!track) return;
+  updateScrollbar();
+  if (!geometry.scrollable) return;
+  const y = event.clientY - track.getBoundingClientRect().top;
+  // A press on the thumb takes hold of it wherever it was caught, so the thumb does not jump to
+  // centre itself under the pointer. A press on the empty track puts the middle of the thumb there
+  // instead, which is what every other scrollbar does and is what makes clicking above or below
+  // the thumb a jump rather than a press that does nothing at all.
+  const grabOffset = y >= geometry.top && y <= geometry.top + geometry.height ? y - geometry.top : geometry.height / 2;
+  scrollbarDrag = { pointerId: event.pointerId, grabOffset };
+  track.setPointerCapture(event.pointerId);
+  scrollbarTo(y - grabOffset);
+  wakeScrollbar();
+  event.preventDefault();
+}
+
+function onScrollbarPointerMove(event: PointerEvent) {
+  const track = scrollbarTrack.value;
+  if (!track || !scrollbarDrag || scrollbarDrag.pointerId !== event.pointerId) return;
+  scrollbarTo(event.clientY - track.getBoundingClientRect().top - scrollbarDrag.grabOffset);
+  wakeScrollbar();
+  event.preventDefault();
+}
+
+function onScrollbarPointerUp(event: PointerEvent) {
+  if (!scrollbarDrag || scrollbarDrag.pointerId !== event.pointerId) return;
+  const pointerId = scrollbarDrag.pointerId;
+  scrollbarDrag = null;
+  // The capture is released rather than left to the browser, so a view that is torn down mid-drag
+  // does not leave this holding a pointer id that belongs to a pane that is no longer there.
+  if (scrollbarTrack.value?.hasPointerCapture(pointerId)) {
+    scrollbarTrack.value.releasePointerCapture(pointerId);
+  }
+  wakeScrollbar();
+}
+
+function onScrollbarLostPointerCapture(event: PointerEvent) {
+  if (!scrollbarDrag || scrollbarDrag.pointerId !== event.pointerId) return;
+  scrollbarDrag = null;
+  wakeScrollbar();
+}
+
+function cancelScrollbarDrag() {
+  const pointerId = scrollbarDrag?.pointerId;
+  scrollbarDrag = null;
+  if (pointerId !== undefined && scrollbarTrack.value?.hasPointerCapture(pointerId)) {
+    scrollbarTrack.value.releasePointerCapture(pointerId);
+  }
+}
+
+/**
+ * The overlay is a sibling of the terminal rather than part of it, so a wheel over it never
+ * reaches xterm's own viewport. Preserve the event's line or pixel delta instead of turning a
+ * small trackpad gesture into a screenful, and accumulate pixel deltas until they cover a row.
+ */
+function onScrollbarWheel(event: WheelEvent) {
+  if (!geometry.scrollable || event.deltaY === 0) return;
+  event.preventDefault();
+  const cellHeight = (scrollbarTrack.value?.clientHeight ?? 0) / terminal.rows;
+  if (event.deltaMode === WheelEvent.DOM_DELTA_PAGE) {
+    wheelRemainderPx = 0;
+    terminal.scrollLines(Math.trunc(event.deltaY) * terminal.rows);
+    return;
+  }
+  const deltaPx = event.deltaMode === WheelEvent.DOM_DELTA_LINE ? event.deltaY * cellHeight : event.deltaY;
+  wheelRemainderPx += deltaPx;
+  const lines = Math.trunc(wheelRemainderPx / Math.max(1, cellHeight));
+  if (lines === 0) return;
+  wheelRemainderPx -= lines * cellHeight;
+  terminal.scrollLines(lines);
+  wakeScrollbar();
+}
+
+function onScrollbarKeydown(event: KeyboardEvent) {
+  if (!geometry.scrollable) return;
+  const page = Math.max(1, terminal.rows - 1);
+  const next = (() => {
+    switch (event.key) {
+      case "ArrowUp":
+        return scrollbarPosition.value - 1;
+      case "ArrowDown":
+        return scrollbarPosition.value + 1;
+      case "PageUp":
+        return scrollbarPosition.value - page;
+      case "PageDown":
+        return scrollbarPosition.value + page;
+      case "Home":
+        return 0;
+      case "End":
+        return geometry.maxOffset;
+      default:
+        return null;
+    }
+  })();
+  if (next === null) return;
+  event.preventDefault();
+  terminal.scrollToLine(Math.min(geometry.maxOffset, Math.max(0, next)));
+  updateScrollbar();
+  wakeScrollbar();
+}
+
 function updateStatus(status: TerminalSessionStatus) {
   state.value = status;
   emit("statusChanged", status);
-  if (status.state === "exited" && statusTimer !== undefined) {
+  if (status.state !== "exited") return;
+  if (statusTimer !== undefined) {
     window.clearInterval(statusTimer);
     statusTimer = undefined;
   }
+  // A shell that has exited has nothing left to say, and holding its last screen open is worse
+  // than losing it: the panel shows a frozen frame that looks like a hung app, the session stays
+  // in the sidebar with a live-looking entry, and the only way out is the close button on a pane
+  // the user has to go looking for. `exit` and `:q` are how a shell is ended on purpose, so the
+  // session goes with it. The close asks the backend once more before acting, finds the process
+  // already gone, and so never reaches the confirmation that stopping a live process needs — that
+  // question stays where it belongs, on the close the user asked for.
+  //
+  // This runs for any status report, including the one `requestClose` makes on its own way out,
+  // and the `closing` guard there turns that second call into a no-op instead of a loop.
+  void requestClose();
 }
 
 async function pollStatus() {
@@ -75,9 +274,14 @@ async function pollStatus() {
 }
 
 function fitActiveView() {
-  if (!props.active || !props.visible || !terminalElement.value) return;
+  if (!terminalReady || !props.active || !props.visible || !terminalElement.value) return;
   if (terminalElement.value.clientWidth === 0 || terminalElement.value.clientHeight === 0) return;
   fit.fit();
+  // The thumb is a fraction of the pane, so it is measured where the pane is measured, and this is
+  // where the pane changes size. It goes before the column recovery below rather than after it
+  // because that recovery gives columns back and keeps the rows: a terminal that fits is the same
+  // height as one that does not, so there is nothing about the thumb that changes after it.
+  updateScrollbar();
   // FitAddon reserves 14px for an overview ruler whenever scrollback is enabled, even though
   // this terminal hides the ruler and scrollbar. Recover those columns without clipping TUIs.
   const screen = terminal.element?.querySelector(".xterm-screen");
@@ -121,7 +325,9 @@ async function requestClose() {
   closing.value = true;
   try {
     const actualStatus = await getTerminalStatus(props.checkoutId, sessionId);
-    updateStatus(actualStatus);
+    // Recorded but not published: a process that ended between two polls has already reported its
+    // own ending, and this read exists to be sure before stopping something, not to say it twice.
+    state.value = actualStatus;
     if (
       actualStatus.state === "running" &&
       !window.confirm("This terminal session is still running. Close the session and stop its process?")
@@ -143,7 +349,7 @@ async function requestClose() {
 defineExpose({ requestClose, focus: () => terminal.focus() });
 
 async function startSession() {
-  if (started || disposed || !props.active || !terminalElement.value) return;
+  if (started || disposed || !terminalReady || !props.active || !terminalElement.value) return;
   started = true;
   fitActiveView();
   channel = new Channel<ArrayBuffer>();
@@ -177,6 +383,39 @@ async function startSession() {
 
 terminal.onData(queueInput);
 terminal.onResize(({ cols, rows }) => queueResize(cols, rows));
+// xterm fires this whenever the viewport moves, whether a wheel, a drag, Shift+PageUp or output
+// arriving at the bottom caused it, and it does not promise what the payload is — some paths send
+// the new position, some send an object wrapping it — so the position is read back off the buffer
+// rather than taken from the event. Output is the reason this is worth subscribing to at all: a
+// scrollback that grows has to shrink its thumb, and nothing else says so.
+terminal.onScroll(() => {
+  updateScrollbar();
+  wakeScrollbar();
+});
+
+/**
+ * Picking a mode is a change to what the pane draws, so the thumb is measured again once the
+ * overlay is really there — the element only exists in the modes that draw one, and a thumb sized
+ * against a track that was not in the document yet would be sized against nothing.
+ */
+watch(
+  () => props.scrollbar,
+  async (mode) => {
+    if (scrollbarFadeTimer !== undefined) window.clearTimeout(scrollbarFadeTimer);
+    scrollbarFadeTimer = undefined;
+    if (mode === "hidden") {
+      scrollbarLit.value = false;
+      wheelRemainderPx = 0;
+      cancelScrollbarDrag();
+      return;
+    }
+    await nextTick();
+    updateScrollbar();
+    // Turning `auto` on shows the thumb once, so the answer to "did that do anything" is visible,
+    // and from there the same fade as a scroll gets it out of the way again.
+    wakeScrollbar();
+  },
+);
 
 watch(
   () => [props.active, props.visible, props.focused] as const,
@@ -189,9 +428,18 @@ watch(
   },
 );
 
-onMounted(() => {
+onMounted(async () => {
   if (!terminalElement.value) return;
+  // Let xterm measure and rasterize only after both faces it can draw have loaded. Clearing a
+  // WebGL atlas after the fallback was already painted made the first selected cells differ from
+  // their neighbours; the bundled faces make waiting here local and deterministic.
+  await Promise.allSettled([
+    document.fonts.load(`16px ${TERMINAL_FONT_FAMILY}`),
+    document.fonts.load(`700 16px ${TERMINAL_FONT_FAMILY}`),
+  ]);
+  if (disposed || !terminalElement.value) return;
   terminal.open(terminalElement.value);
+  terminalReady = true;
   // Both of these need the terminal on the page, and the fit that follows has to measure the
   // renderer that will actually draw.
   enableTerminalLigatures(terminal);
@@ -202,20 +450,6 @@ onMounted(() => {
     });
   });
   fitActiveView();
-  // The face is a `local()` one, so the browser resolves it after the first paint, and the fit
-  // above measures whatever cell the *fallback* has — a monospace fallback's advance is wider
-  // than this one's, so the grid that gets sized for it is short by a few columns and a row. When
-  // the real face lands, xterm re-measures the cell and repaints at the same cols and rows, and
-  // what is left unpainted is a strip down the right and along the bottom: flush at the top-left
-  // corner, short everywhere else. Nothing else re-fits the terminal, so this does.
-  void document.fonts.ready.then(() => {
-    if (disposed) return;
-    // WebGL's glyph atlas may have rasterized fallback-font glyphs before the local face loaded.
-    // Selection uses differently colored atlas entries, so it can expose the now-loaded font only
-    // for selected cells unless the stale entries are discarded too.
-    terminal.clearTextureAtlas();
-    fitActiveView();
-  });
   resizeObserver = new ResizeObserver(() => fitActiveView());
   resizeObserver.observe(terminalElement.value);
   void startSession();
@@ -224,6 +458,8 @@ onMounted(() => {
 onUnmounted(() => {
   disposed = true;
   if (statusTimer !== undefined) window.clearInterval(statusTimer);
+  if (scrollbarFadeTimer !== undefined) window.clearTimeout(scrollbarFadeTimer);
+  scrollbarDrag = null;
   resizeObserver?.disconnect();
   selectionCopy?.dispose();
   if (channel) channel.onmessage = () => {};
@@ -233,7 +469,35 @@ onUnmounted(() => {
 
 <template>
   <section class="terminal-surface flex h-full min-h-0 flex-col overflow-hidden">
-    <div ref="terminalElement" class="terminal-host min-h-0 flex-1" aria-label="Shell terminal" />
+    <div class="terminal-region relative min-h-0 flex-1">
+      <div ref="terminalElement" class="terminal-host h-full min-h-0" aria-label="Shell terminal" />
+      <!-- Overlaying the terminal preserves the grid width that xterm's native bar would reserve. -->
+      <div
+        v-if="scrollbarEnabled"
+        ref="scrollbarTrack"
+        class="terminal-scrollbar"
+        :class="{ 'terminal-scrollbar-idle': !scrollbarVisible }"
+        role="scrollbar"
+        aria-label="Terminal scrollback"
+        aria-orientation="vertical"
+        aria-valuemin="0"
+        :aria-valuemax="scrollbarMaximum"
+        :aria-valuenow="scrollbarPosition"
+        tabindex="0"
+        @keydown="onScrollbarKeydown"
+        @pointerdown="onScrollbarPointerDown"
+        @pointermove="onScrollbarPointerMove"
+        @pointerup="onScrollbarPointerUp"
+        @pointercancel="onScrollbarPointerUp"
+        @lostpointercapture="onScrollbarLostPointerCapture"
+        @wheel="onScrollbarWheel"
+      >
+        <div
+          class="terminal-scrollbar-thumb"
+          :style="{ top: `${scrollbarThumb.top}px`, height: `${scrollbarThumb.height}px` }"
+        />
+      </div>
+    </div>
     <p v-if="error" role="alert" class="m-0 border-t border-(--marvis-border) px-3 py-2 text-xs text-(--marvis-red)">
       {{ error }}
     </p>
