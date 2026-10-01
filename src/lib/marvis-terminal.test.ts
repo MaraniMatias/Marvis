@@ -200,6 +200,23 @@ describe("enableTerminalSelectionCopy", () => {
     disposable.dispose();
   });
 
+  // A double click selects the word xterm.js measured, so it copies like a drag does.
+  it("copies the word or the line a double and a triple click select", () => {
+    const terminal = fakeTerminal();
+    const copy = vi.fn();
+    const disposable = enableTerminalSelectionCopy(terminal as never, copy);
+
+    for (const detail of [2, 3]) {
+      terminal.selection = `click ${detail}`;
+      terminal.element.dispatchEvent(new MouseEvent("mousedown", { button: 0, detail }));
+      document.dispatchEvent(new MouseEvent("mouseup", { button: 0, detail }));
+    }
+
+    expect(copy).toHaveBeenNthCalledWith(1, "click 2");
+    expect(copy).toHaveBeenNthCalledWith(2, "click 3");
+    disposable.dispose();
+  });
+
   it("does not copy a click or a drag without a selection", () => {
     const terminal = fakeTerminal();
     const copy = vi.fn();
@@ -210,6 +227,8 @@ describe("enableTerminalSelectionCopy", () => {
     terminal.element.dispatchEvent(new MouseEvent("mousedown", { button: 0 }));
     document.dispatchEvent(new MouseEvent("mousemove", { buttons: 1 }));
     document.dispatchEvent(new MouseEvent("mouseup", { button: 0 }));
+    terminal.element.dispatchEvent(new MouseEvent("mousedown", { button: 0, detail: 2 }));
+    document.dispatchEvent(new MouseEvent("mouseup", { button: 0, detail: 2 }));
 
     expect(copy).not.toHaveBeenCalled();
     disposable.dispose();

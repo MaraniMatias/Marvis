@@ -88,9 +88,13 @@ export function enableTerminalLigatures(terminal: Terminal): void {
 }
 
 /**
- * Lets macOS users select text in applications that take over the terminal mouse. Option-drag is
- * xterm.js' force-selection gesture; it is enabled only while an application has mouse tracking
- * active, so the shell keeps its normal rectangular Option selection.
+ * Copies whatever a selection gesture leaves selected, the way a text field does: a drag, and a
+ * double or triple click, which xterm.js turns into a word or a line. A click that selects nothing
+ * copies nothing.
+ *
+ * It also lets macOS users select text in applications that take over the terminal mouse.
+ * Option-drag is xterm.js' force-selection gesture; it is enabled only while an application has
+ * mouse tracking active, so the shell keeps its normal rectangular Option selection.
  */
 export function enableTerminalSelectionCopy(
   terminal: Terminal,
@@ -102,6 +106,9 @@ export function enableTerminalSelectionCopy(
   const document = element.ownerDocument;
   let dragging = false;
   let moved = false;
+  // xterm.js selects the word or the line on the second and third click of a multiple click, and
+  // it does it before `mouseup`, so the selection is already there by the time this reads it.
+  let multipleClick = false;
 
   const syncSelectionMode = () => {
     const forceSelection = terminal.modes.mouseTrackingMode !== "none";
@@ -113,6 +120,7 @@ export function enableTerminalSelectionCopy(
     if (event.button !== 0) return;
     dragging = true;
     moved = false;
+    multipleClick = event.detail > 1;
   };
   const onMouseMove = () => {
     if (dragging) moved = true;
@@ -120,7 +128,7 @@ export function enableTerminalSelectionCopy(
   const onMouseUp = () => {
     if (!dragging) return;
     dragging = false;
-    if (moved && terminal.hasSelection()) void copy(terminal.getSelection());
+    if ((moved || multipleClick) && terminal.hasSelection()) void copy(terminal.getSelection());
   };
 
   syncSelectionMode();
