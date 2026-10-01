@@ -408,6 +408,13 @@ fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<Wat
         }
         if let Some(common) = plan.common_dir.as_deref() {
             if path.starts_with(common) {
+                // Git checks the new worktree's branch out into `<common>/worktrees/<name>/`, and
+                // the index it writes there is that checkout's own bookkeeping. The plan cannot
+                // attribute it to anyone until the registration names it, and reading the whole
+                // repository over it is the cost this signal must not pay.
+                if is_pending_worktree_git_dir(path, common) {
+                    continue;
+                }
                 repo_wide |= should_refresh_path(path);
                 continue;
             }
@@ -509,6 +516,22 @@ fn is_pending_worktree_path(path: &Path, checkout_root: &Path) -> bool {
         .is_some_and(|component| {
             matches!(component, Component::Normal(name) if name.to_str() == Some(".worktrees"))
         })
+}
+
+/// Whether a change in the shared Git directory belongs to a worktree the plan has not learned
+/// about yet. Git writes that worktree's `HEAD`, `index` and `ORIG_HEAD` into
+/// `<common>/worktrees/<name>/` while it checks the branch out, and none of it moves anything for
+/// anyone else. A worktree the plan already knows is matched before this is asked, so what is left
+/// is the window between the worktree landing on disk and the membership signal that adds it.
+fn is_pending_worktree_git_dir(path: &Path, common_dir: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(common_dir) else {
+        return false;
+    };
+    let mut components = relative.components();
+    matches!(
+        components.next(),
+        Some(Component::Normal(name)) if name.to_str() == Some("worktrees")
+    ) && components.next().is_some()
 }
 
 impl GitSnapshotCache {
@@ -2561,6 +2584,39 @@ line.txt";
                 );
             }
         }
+    }
+
+    #[test]
+    fn an_unregistered_worktree_writing_its_own_index_is_not_a_repository_wide_change() {
+        let mut plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            git_dirs: BTreeMap::new(),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned()],
+        };
+        let event = notify::Event {
+            kind: notify::EventKind::Create(notify::event::CreateKind::File),
+            paths: vec![PathBuf::from("/repo/.git/worktrees/task/index")],
+            attrs: Default::default(),
+        };
+
+        // Git writes the new worktree's index while it is still checking the branch out, before
+        // the membership signal has named it. Every checkout holds an index of its own, so
+        // answering that write with a read of all of them is the cost this signal refuses, and on
+        // a backend that does not batch events it is the update that arrives instead.
+        assert_eq!(affected_checkouts(&plan, &event), None);
+
+        plan.git_dirs.insert(
+            PathBuf::from("/repo/.git/worktrees/task"),
+            "task".to_owned(),
+        );
+        plan.all.push("task".to_owned());
+
+        let update = affected_checkouts(&plan, &event).unwrap();
+        assert_eq!(update.status, ["task"]);
     }
 
     /// The whole chain a worktree an agent created travels, as far as the backend is concerned.
