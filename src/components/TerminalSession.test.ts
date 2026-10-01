@@ -129,12 +129,19 @@ for (const [property, value] of [
   Object.defineProperty(HTMLElement.prototype, property, { value, configurable: true });
 }
 
+// The real preload is memoized, so it would only ever load the faces once for the whole file and
+// the ordering below would be untestable. Asking for them per mount keeps the guarantee this file
+// exists to pin: xterm opens only after both bundled weights are ready.
 vi.mock("../lib/marvis-terminal", () => ({
-  TERMINAL_FONT_FAMILY: '"Marvis Nerd Mono", monospace',
   createMarvisTerminal: () => new MockTerminal(),
   enableTerminalLigatures: terminalLib.enableTerminalLigatures,
   enableTerminalSelectionCopy: terminalLib.enableTerminalSelectionCopy,
   attachTerminalRenderer: terminalLib.attachTerminalRenderer,
+  preloadTerminalFonts: () =>
+    Promise.allSettled([
+      document.fonts.load('16px "Marvis Nerd Mono", monospace'),
+      document.fonts.load('700 16px "Marvis Nerd Mono", monospace'),
+    ]),
 }));
 
 vi.mock("@xterm/addon-fit", () => ({

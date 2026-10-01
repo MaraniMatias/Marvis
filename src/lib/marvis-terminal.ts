@@ -74,6 +74,30 @@ export function createMarvisTerminal(): Terminal {
   return terminal;
 }
 
+let terminalFonts: Promise<unknown> | undefined;
+
+/**
+ * Both bundled weights, and the one thing on the path to a drawn terminal that is not the
+ * terminal's own work.
+ *
+ * xterm.js cannot measure its grid against a face it does not have, so a panel that opens
+ * before these land draws its first frame from the fallback and lays the columns out wrong.
+ * The files are local, but they are not small, and parsing them is the part of opening a
+ * terminal a person waits on without being able to see why.
+ *
+ * The request goes out when the app starts rather than when a panel mounts, and the answer is
+ * kept: a panel that mounts later awaits a promise that is already settled, so the wait is a
+ * microtask instead of a font parse. Callers still await it — the guarantee is that the faces
+ * are ready before `open`, not that they were asked for early.
+ */
+export function preloadTerminalFonts(): Promise<unknown> {
+  terminalFonts ??= Promise.allSettled([
+    document.fonts.load(`16px ${TERMINAL_FONT_FAMILY}`),
+    document.fonts.load(`700 16px ${TERMINAL_FONT_FAMILY}`),
+  ]);
+  return terminalFonts;
+}
+
 /**
  * The ligatures, which only xterm.js takes once the terminal is on the page: it throws
  * "Terminal must be opened first" before that, and a terminal that cannot be created at all is

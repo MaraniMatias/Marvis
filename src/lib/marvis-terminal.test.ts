@@ -9,6 +9,7 @@ import {
 
 const stubs = vi.hoisted(() => ({
   loaded: [] as string[],
+  fontLoads: [] as string[],
   webglFails: false,
   disposed: 0,
   loseContext: null as (() => void) | null,
@@ -278,5 +279,43 @@ describe("attachTerminalRenderer", () => {
     stubs.loseContext?.();
 
     expect(stubs.disposed).toBe(1);
+  });
+});
+
+describe("preloadTerminalFonts", () => {
+  // The kept promise is module state on purpose, so each of these needs the module fresh or the
+  // first test's answer would be handed to the second. happy-dom has no font loading API either,
+  // so `document.fonts` stands in for it.
+  async function freshPreload(load: (font: string) => Promise<unknown>) {
+    vi.resetModules();
+    stubs.fontLoads = [];
+    Object.defineProperty(document, "fonts", {
+      value: {
+        load: vi.fn((font: string) => {
+          stubs.fontLoads.push(font);
+          return load(font);
+        }),
+      },
+      configurable: true,
+    });
+    const { preloadTerminalFonts } = await import("./marvis-terminal");
+    return preloadTerminalFonts();
+  }
+
+  // The whole point of preloading is that the second caller pays nothing, which only holds if
+  // the answer is kept. Without this, every panel re-parses 4.8MB of TTF on its own mount.
+  it("asks for both weights once and hands every later caller the same promise", async () => {
+    await freshPreload(() => Promise.resolve([]));
+    const { preloadTerminalFonts } = await import("./marvis-terminal");
+    const first = preloadTerminalFonts();
+    const second = preloadTerminalFonts();
+
+    expect(second).toBe(first);
+    expect(stubs.fontLoads).toEqual(['16px "Marvis Nerd Mono", monospace', '700 16px "Marvis Nerd Mono", monospace']);
+    await expect(first).resolves.toHaveLength(2);
+  });
+
+  it("resolves rather than rejects when a face is missing, so a panel still opens", async () => {
+    await expect(freshPreload(() => Promise.reject(new Error("no such face")))).resolves.toHaveLength(2);
   });
 });

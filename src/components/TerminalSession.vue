@@ -12,7 +12,7 @@ import {
   createMarvisTerminal,
   enableTerminalLigatures,
   enableTerminalSelectionCopy,
-  TERMINAL_FONT_FAMILY,
+  preloadTerminalFonts,
 } from "../lib/marvis-terminal";
 import { renderPtyOutput } from "../lib/terminal-renderer";
 import { scrollbarOffsetForTop, terminalScrollbarGeometry } from "../lib/terminal-scrollbar";
@@ -432,11 +432,10 @@ onMounted(async () => {
   if (!terminalElement.value) return;
   // Let xterm measure and rasterize only after both faces it can draw have loaded. Clearing a
   // WebGL atlas after the fallback was already painted made the first selected cells differ from
-  // their neighbours; the bundled faces make waiting here local and deterministic.
-  await Promise.allSettled([
-    document.fonts.load(`16px ${TERMINAL_FONT_FAMILY}`),
-    document.fonts.load(`700 16px ${TERMINAL_FONT_FAMILY}`),
-  ]);
+  // their neighbours; the bundled faces make waiting here local and deterministic. The load is
+  // kicked off when the app starts rather than here, so on any terminal but the first this is
+  // already settled and the await costs a microtask.
+  await preloadTerminalFonts();
   if (disposed || !terminalElement.value) return;
   terminal.open(terminalElement.value);
   terminalReady = true;
