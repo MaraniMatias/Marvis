@@ -96,7 +96,9 @@ const appShell = ref<HTMLElement | null>(null);
 const checkoutUiStates = ref<Record<string, CheckoutUiState>>({});
 const checkoutUiReady = ref(false);
 const mainPane = ref<InstanceType<typeof MainPane> | null>(null);
-const sidebarVisible = ref(true);
+/** ⌘B's state: the navigation and the files and changes panel are one thing to the eye, so they go
+ *  together. A window with the main view alone in it is the point of the shortcut. */
+const sidePanelsVisible = ref(true);
 const sidebarPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
 const inspectorPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
 const viewportWidth = ref(window.innerWidth / DEFAULT_ZOOM);
@@ -558,7 +560,7 @@ function onAppKeydown(event: KeyboardEvent) {
 }
 
 /**
- * ⌘B is the app's and nobody else's.
+ * ⌘B is the app's and nobody else's, and it takes both side panels with it.
  *
  * This one listens on capture, which is the whole reason it works: by the time a keydown reaches
  * the window on its way up, xterm has already turned it into input, and a shell reading ⌘B as
@@ -569,8 +571,12 @@ function onSidebarKeydown(event: KeyboardEvent) {
   if (event.altKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "b") return;
   event.preventDefault();
   event.stopPropagation();
-  sidebarVisible.value = !sidebarVisible.value;
-  sidebarPanel.value?.[sidebarVisible.value ? "expand" : "collapse"]();
+  sidePanelsVisible.value = !sidePanelsVisible.value;
+  const show = sidePanelsVisible.value;
+  sidebarPanel.value?.[show ? "expand" : "collapse"]();
+  // A drawer has no width to give back and no width to take, so what shows it is the state the
+  // drawer is bound to. The panel is only the panel's own when it sits beside the main view.
+  if (!inspectorInDrawer.value) inspectorPanel.value?.[show ? "expand" : "collapse"]();
 }
 
 let zoomToastId: number | undefined;
@@ -810,13 +816,15 @@ function resizeAppPreview(width: number) {
 watch(appLayout, () => scheduleAppLayoutSave(), { deep: true });
 
 // A narrow window cannot hold the main panel and the inspector side by side, so the inspector
-// floats over it as a drawer. Its width is left alone, to be restored when space returns.
+// floats over it as a drawer. Its width is left alone, to be restored when space returns. A panel
+// ⌘B took away is collapsed as well, so a window that grows back does not reserve room for a panel
+// nobody can see.
 watch(
   [inspectorInDrawer, appLayoutReady],
   async () => {
     if (!appLayoutReady.value) return;
     await nextTick();
-    if (inspectorInDrawer.value) inspectorPanel.value?.collapse();
+    if (inspectorInDrawer.value || !sidePanelsVisible.value) inspectorPanel.value?.collapse();
     else {
       inspectorPanel.value?.expand();
       inspectorPanel.value?.resize(toScreen(appLayout.value.inspectorWidth));
@@ -1428,7 +1436,7 @@ function reportWarning(message: string) {
         />
       </SplitterPanel>
       <SplitterResizeHandle
-        v-show="sidebarVisible"
+        v-show="sidePanelsVisible"
         id="navigation-resize-handle"
         aria-label="Resize navigation sidebar"
         class="splitter-handle"
@@ -1478,7 +1486,7 @@ function reportWarning(message: string) {
         />
       </SplitterPanel>
       <SplitterResizeHandle
-        v-show="!inspectorInDrawer"
+        v-show="sidePanelsVisible && !inspectorInDrawer"
         id="inspector-resize-handle"
         aria-label="Resize files and changes inspector"
         class="splitter-handle"
@@ -1504,6 +1512,7 @@ function reportWarning(message: string) {
              is the file tree and the change set, and nothing more. -->
         <Teleport :to="appShell" :disabled="!isSplitLayout || !appShell">
           <InspectorPane
+            v-show="sidePanelsVisible"
             :class="{
               'right-inspector-drawer': inspectorInDrawer,
               'split-inspector-drawer': isSplitLayout,
@@ -1524,7 +1533,7 @@ function reportWarning(message: string) {
       </SplitterPanel>
     </SplitterGroup>
     <div
-      v-if="isSplitLayout"
+      v-if="isSplitLayout && sidePanelsVisible"
       aria-hidden="true"
       class="inspector-hover-strip"
       :class="{ 'inspector-hover-strip-open': splitInspectorOpen }"

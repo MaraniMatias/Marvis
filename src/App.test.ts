@@ -1929,9 +1929,9 @@ describe("App UI integration", () => {
     wrapper.unmount();
   });
   describe("the sidebar shortcut", () => {
-    const pressInSidebar = (init: KeyboardEventInit) => {
+    const pressInSidebar = (init: KeyboardEventInit, target = wrapper.get("#navigation-panel").element) => {
       const event = new KeyboardEvent("keydown", { cancelable: true, bubbles: true, ...init });
-      wrapper.get("#navigation-panel").element.dispatchEvent(event);
+      target.dispatchEvent(event);
       return event;
     };
     let wrapper: Awaited<ReturnType<typeof mountApp>>;
@@ -1959,13 +1959,85 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
-    it("takes the handle away with the panel, so a hidden sidebar has nothing to grab", async () => {
-      const handle = () => wrapper.findAll("#navigation-resize-handle")[0];
+    it("takes the files and changes panel with it, so the main view is alone in the window", async () => {
+      // One shortcut, both panels: a file tree and a change list standing between the main view and
+      // the window's edge is the arrangement nobody asked for by hiding the sidebar.
+      const panel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
+      const inspector = () => wrapper.findComponent({ name: "InspectorPane" });
 
-      expect(handle().isVisible()).toBe(true);
+      expect(inspector().isVisible()).toBe(true);
       pressInSidebar({ key: "b", metaKey: true });
       await flushPromises();
-      expect(handle().exists() && handle().isVisible()).toBe(false);
+      expect(panel.emitted("collapse")).toBeTruthy();
+      expect(inspector().isVisible()).toBe(false);
+
+      pressInSidebar({ key: "b", metaKey: true });
+      await flushPromises();
+      expect(panel.emitted("expand")).toBeTruthy();
+      expect(inspector().isVisible()).toBe(true);
+      wrapper.unmount();
+    });
+
+    it("takes the handles away with the panels, so a hidden sidebar has nothing to grab", async () => {
+      const handle = (id: string) => wrapper.findAll(id)[0];
+
+      expect(handle("#navigation-resize-handle").isVisible()).toBe(true);
+      expect(handle("#inspector-resize-handle").isVisible()).toBe(true);
+      pressInSidebar({ key: "b", metaKey: true });
+      await flushPromises();
+      expect(handle("#navigation-resize-handle").exists() && handle("#navigation-resize-handle").isVisible()).toBe(
+        false,
+      );
+      expect(handle("#inspector-resize-handle").exists() && handle("#inspector-resize-handle").isVisible()).toBe(false);
+      wrapper.unmount();
+    });
+
+    it("hides the drawer as well, in the two arrangements where the inspector floats", async () => {
+      // Narrow and split both put the inspector over the main view, and a drawer has no width to
+      // collapse: what shows it is the state it is bound to, which is the state the shortcut moved.
+      // One arrangement at a time, because the key travels to the window and every app mounted on
+      // this document answers it.
+      for (const arrangement of [
+        { width: 900, layout: { ...DEFAULT_APP_LAYOUT } },
+        { width: 1400, layout: { ...DEFAULT_APP_LAYOUT, mode: "split" as const } },
+      ]) {
+        Object.defineProperty(window, "innerWidth", { configurable: true, value: arrangement.width });
+        const floating = await mountApp(workspaceWith(checkout("checkout:one")), arrangement.layout, {
+          attachTo: document.body,
+        });
+
+        expect(floating.findComponent({ name: "InspectorPane" }).isVisible()).toBe(true);
+        pressInSidebar({ key: "b", metaKey: true }, floating.get("#navigation-panel").element);
+        await flushPromises();
+        expect(floating.findComponent({ name: "InspectorPane" }).isVisible()).toBe(false);
+        // The strip is the drawer peeking on hover, and a strip that opens nothing is a hotspot
+        // for a panel that is not there.
+        expect(floating.find(".inspector-hover-strip").exists()).toBe(false);
+        floating.unmount();
+      }
+      wrapper.unmount();
+    });
+
+    it("gives no width back to a panel that is still hidden", async () => {
+      // A window that grows back is not a request to show the panel: an expanded panel nobody can
+      // see is width the main view loses, so the shortcut is the only thing that brings it back.
+      const resizeCalls = vi.fn();
+      mocks.onProgrammaticPanelResize = resizeCalls;
+      resizeCalls.mockClear();
+
+      pressInSidebar({ key: "b", metaKey: true });
+      await flushPromises();
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 1400 });
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+      expect(resizeCalls).not.toHaveBeenCalled();
+
+      pressInSidebar({ key: "b", metaKey: true });
+      await flushPromises();
+      expect(wrapper.findComponent({ name: "InspectorPane" }).isVisible()).toBe(true);
       wrapper.unmount();
     });
 
