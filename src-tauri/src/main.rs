@@ -230,8 +230,11 @@ mod security_tests {
             [
                 "core:default",
                 "core:window:allow-close",
+                // The title bar draws minimize on a window that has no frame of its own.
+                "core:window:allow-minimize",
                 "core:window:allow-start-dragging",
-                // Double-clicking the title-bar drag region zooms the window.
+                // It draws the maximize control next to it, and the platform's own double-click
+                // zoom reaches the window through the drag region, which is allowed above.
                 "core:window:allow-toggle-maximize",
                 "dialog:allow-open",
                 "clipboard-manager:allow-write-text"
@@ -375,6 +378,32 @@ mod security_tests {
                 "the write path stopped checking for `{guard}`"
             );
         }
+    }
+
+    /// The Linux window is the one the base config describes, without the frame.
+    ///
+    /// It has to be written out again because a platform config is merged as a patch and a
+    /// patch replaces an array rather than merging into it, so `tauri.linux.conf.json` carries
+    /// the whole window to turn one flag off. That is the one place the window can say two
+    /// things at once, and a Linux build that quietly kept a stale width, minimum or colour
+    /// would look like nothing at all from a macOS machine.
+    #[test]
+    fn sec_05_3_the_linux_window_is_the_base_window_without_its_frame() {
+        let base: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
+        let linux: Value = serde_json::from_str(include_str!("../tauri.linux.conf.json")).unwrap();
+        let mut base_window = base["app"]["windows"][0].clone();
+        let mut linux_window = linux["app"]["windows"][0].clone();
+
+        assert_eq!(base_window["decorations"], Value::Bool(true));
+        assert_eq!(linux_window["decorations"], Value::Bool(false));
+
+        // The traffic lights are macOS's alone and are read on macOS alone, so the Linux
+        // window does not carry them. Everything else about it is the window macOS gets.
+        for key in ["decorations", "titleBarStyle", "hiddenTitle"] {
+            base_window.as_object_mut().unwrap().remove(key);
+            linux_window.as_object_mut().unwrap().remove(key);
+        }
+        assert_eq!(base_window, linux_window);
     }
 }
 

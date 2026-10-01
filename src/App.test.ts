@@ -32,6 +32,10 @@ const mocks = vi.hoisted(() => ({
   openPath: vi.fn(),
   selectCheckout: vi.fn(),
   toggleMaximize: vi.fn(),
+  minimize: vi.fn(),
+  isDecorated: vi.fn(),
+  isMaximized: vi.fn(),
+  onWindowResized: null as (() => void) | null,
   onCloseRequested: null as ((event: { preventDefault(): void }) => Promise<void>) | null,
   currentWindow: null as {
     onCloseRequested: (handler: (event: { preventDefault(): void }) => Promise<void>) => Promise<() => void>;
@@ -145,7 +149,17 @@ vi.mock("reka-ui", async () => {
 });
 
 vi.mock("@tauri-apps/api/window", () => ({
-  getCurrentWindow: () => ({ ...mocks.currentWindow, toggleMaximize: mocks.toggleMaximize }),
+  getCurrentWindow: () => ({
+    ...mocks.currentWindow,
+    toggleMaximize: mocks.toggleMaximize,
+    minimize: mocks.minimize,
+    isDecorated: mocks.isDecorated,
+    isMaximized: mocks.isMaximized,
+    onResized: vi.fn(async (handler: () => void) => {
+      mocks.onWindowResized = handler;
+      return vi.fn();
+    }),
+  }),
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
@@ -518,6 +532,12 @@ describe("App UI integration", () => {
     mocks.saveReviewTarget.mockResolvedValue(undefined);
     mocks.exportReviewMarkdown.mockResolvedValue("2026-03-14-1532.md");
     mocks.toggleMaximize.mockResolvedValue(undefined);
+    mocks.minimize.mockResolvedValue(undefined);
+    // A window with a frame of its own is the case the app was written against, so it is what
+    // every test starts from; the ones that care about the frameless window say so.
+    mocks.isDecorated.mockResolvedValue(true);
+    mocks.isMaximized.mockResolvedValue(false);
+    mocks.onWindowResized = null;
     mocks.currentWindow = {
       onCloseRequested: vi.fn(async (handler) => {
         mocks.onCloseRequested = handler;
@@ -568,15 +588,79 @@ describe("App UI integration", () => {
   }
 
   describe("titlebar", () => {
-    it("leaves an empty spacer for the window drag and zooms it on double click", async () => {
+    it("leaves an empty spacer for the window to drag, and the double click to the window", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
 
       const spacer = wrapper.get("[data-tauri-drag-region]");
       expect(spacer.text()).toBe("");
       expect(spacer.attributes("aria-hidden")).toBe("true");
+      // The window reads the double click off the drag region itself. Answering it here as
+      // well toggled twice, so the window grew and came straight back.
       await spacer.trigger("dblclick");
 
+      expect(mocks.toggleMaximize).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("leaves the window's controls to the frame when the window has one", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      expect(wrapper.find('[data-testid="window-close"]').exists()).toBe(false);
+      // The room macOS's traffic lights need is left alone.
+      expect(wrapper.get("header").classes()).toContain("pl-[78px]");
+      wrapper.unmount();
+    });
+
+    it("draws minimize, maximize and close on a window that has no frame of its own", async () => {
+      mocks.isDecorated.mockResolvedValue(false);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      // No frame means no traffic lights, so the space they took goes to the crumbs.
+      expect(wrapper.get("header").classes()).toContain("pl-3");
+      await wrapper.get('[data-testid="window-minimize"]').trigger("click");
+      expect(mocks.minimize).toHaveBeenCalledOnce();
+      await wrapper.get('[data-testid="window-maximize"]').trigger("click");
       expect(mocks.toggleMaximize).toHaveBeenCalledOnce();
+      await flushPromises();
+
+      await wrapper.get('[data-testid="window-close"]').trigger("click");
+      await flushPromises();
+      expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
+      wrapper.unmount();
+    });
+
+    it("names the maximize control after what the window is, and follows the desktop", async () => {
+      mocks.isDecorated.mockResolvedValue(false);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      expect(wrapper.get('[data-testid="window-maximize"]').attributes("aria-label")).toBe("Maximize window");
+
+      // The desktop maximizes the window on its own, on a double click over the drag region or
+      // on its own shortcut, and the control has to offer to restore rather than to maximize.
+      mocks.isMaximized.mockResolvedValue(true);
+      mocks.onWindowResized!();
+      await flushPromises();
+
+      expect(wrapper.get('[data-testid="window-maximize"]').attributes("aria-label")).toBe("Restore window");
+      wrapper.unmount();
+    });
+
+    it("waits for the queued persistence before closing from its own control", async () => {
+      mocks.isDecorated.mockResolvedValue(false);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      let resolveWrite!: () => void;
+      mocks.saveAppLayout.mockImplementation(() => new Promise<void>((resolve) => (resolveWrite = resolve)));
+      wrapper.getComponent(SplitterGroup).vm.$emit("layout", [320, 700, 300]);
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+
+      await wrapper.get('[data-testid="window-close"]').trigger("click");
+      await flushPromises();
+      expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
+
+      resolveWrite();
+      await flushPromises();
+      expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
       wrapper.unmount();
     });
 

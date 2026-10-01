@@ -42,6 +42,37 @@ body {
 .window-breadcrumb {
   color: var(--marvis-text-secondary);
 }
+
+/* The controls a window without a frame of its own has to draw. They are full-height and
+   flush with the edge, the way the ones a window manager draws are, and they fill under the
+   pointer rather than raising a surface: a title bar control that hovered like an app button
+   read as part of the app instead of as the window. The padding is here rather than in a
+   utility because an unlayered rule outranks one from tailwind's layer, the same reason
+   `.icon-button` carries its own. */
+.window-control {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--marvis-text-secondary);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
+    color 120ms ease;
+}
+
+.window-control:hover {
+  background: var(--marvis-border);
+  color: var(--marvis-text);
+}
+
+.window-control-close:hover {
+  background: var(--marvis-red);
+  color: var(--marvis-bg-1);
+}
 .app-sidebar,
 .app-inspector {
   background: var(--marvis-bg-1);

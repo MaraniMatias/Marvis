@@ -7,8 +7,12 @@ import { SplitterGroup, SplitterPanel, SplitterResizeHandle } from "reka-ui";
 import {
   Columns2 as Columns2Icon,
   Columns3 as Columns3Icon,
+  Copy as CopyIcon,
   GitFork as GitForkIcon,
+  Minus as MinusIcon,
   Settings as SettingsIcon,
+  Square as SquareIcon,
+  X as XIcon,
 } from "@lucide/vue";
 import type { Checkout } from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
@@ -170,6 +174,10 @@ let shellRequestToken = 0;
 let unlistenFileActivity: (() => void) | undefined;
 let activityListenerDisposed = false;
 let unlistenCloseRequested: (() => void) | undefined;
+let unlistenWindowResized: (() => void) | undefined;
+/** Linux draws no frame of its own, so the title bar carries the window's controls there. */
+const windowDecorated = ref(true);
+const windowMaximized = ref(false);
 let allowWindowClose = false;
 let windowClosePromise: Promise<void> | null = null;
 let uiLayoutSaveTimer: number | undefined;
@@ -727,6 +735,18 @@ onMounted(async () => {
     showWindowError(cause);
   }
   try {
+    // Whether the window has its own frame decides where the controls live, and it is the
+    // only honest answer: a platform that draws one and a platform that does not are told
+    // apart by the window rather than by a guess about the user agent.
+    windowDecorated.value = await currentWindow.isDecorated();
+    if (!windowDecorated.value) {
+      windowMaximized.value = await currentWindow.isMaximized();
+      unlistenWindowResized = await currentWindow.onResized(() => void readWindowMaximized());
+    }
+  } catch (cause) {
+    showWindowError(cause);
+  }
+  try {
     appLayout.value = normalizeAppLayout(await loadAppLayout());
   } catch (cause) {
     reportCause(cause);
@@ -755,6 +775,7 @@ onMounted(async () => {
 onUnmounted(() => {
   activityListenerDisposed = true;
   unlistenCloseRequested?.();
+  unlistenWindowResized?.();
   window.removeEventListener("resize", onViewportResize);
   window.removeEventListener("keydown", onAppKeydown);
   unlistenFileActivity?.();
@@ -791,9 +812,31 @@ function requestWindowClose(currentWindow: ReturnType<typeof getCurrentWindow>):
   return windowClosePromise;
 }
 
-/** Double-clicking the empty part of the title bar zooms the window, as the platform does. */
-function zoomFromTitlebar() {
-  void getCurrentWindow().toggleMaximize().catch(showWindowError);
+/**
+ * Reads back whether the window is maximized, so the control says what it will do.
+ *
+ * It is read rather than tracked because the window is not only maximized from here: the
+ * desktop maximizes it on its own, and a control that still offered to maximize a maximized
+ * window is worse than one that never changed.
+ */
+async function readWindowMaximized() {
+  try {
+    windowMaximized.value = await getCurrentWindow().isMaximized();
+  } catch (cause) {
+    showWindowError(cause);
+  }
+}
+
+function minimizeWindow() {
+  void getCurrentWindow().minimize().catch(showWindowError);
+}
+
+function toggleWindowMaximized() {
+  void getCurrentWindow().toggleMaximize().then(readWindowMaximized).catch(showWindowError);
+}
+
+function closeWindow() {
+  void requestWindowClose(getCurrentWindow());
 }
 
 function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
@@ -1070,7 +1113,12 @@ function reportWarning(message: string) {
     class="app-shell relative flex h-full min-w-[900px] flex-col"
     :style="{ '--inspector-width': `${appLayout.inspectorWidth}px` }"
   >
-    <header class="window-header flex h-8 shrink-0 items-center gap-4 border-b pl-[78px] pr-4">
+    <!-- The padding on the left is where macOS puts its traffic lights. A window that draws no
+         frame of its own has none, so the space goes to the crumbs instead. -->
+    <header
+      class="window-header flex h-8 shrink-0 items-center gap-4 border-b pr-4"
+      :class="windowDecorated ? 'pl-[78px]' : 'pl-3'"
+    >
       <!-- The mockup packs the crumbs against the left, with the empty space and the gear at the
            far end. Dragging lives on that empty space, so the crumbs keep their place instead of
            being pushed to the opposite edge. The nav grows into the room the mockup gives it and
@@ -1149,9 +1197,11 @@ function reportWarning(message: string) {
           </template>
         </template>
       </nav>
-      <!-- Native dragging and double-click zoom live on the empty space the mockup leaves at
-           the far end, so they cannot swallow a click on a crumb or the gear. -->
-      <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-8 flex-1" @dblclick="zoomFromTitlebar" />
+      <!-- Native dragging lives on the empty space the mockup leaves at the far end, so it
+           cannot swallow a click on a crumb or the gear. Zooming on a double click is left to
+           the window: it reads the double click off the drag region itself, and answering it
+           here as well maximized and restored the window in the same gesture. -->
+      <div data-tauri-drag-region aria-hidden="true" class="h-full min-w-8 flex-1" />
       <button
         type="button"
         :aria-label="appLayout.mode === 'split' ? 'Switch to focus layout' : 'Switch to split layout'"
@@ -1171,6 +1221,40 @@ function reportWarning(message: string) {
       >
         <SettingsIcon class="icon-xs" aria-hidden="true" />
       </button>
+      <!-- The window's own controls, for the platform whose window has no frame to draw them.
+           They are past the drag region, so a click on one is a click on the button. -->
+      <div v-if="!windowDecorated" class="window-controls -mr-4 flex h-full shrink-0 self-stretch">
+        <button
+          type="button"
+          aria-label="Minimize window"
+          data-testid="window-minimize"
+          class="window-control"
+          @click="minimizeWindow"
+        >
+          <MinusIcon class="icon-xs" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          :aria-label="windowMaximized ? 'Restore window' : 'Maximize window'"
+          data-testid="window-maximize"
+          class="window-control"
+          @click="toggleWindowMaximized"
+        >
+          <!-- Two squares for restore and one for maximize: the same pair every other window
+               on the platform uses, which is what makes it readable without a label. -->
+          <CopyIcon v-if="windowMaximized" class="icon-xs" aria-hidden="true" />
+          <SquareIcon v-else class="icon-xs" aria-hidden="true" />
+        </button>
+        <button
+          type="button"
+          aria-label="Close window"
+          data-testid="window-close"
+          class="window-control window-control-close"
+          @click="closeWindow"
+        >
+          <XIcon class="icon-xs" aria-hidden="true" />
+        </button>
+      </div>
     </header>
     <SplitterGroup direction="horizontal" class="app-splitter flex min-h-0 flex-1" @layout="onSplitterLayout">
       <SplitterPanel

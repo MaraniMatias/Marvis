@@ -1,11 +1,12 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Marvis domain access plus folder selection, window close, title-bar dragging, and double-click zoom.",
+  "description": "Marvis domain access plus folder selection, the window controls, and title-bar dragging.",
   "windows": ["main"],
   "permissions": [
     "core:default",
     "core:window:allow-close",
+    "core:window:allow-minimize",
     "core:window:allow-start-dragging",
     "core:window:allow-toggle-maximize",
     "dialog:allow-open",
