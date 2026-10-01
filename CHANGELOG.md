@@ -8,6 +8,14 @@ here still gets its generated notes.
 
 ## Unreleased
 
+- **`Cmd`/`Ctrl` `+`, `-` and `0` scale the window.** Eight steps from 80% to 150%, and the scale is
+  remembered between launches. Each change says where it landed — `Zoom 120% (Cmd 0 to reset)` —
+  with the name of the key that was pressed, because the handler needs a modifier either way and so
+  already knows which one it is. The terminal is redrawn at the scaled cell size rather than
+  stretched, so it stays as sharp as the rest of the window. One consequence to know about: the
+  window keeps its 900px minimum, so at 150% a small window has its right edge cut off rather than
+  scrolling.
+
 - **`exit` closes the terminal it was typed in.** Ending a shell with `exit` or an alias of it like
   `:q` now takes the pane with it, instead of leaving a frozen last frame that reads as a hung app
   and an entry in the sidebar that looks alive. Closing a terminal whose process is still running

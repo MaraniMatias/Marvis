@@ -10,6 +10,19 @@ export const TERMINAL_FONT_FAMILY = '"Marvis Nerd Mono", monospace';
 const TERMINAL_FONT_SIZE = 16;
 
 /**
+ * The cell size the terminal draws at, which is the size it is drawn at whether or not the
+ * window around it is scaled.
+ *
+ * The window's scale is a `zoom` on the root element, and the terminal's host cancels it out, so
+ * the grid is measured and rasterized at this size in the screen's own pixels. That is the whole
+ * reason for the cancel: leaving the host scaled would let the compositor stretch an already drawn
+ * WebGL canvas, which is how a terminal ends up legible and soft at the same time.
+ */
+export function terminalFontSize(zoom: number): number {
+  return TERMINAL_FONT_SIZE * zoom;
+}
+
+/**
  * Only the colors come from the design tokens (B.1); the face and the size are the ones the app
  * has always had. The background is in the theme rather than left to CSS because xterm.js paints
  * it as an inline style: the stylesheet has one declaration for the surface and out-specifies that
@@ -52,13 +65,17 @@ export type RendererLevel = "webgl" | "dom";
  * `allowProposedApi` is on for the ligature joiner and the Unicode provider, which are both
  * experimental in 6.0; it is the price of the two, and it is why this function is the only
  * place a terminal is built.
+ *
+ * The scale is a parameter because the terminal's cell size has to be the size it is drawn at
+ * before it is ever opened: a terminal built at the unscaled cell and scaled afterwards spends
+ * its first frame measuring a grid that is already the wrong size.
  */
-export function createMarvisTerminal(): Terminal {
+export function createMarvisTerminal(zoom = 1): Terminal {
   const terminal = new Terminal({
     allowProposedApi: true,
     cursorBlink: true,
     fontFamily: TERMINAL_FONT_FAMILY,
-    fontSize: TERMINAL_FONT_SIZE,
+    fontSize: terminalFontSize(zoom),
     lineHeight: 1.2,
     scrollback: 10000,
     theme: TERMINAL_THEME,

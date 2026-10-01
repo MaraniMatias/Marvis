@@ -28,6 +28,7 @@ const props = defineProps<{
   shellRequest?: { checkoutId: string; token: number } | null;
   registeredSessionIds?: string[];
   terminalScrollbar?: TerminalScrollbarMode;
+  zoom?: number;
 }>();
 const isVisible = computed(() => props.visible ?? true);
 
@@ -271,6 +272,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
           :visible="isVisible"
           :focused="isVisible && view.session?.id === activeSessionId"
           :scrollbar="terminalScrollbar"
+          :zoom="zoom"
           @created="onCreated(view.key, $event)"
           @closed="onClosed(view.key, $event)"
           @status-changed="onStatusChanged(view.session?.id ?? view.key, $event)"

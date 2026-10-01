@@ -23,6 +23,8 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     events: [] as string[],
     fontLoads: [] as string[],
     fontLoadPromise: null as Promise<FontFace[]> | null,
+    /** The scale the terminal was built at, which is the size of its cell from its first frame. */
+    builtAtZoom: 1,
     terminal: null as MockTerminal | null,
   };
   class MockTerminal {
@@ -133,7 +135,11 @@ for (const [property, value] of [
 // the ordering below would be untestable. Asking for them per mount keeps the guarantee this file
 // exists to pin: xterm opens only after both bundled weights are ready.
 vi.mock("../lib/marvis-terminal", () => ({
-  createMarvisTerminal: () => new MockTerminal(),
+  createMarvisTerminal: (zoom: number) => {
+    terminalMock.builtAtZoom = zoom;
+    return new MockTerminal();
+  },
+  terminalFontSize: (zoom: number) => 16 * zoom,
   enableTerminalLigatures: terminalLib.enableTerminalLigatures,
   enableTerminalSelectionCopy: terminalLib.enableTerminalSelectionCopy,
   attachTerminalRenderer: terminalLib.attachTerminalRenderer,
@@ -203,6 +209,7 @@ describe("TerminalSession UI", () => {
     terminalMock.events = [];
     terminalMock.fontLoads = [];
     terminalMock.fontLoadPromise = null;
+    terminalMock.builtAtZoom = 1;
     terminalMock.terminal = null;
     terminalLib.fitCalls = 0;
     vi.mocked(createTerminal).mockResolvedValue(created);
@@ -416,6 +423,50 @@ describe("TerminalSession UI", () => {
     // thumb goes 152px along a 384px travel, which is line 38 of 96.
     await track.trigger("pointerdown", { clientY: 200, pointerId: 2 });
     expect(terminalMock.scrollToLines).toEqual([0, 96, 38]);
+    wrapper.unmount();
+  });
+
+  it("builds the grid at the scaled cell size and cancels the scale on its own host", async () => {
+    // The host is the one thing in the window that is not scaled: the grid is measured and
+    // rasterized in the screen's own pixels, so leaving the scale on it would let the compositor
+    // stretch a canvas that had already been drawn.
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true, zoom: 0.8 } });
+    await flushPromises();
+
+    expect(terminalMock.builtAtZoom).toBe(0.8);
+    expect(wrapper.get(".terminal-host").attributes("style")).toBe("zoom: 1.25;");
+    wrapper.unmount();
+  });
+
+  it("redraws the grid at the new cell size when the window is scaled, and refits it", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+    const fitsBefore = terminalLib.fitCalls;
+
+    await wrapper.setProps({ zoom: 1.2 });
+    await flushPromises();
+
+    // 16px at 120% is a cell of 19.2, and xterm re-measures and repaints on the assignment; the
+    // fit is what tells the PTY how many columns the new cell leaves it.
+    expect(terminalMock.terminal?.options).toEqual({ fontSize: 19.2 });
+    expect(terminalLib.fitCalls).toBeGreaterThan(fitsBefore);
+    expect(wrapper.get(".terminal-host").attributes("style")).toBe("zoom: 0.8333333333333334;");
+    wrapper.unmount();
+  });
+
+  it("reads a drag on the scaled track as a position in the track's own units", async () => {
+    terminalMock.buffer = { length: 120, viewportY: 0 };
+    const wrapper = mount(TerminalSession, {
+      props: { checkoutId: "checkout:repo", active: true, scrollbar: "always", zoom: 1.2 },
+    });
+    await flushPromises();
+    const track = wrapper.get(".terminal-scrollbar");
+
+    // A 480px track at 120% is 576px on the screen, so its middle is at 288 — which is 240 in the
+    // track's own units, and line 48 of the 96 lines of travel. Reading the pointer as 288 would
+    // have put the thumb on line 60, forty-eight pixels below where it was let go.
+    await track.trigger("pointerdown", { clientY: 288, pointerId: 1 });
+    expect(terminalMock.scrollToLines).toEqual([48]);
     wrapper.unmount();
   });
 

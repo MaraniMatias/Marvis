@@ -33,6 +33,7 @@ const props = withDefaults(
     split?: boolean;
     previewWidth?: number;
     terminalScrollbar?: TerminalScrollbarMode;
+    zoom?: number;
   }>(),
   {
     refreshRevision: 0,
@@ -43,6 +44,7 @@ const props = withDefaults(
     split: false,
     previewWidth: 360,
     terminalScrollbar: "hidden",
+    zoom: 1,
   },
 );
 const emit = defineEmits<{
@@ -78,7 +80,9 @@ function startPreviewResize(event: PointerEvent) {
 
 function resizePreview(event: PointerEvent) {
   if (!props.split || resizePointerId !== event.pointerId) return;
-  emit("resizePreview", resizeRootRight - event.clientX - 5);
+  // The pointer and the rect are both in the window's units, so the drag distance is honest; what
+  // the preview is sized in is the app's, and the two differ by whatever the window is scaled to.
+  emit("resizePreview", (resizeRootRight - event.clientX) / props.zoom - 5);
 }
 
 function finishPreviewResize(event: PointerEvent) {
@@ -114,6 +118,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
         :shell-request="shellRequest"
         :registered-session-ids="registeredSessionIds"
         :terminal-scrollbar="terminalScrollbar"
+        :zoom="zoom"
         @open-folder="$emit('openFolder')"
         @workspace-updated="$emit('workspaceUpdated', $event)"
         @session-status-changed="(sessionId, status) => $emit('sessionStatusChanged', sessionId, status)"

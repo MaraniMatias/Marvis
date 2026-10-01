@@ -8,16 +8,18 @@ import {
   needsInspectorDrawer,
   resizeLayoutPanel,
 } from "./ui-state";
+import { ZOOM_STEPS } from "./zoom";
 
 describe("persisted UI state", () => {
   it("keeps the marvis default panel widths", () => {
     expect(DEFAULT_APP_LAYOUT).toEqual({
-      version: 3,
+      version: 4,
       mode: "focus",
       sidebarWidth: 240,
       inspectorWidth: 280,
       previewWidth: 360,
       terminalScrollbar: "hidden",
+      zoom: 1,
     });
   });
 
@@ -29,6 +31,7 @@ describe("persisted UI state", () => {
       inspectorWidth: 420,
       previewWidth: 720,
       terminalScrollbar: "auto" as const,
+      zoom: 1.2 as const,
     };
     expect(normalizeAppLayout(JSON.parse(JSON.stringify(saved)))).toEqual(saved);
     expect(
@@ -45,20 +48,32 @@ describe("persisted UI state", () => {
   it("uses defaults for unknown versions and clamps corrupt dimensions", () => {
     expect(normalizeAppLayout({ version: 1, mode: "split", sidebarWidth: 400 })).toEqual(DEFAULT_APP_LAYOUT);
     expect(normalizeAppLayout({ version: 9 })).toEqual(DEFAULT_APP_LAYOUT);
-    // The layout a version-2 build wrote is refused whole rather than read field by field: it has
-    // no scrollbar to say which of the three it wanted, and guessing would pick for it.
-    expect(normalizeAppLayout({ version: 2, sidebarWidth: 345, inspectorWidth: 450, previewWidth: 720 })).toEqual(
+    // The layout a version-3 build wrote is refused whole: it has no scale in it, and reading the
+    // widths out of it anyway would hand back a window somebody had already arranged.
+    expect(normalizeAppLayout({ version: 3, sidebarWidth: 345, inspectorWidth: 450, previewWidth: 720 })).toEqual(
       DEFAULT_APP_LAYOUT,
     );
-    expect(normalizeAppLayout({ version: 3, sidebarWidth: 900, inspectorWidth: -1, previewWidth: 1200 })).toEqual({
-      version: 3,
+    expect(normalizeAppLayout({ version: 4, sidebarWidth: 900, inspectorWidth: -1, previewWidth: 1200 })).toEqual({
+      version: 4,
       mode: "focus",
       sidebarWidth: 500,
       inspectorWidth: 200,
       previewWidth: 900,
       terminalScrollbar: "hidden",
+      zoom: 1,
     });
-    expect(normalizeAppLayout({ version: 3 })).toEqual(DEFAULT_APP_LAYOUT);
+    expect(normalizeAppLayout({ version: 4 })).toEqual(DEFAULT_APP_LAYOUT);
+  });
+
+  it("keeps a scale it can draw and snaps one it cannot to the nearest step", () => {
+    for (const zoom of ZOOM_STEPS) {
+      expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, zoom }).zoom).toBe(zoom);
+    }
+    // The scale is a preference for the same reason the scrollbar is: a factor from a build with a
+    // different range in it is still an answer, and the nearest step is what this build can draw.
+    expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, zoom: 2.4 }).zoom).toBe(1.5);
+    expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, zoom: 0.2 }).zoom).toBe(0.8);
+    expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, zoom: "big" }).zoom).toBe(1);
   });
 
   it("keeps a scrollbar mode it knows and falls back to hidden for one it does not", () => {

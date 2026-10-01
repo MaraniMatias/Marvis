@@ -48,6 +48,8 @@ import type { ReviewSender, ReviewTarget } from "./presentation/review-notes";
 import { useAgentSessions } from "./presentation/agent-sessions";
 import { useToasts } from "./presentation/toasts";
 import { defaultAgentSession } from "./domain/agent";
+import { DEFAULT_ZOOM, zoomKeyFor, zoomLabel, zoomStep } from "./domain/zoom";
+import type { Zoom, ZoomModifier } from "./domain/zoom";
 import { buildReviewMarkdown, localReviewTimestamp } from "./domain/review";
 import { isMarkdownPath } from "./presentation/markdown-preview";
 import {
@@ -78,7 +80,7 @@ const {
 const { recentPaths, refresh: refreshRecentPaths } = useRecentPaths();
 /** The one crumb menu that is open: opening any of them closes the other two. */
 const openCrumb = ref<string | null>(null);
-const { push: pushToast, pushCause: reportCause } = useToasts();
+const { push: pushToast, pushCause: reportCause, dismiss: dismissToast } = useToasts();
 const appLayout = ref<AppLayoutState>({ ...DEFAULT_APP_LAYOUT });
 const appLayoutReady = ref(false);
 const appShell = ref<HTMLElement | null>(null);
@@ -87,7 +89,9 @@ const checkoutUiReady = ref(false);
 const mainPane = ref<InstanceType<typeof MainPane> | null>(null);
 const sidebarPanel = ref<{ resize(size: number): void } | null>(null);
 const inspectorPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
-const viewportWidth = ref(window.innerWidth);
+const viewportWidth = ref(window.innerWidth / DEFAULT_ZOOM);
+/** The scale the whole window is drawn at, which every measurement below has to agree with. */
+const appZoom = computed(() => appLayout.value.zoom);
 const isNarrow = computed(
   () => appLayout.value.mode === "focus" && needsInspectorDrawer(appLayout.value, viewportWidth.value),
 );
@@ -269,7 +273,8 @@ function measurePath() {
     ? (parseFloat(style.maxWidth) / 100) * header
     : parseFloat(style.maxWidth) || header;
   const others = [...line.children].reduce(
-    (width, child) => (child === crumb || child === probe ? width : width + child.getBoundingClientRect().width),
+    (width, child) =>
+      child === crumb || child === probe ? width : width + child.getBoundingClientRect().width / appZoom.value,
     0,
   );
   const gaps = (line.childElementCount - 1) * (parseFloat(style.columnGap) || 0);
@@ -556,8 +561,62 @@ function closeSplitInspector() {
 }
 
 function onAppKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape" && splitInspectorOpen.value) closeSplitInspector();
+  if (event.key === "Escape" && splitInspectorOpen.value) {
+    closeSplitInspector();
+    return;
+  }
+  const direction = zoomKeyFor(event);
+  if (direction === undefined) return;
+  // The webview is told the scale, and it does nothing with a `0` on its own, but the key is
+  // stopped here anyway: a shortcut that also reaches the terminal as input is a shortcut that
+  // types into whatever had the focus.
+  event.preventDefault();
+  setZoom(zoomStep(appZoom.value, direction), event.metaKey ? "Cmd" : "Ctrl");
 }
+
+let zoomToastId: number | undefined;
+
+/**
+ * The one line that says where the window is scaled to, replaced rather than stacked.
+ *
+ * `push` folds away a message identical to the one before it and every step of a held key is a
+ * different number, so without taking the last one down first, holding the key leaves the last
+ * three percentages on screen as a history of the gesture instead of the current one.
+ */
+function announceZoom(zoom: Zoom, modifier: ZoomModifier) {
+  if (zoomToastId !== undefined) dismissToast(zoomToastId);
+  zoomToastId = pushToast(zoomLabel(zoom, modifier), "info");
+}
+
+function setZoom(zoom: Zoom, modifier: ZoomModifier) {
+  // Already there: the key did something, so there is nothing to say about it.
+  if (zoom === appZoom.value) return;
+  appLayout.value = { ...appLayout.value, zoom };
+  announceZoom(zoom, modifier);
+}
+
+/**
+ * The window is scaled from the root element, so everything inside it is laid out in the space a
+ * window of this size has before the scale and painted at the scale after it. Two things follow
+ * from that, and both of them are read from here: the viewport a breakpoint is measured against
+ * is `zoom` times wider than the space the app is arranging, and a pointer reports where it is in
+ * the same widened units.
+ */
+function applyZoom(zoom: number) {
+  document.documentElement.style.setProperty("zoom", String(zoom));
+  viewportWidth.value = window.innerWidth / zoom;
+}
+
+watch(appZoom, applyZoom, { immediate: true });
+
+/**
+ * reka-ui measures its panels with `getBoundingClientRect()` and reports them in the same units,
+ * which are the units of the window rather than the units the layout is written in. The two are
+ * the same number at 100% and at nothing else, so a width is scaled on its way into the splitter
+ * and unscaled on its way back out, and the number in the saved layout keeps meaning what it says.
+ */
+const toScreen = (px: number) => px * appZoom.value;
+const toLayout = (px: number) => px / appZoom.value;
 
 function updateCheckoutUiState(checkoutId: string, patch: Partial<CheckoutUiState>) {
   const previous = checkoutUiStates.value[checkoutId] ?? { ...DEFAULT_CHECKOUT_UI_STATE };
@@ -647,8 +706,8 @@ async function flushUiStateWrites() {
 function onSplitterLayout(sizes: number[]) {
   if (!appLayoutReady.value || sizes.length < 3) return;
   let next = appLayout.value;
-  if (sizes[0] > 0) next = resizeLayoutPanel(next, "sidebar", sizes[0]);
-  if (!inspectorInDrawer.value && sizes[2] > 0) next = resizeLayoutPanel(next, "inspector", sizes[2]);
+  if (sizes[0] > 0) next = resizeLayoutPanel(next, "sidebar", toLayout(sizes[0]));
+  if (!inspectorInDrawer.value && sizes[2] > 0) next = resizeLayoutPanel(next, "inspector", toLayout(sizes[2]));
   if (next.sidebarWidth !== appLayout.value.sidebarWidth || next.inspectorWidth !== appLayout.value.inspectorWidth) {
     appLayout.value = next;
   }
@@ -656,7 +715,7 @@ function onSplitterLayout(sizes: number[]) {
 
 function resetPanelWidth(panel: "sidebar" | "inspector") {
   const width = panel === "sidebar" ? DEFAULT_APP_LAYOUT.sidebarWidth : DEFAULT_APP_LAYOUT.inspectorWidth;
-  (panel === "sidebar" ? sidebarPanel.value : inspectorPanel.value)?.resize(width);
+  (panel === "sidebar" ? sidebarPanel.value : inspectorPanel.value)?.resize(toScreen(width));
   appLayout.value = resizeLayoutPanel(appLayout.value, panel, width);
 }
 
@@ -676,7 +735,7 @@ watch(
     if (inspectorInDrawer.value) inspectorPanel.value?.collapse();
     else {
       inspectorPanel.value?.expand();
-      inspectorPanel.value?.resize(appLayout.value.inspectorWidth);
+      inspectorPanel.value?.resize(toScreen(appLayout.value.inspectorWidth));
     }
   },
   { immediate: true, flush: "post" },
@@ -785,7 +844,7 @@ onUnmounted(() => {
 });
 
 function onViewportResize() {
-  viewportWidth.value = window.innerWidth;
+  viewportWidth.value = window.innerWidth / appZoom.value;
   measurePath();
 }
 
@@ -1239,9 +1298,9 @@ function reportWarning(message: string) {
       <SplitterPanel
         id="navigation-panel"
         ref="sidebarPanel"
-        :default-size="appLayout.sidebarWidth"
-        :min-size="SIDEBAR_WIDTH_LIMITS.min"
-        :max-size="SIDEBAR_WIDTH_LIMITS.max"
+        :default-size="toScreen(appLayout.sidebarWidth)"
+        :min-size="toScreen(SIDEBAR_WIDTH_LIMITS.min)"
+        :max-size="toScreen(SIDEBAR_WIDTH_LIMITS.max)"
         size-unit="px"
         class="min-h-0 shrink-0"
       >
@@ -1279,7 +1338,7 @@ function reportWarning(message: string) {
       </SplitterResizeHandle>
       <SplitterPanel
         id="main-panel"
-        :min-size="isSplitLayout ? (activeMainView.kind === 'terminal' ? 320 : 585) : 420"
+        :min-size="toScreen(isSplitLayout ? (activeMainView.kind === 'terminal' ? 320 : 585) : 420)"
         size-unit="px"
         class="main-column min-h-0 min-w-0 flex-1"
       >
@@ -1290,6 +1349,7 @@ function reportWarning(message: string) {
           :split="isSplitLayout"
           :preview-width="appLayout.previewWidth"
           :terminal-scrollbar="appLayout.terminalScrollbar"
+          :zoom="appLayout.zoom"
           :ready="checkoutUiReady"
           :git-snapshot="gitSnapshot"
           :review="review"
@@ -1328,9 +1388,9 @@ function reportWarning(message: string) {
       <SplitterPanel
         id="inspector-panel"
         ref="inspectorPanel"
-        :default-size="inspectorInDrawer ? 0 : appLayout.inspectorWidth"
-        :min-size="INSPECTOR_WIDTH_LIMITS.min"
-        :max-size="INSPECTOR_WIDTH_LIMITS.max"
+        :default-size="inspectorInDrawer ? 0 : toScreen(appLayout.inspectorWidth)"
+        :min-size="toScreen(INSPECTOR_WIDTH_LIMITS.min)"
+        :max-size="toScreen(INSPECTOR_WIDTH_LIMITS.max)"
         :collapsed-size="0"
         collapsible
         size-unit="px"

@@ -28,6 +28,10 @@ const INSPECTOR_WIDTH_MIN: u32 = 200;
 const INSPECTOR_WIDTH_MAX: u32 = 480;
 const PREVIEW_WIDTH_MIN: u32 = 260;
 const PREVIEW_WIDTH_MAX: u32 = 900;
+/// The ends of the zoom steps the renderer walks. Kept here so a stored factor cannot come back
+/// out of the database as a scale no step in `src/domain/zoom.ts` names.
+const ZOOM_MIN: f64 = 0.8;
+const ZOOM_MAX: f64 = 1.5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
@@ -38,17 +42,19 @@ pub struct AppLayoutState {
     pub inspector_width: u32,
     pub preview_width: u32,
     pub terminal_scrollbar: String,
+    pub zoom: f64,
 }
 
 impl Default for AppLayoutState {
     fn default() -> Self {
         Self {
-            version: 3,
+            version: 4,
             mode: "focus".into(),
             sidebar_width: 240,
             inspector_width: 280,
             preview_width: 360,
             terminal_scrollbar: "hidden".into(),
+            zoom: 1.0,
         }
     }
 }
@@ -65,6 +71,9 @@ impl AppLayoutState {
         ) {
             self.terminal_scrollbar = "hidden".into();
         }
+        // The webview is told the scale as a plain factor, so anything outside the range the steps
+        // cover is clamped to its end rather than passed on to be drawn.
+        self.zoom = self.zoom.clamp(ZOOM_MIN, ZOOM_MAX);
         self.sidebar_width = self
             .sidebar_width
             .clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
@@ -703,7 +712,7 @@ impl Database {
         let layout = serde_json::from_str::<AppLayoutState>(&serialized)
             .ok()
             .map(AppLayoutState::normalized)
-            .filter(|layout| layout.version == 3)
+            .filter(|layout| layout.version == 4)
             .unwrap_or_default();
         if serde_json::to_string(&layout).map_err(|error| error.to_string())? != serialized {
             connection
@@ -715,7 +724,7 @@ impl Database {
 
     pub fn save_app_layout(&self, layout: &AppLayoutState) -> Result<(), String> {
         let layout = layout.clone().normalized();
-        if layout.version != 3 {
+        if layout.version != 4 {
             return Err("saved UI layout has an unsupported version".into());
         }
         let serialized = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
@@ -2542,6 +2551,7 @@ mod tests {
             inspector_width: 420,
             preview_width: 720,
             terminal_scrollbar: "auto".into(),
+            zoom: 1.2,
             ..AppLayoutState::default()
         };
         database.save_app_layout(&layout).unwrap();
@@ -2732,7 +2742,7 @@ mod tests {
     #[test]
     fn app_layout_normalizes_dimensions_and_unknown_modes() {
         let layout = serde_json::from_value::<AppLayoutState>(serde_json::json!({
-            "version": 3,
+            "version": 4,
             "mode": "unknown",
             "sidebarWidth": 260,
             "inspectorWidth": 320,
@@ -2754,7 +2764,7 @@ mod tests {
         );
 
         let out_of_range = serde_json::from_value::<AppLayoutState>(serde_json::json!({
-            "version": 3,
+            "version": 4,
             "sidebarWidth": 220,
             "inspectorWidth": 560,
             "previewWidth": 200,
@@ -2772,6 +2782,30 @@ mod tests {
                 ..Default::default()
             }
         );
+    }
+
+    #[test]
+    fn app_layout_keeps_a_scale_inside_the_steps_and_clamps_one_outside_them() {
+        let inside = serde_json::from_value::<AppLayoutState>(serde_json::json!({
+            "version": 4,
+            "zoom": 1.3
+        }))
+        .unwrap()
+        .normalized();
+        assert_eq!(inside.zoom, 1.3);
+
+        // The scale is the one field the webview is handed as a bare factor, so the only thing
+        // standing between a saved file and a window nobody can read is this clamp.
+        for (stored, clamped) in [(4.0, 1.5), (0.01, 0.8)] {
+            let zoom = serde_json::from_value::<AppLayoutState>(serde_json::json!({
+                "version": 4,
+                "zoom": stored
+            }))
+            .unwrap()
+            .normalized()
+            .zoom;
+            assert_eq!(zoom, clamped, "a stored {stored} came back as {zoom}");
+        }
     }
 
     #[test]

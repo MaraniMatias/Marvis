@@ -554,6 +554,9 @@ describe("App UI integration", () => {
     // still up for the next one. Each test starts with an empty stack.
     const { toasts } = useToasts();
     toasts.value = [];
+    // The scale is written to the document rather than to the app, so it outlives the component
+    // that set it and would be the next test's starting point.
+    document.documentElement.style.removeProperty("zoom");
     vi.useRealTimers();
   });
 
@@ -1183,12 +1186,13 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 3,
+        version: 4,
         mode: "focus",
         sidebarWidth: 310,
         inspectorWidth: 340,
         previewWidth: 360,
         terminalScrollbar: "hidden",
+        zoom: 1,
       });
       wrapper.unmount();
     });
@@ -1201,12 +1205,13 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 3,
+        version: 4,
         mode: "focus",
         sidebarWidth: 500,
         inspectorWidth: 200,
         previewWidth: 360,
         terminalScrollbar: "hidden",
+        zoom: 1,
       });
       wrapper.unmount();
     });
@@ -1216,12 +1221,13 @@ describe("App UI integration", () => {
       // this one is stored as `always`: a preference read back as the default would be invisible
       // everywhere else, because the default is what a layout with no preference in it gives.
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 3,
+        version: 4,
         mode: "focus",
         sidebarWidth: 345,
         inspectorWidth: 450,
         previewWidth: 360,
         terminalScrollbar: "always",
+        zoom: 1,
       });
       const group = wrapper.getComponent(SplitterGroup);
       const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
@@ -1236,24 +1242,26 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 3,
+        version: 4,
         mode: "focus",
         sidebarWidth: 400,
         inspectorWidth: 450,
         previewWidth: 360,
         terminalScrollbar: "always",
+        zoom: 1,
       });
       wrapper.unmount();
     });
 
     it("lets double-click on a handle reset just that panel", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 3,
+        version: 4,
         mode: "focus",
         sidebarWidth: 345,
         inspectorWidth: 450,
         previewWidth: 360,
         terminalScrollbar: "hidden",
+        zoom: 1,
       });
       const resizeCalls = vi.fn();
       mocks.onProgrammaticPanelResize = resizeCalls;
@@ -1267,24 +1275,26 @@ describe("App UI integration", () => {
       await vi.advanceTimersByTimeAsync(300);
       await flushPromises();
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 3,
+        version: 4,
         mode: "focus",
         sidebarWidth: DEFAULT_APP_LAYOUT.sidebarWidth,
         inspectorWidth: 450,
         previewWidth: 360,
         terminalScrollbar: "hidden",
+        zoom: 1,
       });
       wrapper.unmount();
     });
 
     it("gives the inspector its full width back when space returns", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 3,
+        version: 4,
         mode: "focus",
         sidebarWidth: 300,
         inspectorWidth: 300,
         previewWidth: 360,
         terminalScrollbar: "hidden",
+        zoom: 1,
       });
       const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
       const resizeCalls = vi.fn();
@@ -1423,6 +1433,146 @@ describe("App UI integration", () => {
       expect(inspector.classes()).toContain("right-inspector-drawer");
       expect(inspector.classes()).toContain("split-inspector-closed");
       expect(wrapper.findComponent({ name: "MainPane" }).props("split")).toBe(true);
+      wrapper.unmount();
+    });
+  });
+
+  describe("the window scale", () => {
+    const press = (init: KeyboardEventInit) => {
+      const event = new KeyboardEvent("keydown", { cancelable: true, ...init });
+      window.dispatchEvent(event);
+      return event;
+    };
+    const scale = () => document.documentElement.style.getPropertyValue("zoom");
+    const { toasts } = useToasts();
+
+    it("scales the window one step and says where it landed", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      expect(press({ key: "+", metaKey: true }).defaultPrevented).toBe(true);
+      await flushPromises();
+
+      expect(scale()).toBe("1.1");
+      expect(toasts.value.map((toast) => toast.message)).toEqual(["Zoom 110% (Cmd 0 to reset)"]);
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({ ...DEFAULT_APP_LAYOUT, zoom: 1.1 });
+      wrapper.unmount();
+    });
+
+    it("names Ctrl when Ctrl is the key that worked", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      press({ key: "=", ctrlKey: true });
+      await flushPromises();
+
+      expect(scale()).toBe("1.1");
+      expect(toasts.value.at(-1)?.message).toBe("Zoom 110% (Ctrl 0 to reset)");
+      wrapper.unmount();
+    });
+
+    it("goes back to 100% on 0, from wherever it was", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      press({ key: "+", metaKey: true });
+      press({ key: "+", metaKey: true });
+      press({ key: "-", metaKey: true });
+      press({ key: "0", metaKey: true });
+      await flushPromises();
+
+      expect(scale()).toBe("1");
+      expect(toasts.value.at(-1)?.message).toBe("Zoom 100% (Cmd 0 to reset)");
+      wrapper.unmount();
+    });
+
+    it("keeps one line of feedback while the key is held down", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      for (let step = 0; step < 3; step += 1) {
+        press({ key: "+", metaKey: true });
+        await flushPromises();
+      }
+
+      // Three different numbers, and `push` only folds away a message identical to the one before
+      // it, so without taking the last one down the stack would be a history of the gesture.
+      expect(toasts.value.map((toast) => toast.message)).toEqual(["Zoom 130% (Cmd 0 to reset)"]);
+      wrapper.unmount();
+    });
+
+    it("says nothing when the key cannot move the scale any further", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), { ...DEFAULT_APP_LAYOUT, zoom: 1.5 });
+      expect(scale()).toBe("1.5");
+
+      press({ key: "+", metaKey: true });
+      await flushPromises();
+
+      expect(scale()).toBe("1.5");
+      expect(toasts.value).toEqual([]);
+      wrapper.unmount();
+    });
+
+    it("says nothing when a 0 arrives at 100%", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      press({ key: "0", metaKey: true });
+      await flushPromises();
+
+      expect(scale()).toBe("1");
+      expect(toasts.value).toEqual([]);
+      wrapper.unmount();
+    });
+
+    it("leaves a 0 and a + that are being typed alone", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      press({ key: "0" });
+      press({ key: "+" });
+      press({ key: "a", metaKey: true });
+      await flushPromises();
+
+      expect(scale()).toBe("1");
+      expect(toasts.value).toEqual([]);
+      expect(mocks.saveAppLayout).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("comes back at the scale it was left at, and lays the window out in that space", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), { ...DEFAULT_APP_LAYOUT, zoom: 1.5 });
+
+      expect(scale()).toBe("1.5");
+      expect(wrapper.findComponent({ name: "MainPane" }).props("zoom")).toBe(1.5);
+      // The app arranges itself in the space the window has before the scale, and a window 1400
+      // wide at 150% is 933 of that, which is not enough for the panels beside the main one.
+      expect(wrapper.get("#inspector-panel").classes()).toContain("min-h-0");
+      expect(wrapper.findComponent({ name: "InspectorPane" }).classes()).toContain("right-inspector-drawer");
+
+      press({ key: "0", metaKey: true });
+      await flushPromises();
+      expect(wrapper.findComponent({ name: "InspectorPane" }).classes()).not.toContain("right-inspector-drawer");
+      wrapper.unmount();
+    });
+
+    it("stores the panel widths in the app's pixels rather than the window's", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), { ...DEFAULT_APP_LAYOUT, zoom: 1.2 });
+      const resizeCalls = vi.fn();
+      mocks.onProgrammaticPanelResize = resizeCalls;
+
+      // The splitter measures with `getBoundingClientRect()`, which is a number after the scale.
+      wrapper.getComponent(SplitterGroup).vm.$emit("layout", [300, 700, 300]);
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
+        ...DEFAULT_APP_LAYOUT,
+        zoom: 1.2,
+        sidebarWidth: 250,
+        inspectorWidth: 250,
+      });
+
+      // And a reset is a width in the same units, so it goes into the splitter scaled.
+      const handles = wrapper.findAllComponents(SplitterResizeHandle);
+      await handles[0]!.trigger("dblclick");
+      await flushPromises();
+      expect(resizeCalls).toHaveBeenCalledWith("navigation-panel", DEFAULT_APP_LAYOUT.sidebarWidth * 1.2);
       wrapper.unmount();
     });
   });

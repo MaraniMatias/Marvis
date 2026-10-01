@@ -13,6 +13,7 @@ import {
   enableTerminalLigatures,
   enableTerminalSelectionCopy,
   preloadTerminalFonts,
+  terminalFontSize,
 } from "../lib/marvis-terminal";
 import { renderPtyOutput } from "../lib/terminal-renderer";
 import { scrollbarOffsetForTop, terminalScrollbarGeometry } from "../lib/terminal-scrollbar";
@@ -26,8 +27,9 @@ const props = withDefaults(
     visible?: boolean;
     focused?: boolean;
     scrollbar?: TerminalScrollbarMode;
+    zoom?: number;
   }>(),
-  { visible: true, focused: false, scrollbar: "hidden" },
+  { visible: true, focused: false, scrollbar: "hidden", zoom: 1 },
 );
 const emit = defineEmits<{
   created: [result: Awaited<ReturnType<typeof createTerminal>>];
@@ -45,7 +47,7 @@ const scrollbarMaximum = ref(0);
 const state = ref<TerminalSessionStatus>({ state: "running", foregroundProcess: false });
 const error = ref<string | null>(null);
 const closing = ref(false);
-const terminal = createMarvisTerminal();
+const terminal = createMarvisTerminal(props.zoom);
 const fit = new FitAddon();
 terminal.loadAddon(fit);
 const { pushCause } = useToasts();
@@ -145,7 +147,9 @@ function onScrollbarPointerDown(event: PointerEvent) {
   if (!track) return;
   updateScrollbar();
   if (!geometry.scrollable) return;
-  const y = event.clientY - track.getBoundingClientRect().top;
+  // The track is inside the scaled window and the pointer is not, so the offset is divided back
+  // into the track's own units: the geometry it is compared against is measured in those.
+  const y = (event.clientY - track.getBoundingClientRect().top) / props.zoom;
   // A press on the thumb takes hold of it wherever it was caught, so the thumb does not jump to
   // centre itself under the pointer. A press on the empty track puts the middle of the thumb there
   // instead, which is what every other scrollbar does and is what makes clicking above or below
@@ -161,7 +165,7 @@ function onScrollbarPointerDown(event: PointerEvent) {
 function onScrollbarPointerMove(event: PointerEvent) {
   const track = scrollbarTrack.value;
   if (!track || !scrollbarDrag || scrollbarDrag.pointerId !== event.pointerId) return;
-  scrollbarTo(event.clientY - track.getBoundingClientRect().top - scrollbarDrag.grabOffset);
+  scrollbarTo((event.clientY - track.getBoundingClientRect().top) / props.zoom - scrollbarDrag.grabOffset);
   wakeScrollbar();
   event.preventDefault();
 }
@@ -418,6 +422,19 @@ watch(
 );
 
 watch(
+  () => props.zoom,
+  async (zoom) => {
+    if (!terminalReady) return;
+    // xterm.js re-measures the cell, clears and repaints on this one assignment, so the only
+    // thing left is the fit: the PTY is told its new column count through it, and nobody is told
+    // anything by the repaint.
+    terminal.options.fontSize = terminalFontSize(zoom);
+    await nextTick();
+    fitActiveView();
+  },
+);
+
+watch(
   () => [props.active, props.visible, props.focused] as const,
   async ([active, visible, focused]) => {
     if (!active) return;
@@ -469,7 +486,14 @@ onUnmounted(() => {
 <template>
   <section class="terminal-surface flex h-full min-h-0 flex-col overflow-hidden">
     <div class="terminal-region relative min-h-0 flex-1">
-      <div ref="terminalElement" class="terminal-host h-full min-h-0" aria-label="Shell terminal" />
+      <!-- The host cancels out the root's scale rather than inheriting it: the grid is measured
+           and rasterized in the screen's own pixels, and the cell is drawn at the scaled size. -->
+      <div
+        ref="terminalElement"
+        class="terminal-host h-full min-h-0"
+        :style="{ zoom: String(1 / props.zoom) }"
+        aria-label="Shell terminal"
+      />
       <!-- Overlaying the terminal preserves the grid width that xterm's native bar would reserve. -->
       <div
         v-if="scrollbarEnabled"
