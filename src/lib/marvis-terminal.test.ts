@@ -3,8 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import {
   attachTerminalRenderer,
   createMarvisTerminal,
-  enableTerminalLigatures,
   enableTerminalSelectionCopy,
+  setTerminalLigatures,
 } from "./marvis-terminal";
 
 const stubs = vi.hoisted(() => ({
@@ -23,7 +23,6 @@ class FakeTerminal {
   modes = { mouseTrackingMode: "none" as "none" | "drag" };
   selection = "";
   writeParsedListeners: Array<() => void> = [];
-  joiner: ((text: string) => [number, number][]) | null = null;
   addons: FakeAddon[] = [];
   constructor(options: Record<string, unknown>) {
     this.options = options;
@@ -33,9 +32,24 @@ class FakeTerminal {
     this.addons.push(addon);
     addon.activate(this);
   }
+  joiners = new Map<number, (text: string) => [number, number][]>();
+  joinerFailures = false;
+  nextJoinerId = 1;
   registerCharacterJoiner(handler: (text: string) => [number, number][]) {
-    this.joiner = handler;
-    return 1;
+    if (this.joinerFailures) throw new Error("Terminal must be opened first");
+    const id = this.nextJoinerId++;
+    this.joiners.set(id, handler);
+    return id;
+  }
+  deregisterCharacterJoiner(id: number) {
+    this.joiners.delete(id);
+  }
+  get joiner() {
+    return [...this.joiners.values()][0] ?? null;
+  }
+  set joiner(_handler: ((text: string) => [number, number][]) | null) {
+    // The fake kept a single joiner before the preference became switchable; the setter is kept so
+    // nothing has to know that, and it is the last registered one xterm.js would draw.
   }
   onWriteParsed(listener: () => void) {
     this.writeParsedListeners.push(listener);
@@ -115,12 +129,13 @@ describe("createMarvisTerminal", () => {
     stubs.loseContext = null;
   });
 
-  // B.1: the face, size and ligatures are fixed. Only the colors come from the tokens.
+  // B.1: the face and the colors come from the tokens; the size and the cursor are preferences.
   it("builds the terminal the panel has always drawn", () => {
     createMarvisTerminal();
 
     expect(stubs.terminal?.options).toMatchObject({
       allowProposedApi: true,
+      cursorBlink: true,
       fontFamily: '"Marvis Nerd Mono", monospace',
       fontSize: 16,
       lineHeight: 1.2,
@@ -132,6 +147,15 @@ describe("createMarvisTerminal", () => {
         selectionBackground: "#22252e", // --marvis-selection
       },
     });
+  });
+
+  it("builds the terminal at the size and cursor the settings ask for", () => {
+    createMarvisTerminal(20, false, 1.2);
+
+    // The size is the preference's own, multiplied by the window's scale: the terminal's host
+    // cancels the scale out so the grid is measured in screen pixels, which means the cell has to
+    // be handed the scaled size rather than inheriting one.
+    expect(stubs.terminal?.options).toMatchObject({ fontSize: 24, cursorBlink: false });
   });
 
   it("gives the terminal a full ANSI palette instead of xterm.js' own", () => {
@@ -163,11 +187,11 @@ describe("createMarvisTerminal", () => {
   });
 });
 
-describe("enableTerminalLigatures", () => {
+describe("setTerminalLigatures", () => {
   it("registers the joiner that draws the programming ligatures", () => {
     const terminal = createMarvisTerminal() as unknown as FakeTerminal;
 
-    enableTerminalLigatures(terminal as never);
+    setTerminalLigatures(terminal as never, true);
 
     expect(terminal.joiner?.("a => b && c")).toEqual([
       [2, 4],
@@ -175,14 +199,28 @@ describe("enableTerminalLigatures", () => {
     ]);
   });
 
-  it("does not take the terminal down when xterm.js refuses the joiner", () => {
-    const terminal = {
-      registerCharacterJoiner: () => {
-        throw new Error("Terminal must be opened first");
-      },
-    };
+  it("takes the joiner back when the preference is switched off, and puts it back", () => {
+    const terminal = createMarvisTerminal() as unknown as FakeTerminal;
 
-    expect(() => enableTerminalLigatures(terminal as never)).not.toThrow();
+    setTerminalLigatures(terminal as never, true);
+    setTerminalLigatures(terminal as never, false);
+    expect(terminal.joiner).toBeNull();
+
+    setTerminalLigatures(terminal as never, true);
+    expect(terminal.joiner?.("a => b")).toEqual([[2, 4]]);
+    // Switching to the value the terminal is already on is a no-op, so a preference that is
+    // re-applied does not stack joiners.
+    setTerminalLigatures(terminal as never, true);
+    expect(terminal.joiners.size).toBe(1);
+  });
+
+  it("does not take the terminal down when xterm.js refuses the joiner", () => {
+    const terminal = createMarvisTerminal() as unknown as FakeTerminal;
+    terminal.joinerFailures = true;
+
+    expect(() => setTerminalLigatures(terminal as never, true)).not.toThrow();
+    // Nothing was registered, so nothing has to be taken back, and switching off is still safe.
+    expect(() => setTerminalLigatures(terminal as never, false)).not.toThrow();
   });
 });
 

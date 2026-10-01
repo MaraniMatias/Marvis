@@ -2,7 +2,7 @@
 import { computed, onMounted, onUnmounted, ref, watch } from "vue";
 import { Plus as PlusIcon } from "@lucide/vue";
 import type { Checkout, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
-import type { TerminalScrollbarMode } from "../domain/ui-state";
+import type { TerminalSettings } from "../domain/settings";
 import {
   addSessionToLayout,
   createTerminalLayout,
@@ -18,8 +18,8 @@ import TerminalSession from "./TerminalSession.vue";
 // Not a `withDefaults` block, and that is deliberate: `shellRequest` and `registeredSessionIds`
 // are optional because a caller that has neither says so by leaving them out, and a default of
 // `null` or `[]` would be a second way of saying the same thing that the watchers below cannot
-// tell apart from the real one. `visible` and `terminalScrollbar` are defaults for the same reason
-// TerminalSession has them: the pane is visible and the scrollbar is hidden unless told otherwise.
+// tell apart from the real one. `visible` is a default for the same reason TerminalSession has it:
+// the pane is visible unless told otherwise.
 const props = defineProps<{
   checkout: Checkout | null;
   activeSessionId: string | null;
@@ -27,7 +27,7 @@ const props = defineProps<{
   visible?: boolean;
   shellRequest?: { checkoutId: string; token: number } | null;
   registeredSessionIds?: string[];
-  terminalScrollbar?: TerminalScrollbarMode;
+  terminalSettings?: TerminalSettings;
   zoom?: number;
 }>();
 const isVisible = computed(() => props.visible ?? true);
@@ -271,7 +271,10 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
           :active="view.checkoutId === checkout?.id && view.key === activeView?.key"
           :visible="isVisible"
           :focused="isVisible && view.session?.id === activeSessionId"
-          :scrollbar="terminalScrollbar"
+          :scrollbar="terminalSettings?.scrollbar"
+          :font-size="terminalSettings?.fontSize ?? 16"
+          :ligatures="terminalSettings?.ligatures ?? true"
+          :cursor-blink="terminalSettings?.cursorBlink ?? true"
           :zoom="zoom"
           @created="onCreated(view.key, $event)"
           @closed="onClosed(view.key, $event)"

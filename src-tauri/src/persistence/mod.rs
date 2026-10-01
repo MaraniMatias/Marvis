@@ -28,10 +28,10 @@ const INSPECTOR_WIDTH_MIN: u32 = 200;
 const INSPECTOR_WIDTH_MAX: u32 = 480;
 const PREVIEW_WIDTH_MIN: u32 = 260;
 const PREVIEW_WIDTH_MAX: u32 = 900;
-/// The ends of the zoom steps the renderer walks. Kept here so a stored factor cannot come back
-/// out of the database as a scale no step in `src/domain/zoom.ts` names.
-const ZOOM_MIN: f64 = 0.8;
-const ZOOM_MAX: f64 = 1.5;
+/// The layout row is the window's own shape and nothing else. The preferences a person sets once
+/// — sizes, ligatures, the scale — live in `~/.marvis/config.yml`, which this shape was widened
+/// and narrowed once to make room for, before that file existed.
+const APP_LAYOUT_VERSION: u8 = 5;
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
@@ -41,20 +41,16 @@ pub struct AppLayoutState {
     pub sidebar_width: u32,
     pub inspector_width: u32,
     pub preview_width: u32,
-    pub terminal_scrollbar: String,
-    pub zoom: f64,
 }
 
 impl Default for AppLayoutState {
     fn default() -> Self {
         Self {
-            version: 4,
+            version: APP_LAYOUT_VERSION,
             mode: "focus".into(),
             sidebar_width: 240,
             inspector_width: 280,
             preview_width: 360,
-            terminal_scrollbar: "hidden".into(),
-            zoom: 1.0,
         }
     }
 }
@@ -65,15 +61,6 @@ impl AppLayoutState {
         if self.mode != "focus" && self.mode != "split" {
             self.mode = "focus".into();
         }
-        if !matches!(
-            self.terminal_scrollbar.as_str(),
-            "hidden" | "auto" | "always"
-        ) {
-            self.terminal_scrollbar = "hidden".into();
-        }
-        // The webview is told the scale as a plain factor, so anything outside the range the steps
-        // cover is clamped to its end rather than passed on to be drawn.
-        self.zoom = self.zoom.clamp(ZOOM_MIN, ZOOM_MAX);
         self.sidebar_width = self
             .sidebar_width
             .clamp(SIDEBAR_WIDTH_MIN, SIDEBAR_WIDTH_MAX);
@@ -712,7 +699,7 @@ impl Database {
         let layout = serde_json::from_str::<AppLayoutState>(&serialized)
             .ok()
             .map(AppLayoutState::normalized)
-            .filter(|layout| layout.version == 4)
+            .filter(|layout| layout.version == APP_LAYOUT_VERSION)
             .unwrap_or_default();
         if serde_json::to_string(&layout).map_err(|error| error.to_string())? != serialized {
             connection
@@ -724,7 +711,7 @@ impl Database {
 
     pub fn save_app_layout(&self, layout: &AppLayoutState) -> Result<(), String> {
         let layout = layout.clone().normalized();
-        if layout.version != 4 {
+        if layout.version != APP_LAYOUT_VERSION {
             return Err("saved UI layout has an unsupported version".into());
         }
         let serialized = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
@@ -2359,7 +2346,8 @@ mod tests {
     };
 
     use super::{
-        AppLayoutState, CheckoutUiState, Database, PersistedDocument, ReviewNote, SCHEMA_VERSION,
+        AppLayoutState, CheckoutUiState, Database, PersistedDocument, ReviewNote,
+        APP_LAYOUT_VERSION, SCHEMA_VERSION,
     };
 
     fn plain_repo(path: &Path, now: &str) -> Repo {
@@ -2550,8 +2538,6 @@ mod tests {
             sidebar_width: 340,
             inspector_width: 420,
             preview_width: 720,
-            terminal_scrollbar: "auto".into(),
-            zoom: 1.2,
             ..AppLayoutState::default()
         };
         database.save_app_layout(&layout).unwrap();
@@ -2742,12 +2728,11 @@ mod tests {
     #[test]
     fn app_layout_normalizes_dimensions_and_unknown_modes() {
         let layout = serde_json::from_value::<AppLayoutState>(serde_json::json!({
-            "version": 4,
+            "version": 5,
             "mode": "unknown",
             "sidebarWidth": 260,
             "inspectorWidth": 320,
-            "previewWidth": 1200,
-            "terminalScrollbar": "always"
+            "previewWidth": 1200
         }))
         .unwrap()
         .normalized();
@@ -2758,17 +2743,15 @@ mod tests {
                 sidebar_width: 260,
                 inspector_width: 320,
                 preview_width: 900,
-                terminal_scrollbar: "always".into(),
                 ..Default::default()
             }
         );
 
         let out_of_range = serde_json::from_value::<AppLayoutState>(serde_json::json!({
-            "version": 4,
+            "version": 5,
             "sidebarWidth": 220,
             "inspectorWidth": 560,
-            "previewWidth": 200,
-            "terminalScrollbar": "warp"
+            "previewWidth": 200
         }))
         .unwrap()
         .normalized();
@@ -2778,34 +2761,29 @@ mod tests {
                 sidebar_width: 240,
                 inspector_width: 480,
                 preview_width: 260,
-                terminal_scrollbar: "hidden".into(),
                 ..Default::default()
             }
         );
     }
 
     #[test]
-    fn app_layout_keeps_a_scale_inside_the_steps_and_clamps_one_outside_them() {
-        let inside = serde_json::from_value::<AppLayoutState>(serde_json::json!({
+    fn a_layout_row_from_before_the_settings_file_moved_out_is_refused_by_name() {
+        // Widths are the only thing this row holds now, so a row written when it also held the
+        // preferences is a shape this build cannot read. It is discarded whole rather than half
+        // honoured: a pane width nobody asked for is a smaller cost than one that silently means
+        // something else than it did.
+        let layout = serde_json::from_value::<AppLayoutState>(serde_json::json!({
             "version": 4,
-            "zoom": 1.3
+            "mode": "split",
+            "sidebarWidth": 340,
+            "inspectorWidth": 420,
+            "previewWidth": 720,
+            "terminalScrollbar": "auto",
+            "zoom": 1.2
         }))
         .unwrap()
         .normalized();
-        assert_eq!(inside.zoom, 1.3);
-
-        // The scale is the one field the webview is handed as a bare factor, so the only thing
-        // standing between a saved file and a window nobody can read is this clamp.
-        for (stored, clamped) in [(4.0, 1.5), (0.01, 0.8)] {
-            let zoom = serde_json::from_value::<AppLayoutState>(serde_json::json!({
-                "version": 4,
-                "zoom": stored
-            }))
-            .unwrap()
-            .normalized()
-            .zoom;
-            assert_eq!(zoom, clamped, "a stored {stored} came back as {zoom}");
-        }
+        assert_ne!(layout.version, APP_LAYOUT_VERSION);
     }
 
     #[test]

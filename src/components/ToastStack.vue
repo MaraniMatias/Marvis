@@ -82,7 +82,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   border-radius: var(--marvis-radius);
   background: var(--marvis-bg-2);
   color: var(--marvis-text);
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 1.4;
   pointer-events: auto;
 }

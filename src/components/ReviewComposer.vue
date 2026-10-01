@@ -47,7 +47,7 @@ function submit() {
     @submit.prevent="submit"
     @keydown.esc.stop.prevent="$emit('cancel')"
   >
-    <p class="mb-1 font-mono text-[10px] text-(--marvis-text-faint)">
+    <p class="mb-1 font-mono text-[0.625rem] text-(--marvis-text-faint)">
       {{ label }}
       <span v-if="code" class="ml-2 truncate text-(--marvis-text-secondary)" :title="code">{{ code }}</span>
     </p>
@@ -59,21 +59,21 @@ function submit() {
       placeholder="What should change here?"
       class="w-full resize-y rounded-sm border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none placeholder:text-(--marvis-text-faint) focus:border-(--marvis-text-faint)"
     />
-    <p v-if="isRange" class="mt-1 text-[10px] text-(--marvis-text-faint)">
+    <p v-if="isRange" class="mt-1 text-[0.625rem] text-(--marvis-text-faint)">
       This note covers the selected lines. Cancel to start over.
     </p>
-    <p v-if="error" role="alert" class="mt-1 text-[10px] text-(--marvis-red)">{{ error }}</p>
+    <p v-if="error" role="alert" class="mt-1 text-[0.625rem] text-(--marvis-red)">{{ error }}</p>
     <div class="mt-1 flex items-center gap-2">
       <button
         type="submit"
-        class="rounded-sm bg-(--marvis-border) px-2 py-0.5 text-[11px] text-(--marvis-text)"
+        class="rounded-sm bg-(--marvis-border) px-2 py-0.5 text-[0.6875rem] text-(--marvis-text)"
         :disabled="!content.trim()"
       >
         Save note
       </button>
       <button
         type="button"
-        class="rounded-sm px-2 py-0.5 text-[11px] text-(--marvis-text-faint) hover:text-(--marvis-text)"
+        class="rounded-sm px-2 py-0.5 text-[0.6875rem] text-(--marvis-text-faint) hover:text-(--marvis-text)"
         @click="$emit('cancel')"
       >
         Cancel

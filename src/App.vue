@@ -25,6 +25,7 @@ import TitlebarMenu from "./components/TitlebarMenu.vue";
 import ToastStack from "./components/ToastStack.vue";
 import ConfirmDialog from "./components/ConfirmDialog.vue";
 import WorktreeDialog from "./components/WorktreeDialog.vue";
+import SettingsDialog from "./components/SettingsDialog.vue";
 import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
 import { workdirTitle } from "./domain/workspace";
 import {
@@ -57,14 +58,22 @@ import {
   DEFAULT_CHECKOUT_UI_STATE,
   INSPECTOR_WIDTH_LIMITS,
   SIDEBAR_WIDTH_LIMITS,
-  TERMINAL_SCROLLBAR_MODES,
   needsInspectorDrawer,
   normalizeAppLayout,
   normalizeCheckoutUiState,
   resizeLayoutPanel,
 } from "./domain/ui-state";
-import type { AppLayoutState, CheckoutUiState, TerminalScrollbarMode } from "./domain/ui-state";
-import { loadAppLayout, loadCheckoutUiState, saveAppLayout, saveCheckoutUiState } from "./lib/ipc";
+import type { AppLayoutState, CheckoutUiState } from "./domain/ui-state";
+import { DEFAULT_SETTINGS, cloneSettings, normalizeSettings, uiFontScale } from "./domain/settings";
+import type { AppSettings } from "./domain/settings";
+import {
+  loadAppLayout,
+  loadCheckoutUiState,
+  loadSettings,
+  saveAppLayout,
+  saveCheckoutUiState,
+  saveSettings,
+} from "./lib/ipc";
 
 const {
   workspace,
@@ -87,11 +96,17 @@ const appShell = ref<HTMLElement | null>(null);
 const checkoutUiStates = ref<Record<string, CheckoutUiState>>({});
 const checkoutUiReady = ref(false);
 const mainPane = ref<InstanceType<typeof MainPane> | null>(null);
-const sidebarPanel = ref<{ resize(size: number): void } | null>(null);
+const sidebarVisible = ref(true);
+const sidebarPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
 const inspectorPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
 const viewportWidth = ref(window.innerWidth / DEFAULT_ZOOM);
+/** The preferences in `~/.marvis/config.yml`, in the shape the file has them in. */
+const settings = ref<AppSettings>(cloneSettings(DEFAULT_SETTINGS));
+const settingsButton = ref<HTMLButtonElement | null>(null);
+const settingsOpen = ref(false);
+const settingsSaving = ref(false);
 /** The scale the whole window is drawn at, which every measurement below has to agree with. */
-const appZoom = computed(() => appLayout.value.zoom);
+const appZoom = computed(() => settings.value.ui.zoom);
 const isNarrow = computed(
   () => appLayout.value.mode === "focus" && needsInspectorDrawer(appLayout.value, viewportWidth.value),
 );
@@ -354,23 +369,6 @@ const worktreeMenu = computed<TitlebarMenuSection[]>(() => {
   ];
 });
 
-/**
- * What the three scrollbar modes are called, in the order they are offered. The names are the
- * behaviour rather than a description of it, because the behaviour is the thing being chosen and
- * "Always" next to "Auto" is read correctly by somebody who has never seen a settings pane about
- * scrollbars before.
- */
-const TERMINAL_SCROLLBAR_LABELS: Record<TerminalScrollbarMode, string> = {
-  hidden: "Hidden",
-  auto: "Auto",
-  always: "Always",
-};
-
-function setTerminalScrollbar(mode: TerminalScrollbarMode) {
-  if (appLayout.value.terminalScrollbar === mode) return;
-  appLayout.value = { ...appLayout.value, terminalScrollbar: mode };
-}
-
 /** The subitems of the active workdir: the terminals it has open, and how to start another. */
 const terminalMenu = computed<TitlebarMenuSection[]>(() => {
   const checkout = activeCheckout.value;
@@ -384,22 +382,6 @@ const terminalMenu = computed<TitlebarMenuSection[]>(() => {
   }));
   return [
     { kind: "group", label: "Terminals", items: sessions },
-    { kind: "separator" },
-    {
-      kind: "group",
-      label: "Scrollbar",
-      // The word is on every row rather than only on the group header because the header is not
-      // searched: typing "scrollbar" into the menu has to leave these three standing, and a
-      // header alone would filter the group away and answer the question with an empty menu.
-      items: TERMINAL_SCROLLBAR_MODES.map((mode) => ({
-        id: `terminal-scrollbar-${mode}`,
-        label: TERMINAL_SCROLLBAR_LABELS[mode],
-        hint: "Scrollbar",
-        checked: appLayout.value.terminalScrollbar === mode,
-        choice: true,
-        run: () => setTerminalScrollbar(mode),
-      })),
-    },
     { kind: "separator" },
     {
       kind: "list",
@@ -565,6 +547,7 @@ function onAppKeydown(event: KeyboardEvent) {
     closeSplitInspector();
     return;
   }
+  if (!appLayoutReady.value || settingsOpen.value) return;
   const direction = zoomKeyFor(event);
   if (direction === undefined) return;
   // The webview is told the scale, and it does nothing with a `0` on its own, but the key is
@@ -572,6 +555,22 @@ function onAppKeydown(event: KeyboardEvent) {
   // types into whatever had the focus.
   event.preventDefault();
   setZoom(zoomStep(appZoom.value, direction), event.metaKey ? "Cmd" : "Ctrl");
+}
+
+/**
+ * ⌘B is the app's and nobody else's.
+ *
+ * This one listens on capture, which is the whole reason it works: by the time a keydown reaches
+ * the window on its way up, xterm has already turned it into input, and a shell reading ⌘B as
+ * backwards-char is exactly what a sidebar shortcut must not do. Stopping it here means neither
+ * the terminal nor the editor ever sees the key, whatever had the focus.
+ */
+function onSidebarKeydown(event: KeyboardEvent) {
+  if (event.altKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "b") return;
+  event.preventDefault();
+  event.stopPropagation();
+  sidebarVisible.value = !sidebarVisible.value;
+  sidebarPanel.value?.[sidebarVisible.value ? "expand" : "collapse"]();
 }
 
 let zoomToastId: number | undefined;
@@ -591,9 +590,87 @@ function announceZoom(zoom: Zoom, modifier: ZoomModifier) {
 function setZoom(zoom: Zoom, modifier: ZoomModifier) {
   // Already there: the key did something, so there is nothing to say about it.
   if (zoom === appZoom.value) return;
-  appLayout.value = { ...appLayout.value, zoom };
-  announceZoom(zoom, modifier);
+  // The scale responds immediately, but only a saved step is announced as the new preference.
+  void applySettings({ ...settings.value, ui: { ...settings.value.ui, zoom } }).then((saved) => {
+    if (saved) announceZoom(zoom, modifier);
+  });
 }
+
+/** The last set the file is known to carry, which is what a rejected write falls back to. */
+const savedSettings = ref<AppSettings>(cloneSettings(DEFAULT_SETTINGS));
+let settingsWrite: Promise<boolean> = Promise.resolve(true);
+let settingsRevision = 0;
+
+/**
+ * A preference takes effect at once and is written behind it, with the file as the arbiter.
+ *
+ * It cannot wait for the write before drawing: the window's scale is a gesture, and a gesture
+ * whose next step is computed from a value that has not landed yet is a gesture that only moves
+ * once per release. So the setting is adopted immediately and the write follows, queued rather
+ * than raced — two presses in a row have to reach the file in the order they were made, or the
+ * older set lands last and the next launch opens at the wrong size.
+ *
+ * A rejected write puts the window back to what the file does carry and says why. That is what
+ * makes Cancel in the dialog honest: there is never a state the window is showing and the file
+ * does not have, so there is nothing to roll back.
+ */
+function applySettings(next: AppSettings): Promise<boolean> {
+  const normalized = normalizeSettings(next);
+  const revision = ++settingsRevision;
+  settings.value = normalized;
+  settingsWrite = settingsWrite
+    .catch(() => false)
+    .then(async () => {
+      try {
+        await saveSettings(normalized);
+      } catch (cause) {
+        reportCause(cause);
+        // A newer preference may already be queued. Only the newest failed write may roll back
+        // the optimistic value; an older failure must not erase a later intent.
+        if (revision === settingsRevision) settings.value = cloneSettings(savedSettings.value);
+        return false;
+      }
+      savedSettings.value = cloneSettings(normalized);
+      return true;
+    });
+  return settingsWrite;
+}
+
+function restoreSettingsFocus() {
+  void nextTick(() => settingsButton.value?.focus());
+}
+
+function closeSettings() {
+  if (settingsSaving.value) return;
+  settingsOpen.value = false;
+  restoreSettingsFocus();
+}
+
+/** The dialog's own Apply: the one place that decides whether the dialog closes. */
+async function applyFromDialog(next: AppSettings) {
+  settingsSaving.value = true;
+  try {
+    if (await applySettings(next)) {
+      settingsOpen.value = false;
+      restoreSettingsFocus();
+    }
+  } finally {
+    settingsSaving.value = false;
+  }
+}
+
+/**
+ * The interface's own sizes are a ratio of one number rather than of the root's font size, because
+ * everything here is drawn in pixels: a base font size would move the padding and the icons with
+ * the text, and what a person changes in Settings is the text.
+ */
+watch(
+  () => settings.value.ui.fontSize,
+  (fontSize) => {
+    document.documentElement.style.setProperty("--marvis-ui-font-scale", String(uiFontScale(fontSize)));
+  },
+  { immediate: true },
+);
 
 /**
  * The window is scaled from the root element, so everything inside it is laid out in the space a
@@ -701,6 +778,13 @@ async function flushUiStateWrites() {
   }
   checkoutUiSaveTimers.clear();
   await uiStateWriteQueue;
+  // A close request leaves the webview alive until the flush finishes. If another settings action
+  // arrived during that wait, include its newer queue entry before allowing the window to close.
+  let revision: number;
+  do {
+    revision = settingsRevision;
+    await settingsWrite;
+  } while (revision !== settingsRevision);
 }
 
 function onSplitterLayout(sizes: number[]) {
@@ -782,6 +866,7 @@ watch(
 onMounted(async () => {
   window.addEventListener("resize", onViewportResize);
   window.addEventListener("keydown", onAppKeydown);
+  window.addEventListener("keydown", onSidebarKeydown, true);
   const currentWindow = getCurrentWindow();
   try {
     unlistenCloseRequested = await currentWindow.onCloseRequested(async (event) => {
@@ -809,7 +894,17 @@ onMounted(async () => {
   } catch (cause) {
     reportCause(cause);
     appLayout.value = { ...DEFAULT_APP_LAYOUT };
+  }
+  try {
+    settings.value = normalizeSettings(await loadSettings());
+    savedSettings.value = cloneSettings(settings.value);
+  } catch (cause) {
+    // The file is either not there yet or is not something this build can read. Either way the
+    // defaults are what the rest of the app draws with, and a broken file stays broken on disk
+    // rather than being replaced by them the next time anything is applied.
+    reportCause(cause);
   } finally {
+    // Do not expose Settings or accept zoom shortcuts until the saved set is known.
     appLayoutReady.value = true;
   }
   try {
@@ -836,6 +931,9 @@ onUnmounted(() => {
   unlistenWindowResized?.();
   window.removeEventListener("resize", onViewportResize);
   window.removeEventListener("keydown", onAppKeydown);
+  // The capture flag is part of the registration: a listener removed without it is not the one
+  // that was added, and this one would outlive the window it belongs to.
+  window.removeEventListener("keydown", onSidebarKeydown, true);
   unlistenFileActivity?.();
   if (inspectorCloseTimer !== undefined) window.clearTimeout(inspectorCloseTimer);
   if (uiLayoutSaveTimer !== undefined) window.clearTimeout(uiLayoutSaveTimer);
@@ -1252,10 +1350,12 @@ function reportWarning(message: string) {
         <Columns3Icon v-else class="icon-xs" aria-hidden="true" />
       </button>
       <button
+        ref="settingsButton"
         type="button"
         aria-label="Settings"
         data-testid="settings-button"
         class="icon-button shrink-0 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+        @click="settingsOpen = true"
       >
         <SettingsIcon class="icon-xs" aria-hidden="true" />
       </button>
@@ -1301,6 +1401,8 @@ function reportWarning(message: string) {
         :default-size="toScreen(appLayout.sidebarWidth)"
         :min-size="toScreen(SIDEBAR_WIDTH_LIMITS.min)"
         :max-size="toScreen(SIDEBAR_WIDTH_LIMITS.max)"
+        :collapsed-size="0"
+        collapsible
         size-unit="px"
         class="min-h-0 shrink-0"
       >
@@ -1326,6 +1428,7 @@ function reportWarning(message: string) {
         />
       </SplitterPanel>
       <SplitterResizeHandle
+        v-show="sidebarVisible"
         id="navigation-resize-handle"
         aria-label="Resize navigation sidebar"
         class="splitter-handle"
@@ -1348,8 +1451,9 @@ function reportWarning(message: string) {
           :view="activeMainView"
           :split="isSplitLayout"
           :preview-width="appLayout.previewWidth"
-          :terminal-scrollbar="appLayout.terminalScrollbar"
-          :zoom="appLayout.zoom"
+          :zoom="appZoom"
+          :terminal-settings="settings.terminal"
+          :editor-settings="settings.editor"
           :ready="checkoutUiReady"
           :git-snapshot="gitSnapshot"
           :review="review"
@@ -1444,6 +1548,13 @@ function reportWarning(message: string) {
       @workspace-updated="applyWorkspace"
       @request-shell="requestShell"
       @warning="reportWarning"
+    />
+    <SettingsDialog
+      :open="settingsOpen"
+      :settings="settings"
+      :saving="settingsSaving"
+      @close="closeSettings"
+      @apply="applyFromDialog"
     />
     <ToastStack />
   </div>

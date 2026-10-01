@@ -2,24 +2,20 @@ import { describe, expect, it } from "vitest";
 import {
   DEFAULT_APP_LAYOUT,
   DEFAULT_CHECKOUT_UI_STATE,
-  TERMINAL_SCROLLBAR_MODES,
   normalizeAppLayout,
   normalizeCheckoutUiState,
   needsInspectorDrawer,
   resizeLayoutPanel,
 } from "./ui-state";
-import { ZOOM_STEPS } from "./zoom";
 
 describe("persisted UI state", () => {
   it("keeps the marvis default panel widths", () => {
     expect(DEFAULT_APP_LAYOUT).toEqual({
-      version: 4,
+      version: 5,
       mode: "focus",
       sidebarWidth: 240,
       inspectorWidth: 280,
       previewWidth: 360,
-      terminalScrollbar: "hidden",
-      zoom: 1,
     });
   });
 
@@ -30,8 +26,6 @@ describe("persisted UI state", () => {
       sidebarWidth: 340,
       inspectorWidth: 420,
       previewWidth: 720,
-      terminalScrollbar: "auto" as const,
-      zoom: 1.2 as const,
     };
     expect(normalizeAppLayout(JSON.parse(JSON.stringify(saved)))).toEqual(saved);
     expect(
@@ -48,44 +42,28 @@ describe("persisted UI state", () => {
   it("uses defaults for unknown versions and clamps corrupt dimensions", () => {
     expect(normalizeAppLayout({ version: 1, mode: "split", sidebarWidth: 400 })).toEqual(DEFAULT_APP_LAYOUT);
     expect(normalizeAppLayout({ version: 9 })).toEqual(DEFAULT_APP_LAYOUT);
-    // The layout a version-3 build wrote is refused whole: it has no scale in it, and reading the
-    // widths out of it anyway would hand back a window somebody had already arranged.
-    expect(normalizeAppLayout({ version: 3, sidebarWidth: 345, inspectorWidth: 450, previewWidth: 720 })).toEqual(
-      DEFAULT_APP_LAYOUT,
-    );
-    expect(normalizeAppLayout({ version: 4, sidebarWidth: 900, inspectorWidth: -1, previewWidth: 1200 })).toEqual({
-      version: 4,
+    // A layout written before the preferences moved to `~/.marvis/config.yml` is refused whole: it
+    // is a shape this build cannot read, and honouring the widths out of it anyway would hand back
+    // a window somebody had already arranged around a scale that is gone.
+    expect(
+      normalizeAppLayout({
+        version: 4,
+        mode: "split",
+        sidebarWidth: 345,
+        inspectorWidth: 450,
+        previewWidth: 720,
+        terminalScrollbar: "auto",
+        zoom: 1.2,
+      }),
+    ).toEqual(DEFAULT_APP_LAYOUT);
+    expect(normalizeAppLayout({ version: 5, sidebarWidth: 900, inspectorWidth: -1, previewWidth: 1200 })).toEqual({
+      version: 5,
       mode: "focus",
       sidebarWidth: 500,
       inspectorWidth: 200,
       previewWidth: 900,
-      terminalScrollbar: "hidden",
-      zoom: 1,
     });
-    expect(normalizeAppLayout({ version: 4 })).toEqual(DEFAULT_APP_LAYOUT);
-  });
-
-  it("keeps a scale it can draw and snaps one it cannot to the nearest step", () => {
-    for (const zoom of ZOOM_STEPS) {
-      expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, zoom }).zoom).toBe(zoom);
-    }
-    // The scale is a preference for the same reason the scrollbar is: a factor from a build with a
-    // different range in it is still an answer, and the nearest step is what this build can draw.
-    expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, zoom: 2.4 }).zoom).toBe(1.5);
-    expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, zoom: 0.2 }).zoom).toBe(0.8);
-    expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, zoom: "big" }).zoom).toBe(1);
-  });
-
-  it("keeps a scrollbar mode it knows and falls back to hidden for one it does not", () => {
-    for (const mode of TERMINAL_SCROLLBAR_MODES) {
-      expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, terminalScrollbar: mode }).terminalScrollbar).toBe(mode);
-    }
-    // The scrollbar is a preference and not state worth refusing a whole layout over, so only this
-    // field is replaced: a name from a build that no longer exists leaves the panels as they were.
-    expect(normalizeAppLayout({ ...DEFAULT_APP_LAYOUT, sidebarWidth: 400, terminalScrollbar: "warp" })).toMatchObject({
-      sidebarWidth: 400,
-      terminalScrollbar: "hidden",
-    });
+    expect(normalizeAppLayout({ version: 5 })).toEqual(DEFAULT_APP_LAYOUT);
   });
 
   it("clamps user resizing to the supported range", () => {

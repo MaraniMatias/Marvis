@@ -4,8 +4,11 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, inject, onMounted } from "vue";
+import type { InjectionKey, Ref } from "vue";
 import { DEFAULT_APP_LAYOUT, DEFAULT_CHECKOUT_UI_STATE } from "./domain/ui-state";
 import type { AppLayoutState } from "./domain/ui-state";
+import { DEFAULT_SETTINGS, SETTINGS_SECTIONS, cloneSettings } from "./domain/settings";
+import type { AppSettings } from "./domain/settings";
 import type { ReviewNote } from "./domain/review";
 import { REVIEW_SENDER } from "./presentation/review-notes";
 import { useToasts } from "./presentation/toasts";
@@ -18,6 +21,8 @@ const mocks = vi.hoisted(() => ({
   sessionPaneMounts: 0,
   saveAppLayout: vi.fn(),
   loadAppLayout: vi.fn(),
+  saveSettings: vi.fn(),
+  loadSettings: vi.fn(),
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
   loadReviewTarget: vi.fn(),
@@ -64,7 +69,7 @@ const mocks = vi.hoisted(() => ({
 }));
 
 vi.mock("reka-ui", async () => {
-  const { defineComponent, h } = await import("vue");
+  const { computed, defineComponent, h, inject, provide } = await import("vue");
   const SplitterGroup = defineComponent({
     name: "SplitterGroup",
     emits: ["layout"],
@@ -134,10 +139,80 @@ vi.mock("reka-ui", async () => {
         });
     },
   });
+  // The Settings dialog's pickers are the only selects in the shell, and they are stubbed as a
+  // list that is always open: the trigger carries the testid and the current value, and a row
+  // reports a choice, which is what clicking one does.
+  // Typed on the symbol rather than at each `inject`, so the trigger and the rows cannot disagree
+  // about the shape of what the root provides.
+  const selected = Symbol("selected") as InjectionKey<{
+    value: Readonly<Ref<string | undefined>>;
+    choose: (value: string) => void;
+  }>;
+  const SelectRoot = defineComponent({
+    name: "SelectRoot",
+    props: { modelValue: String },
+    emits: ["update:modelValue"],
+    setup(props, { emit, slots }) {
+      provide(selected, {
+        value: computed(() => props.modelValue),
+        choose: (value: string) => emit("update:modelValue", value),
+      });
+      return () => slots.default?.();
+    },
+  });
+  const SelectTrigger = defineComponent({
+    name: "SelectTrigger",
+    inheritAttrs: false,
+    setup(_, { attrs, slots }) {
+      return () => h("button", attrs, slots.default?.());
+    },
+  });
+  const SelectValue = defineComponent({
+    name: "SelectValue",
+    setup() {
+      const current = inject(selected)!;
+      return () => current.value.value;
+    },
+  });
+  const SelectItem = defineComponent({
+    name: "SelectItem",
+    props: { value: String },
+    setup(props, { slots }) {
+      const current = inject(selected)!;
+      return () =>
+        h(
+          "button",
+          {
+            type: "button",
+            "data-value": props.value,
+            onClick: () => current.choose(props.value ?? ""),
+          },
+          slots.default?.(),
+        );
+    },
+  });
+  const selectPassThrough = (name: string) =>
+    defineComponent({
+      name,
+      inheritAttrs: false,
+      setup(_, { attrs, slots }) {
+        return () => h("div", attrs, slots.default?.());
+      },
+    });
+
   return {
     SplitterGroup,
     SplitterPanel,
     SplitterResizeHandle,
+    SelectRoot,
+    SelectTrigger,
+    SelectValue,
+    SelectContent: selectPassThrough("SelectContent"),
+    SelectPortal: selectPassThrough("SelectPortal"),
+    SelectViewport: selectPassThrough("SelectViewport"),
+    SelectItem,
+    SelectItemIndicator: selectPassThrough("SelectItemIndicator"),
+    SelectItemText: selectPassThrough("SelectItemText"),
     DropdownMenuRoot: menuRoot,
     DropdownMenuTrigger: passThrough("DropdownMenuTrigger"),
     DropdownMenuContent: passThrough("DropdownMenuContent"),
@@ -175,6 +250,8 @@ vi.mock("./lib/ipc", () => ({
   loadCheckoutUiState: mocks.loadCheckoutUiState,
   renameTerminal: mocks.renameTerminal,
   saveAppLayout: mocks.saveAppLayout,
+  loadSettings: mocks.loadSettings,
+  saveSettings: mocks.saveSettings,
   saveCheckoutUiState: mocks.saveCheckoutUiState,
   saveReviewTarget: mocks.saveReviewTarget,
   // The real command returns the refreshed workspace; App assigns it straight back,
@@ -475,10 +552,12 @@ function workspaceWith(...checkouts: Checkout[]): WorkspaceState {
 async function mountApp(
   workspace: WorkspaceState,
   layout: AppLayoutState = { ...DEFAULT_APP_LAYOUT },
-  options: { attachTo?: HTMLElement } = {},
+  options: { attachTo?: HTMLElement; settings?: AppSettings; settingsLoad?: Promise<AppSettings> } = {},
 ) {
   mocks.initialWorkspace = workspace;
   mocks.loadAppLayout.mockResolvedValue(layout);
+  if (options.settingsLoad) mocks.loadSettings.mockReturnValue(options.settingsLoad);
+  else mocks.loadSettings.mockResolvedValue(options.settings ?? cloneSettings(DEFAULT_SETTINGS));
   const wrapper = mount(App, {
     attachTo: options.attachTo,
     global: {
@@ -496,6 +575,7 @@ async function mountApp(
   await vi.advanceTimersByTimeAsync(300);
   await flushPromises();
   mocks.saveAppLayout.mockClear();
+  mocks.saveSettings.mockClear();
   mocks.saveCheckoutUiState.mockClear();
   return wrapper;
 }
@@ -521,6 +601,7 @@ describe("App UI integration", () => {
     mocks.ackFinishedTurn.mockReset();
     if (mocks.turns) mocks.turns.value = 0;
     mocks.loadAppLayout.mockResolvedValue({ ...DEFAULT_APP_LAYOUT });
+    mocks.loadSettings.mockResolvedValue(cloneSettings(DEFAULT_SETTINGS));
     mocks.listRecentPaths.mockResolvedValue([]);
     mocks.selectCheckout.mockImplementation(async (checkoutId: string | null) => {
       const workspace = mocks.workspaceRef;
@@ -529,6 +610,7 @@ describe("App UI integration", () => {
     });
     mocks.loadCheckoutUiState.mockResolvedValue({ ...DEFAULT_CHECKOUT_UI_STATE });
     mocks.saveAppLayout.mockResolvedValue(undefined);
+    mocks.saveSettings.mockResolvedValue(undefined);
     mocks.saveCheckoutUiState.mockResolvedValue(undefined);
     mocks.loadReviewTarget.mockResolvedValue("markdown");
     mocks.saveReviewTarget.mockResolvedValue(undefined);
@@ -557,6 +639,7 @@ describe("App UI integration", () => {
     // The scale is written to the document rather than to the app, so it outlives the component
     // that set it and would be the next test's starting point.
     document.documentElement.style.removeProperty("zoom");
+    document.documentElement.style.removeProperty("--marvis-ui-font-scale");
     vi.useRealTimers();
   });
 
@@ -802,36 +885,6 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
-    it("offers the three scrollbar modes from the terminal crumb and keeps the one that is picked", async () => {
-      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
-
-      // The terminal crumb is where this lives rather than behind a settings button, for the same
-      // reason the rest of it is there: it is a choice about the terminal, it is one click from the
-      // pane it changes, and there is no settings surface in the app for it to live in.
-      const rows = wrapper.findAll('[data-testid^="menu-item-terminal-scrollbar-"]');
-      expect(rows.map((row) => row.text())).toEqual(["HiddenScrollbar", "AutoScrollbar", "AlwaysScrollbar"]);
-      // These are one of three answers, so they say so: a reader is told each row's state rather
-      // than only being shown a mark on one of them, which is the difference between knowing the
-      // current mode and knowing there are modes.
-      expect(rows.map((row) => [row.attributes("role"), row.attributes("aria-checked")])).toEqual([
-        ["menuitemradio", "true"],
-        ["menuitemradio", "false"],
-        ["menuitemradio", "false"],
-      ]);
-      expect(rows[0]!.find(".menu-check").exists()).toBe(true);
-      expect(rows[0]!.find(".menu-check").attributes("aria-hidden")).toBe("true");
-      expect(rows[1]!.find(".menu-check").exists()).toBe(false);
-
-      await wrapper.get('[data-testid="menu-item-terminal-scrollbar-always"]').trigger("click");
-      await vi.advanceTimersByTimeAsync(300);
-      await flushPromises();
-
-      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({ ...DEFAULT_APP_LAYOUT, terminalScrollbar: "always" });
-      const afterPick = wrapper.findAll('[data-testid^="menu-item-terminal-scrollbar-"]');
-      expect(afterPick.map((row) => row.attributes("aria-checked"))).toEqual(["false", "false", "true"]);
-      wrapper.unmount();
-    });
-
     it("draws a file path as the steps it is made of", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
 
@@ -986,12 +1039,16 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
-    it("keeps the settings gear without an action behind it", async () => {
+    it("names the settings gear for a screen reader", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
 
       const settings = wrapper.get('[data-testid="settings-button"]');
       expect(settings.attributes("aria-label")).toBe("Settings");
       expect(settings.find("svg").exists()).toBe(true);
+      // The dialog itself is asserted in its own block; what belongs here is that the gear opens
+      // one at all rather than sitting there.
+      await settings.trigger("click");
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(true);
       wrapper.unmount();
     });
 
@@ -1186,13 +1243,11 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 4,
+        version: 5,
         mode: "focus",
         sidebarWidth: 310,
         inspectorWidth: 340,
         previewWidth: 360,
-        terminalScrollbar: "hidden",
-        zoom: 1,
       });
       wrapper.unmount();
     });
@@ -1205,13 +1260,11 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 4,
+        version: 5,
         mode: "focus",
         sidebarWidth: 500,
         inspectorWidth: 200,
         previewWidth: 360,
-        terminalScrollbar: "hidden",
-        zoom: 1,
       });
       wrapper.unmount();
     });
@@ -1221,13 +1274,11 @@ describe("App UI integration", () => {
       // this one is stored as `always`: a preference read back as the default would be invisible
       // everywhere else, because the default is what a layout with no preference in it gives.
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 4,
+        version: 5,
         mode: "focus",
         sidebarWidth: 345,
         inspectorWidth: 450,
         previewWidth: 360,
-        terminalScrollbar: "always",
-        zoom: 1,
       });
       const group = wrapper.getComponent(SplitterGroup);
       const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
@@ -1242,26 +1293,22 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 4,
+        version: 5,
         mode: "focus",
         sidebarWidth: 400,
         inspectorWidth: 450,
         previewWidth: 360,
-        terminalScrollbar: "always",
-        zoom: 1,
       });
       wrapper.unmount();
     });
 
     it("lets double-click on a handle reset just that panel", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 4,
+        version: 5,
         mode: "focus",
         sidebarWidth: 345,
         inspectorWidth: 450,
         previewWidth: 360,
-        terminalScrollbar: "hidden",
-        zoom: 1,
       });
       const resizeCalls = vi.fn();
       mocks.onProgrammaticPanelResize = resizeCalls;
@@ -1275,26 +1322,22 @@ describe("App UI integration", () => {
       await vi.advanceTimersByTimeAsync(300);
       await flushPromises();
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 4,
+        version: 5,
         mode: "focus",
         sidebarWidth: DEFAULT_APP_LAYOUT.sidebarWidth,
         inspectorWidth: 450,
         previewWidth: 360,
-        terminalScrollbar: "hidden",
-        zoom: 1,
       });
       wrapper.unmount();
     });
 
     it("gives the inspector its full width back when space returns", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 4,
+        version: 5,
         mode: "focus",
         sidebarWidth: 300,
         inspectorWidth: 300,
         previewWidth: 360,
-        terminalScrollbar: "hidden",
-        zoom: 1,
       });
       const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
       const resizeCalls = vi.fn();
@@ -1445,6 +1488,10 @@ describe("App UI integration", () => {
     };
     const scale = () => document.documentElement.style.getPropertyValue("zoom");
     const { toasts } = useToasts();
+    const settingsAtZoom = (zoom: number): AppSettings => ({
+      ...cloneSettings(DEFAULT_SETTINGS),
+      ui: { ...DEFAULT_SETTINGS.ui, zoom: zoom as AppSettings["ui"]["zoom"] },
+    });
 
     it("scales the window one step and says where it landed", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
@@ -1456,7 +1503,34 @@ describe("App UI integration", () => {
       expect(toasts.value.map((toast) => toast.message)).toEqual(["Zoom 110% (Cmd 0 to reset)"]);
       await vi.advanceTimersByTimeAsync(300);
       await flushPromises();
-      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({ ...DEFAULT_APP_LAYOUT, zoom: 1.1 });
+      expect(mocks.saveSettings).toHaveBeenLastCalledWith(settingsAtZoom(1.1));
+      wrapper.unmount();
+    });
+
+    it("does not let an older failed write roll back a newer zoom step", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      let rejectFirst!: (error: Error) => void;
+      let resolveSecond!: () => void;
+      mocks.saveSettings
+        .mockImplementationOnce(() => new Promise<void>((_, reject) => (rejectFirst = reject)))
+        .mockImplementationOnce(() => new Promise<void>((resolve) => (resolveSecond = resolve)));
+
+      press({ key: "+", metaKey: true });
+      press({ key: "+", metaKey: true });
+      await flushPromises();
+      expect(scale()).toBe("1.2");
+      expect(mocks.saveSettings).toHaveBeenCalledTimes(1);
+
+      rejectFirst(new Error("older write failed"));
+      await flushPromises();
+      expect(mocks.saveSettings).toHaveBeenCalledTimes(2);
+      expect(scale()).toBe("1.2");
+
+      resolveSecond();
+      await flushPromises();
+      expect(scale()).toBe("1.2");
+      expect(mocks.saveSettings).toHaveBeenLastCalledWith(settingsAtZoom(1.2));
+      expect(toasts.value.at(-1)?.message).toBe("Zoom 120% (Cmd 0 to reset)");
       wrapper.unmount();
     });
 
@@ -1500,7 +1574,11 @@ describe("App UI integration", () => {
     });
 
     it("says nothing when the key cannot move the scale any further", async () => {
-      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), { ...DEFAULT_APP_LAYOUT, zoom: 1.5 });
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { settings: { ...structuredClone(DEFAULT_SETTINGS), ui: { ...DEFAULT_SETTINGS.ui, zoom: 1.5 } } },
+      );
       expect(scale()).toBe("1.5");
 
       press({ key: "+", metaKey: true });
@@ -1537,7 +1615,11 @@ describe("App UI integration", () => {
     });
 
     it("comes back at the scale it was left at, and lays the window out in that space", async () => {
-      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), { ...DEFAULT_APP_LAYOUT, zoom: 1.5 });
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { settings: { ...structuredClone(DEFAULT_SETTINGS), ui: { ...DEFAULT_SETTINGS.ui, zoom: 1.5 } } },
+      );
 
       expect(scale()).toBe("1.5");
       expect(wrapper.findComponent({ name: "MainPane" }).props("zoom")).toBe(1.5);
@@ -1553,7 +1635,11 @@ describe("App UI integration", () => {
     });
 
     it("stores the panel widths in the app's pixels rather than the window's", async () => {
-      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), { ...DEFAULT_APP_LAYOUT, zoom: 1.2 });
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { settings: { ...structuredClone(DEFAULT_SETTINGS), ui: { ...DEFAULT_SETTINGS.ui, zoom: 1.2 } } },
+      );
       const resizeCalls = vi.fn();
       mocks.onProgrammaticPanelResize = resizeCalls;
 
@@ -1563,7 +1649,6 @@ describe("App UI integration", () => {
       await flushPromises();
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
         ...DEFAULT_APP_LAYOUT,
-        zoom: 1.2,
         sidebarWidth: 250,
         inspectorWidth: 250,
       });
@@ -1804,14 +1889,21 @@ describe("App UI integration", () => {
     wrapper.unmount();
   });
 
-  it("waits for queued persistence before allowing a native close", async () => {
+  it("waits for queued UI and settings writes before allowing a native close", async () => {
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
-    let resolveWrite!: () => void;
-    mocks.saveAppLayout.mockImplementation(() => new Promise<void>((resolve) => (resolveWrite = resolve)));
+    let resolveLayoutWrite!: () => void;
+    let resolveFirstSettingsWrite!: () => void;
+    let resolveSecondSettingsWrite!: () => void;
+    mocks.saveAppLayout.mockImplementation(() => new Promise<void>((resolve) => (resolveLayoutWrite = resolve)));
+    mocks.saveSettings
+      .mockImplementationOnce(() => new Promise<void>((resolve) => (resolveFirstSettingsWrite = resolve)))
+      .mockImplementationOnce(() => new Promise<void>((resolve) => (resolveSecondSettingsWrite = resolve)));
     wrapper.getComponent(SplitterGroup).vm.$emit("layout", [320, 700, 300]);
     await vi.advanceTimersByTimeAsync(300);
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "+", metaKey: true, cancelable: true }));
     await flushPromises();
     expect(mocks.saveAppLayout).toHaveBeenCalled();
+    expect(mocks.saveSettings).toHaveBeenCalled();
 
     const preventDefault = vi.fn();
     const closeHandler = mocks.onCloseRequested!;
@@ -1820,9 +1912,383 @@ describe("App UI integration", () => {
     await flushPromises();
     expect(preventDefault).toHaveBeenCalledOnce();
     expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
-    resolveWrite();
+
+    // A later preference action can arrive while the prevented close is flushing earlier work.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "+", metaKey: true, cancelable: true }));
+    await flushPromises();
+    resolveLayoutWrite();
+    await flushPromises();
+    expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
+    resolveFirstSettingsWrite();
+    await flushPromises();
+    expect(mocks.saveSettings).toHaveBeenCalledTimes(2);
+    expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
+    resolveSecondSettingsWrite();
     await Promise.all([closing, duplicateClose]);
     expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
     wrapper.unmount();
+  });
+  describe("the sidebar shortcut", () => {
+    const pressInSidebar = (init: KeyboardEventInit) => {
+      const event = new KeyboardEvent("keydown", { cancelable: true, bubbles: true, ...init });
+      wrapper.get("#navigation-panel").element.dispatchEvent(event);
+      return event;
+    };
+    let wrapper: Awaited<ReturnType<typeof mountApp>>;
+
+    beforeEach(async () => {
+      // Attached, because the assertion below is about where a keydown stops: a tree that is not in
+      // the document has no capture path from a panel to the window at all.
+      wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { attachTo: document.body },
+      );
+    });
+
+    it("collapses and brings back the navigation panel on Cmd+B", async () => {
+      const panel = wrapper.findAllComponents({ name: "SplitterPanel" })[0]!;
+
+      expect(pressInSidebar({ key: "b", metaKey: true }).defaultPrevented).toBe(true);
+      await flushPromises();
+      expect(panel.emitted("collapse")).toBeTruthy();
+
+      pressInSidebar({ key: "b", metaKey: true });
+      await flushPromises();
+      expect(panel.emitted("expand")).toBeTruthy();
+      wrapper.unmount();
+    });
+
+    it("takes the handle away with the panel, so a hidden sidebar has nothing to grab", async () => {
+      const handle = () => wrapper.findAll("#navigation-resize-handle")[0];
+
+      expect(handle().isVisible()).toBe(true);
+      pressInSidebar({ key: "b", metaKey: true });
+      await flushPromises();
+      expect(handle().exists() && handle().isVisible()).toBe(false);
+      wrapper.unmount();
+    });
+
+    it("stops the key before the terminal or the editor can read it as input", async () => {
+      // The whole reason the listener is on capture: by the time a keydown reaches the window on
+      // its way up, xterm has already turned it into input, and a shell reading Cmd+B as
+      // backwards-char is the failure this shortcut exists to prevent.
+      const seenByTerminal: string[] = [];
+      (wrapper.get("#navigation-panel").element as HTMLElement).addEventListener("keydown", (event) => {
+        seenByTerminal.push((event as KeyboardEvent).key);
+      });
+
+      pressInSidebar({ key: "b", metaKey: true });
+      await flushPromises();
+
+      expect(seenByTerminal).toEqual([]);
+      wrapper.unmount();
+    });
+
+    it("stops listening once the window it belongs to is gone", async () => {
+      const removed = vi.spyOn(window, "removeEventListener");
+
+      wrapper.unmount();
+
+      // The capture flag is part of the registration: a listener removed without it is not the one
+      // that was added, and this one would outlive the window and keep swallowing Cmd+B.
+      expect(removed).toHaveBeenCalledWith("keydown", expect.any(Function), true);
+      removed.mockRestore();
+    });
+
+    it("is Ctrl+B where Cmd is not the key, and leaves a plain b alone", async () => {
+      pressInSidebar({ key: "b", ctrlKey: true });
+      await flushPromises();
+      expect(wrapper.findAllComponents({ name: "SplitterPanel" })[0]!.emitted("collapse")).toBeTruthy();
+
+      pressInSidebar({ key: "b", metaKey: true });
+      await flushPromises();
+      expect(wrapper.findAllComponents({ name: "SplitterPanel" })[0]!.emitted("collapse")).toHaveLength(1);
+
+      const plain = pressInSidebar({ key: "b" });
+      expect(plain.defaultPrevented).toBe(false);
+      await flushPromises();
+      expect(wrapper.findAllComponents({ name: "SplitterPanel" })[0]!.emitted("collapse")).toHaveLength(1);
+      wrapper.unmount();
+    });
+  });
+  describe("the settings dialog", () => {
+    const openSettings = async (settings = DEFAULT_SETTINGS) => {
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        {
+          settings: cloneSettings(settings),
+        },
+      );
+      await wrapper.get('[data-testid="settings-button"]').trigger("click");
+      return wrapper;
+    };
+
+    it("keeps settings hidden and zoom inert until the saved preferences load", async () => {
+      let resolveSettings!: (settings: AppSettings) => void;
+      const settingsLoad = new Promise<AppSettings>((resolve) => (resolveSettings = resolve));
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { settingsLoad },
+      );
+
+      expect(wrapper.find('[data-testid="settings-button"]').exists()).toBe(false);
+      const zoom = new KeyboardEvent("keydown", { key: "+", metaKey: true, cancelable: true });
+      window.dispatchEvent(zoom);
+      expect(zoom.defaultPrevented).toBe(false);
+      expect(mocks.saveSettings).not.toHaveBeenCalled();
+
+      resolveSettings({ ...cloneSettings(DEFAULT_SETTINGS), ui: { fontSize: 18, zoom: 1 } });
+      await flushPromises();
+      expect(wrapper.find('[data-testid="settings-button"]').exists()).toBe(true);
+      expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe(String(18 / 14));
+      wrapper.unmount();
+    });
+
+    it("opens off the gear, draws a control for every preference, and closes on Cancel", async () => {
+      const wrapper = await openSettings();
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(true);
+
+      // Every field in the schema has a control, and no control is drawn for anything else: the
+      // form is the schema, and the test reads the schema rather than a copy of it.
+      for (const section of SETTINGS_SECTIONS) {
+        for (const field of section.fields) {
+          const control = `settings-${field.path.replaceAll(".", "-")}`;
+          // Inputs are labelled by `for`/`id` and pickers by the testid their trigger carries, so
+          // the check asks for either rather than making the test know which kind of field it is.
+          expect(wrapper.find(`#${control}, [data-testid="${control}"]`).exists(), field.path).toBe(true);
+        }
+      }
+
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Cancel")!
+        .trigger("click");
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+      expect(mocks.saveSettings).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("moves focus into the dialog, traps Tab, and restores the gear on close", async () => {
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { attachTo: document.body },
+      );
+      const gear = wrapper.get('[data-testid="settings-button"]').element;
+      await wrapper.get('[data-testid="settings-button"]').trigger("click");
+      await flushPromises();
+
+      expect(document.activeElement).toBe(wrapper.get("button[autofocus]").element);
+      const apply = wrapper.findAll("button").find((button) => button.text() === "Apply")!.element;
+      apply.focus();
+      apply.dispatchEvent(new KeyboardEvent("keydown", { key: "Tab", bubbles: true, cancelable: true }));
+      expect(document.activeElement).toBe(wrapper.get('button[aria-label="Close"]').element);
+
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Cancel")!
+        .trigger("click");
+      await flushPromises();
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+      expect(document.activeElement).toBe(gear);
+      wrapper.unmount();
+    });
+
+    it("locks the draft while saving, ignores zoom, and retains it after a failed save", async () => {
+      let rejectSave!: (error: Error) => void;
+      mocks.saveSettings.mockImplementationOnce(() => new Promise<void>((_, reject) => (rejectSave = reject)));
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { attachTo: document.body },
+      );
+      await wrapper.get('[data-testid="settings-button"]').trigger("click");
+      const fontSize = wrapper.get("#settings-editor-fontSize");
+      await fontSize.setValue("15");
+      await fontSize.trigger("change");
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Apply")!
+        .trigger("click");
+      await flushPromises();
+
+      expect(fontSize.attributes("disabled")).toBeDefined();
+      expect(wrapper.get("button[aria-label=Close]").attributes("disabled")).toBeDefined();
+      expect(
+        wrapper
+          .findAll("button")
+          .find((button) => button.text() === "Cancel")!
+          .attributes("disabled"),
+      ).toBeDefined();
+      expect(
+        wrapper
+          .findAll("button")
+          .find((button) => button.text() === "Reset to defaults")!
+          .attributes("disabled"),
+      ).toBeDefined();
+      expect(wrapper.find('[role="dialog"]').attributes("aria-busy")).toBe("true");
+      const zoom = new KeyboardEvent("keydown", { key: "+", metaKey: true, cancelable: true });
+      window.dispatchEvent(zoom);
+      expect(mocks.saveSettings).toHaveBeenCalledOnce();
+      expect(document.documentElement.style.getPropertyValue("zoom")).toBe("1");
+      await wrapper.get('[role="dialog"]').trigger("keydown", { key: "Escape" });
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(true);
+
+      rejectSave(new Error("settings write failed"));
+      await flushPromises();
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(true);
+      expect((wrapper.get("#settings-editor-fontSize").element as HTMLInputElement).value).toBe("15");
+      expect(wrapper.get("#settings-editor-fontSize").attributes("disabled")).toBeUndefined();
+      wrapper.unmount();
+    });
+
+    it("writes the whole set and takes effect at once, without waiting for the file", async () => {
+      const wrapper = await openSettings();
+      const fontSize = wrapper.get("#settings-ui-fontSize");
+      await fontSize.setValue("18");
+      await fontSize.trigger("change");
+
+      // The draft is the dialog's own until Apply, so nothing on screen has moved yet.
+      expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe("1");
+
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Apply")!
+        .trigger("click");
+      await flushPromises();
+      // Applied, the whole type scale on the document moves: the window is redrawn at 18/14 of
+      // the size it was drawn at, with no reload and without waiting for the file to be written.
+      expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe(String(18 / 14));
+      expect(mocks.saveSettings).toHaveBeenCalledWith({
+        ...DEFAULT_SETTINGS,
+        ui: { ...DEFAULT_SETTINGS.ui, fontSize: 18 },
+      });
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
+      wrapper.unmount();
+    });
+
+    it("says nothing has been written when Cancel throws the draft away", async () => {
+      const wrapper = await openSettings();
+      const fontSize = wrapper.get("#settings-terminal-fontSize");
+      await fontSize.setValue("20");
+      await fontSize.trigger("change");
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Cancel")!
+        .trigger("click");
+      await wrapper.get('[data-testid="settings-button"]').trigger("click");
+
+      // Reopening starts from what is saved, not from what was typed and abandoned.
+      expect((wrapper.get("#settings-terminal-fontSize").element as HTMLInputElement).value).toBe("16");
+      expect(mocks.saveSettings).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("rejects fractional indentation sizes instead of sending invalid settings", async () => {
+      const wrapper = await openSettings();
+      const size = wrapper.get("#settings-editor-indentation-size");
+      await size.setValue("2.5");
+      await size.trigger("change");
+
+      expect((size.element as HTMLInputElement).value).toBe("2");
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Apply")!
+        .trigger("click");
+      await flushPromises();
+      expect(mocks.saveSettings).toHaveBeenCalledWith(DEFAULT_SETTINGS);
+      wrapper.unmount();
+    });
+
+    it("stays open and says so when the write fails", async () => {
+      mocks.saveSettings.mockRejectedValue(new Error("could not write the settings file"));
+      const wrapper = await openSettings();
+      const fontSize = wrapper.get("#settings-editor-fontSize");
+      await fontSize.setValue("15");
+      await fontSize.trigger("change");
+
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Apply")!
+        .trigger("click");
+      await flushPromises();
+
+      // Closing on a failed write would leave the window showing a setting the app is not using
+      // and the file not carrying, with nothing on screen to say so.
+      expect(wrapper.find('[role="dialog"]').exists()).toBe(true);
+      const { toasts } = useToasts();
+      expect(toasts.value.at(-1)?.message).toContain("could not write the settings file");
+
+      // And the window is back where the file says it should be, so reopening shows the saved
+      // value rather than the one the file refused.
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Cancel")!
+        .trigger("click");
+      await wrapper.get('[data-testid="settings-button"]').trigger("click");
+      expect((wrapper.get("#settings-editor-fontSize").element as HTMLInputElement).value).toBe("13");
+      wrapper.unmount();
+    });
+
+    it("puts the window back to the last saved set when a later write is refused", async () => {
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { settings: { ...cloneSettings(DEFAULT_SETTINGS), ui: { fontSize: 16, zoom: 1 } } },
+      );
+      mocks.saveSettings.mockRejectedValueOnce(new Error("the settings file could not be read"));
+
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "+", metaKey: true, cancelable: true }));
+      await flushPromises();
+
+      // The scale is adopted first so a held key walks the steps, and taken back when the write
+      // does not land: what is drawn and what the file carries are the same thing again.
+      expect(document.documentElement.style.getPropertyValue("zoom")).toBe("1");
+      expect(wrapper.findComponent({ name: "MainPane" }).props("zoom")).toBe(1);
+      const { toasts } = useToasts();
+      expect(toasts.value.at(-1)?.message).toContain("could not be read");
+      wrapper.unmount();
+    });
+
+    it("puts the draft back to the defaults and applies that", async () => {
+      const wrapper = await openSettings();
+      const toggle = wrapper.get("#settings-terminal-ligatures");
+      await toggle.setValue(false);
+      expect((toggle.element as HTMLInputElement).checked).toBe(false);
+
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Reset to defaults")!
+        .trigger("click");
+      expect((wrapper.get("#settings-terminal-ligatures").element as HTMLInputElement).checked).toBe(true);
+      // Reset says where the draft would go; it is the same Apply that writes it.
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Apply")!
+        .trigger("click");
+      await flushPromises();
+      expect(mocks.saveSettings).toHaveBeenCalledWith(DEFAULT_SETTINGS);
+      wrapper.unmount();
+    });
+
+    it("hands the terminal and the editor the settings that were saved", async () => {
+      const wrapper = await openSettings({
+        ...DEFAULT_SETTINGS,
+        terminal: { ...DEFAULT_SETTINGS.terminal, fontSize: 20, ligatures: false, scrollbar: "always" },
+        editor: {
+          ...DEFAULT_SETTINGS.editor,
+          fontSize: 15,
+          indentation: { useSpaces: false, size: 4 },
+        },
+      });
+
+      const main = wrapper.findComponent({ name: "MainPane" });
+      expect(main.props("terminalSettings")).toMatchObject({ fontSize: 20, ligatures: false, scrollbar: "always" });
+      expect(main.props("editorSettings")).toMatchObject({ fontSize: 15 });
+      wrapper.unmount();
+    });
   });
 });

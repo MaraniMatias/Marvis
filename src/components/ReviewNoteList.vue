@@ -59,7 +59,7 @@ function canResolve(note: ReviewNote): boolean {
         note.outdated ? 'border-(--marvis-border) bg-(--marvis-bg-1)' : 'border-(--marvis-border) bg-(--marvis-bg-0)'
       "
     >
-      <p class="flex items-center gap-2 font-mono text-[10px] text-(--marvis-text-faint)">
+      <p class="flex items-center gap-2 font-mono text-[0.625rem] text-(--marvis-text-faint)">
         <span>{{ note.side }}:{{ reviewLineRange(note) }}</span>
         <span v-if="note.status === 'sent'" class="text-(--marvis-text-secondary)">sent</span>
         <span v-if="note.status === 'resolved'" class="text-(--marvis-green)">resolved</span>
@@ -110,12 +110,15 @@ function canResolve(note: ReviewNote): boolean {
           @keydown.esc.stop.prevent="editingId = null"
         />
         <div class="mt-1 flex gap-2">
-          <button type="submit" class="rounded-sm bg-(--marvis-border) px-2 py-0.5 text-[11px] text-(--marvis-text)">
+          <button
+            type="submit"
+            class="rounded-sm bg-(--marvis-border) px-2 py-0.5 text-[0.6875rem] text-(--marvis-text)"
+          >
             Save
           </button>
           <button
             type="button"
-            class="rounded-sm px-2 py-0.5 text-[11px] text-(--marvis-text-faint) hover:text-(--marvis-text)"
+            class="rounded-sm px-2 py-0.5 text-[0.6875rem] text-(--marvis-text-faint) hover:text-(--marvis-text)"
             @click="editingId = null"
           >
             Cancel
@@ -123,12 +126,12 @@ function canResolve(note: ReviewNote): boolean {
         </div>
       </form>
       <p v-else class="mt-0.5 whitespace-pre-wrap text-(--marvis-text)">{{ note.content }}</p>
-      <p v-if="note.outdated" class="mt-0.5 text-[10px] text-(--marvis-red)">
+      <p v-if="note.outdated" class="mt-0.5 text-[0.625rem] text-(--marvis-red)">
         The line this note points at changed. It is kept out of the review sent to the agent.
       </p>
       <p
         v-else-if="note.status === 'sent' && verdictFor(note)"
-        class="mt-0.5 text-[10px]"
+        class="mt-0.5 text-[0.625rem]"
         :class="verdictFor(note)!.resolvable ? 'text-(--marvis-text-dim)' : 'text-(--marvis-text-faint)'"
       >
         {{ verdictFor(note)!.message }}

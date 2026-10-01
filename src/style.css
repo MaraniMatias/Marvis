@@ -27,11 +27,37 @@ body {
   background: var(--marvis-bg-0);
 }
 
+/*
+ * The interface's own font size, and the one number the Settings dialog moves.
+ *
+ * It is a scale on the root rather than a size on the shell, because every size the interface
+ * states in `rem` is type, and the tailwind `text-*` utilities are `rem` too. A setting that set
+ * `font-size` on one element would move one element; this moves the type scale the whole
+ * interface is drawn on.
+ *
+ * The spacing scale is taken out of `rem` and pinned to the pixel it already was, which is what
+ * keeps this a text setting rather than a second zoom. Tailwind's default is `0.25rem`, which is
+ * `4px` at the root size this app was designed at, so nothing moves until the preference does;
+ * after that, `p-3` stays 12px while `text-xs` grows. The window's scale
+ * (`src/domain/zoom.ts`) is the one that moves the panes and their padding.
+ *
+ * The terminal and the editor are the two places this does not reach, and they do not take it from
+ * here: xterm draws its own text at a size in pixels and CodeMirror paints its own, so both read
+ * their own preference instead.
+ */
+@theme {
+  --spacing: 4px;
+}
+
+:root {
+  font-size: calc(16px * var(--marvis-ui-font-scale, 1));
+}
+
 /* The mockup's shell is 14px. Without this the body inherits the browser's 16px, and every
    element that does not set its own size reads at a size the mockup never has. */
 .app-shell {
   background: var(--marvis-bg-0);
-  font-size: 14px;
+  font-size: 0.875rem;
 }
 
 .window-header {

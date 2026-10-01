@@ -92,7 +92,7 @@
 .group-header {
   padding: 6px 10px;
   color: var(--marvis-text-faint);
-  font-size: 11px;
+  font-size: 0.6875rem;
   letter-spacing: 0.02em;
   overflow: hidden;
   text-overflow: ellipsis;
@@ -153,7 +153,7 @@
   background: color-mix(in srgb, var(--marvis-accent) 14%, transparent);
   color: var(--marvis-text-secondary);
   font: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
   cursor: pointer;
   transition:
     background-color 120ms ease,
@@ -173,7 +173,7 @@
   padding: 8px 12px;
   border: 1px solid var(--marvis-border);
   background: var(--marvis-bg-0);
-  font-size: 14px;
+  font-size: 0.875rem;
   color: var(--marvis-text);
 }
 .marvis-select-field:hover,
@@ -209,7 +209,7 @@
   background: var(--marvis-red);
   color: var(--marvis-bg-0);
   font: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
   font-weight: 500;
   cursor: pointer;
   transition: opacity 120ms ease;
@@ -299,10 +299,17 @@
    surface of the pane it opened over. Global because reka-ui portals it out of the shell, which
    is also why the no-focus-ring rule above is written without a scope. The column it stands in
    is not part of it: the crumb menu is the wider of the two, because a branch name is a long
-   one and "C" is not. */
+   one and "C" is not.
+
+   The z-index is load-bearing and not decoration. A dialog's scrim is `z-50` — the highest
+   anything in the app claims — and a list inside one portals to the body, so without a number
+   here reka hands its wrapper `z-index: auto` and the list is painted under the scrim: present
+   in the DOM, invisible, and unclickable. reka copies this computed value onto the wrapper, so
+   one number here lifts every list in the app over every overlay. */
 .marvis-menu {
+  z-index: 60;
   padding: 4px;
-  font-size: 13px;
+  font-size: 0.8125rem;
   line-height: 18px;
   color: var(--marvis-text);
   box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
@@ -385,7 +392,7 @@
   margin-left: auto;
   overflow: hidden;
   color: var(--marvis-text-faint);
-  font-size: 11px;
+  font-size: 0.6875rem;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
@@ -393,7 +400,7 @@
 .menu-note {
   padding: 5px 8px;
   color: var(--marvis-text-faint);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 .menu-separator {

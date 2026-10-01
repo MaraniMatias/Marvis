@@ -1,0 +1,113 @@
+import { describe, expect, it } from "vitest";
+import {
+  DEFAULT_SETTINGS,
+  EDITOR_FONT_SIZE_LIMITS,
+  INDENTATION_SIZE_LIMITS,
+  SETTINGS_SECTIONS,
+  TERMINAL_FONT_SIZE_LIMITS,
+  UI_FONT_SIZE_LIMITS,
+  normalizeSettings,
+  uiFontScale,
+  valueAt,
+  withValue,
+} from "./settings";
+import { ZOOM_STEPS } from "./zoom";
+
+describe("the settings file", () => {
+  it("names the three surfaces and everything they carry", () => {
+    expect(DEFAULT_SETTINGS).toEqual({
+      ui: { fontSize: 14, zoom: 1 },
+      terminal: { fontSize: 16, ligatures: true, cursorBlink: true, scrollbar: "hidden" },
+      editor: { fontSize: 13, ligatures: true, indentation: { useSpaces: true, size: 2 } },
+    });
+  });
+
+  it("reads what was written, and a file with lines missing from it", () => {
+    const written = {
+      ui: { fontSize: 16, zoom: 1.2 as const },
+      terminal: { fontSize: 18, ligatures: false, cursorBlink: false, scrollbar: "always" as const },
+      editor: { fontSize: 15, ligatures: false, indentation: { useSpaces: false, size: 4 } },
+    };
+    expect(normalizeSettings(JSON.parse(JSON.stringify(written)))).toEqual(written);
+    // A file somebody edited by hand is allowed to be partial: a line they deleted is a preference
+    // they did not set, not a shape this build cannot read. The one line that is there is kept.
+    expect(normalizeSettings({ ui: { fontSize: 18 } })).toEqual({
+      ...DEFAULT_SETTINGS,
+      ui: { ...DEFAULT_SETTINGS.ui, fontSize: 18 },
+    });
+    expect(normalizeSettings(undefined)).toEqual(DEFAULT_SETTINGS);
+  });
+
+  it("clamps a size outside the range and answers 100% for a scale it cannot draw", () => {
+    expect(normalizeSettings({ ui: { fontSize: 400 } }).ui.fontSize).toBe(UI_FONT_SIZE_LIMITS.max);
+    expect(normalizeSettings({ ui: { fontSize: 2 } }).ui.fontSize).toBe(UI_FONT_SIZE_LIMITS.min);
+    expect(normalizeSettings({ terminal: { fontSize: 400 } }).terminal.fontSize).toBe(TERMINAL_FONT_SIZE_LIMITS.max);
+    expect(normalizeSettings({ editor: { fontSize: 4 } }).editor.fontSize).toBe(EDITOR_FONT_SIZE_LIMITS.min);
+    expect(normalizeSettings({ editor: { indentation: { size: 40 } } }).editor.indentation.size).toBe(
+      INDENTATION_SIZE_LIMITS.max,
+    );
+    expect(normalizeSettings({ editor: { indentation: { size: 2.5 } } }).editor.indentation.size).toBe(
+      DEFAULT_SETTINGS.editor.indentation.size,
+    );
+    // `.nan` is a number a YAML file can hold and no font size can be, so it is a default rather
+    // than a value that reaches the renderer.
+    expect(normalizeSettings({ ui: { fontSize: Number.NaN } }).ui.fontSize).toBe(DEFAULT_SETTINGS.ui.fontSize);
+    expect(normalizeSettings({ ui: { zoom: 4 } }).ui.zoom).toBe(1.5);
+    expect(normalizeSettings({ ui: { zoom: 0.1 } }).ui.zoom).toBe(0.8);
+  });
+
+  it("keeps a scrollbar mode it knows and falls back to hidden for one it does not", () => {
+    expect(normalizeSettings({ terminal: { scrollbar: "always" } }).terminal.scrollbar).toBe("always");
+    expect(normalizeSettings({ terminal: { scrollbar: "warp" } }).terminal.scrollbar).toBe("hidden");
+    // A boolean typed where a string belongs is a mistake, not a mode, and it is a preference
+    // rather than state worth refusing the whole file over.
+    expect(normalizeSettings({ terminal: { ligatures: "yes" } }).terminal.ligatures).toBe(
+      DEFAULT_SETTINGS.terminal.ligatures,
+    );
+    expect(normalizeSettings({ terminal: { ligatures: false } }).terminal.ligatures).toBe(false);
+  });
+
+  it("scales the interface against the size the design is drawn at", () => {
+    expect(uiFontScale(DEFAULT_SETTINGS.ui.fontSize)).toBe(1);
+    expect(uiFontScale(UI_FONT_SIZE_LIMITS.max)).toBeCloseTo(UI_FONT_SIZE_LIMITS.max / 14);
+  });
+});
+
+describe("the form's schema", () => {
+  it("names every preference once, and every path names a field", () => {
+    const paths = SETTINGS_SECTIONS.flatMap((section) => section.fields.map((field) => field.path));
+    expect(new Set(paths).size).toBe(paths.length);
+    for (const section of SETTINGS_SECTIONS) {
+      for (const field of section.fields) {
+        expect(() => valueAt(DEFAULT_SETTINGS, field.path), field.path).not.toThrow();
+        expect(field.label.length, field.path).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("offers the window scale as the steps the keyboard walks, and nothing else", () => {
+    const zoom = SETTINGS_SECTIONS.flatMap((section) => section.fields).find((field) => field.path === "ui.zoom");
+    expect(zoom?.kind).toBe("select");
+    expect(zoom?.kind === "select" && zoom.options.map((option) => option.value)).toEqual(ZOOM_STEPS.map(String));
+  });
+
+  it("reads and writes through a path without editing the tree it was given", () => {
+    const next = withValue(DEFAULT_SETTINGS, "editor.indentation.size", 4);
+    expect(next.editor.indentation.size).toBe(4);
+    expect(DEFAULT_SETTINGS.editor.indentation.size).toBe(2);
+
+    expect(valueAt(next, "editor.indentation.useSpaces")).toBe(true);
+    expect(withValue(DEFAULT_SETTINGS, "terminal.ligatures", false).terminal.ligatures).toBe(false);
+    expect(valueAt(withValue(DEFAULT_SETTINGS, "ui.zoom", 1.3), "ui.zoom")).toBe(1.3);
+  });
+
+  it("turns a select's string back into the value it stands for", () => {
+    const select = (path: string) =>
+      SETTINGS_SECTIONS.flatMap((section) => section.fields).find((field) => field.path === path);
+    const indent = select("editor.indentation.useSpaces");
+    const scrollbar = select("terminal.scrollbar");
+    expect(indent?.kind === "select" && indent.parse("false")).toBe(false);
+    expect(indent?.kind === "select" && String(indent.parse("true"))).toBe("true");
+    expect(scrollbar?.kind === "select" && scrollbar.parse("always")).toBe("always");
+  });
+});

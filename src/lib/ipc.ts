@@ -8,6 +8,7 @@ import type { RecentPath, Session, TerminalSessionStatus, WorkspaceState } from 
 import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalInfo } from "../domain/worktree";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { AppLayoutState, CheckoutUiState } from "../domain/ui-state";
+import type { AppSettings } from "../domain/settings";
 import type { AgentAgent, AgentSession } from "../domain/agent";
 import type { ReviewTarget } from "../presentation/review-notes";
 import type { DocumentOrigin } from "../domain/main-document";
@@ -313,6 +314,15 @@ export function loadAppLayout(): Promise<AppLayoutState> {
 
 export function saveAppLayout(layout: AppLayoutState): Promise<void> {
   return invoke<void>("ui_layout_save", { layout });
+}
+
+/** The preferences the Settings dialog owns, from `~/.marvis/config.yml`. */
+export function loadSettings(): Promise<AppSettings> {
+  return invoke<AppSettings>("settings_load");
+}
+
+export function saveSettings(settings: AppSettings): Promise<void> {
+  return invoke<void>("settings_save", { settings });
 }
 
 export function loadCheckoutUiState(checkoutId: string): Promise<CheckoutUiState> {

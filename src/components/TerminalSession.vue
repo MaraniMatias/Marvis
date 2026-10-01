@@ -5,12 +5,12 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type { TerminalSessionStatus } from "../domain/workspace";
-import type { TerminalScrollbarMode } from "../domain/ui-state";
+import type { TerminalScrollbarMode } from "../domain/settings";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
 import {
   attachTerminalRenderer,
   createMarvisTerminal,
-  enableTerminalLigatures,
+  setTerminalLigatures,
   enableTerminalSelectionCopy,
   preloadTerminalFonts,
   terminalFontSize,
@@ -27,9 +27,12 @@ const props = withDefaults(
     visible?: boolean;
     focused?: boolean;
     scrollbar?: TerminalScrollbarMode;
+    fontSize?: number;
+    ligatures?: boolean;
+    cursorBlink?: boolean;
     zoom?: number;
   }>(),
-  { visible: true, focused: false, scrollbar: "hidden", zoom: 1 },
+  { visible: true, focused: false, scrollbar: "hidden", fontSize: 16, ligatures: true, cursorBlink: true, zoom: 1 },
 );
 const emit = defineEmits<{
   created: [result: Awaited<ReturnType<typeof createTerminal>>];
@@ -47,7 +50,7 @@ const scrollbarMaximum = ref(0);
 const state = ref<TerminalSessionStatus>({ state: "running", foregroundProcess: false });
 const error = ref<string | null>(null);
 const closing = ref(false);
-const terminal = createMarvisTerminal(props.zoom);
+const terminal = createMarvisTerminal(props.fontSize, props.cursorBlink, props.zoom);
 const fit = new FitAddon();
 terminal.loadAddon(fit);
 const { pushCause } = useToasts();
@@ -421,14 +424,22 @@ watch(
   },
 );
 
+/**
+ * The size and the two faces of the terminal's own type, watched together because they all end in
+ * the same fit.
+ *
+ * xterm.js re-measures the cell, clears and repaints on the fontSize assignment, so the only thing
+ * left is the fit: the PTY is told its new column count through it, and nobody is told anything by
+ * the repaint. The ligature joiner and the cursor are options on the same object, and both take
+ * effect on the next paint, so neither needs one.
+ */
 watch(
-  () => props.zoom,
-  async (zoom) => {
+  () => [props.fontSize, props.ligatures, props.cursorBlink, props.zoom] as const,
+  async ([fontSize, ligatures, cursorBlink, zoom]) => {
     if (!terminalReady) return;
-    // xterm.js re-measures the cell, clears and repaints on this one assignment, so the only
-    // thing left is the fit: the PTY is told its new column count through it, and nobody is told
-    // anything by the repaint.
-    terminal.options.fontSize = terminalFontSize(zoom);
+    terminal.options.fontSize = terminalFontSize(fontSize, zoom);
+    terminal.options.cursorBlink = cursorBlink;
+    setTerminalLigatures(terminal, ligatures);
     await nextTick();
     fitActiveView();
   },
@@ -458,7 +469,7 @@ onMounted(async () => {
   terminalReady = true;
   // Both of these need the terminal on the page, and the fit that follows has to measure the
   // renderer that will actually draw.
-  enableTerminalLigatures(terminal);
+  setTerminalLigatures(terminal, props.ligatures);
   attachTerminalRenderer(terminal);
   selectionCopy = enableTerminalSelectionCopy(terminal, (text) => {
     void writeText(text).catch((cause) => {

@@ -3,6 +3,7 @@
 use tauri::{Emitter, Manager};
 
 mod commands;
+mod config;
 pub mod domain;
 pub mod git;
 #[cfg(target_os = "macos")]
@@ -60,7 +61,9 @@ fn main() {
             use tauri::Manager;
 
             let data_dir = app.path().app_data_dir()?;
-            let review_root = services::files::review_root(&app.path().home_dir()?);
+            let home = app.path().home_dir()?;
+            let review_root = services::files::review_root(&home);
+            let config_file = config::config_file(&home);
             std::fs::create_dir_all(&data_dir)?;
             let database = persistence::Database::open(data_dir.join("marvis.sqlite3"))
                 .map_err(std::io::Error::other)?;
@@ -123,6 +126,7 @@ fn main() {
             }
             app.manage(database);
             app.manage(review_root);
+            app.manage(config_file);
             app.manage(std::sync::Arc::new(terminal::TerminalBackend::default()));
             app.manage(std::sync::Arc::new(
                 services::git::GitWatcherManager::default(),
@@ -203,6 +207,8 @@ fn main() {
             commands::terminal::terminal_layout_save,
             commands::ui_state::ui_layout_load,
             commands::ui_state::ui_layout_save,
+            commands::ui_state::settings_load,
+            commands::ui_state::settings_save,
             commands::ui_state::checkout_ui_state_load,
             commands::ui_state::checkout_ui_state_save,
             commands::ui_state::review_target_load,

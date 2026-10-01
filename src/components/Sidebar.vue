@@ -611,7 +611,7 @@ const agentTitle = computed(() =>
 
 .workdir-select.new-item .workdir-name {
   color: var(--marvis-text-dim);
-  font-size: 12px;
+  font-size: 0.75rem;
 }
 
 /* Keep the plus in the same 14px layout slot as the terminal icon. Its 1px inset keeps the 12px
@@ -735,7 +735,7 @@ const agentTitle = computed(() =>
   align-self: center;
   gap: 4px;
   color: var(--marvis-text-faint);
-  font-size: 11px;
+  font-size: 0.6875rem;
 }
 
 /* Hover drops the counts to clear the row actions. An error and a session asking for

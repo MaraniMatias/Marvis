@@ -1,6 +1,7 @@
 use tauri::State;
 
 use crate::{
+    config::{self, AppSettings, ConfigFile},
     domain::ipc::{IpcError, IpcErrorCode},
     persistence::{AppLayoutState, CheckoutUiState, Database},
 };
@@ -24,6 +25,25 @@ pub async fn ui_layout_save(
         .await
         .map_err(operation_error)?
         .map_err(validation_error)
+}
+
+#[tauri::command]
+pub async fn settings_load(config_file: State<'_, ConfigFile>) -> Result<AppSettings, IpcError> {
+    let path = config_file.0.clone();
+    tauri::async_runtime::spawn_blocking(move || config::load(&path))
+        .await
+        .map_err(operation_error)?
+}
+
+#[tauri::command]
+pub async fn settings_save(
+    settings: AppSettings,
+    config_file: State<'_, ConfigFile>,
+) -> Result<(), IpcError> {
+    let path = config_file.0.clone();
+    tauri::async_runtime::spawn_blocking(move || config::save(&path, &settings))
+        .await
+        .map_err(operation_error)?
 }
 
 #[tauri::command]

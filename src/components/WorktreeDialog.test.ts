@@ -87,7 +87,7 @@ describe("WorktreeDialog", () => {
     prompt.mockRestore();
   });
 
-  it("shows dirty files and active sessions, defaults to keeping the branch, and requires confirmation", async () => {
+  it("shows dirty files and active sessions, defaults to deleting the branch, and requires confirmation", async () => {
     ipc.getWorktreeRemovalInfo.mockResolvedValue({
       checkoutId: "checkout:feature",
       isPrimary: false,
@@ -107,23 +107,15 @@ describe("WorktreeDialog", () => {
 
     expect(wrapper.text()).toContain("uncommitted.txt");
     expect(wrapper.text()).toContain("zsh · feature");
-    // The branch choice is a list the app draws, and what it says is what is chosen.
+    // The branch choice is a list the app draws, and what it says is what is chosen. It opens on
+    // delete, so confirming the removal takes the branch with it unless the other row is picked.
     const trigger = wrapper.get('[aria-label="Local branch"]');
-    expect(trigger.text()).toContain("Keep branch (recommended)");
+    expect(trigger.text()).toContain("Delete branch");
     const removeButton = wrapper.findAll("button").find((button) => button.text() === "Delete");
     expect(removeButton?.attributes("disabled")).toBeDefined();
 
     await wrapper.findAll('input[type="checkbox"]')[0].setValue(true);
     await wrapper.findAll('input[type="checkbox"]')[1].setValue(true);
-    // The list is the app's own, drawn where the pointer is: opening it and picking the row is
-    // what choosing a branch is, and the popup is portalled out of the dialog's own tree.
-    await wrapper.get('[aria-label="Local branch"]').trigger("pointerdown", { button: 0 });
-    await flushPromises();
-    const rows = [...document.querySelectorAll<HTMLElement>('[role="option"]')];
-    const pick = rows.find((row) => row.textContent?.startsWith("Delete branch"))!;
-    pick.dispatchEvent(new Event("pointerup", { bubbles: true }));
-    await flushPromises();
-    expect(wrapper.get('[aria-label="Local branch"]').text()).toContain("Delete branch");
     await wrapper
       .findAll("button")
       .find((button) => button.text() === "Delete")

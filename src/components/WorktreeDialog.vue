@@ -37,7 +37,7 @@ const branchEdited = ref(false);
 const removal = ref<WorktreeRemovalInfo | null>(null);
 const dirtyConfirmed = ref(false);
 const sessionsConfirmed = ref(false);
-const branchAction = ref<"keep" | "delete">("keep");
+const branchAction = ref<"keep" | "delete">("delete");
 const isBusy = computed(() => loading.value);
 const canRemove = computed(
   () =>
@@ -61,7 +61,7 @@ const archiveBlocked = computed(
 
 /** What the two answers to the branch are called, which changes with what the branch holds. */
 const branchActions = computed(() => [
-  { value: "keep", label: "Keep branch (recommended)" },
+  { value: "keep", label: "Keep branch" },
   {
     value: "delete",
     label: `Delete branch${removal.value?.unmergedCommits ? " and its unmerged commits" : ""}`,
@@ -77,7 +77,7 @@ watch(
     removal.value = null;
     dirtyConfirmed.value = false;
     sessionsConfirmed.value = false;
-    branchAction.value = "keep";
+    branchAction.value = "delete";
     try {
       if (props.mode === "create") {
         taskName.value = "new-task";
@@ -248,7 +248,7 @@ function messageOf(cause: unknown): string {
             class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text) outline-none focus:border-(--marvis-text-faint)"
             @input="updateTaskName(($event.target as HTMLInputElement).value)"
           />
-          <span class="mt-1 block text-[11px] text-(--marvis-text-faint)"
+          <span class="mt-1 block text-[0.6875rem] text-(--marvis-text-faint)"
             >Used as a directory name; unsafe characters are cleaned by Git service validation.</span
           >
         </label>
@@ -377,12 +377,7 @@ function messageOf(cause: unknown): string {
         <footer class="flex items-center gap-2 pt-1">
           <!-- Delete is the only answer that reaches the disk, so it is the only one painted
                in the failure colour, and it sits apart from the two that do not. -->
-          <button
-            type="button"
-            :disabled="isBusy || !canRemove"
-            class="marvis-button-danger"
-            @click="submitRemove"
-          >
+          <button type="button" :disabled="isBusy || !canRemove" class="marvis-button-danger" @click="submitRemove">
             {{ isBusy ? "Deleting…" : "Delete" }}
           </button>
           <span class="flex-1" />

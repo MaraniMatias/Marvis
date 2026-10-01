@@ -23,8 +23,8 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     events: [] as string[],
     fontLoads: [] as string[],
     fontLoadPromise: null as Promise<FontFace[]> | null,
-    /** The scale the terminal was built at, which is the size of its cell from its first frame. */
-    builtAtZoom: 1,
+    /** The size and the scale the terminal was built at, which is the size of its cell from its first frame. */
+    builtAt: { fontSize: 16, cursorBlink: true, zoom: 1 } as { fontSize: number; cursorBlink: boolean; zoom: number },
     terminal: null as MockTerminal | null,
   };
   class MockTerminal {
@@ -102,7 +102,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 // asserted there. What this file owns is the wiring: a terminal on the page, with both.
 const terminalLib = vi.hoisted(() => ({
   attachTerminalRenderer: vi.fn(),
-  enableTerminalLigatures: vi.fn(),
+  setTerminalLigatures: vi.fn(),
   enableTerminalSelectionCopy: vi.fn(() => ({ dispose: vi.fn() })),
   fitCalls: 0,
 }));
@@ -135,12 +135,12 @@ for (const [property, value] of [
 // the ordering below would be untestable. Asking for them per mount keeps the guarantee this file
 // exists to pin: xterm opens only after both bundled weights are ready.
 vi.mock("../lib/marvis-terminal", () => ({
-  createMarvisTerminal: (zoom: number) => {
-    terminalMock.builtAtZoom = zoom;
+  createMarvisTerminal: (fontSize: number, cursorBlink: boolean, zoom: number) => {
+    terminalMock.builtAt = { fontSize, cursorBlink, zoom };
     return new MockTerminal();
   },
-  terminalFontSize: (zoom: number) => 16 * zoom,
-  enableTerminalLigatures: terminalLib.enableTerminalLigatures,
+  terminalFontSize: (fontSize: number, zoom: number) => fontSize * zoom,
+  setTerminalLigatures: terminalLib.setTerminalLigatures,
   enableTerminalSelectionCopy: terminalLib.enableTerminalSelectionCopy,
   attachTerminalRenderer: terminalLib.attachTerminalRenderer,
   preloadTerminalFonts: () =>
@@ -209,7 +209,7 @@ describe("TerminalSession UI", () => {
     terminalMock.events = [];
     terminalMock.fontLoads = [];
     terminalMock.fontLoadPromise = null;
-    terminalMock.builtAtZoom = 1;
+    terminalMock.builtAt = { fontSize: 16, cursorBlink: true, zoom: 1 };
     terminalMock.terminal = null;
     terminalLib.fitCalls = 0;
     vi.mocked(createTerminal).mockResolvedValue(created);
@@ -231,7 +231,7 @@ describe("TerminalSession UI", () => {
     expect(createTerminal).toHaveBeenCalledWith("checkout:repo", 80, 24, expect.anything());
     // Both are refused by xterm.js until the terminal is on the page.
     expect(terminalMock.openCalls).toBe(1);
-    expect(terminalLib.enableTerminalLigatures).toHaveBeenCalledTimes(1);
+    expect(terminalLib.setTerminalLigatures).toHaveBeenCalledWith(expect.anything(), true);
     expect(terminalLib.enableTerminalSelectionCopy).toHaveBeenCalledTimes(1);
     expect(terminalLib.attachTerminalRenderer).toHaveBeenCalledTimes(1);
     expect(writeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", new TextEncoder().encode("λ pasted"));
@@ -430,10 +430,14 @@ describe("TerminalSession UI", () => {
     // The host is the one thing in the window that is not scaled: the grid is measured and
     // rasterized in the screen's own pixels, so leaving the scale on it would let the compositor
     // stretch a canvas that had already been drawn.
-    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true, zoom: 0.8 } });
+    const wrapper = mount(TerminalSession, {
+      props: { checkoutId: "checkout:repo", active: true, fontSize: 20, zoom: 0.8 },
+    });
     await flushPromises();
 
-    expect(terminalMock.builtAtZoom).toBe(0.8);
+    // The cell is the preference's own size times the window's scale, and it is the scale alone
+    // that is cancelled on the host: the size is a real change to the grid, not a transform.
+    expect(terminalMock.builtAt).toEqual({ fontSize: 20, cursorBlink: true, zoom: 0.8 });
     expect(wrapper.get(".terminal-host").attributes("style")).toBe("zoom: 1.25;");
     wrapper.unmount();
   });
@@ -443,12 +447,12 @@ describe("TerminalSession UI", () => {
     await flushPromises();
     const fitsBefore = terminalLib.fitCalls;
 
-    await wrapper.setProps({ zoom: 1.2 });
+    await wrapper.setProps({ fontSize: 18, zoom: 1.2 });
     await flushPromises();
 
-    // 16px at 120% is a cell of 19.2, and xterm re-measures and repaints on the assignment; the
+    // 18px at 120% is a cell of 21.6, and xterm re-measures and repaints on the assignment; the
     // fit is what tells the PTY how many columns the new cell leaves it.
-    expect(terminalMock.terminal?.options).toEqual({ fontSize: 19.2 });
+    expect(terminalMock.terminal?.options).toEqual({ fontSize: 18 * 1.2, cursorBlink: true });
     expect(terminalLib.fitCalls).toBeGreaterThan(fitsBefore);
     expect(wrapper.get(".terminal-host").attributes("style")).toBe("zoom: 0.8333333333333334;");
     wrapper.unmount();

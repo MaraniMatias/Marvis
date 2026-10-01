@@ -1,27 +1,18 @@
 import type { MainDocument, MainViewState } from "./main-document";
-import { DEFAULT_ZOOM, normalizeZoom } from "./zoom";
-import type { Zoom } from "./zoom";
 
 /**
- * How the terminal's own scrollbar is drawn, in the order a menu lists them.
+ * How the window is arranged, and nothing else.
  *
- * `hidden` is the default and the terminal is full-bleed: the scrollback is there for when it is
- * asked for, and a permanent strip down the right edge of every pane is a column of dead pixels
- * the fit has to work around. `auto` is what a desktop terminal does — the thumb shows up when
- * something moves and gets out of the way when nothing does — and `always` is for the people who
- * scroll by dragging it.
+ * These are the shapes a person arrives at by dragging and then leaves alone, which is why they
+ * live in the database next to the workspace they belong to. The preferences — sizes, ligatures,
+ * the scale — are in `src/domain/settings.ts`, in `~/.marvis/config.yml`.
  */
-export const TERMINAL_SCROLLBAR_MODES = ["hidden", "auto", "always"] as const;
-export type TerminalScrollbarMode = (typeof TERMINAL_SCROLLBAR_MODES)[number];
-
 export interface AppLayoutState {
-  version: 4;
+  version: 5;
   mode: "focus" | "split";
   sidebarWidth: number;
   inspectorWidth: number;
   previewWidth: number;
-  terminalScrollbar: TerminalScrollbarMode;
-  zoom: Zoom;
 }
 
 export interface CheckoutUiState extends MainViewState {
@@ -44,13 +35,11 @@ export const PREVIEW_WIDTH_LIMITS = { min: 260, max: 900 } as const;
 const MIN_MAIN_WIDTH = 430;
 
 export const DEFAULT_APP_LAYOUT: AppLayoutState = {
-  version: 4,
+  version: 5,
   mode: "focus",
   sidebarWidth: 240,
   inspectorWidth: 280,
   previewWidth: 360,
-  terminalScrollbar: "hidden",
-  zoom: DEFAULT_ZOOM,
 };
 
 export const DEFAULT_CHECKOUT_UI_STATE: CheckoutUiState = {
@@ -98,9 +87,9 @@ function safeReviewPath(value: unknown): value is string {
 }
 
 export function normalizeAppLayout(value: unknown): AppLayoutState {
-  if (!isRecord(value) || value.version !== 4) return { ...DEFAULT_APP_LAYOUT };
+  if (!isRecord(value) || value.version !== 5) return { ...DEFAULT_APP_LAYOUT };
   return {
-    version: 4,
+    version: 5,
     mode: value.mode === "split" ? "split" : "focus",
     sidebarWidth: boundedNumber(
       value.sidebarWidth,
@@ -120,16 +109,6 @@ export function normalizeAppLayout(value: unknown): AppLayoutState {
       PREVIEW_WIDTH_LIMITS.min,
       PREVIEW_WIDTH_LIMITS.max,
     ),
-    // Anything that is not one of the three is a build that no longer exists or a hand-edited
-    // file, and the scrollbar is a preference rather than state worth refusing a layout over: the
-    // one this build knows how to draw is a better answer than a pane that has no scrollbar at all.
-    terminalScrollbar: TERMINAL_SCROLLBAR_MODES.includes(value.terminalScrollbar as TerminalScrollbarMode)
-      ? (value.terminalScrollbar as TerminalScrollbarMode)
-      : DEFAULT_APP_LAYOUT.terminalScrollbar,
-    // The scale is a preference for the same reason the scrollbar is: a saved layout that came
-    // from a build with a different range in it is still a layout somebody chose, and the nearest
-    // step this build can draw is a better answer than a window at a scale nothing else knows.
-    zoom: normalizeZoom(value.zoom),
   };
 }
 

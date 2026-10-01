@@ -3,7 +3,8 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { defaultHighlightStyle, forceParsing, syntaxTree } from "@codemirror/language";
 import { redo, undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
-import { createCodeEditor } from "./code-editor";
+import type { IndentationSettings } from "../domain/settings";
+import { createCodeEditor, setEditorIndentation } from "./code-editor";
 
 const views = new Set<EditorView>();
 const hosts = new Set<HTMLElement>();
@@ -184,5 +185,93 @@ describe("code editor", () => {
     expect(view.state.doc.toString()).toBe("const answer = 1;");
     expect(redo(view)).toBe(true);
     expect(view.state.doc.toString()).toBe("const answer = 1;// typed");
+  });
+});
+
+describe("indentation", () => {
+  /** The key CodeMirror's own Tab handling goes through, which is what a person pressing it hits. */
+  function pressTab(view: EditorView, shiftKey = false) {
+    view.contentDOM.dispatchEvent(
+      new KeyboardEvent("keydown", { key: "Tab", shiftKey, bubbles: true, cancelable: true }),
+    );
+  }
+
+  function mountWith(indentation: IndentationSettings, content = "") {
+    const host = document.createElement("div");
+    hosts.add(host);
+    document.body.appendChild(host);
+    const view = createCodeEditor({
+      parent: host,
+      content,
+      language: "plaintext",
+      readingPosition: { top: 0, left: 0 },
+      indentation,
+      onChange: () => {},
+      onScroll: () => {},
+    });
+    views.add(view);
+    return view;
+  }
+
+  it("indents with the spaces the settings ask for", () => {
+    const view = mountWith({ useSpaces: true, size: 2 });
+
+    pressTab(view);
+
+    // Without a Tab binding nothing happens at all, which is the failure this pins: the default
+    // keymap leaves Tab unbound, so the preference would be a number in a file and not in a document.
+    expect(view.state.doc.toString()).toBe("  ");
+  });
+
+  it("indents with a tab character when the settings ask for tabs", () => {
+    const view = mountWith({ useSpaces: false, size: 4 });
+
+    pressTab(view);
+
+    expect(view.state.doc.toString()).toBe("\t");
+  });
+
+  it("removes one level with shift-Tab", () => {
+    const view = mountWith({ useSpaces: true, size: 2 }, "    indented");
+
+    view.dispatch({ selection: { anchor: view.state.doc.length } });
+    pressTab(view, true);
+
+    expect(view.state.doc.toString()).toBe("  indented");
+  });
+
+  it("moves the caret by the indent size, which is the same number", () => {
+    const view = mountWith({ useSpaces: true, size: 4 });
+
+    expect(view.state.tabSize).toBe(4);
+  });
+
+  it("reconfigures a document that is already open without losing what is in it", () => {
+    const view = mountWith({ useSpaces: true, size: 2 }, "const answer = 1;");
+    view.dispatch({ changes: { from: view.state.doc.length, insert: "// typed" } });
+    view.dispatch({ selection: { anchor: 4 } });
+
+    setEditorIndentation(view, { useSpaces: false, size: 8 });
+
+    // A new editor would be the other way to apply this, and it would take the text, the caret and
+    // the undo history with it to change the width of a tab.
+    expect(view.state.doc.toString()).toBe("const answer = 1;// typed");
+    expect(view.state.selection.main.anchor).toBe(4);
+    expect(undo(view)).toBe(true);
+    expect(view.state.doc.toString()).toBe("const answer = 1;");
+    expect(view.state.tabSize).toBe(8);
+    expect(redo(view)).toBe(true);
+
+    // The new unit, at the line the caret is on, with the text the reconfigure had to preserve
+    // still around it.
+    view.dispatch({ selection: { anchor: 4 } });
+    pressTab(view);
+    expect(view.state.doc.toString()).toBe("\tconst answer = 1;// typed");
+  });
+
+  it("does nothing to a view this build did not build", () => {
+    // The compartment is per editor, so an editor from elsewhere has none to reconfigure and the
+    // call is a no-op rather than a throw from a component that has no way to know.
+    expect(() => setEditorIndentation({} as EditorView, { useSpaces: false, size: 4 })).not.toThrow();
   });
 });

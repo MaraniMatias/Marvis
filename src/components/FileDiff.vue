@@ -525,8 +525,8 @@ onUnmounted(() => {
     <header v-if="!embedded" class="document-toolbar shrink-0 border-b px-3 py-2">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <p class="truncate text-[11px] text-(--marvis-text-dim)" :title="title">{{ title }}</p>
-          <p v-if="!path && branch" class="truncate text-[11px] text-(--marvis-text-faint)" :title="branch">
+          <p class="truncate text-[0.6875rem] text-(--marvis-text-dim)" :title="title">{{ title }}</p>
+          <p v-if="!path && branch" class="truncate text-[0.6875rem] text-(--marvis-text-faint)" :title="branch">
             {{ branch }}
           </p>
         </div>
@@ -605,13 +605,13 @@ onUnmounted(() => {
               </PopoverContent>
             </PopoverPortal>
           </PopoverRoot>
-          <span v-if="canSend" data-testid="send-count" class="text-[11px] text-(--marvis-text-faint)">
+          <span v-if="canSend" data-testid="send-count" class="text-[0.6875rem] text-(--marvis-text-faint)">
             {{ sendableNotes.length }} {{ sendableNotes.length === 1 ? "note" : "notes" }}
             <template v-if="draftCount">· {{ draftCount }} {{ draftCount === 1 ? "draft" : "drafts" }}</template>
           </span>
         </div>
         <div v-if="showBusyChoice" data-testid="send-busy" class="flex flex-col items-end gap-1">
-          <p class="max-w-prose text-right text-[11px] text-(--marvis-text-secondary)">
+          <p class="max-w-prose text-right text-[0.6875rem] text-(--marvis-text-secondary)">
             “{{ targetSession?.title }}” is mid-task. Sending now lands inside its current turn; queueing waits for it
             to finish. This OpenCode version cannot cancel a turn.
           </p>
@@ -645,11 +645,11 @@ onUnmounted(() => {
         <p
           v-if="sender.target === 'opencode' && sender.unfinishedRounds > 0"
           data-testid="unfinished-rounds"
-          class="text-[11px] text-(--marvis-text-faint)"
+          class="text-[0.6875rem] text-(--marvis-text-faint)"
         >
           {{ sender.unfinishedRounds }} {{ sender.unfinishedRounds === 1 ? "round" : "rounds" }} not finished
         </p>
-        <label v-if="outdatedCount > 0" class="flex items-center gap-1.5 text-[11px] text-(--marvis-text-faint)">
+        <label v-if="outdatedCount > 0" class="flex items-center gap-1.5 text-[0.6875rem] text-(--marvis-text-faint)">
           <input
             v-model="includeOutdated"
             type="checkbox"
@@ -717,16 +717,16 @@ onUnmounted(() => {
         No text hunks are available for this change.
       </p>
       <template v-else-if="(diffState === 'ready' || diffState === 'loading') && diff">
-        <p v-if="diff.large" class="shrink-0 px-3 py-1 text-[10px] text-(--marvis-text-faint)">
+        <p v-if="diff.large" class="shrink-0 px-3 py-1 text-[0.625rem] text-(--marvis-text-faint)">
           {{ diff.totalLines.toLocaleString() }} diff rows · virtualized view · click + note on two lines to comment on
           a range
         </p>
-        <p v-else class="shrink-0 px-3 py-1 text-[10px] text-(--marvis-text-faint)">
+        <p v-else class="shrink-0 px-3 py-1 text-[0.625rem] text-(--marvis-text-faint)">
           Drag across line numbers to select a range, then click + note on its last line.
         </p>
         <div
           ref="diffViewport"
-          class="diff-viewport min-h-0 flex-1 overflow-auto font-mono text-[12px]"
+          class="diff-viewport min-h-0 flex-1 overflow-auto font-mono text-[0.75rem]"
           aria-label="Diff contents"
           @scroll="onDiffScroll"
         >
@@ -740,7 +740,7 @@ onUnmounted(() => {
               <template v-for="row in visibleLargeDiffWindow.rows" :key="row.visualIndex">
                 <div
                   data-testid="large-diff-row"
-                  class="group flex h-6 min-w-max items-center overflow-hidden whitespace-pre text-[12px]"
+                  class="group flex h-6 min-w-max items-center overflow-hidden whitespace-pre text-[0.75rem]"
                   :class="{ 'review-range-selected': isDraftSelection(row.line) }"
                 >
                   <button
@@ -785,7 +785,7 @@ onUnmounted(() => {
                     <button
                       v-if="rowAnchor(row.line)"
                       type="button"
-                      class="ml-auto shrink-0 px-2 text-[11px] text-(--marvis-accent) opacity-0 group-hover:opacity-100"
+                      class="ml-auto shrink-0 px-2 text-[0.6875rem] text-(--marvis-accent) opacity-0 group-hover:opacity-100"
                       :aria-label="`Add review note on line ${rowAnchor(row.line)!.line}`"
                       @click="openDraft(rowAnchor(row.line)!.side, rowAnchor(row.line)!.line)"
                     >
@@ -829,7 +829,7 @@ onUnmounted(() => {
             <section v-for="(hunk, index) in diffHunks" :key="`${path}-${index}`" class="min-w-0">
               <button
                 type="button"
-                class="diff-hunk mb-1 w-full truncate border-b border-(--marvis-border) px-2 py-1 text-left font-mono text-[10px] text-(--marvis-text-dim)"
+                class="diff-hunk mb-1 w-full truncate border-b border-(--marvis-border) px-2 py-1 text-left font-mono text-[0.625rem] text-(--marvis-text-dim)"
                 :aria-expanded="!collapsedHunks.includes(index)"
                 :title="hunk.title"
                 @click="toggleHunk(index)"
@@ -876,7 +876,7 @@ onUnmounted(() => {
           </div>
         </div>
         <div v-if="notesWithoutLine.length > 0" class="shrink-0 border-t border-(--marvis-border)">
-          <p class="px-2 py-1 text-[10px] text-(--marvis-text-faint)">
+          <p class="px-2 py-1 text-[0.625rem] text-(--marvis-text-faint)">
             {{ notesWithoutLine.length }}
             {{ notesWithoutLine.length === 1 ? "note points" : "notes point" }} at a line that is no longer in this diff
           </p>
@@ -961,7 +961,7 @@ onUnmounted(() => {
   background: transparent;
   color: var(--marvis-text);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
@@ -978,7 +978,7 @@ onUnmounted(() => {
 
 .diff-status {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 0.625rem;
   color: var(--marvis-text-secondary);
 }
 

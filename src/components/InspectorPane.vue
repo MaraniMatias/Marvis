@@ -715,7 +715,7 @@ const matchedSearchEntries = searchEntries.value
   background: transparent;
   color: var(--marvis-text-faint);
   font-family: inherit;
-  font-size: 11px;
+  font-size: 0.6875rem;
   letter-spacing: 0.02em;
   text-align: left;
   cursor: pointer;
@@ -740,7 +740,7 @@ const matchedSearchEntries = searchEntries.value
 
 .details-tab-count {
   color: var(--marvis-text-faint);
-  font-size: 10px;
+  font-size: 0.625rem;
 }
 
 /* The tab strip stays put, each list scrolls on its own. The right padding is the scrollbar's:
@@ -770,7 +770,7 @@ const matchedSearchEntries = searchEntries.value
   background: transparent;
   color: var(--marvis-text-secondary);
   font-family: inherit;
-  font-size: 12px;
+  font-size: 0.75rem;
   line-height: calc(var(--tree-row-height) - 6px);
   text-align: left;
   white-space: nowrap;
@@ -845,7 +845,7 @@ const matchedSearchEntries = searchEntries.value
 
 .file-status {
   flex-shrink: 0;
-  font-size: 10px;
+  font-size: 0.625rem;
   color: var(--marvis-text-secondary);
 }
 
@@ -881,7 +881,7 @@ const matchedSearchEntries = searchEntries.value
   height: var(--tree-row-height);
   padding: 0 6px;
   color: var(--marvis-text-faint);
-  font-size: 11px;
+  font-size: 0.6875rem;
   line-height: var(--tree-row-height);
   letter-spacing: 0.02em;
   white-space: nowrap;

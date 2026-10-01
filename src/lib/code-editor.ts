@@ -17,12 +17,13 @@ import {
   foldGutter,
   foldKeymap,
   indentOnInput,
+  indentUnit,
   bracketMatching,
   type StringStream,
 } from "@codemirror/language";
-import { EditorState, RangeSetBuilder, StateField, type Extension } from "@codemirror/state";
+import { Compartment, EditorState, RangeSetBuilder, StateField, type Extension } from "@codemirror/state";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
-import { history, defaultKeymap, historyKeymap } from "@codemirror/commands";
+import { history, defaultKeymap, historyKeymap, indentWithTab, temporarilySetTabFocusMode } from "@codemirror/commands";
 import {
   Decoration,
   EditorView,
@@ -55,12 +56,15 @@ import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { swift } from "@codemirror/legacy-modes/mode/swift";
 import { toml } from "@codemirror/legacy-modes/mode/toml";
 import { frontMatterLineCount } from "./front-matter";
+import type { IndentationSettings } from "../domain/settings";
 
 export interface CodeEditorOptions {
   parent: HTMLElement;
   content: string;
   language: string | null;
   readingPosition: { top: number; left: number };
+  /** What one level of indent is. It arrives with the rest of the settings and is applied to a live editor below. */
+  indentation?: IndentationSettings;
   onChange: (content: string) => void;
   onScroll: (position: { top: number; left: number }) => void;
 }
@@ -157,11 +161,55 @@ const marvisTheme = EditorView.theme({
 });
 
 /**
+ * What one level of indent is, as the two extensions that mean it.
+ *
+ * `indentUnit` is what Enter inserts and what the language's own indenter produces; the tab size
+ * is what the caret moves by when it crosses a tab and what `shift-Tab` removes. They are the same
+ * number to a person, so one preference sets both.
+ */
+function indentationExtension(indentation: IndentationSettings): Extension {
+  const unit = indentation.useSpaces ? " ".repeat(indentation.size) : "\t";
+  return [indentUnit.of(unit), EditorState.tabSize.of(indentation.size)];
+}
+
+/**
+ * Tab indents, and Escape lets the keyboard leave.
+ *
+ * `indentWithTab` is what makes the preference visible: without it Tab does nothing at all in this
+ * editor, because the default keymap leaves it unbound, and a document that indents on Enter but
+ * not on Tab is the one place a person notices the difference between the two settings at once.
+ * It indents with `indentUnit`, so the same two preferences decide whether that is two spaces or
+ * a tab character.
+ *
+ * Binding Tab costs the one thing Tab is for, so the way out is one key: Escape puts the editor in
+ * CodeMirror's tab-focus mode for a moment, and the next Tab moves the focus instead of the caret.
+ * That is CodeMirror's own answer to the tradeoff rather than a shortcut invented here.
+ */
+const tabKeymap: Extension = keymap.of([indentWithTab, { key: "Escape", run: temporarilySetTabFocusMode }]);
+
+/** The one compartment per editor, so the preference can change without rebuilding the document. */
+const indentationCompartments = new WeakMap<EditorView, Compartment>();
+
+/**
+ * Applies a new indentation to an editor that is already open.
+ *
+ * A compartment rather than a new editor because the alternative throws away the undo history, the
+ * scroll position and the cursor of a document somebody is in the middle of reading, to change the
+ * width of a tab.
+ */
+export function setEditorIndentation(view: EditorView, indentation: IndentationSettings): void {
+  const compartment = indentationCompartments.get(view);
+  if (!compartment) return;
+  view.dispatch({ effects: compartment.reconfigure(indentationExtension(indentation)) });
+}
+
+/**
  * The editor is imported by DocumentPane only after a Code view is opened. Shiki remains the
  * renderer for the read-only view, while this small CM6 setup owns editing, history, gutters, and
  * the language selected by the existing toolbar.
  */
 export function createCodeEditor(options: CodeEditorOptions): EditorView {
+  const indentation = new Compartment();
   const view = new EditorView({
     state: EditorState.create({
       doc: options.content,
@@ -187,12 +235,15 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
         closeBrackets(),
         history(),
         EditorState.allowMultipleSelections.of(true),
+        // Tab first, so it wins over anything in the maps below that also answers to it.
+        tabKeymap,
         keymap.of([...closeBracketsKeymap, ...defaultKeymap, ...historyKeymap, ...foldKeymap]),
         // CodeMirror assumes a light page unless told otherwise, and the two things it paints
         // itself say so: a lavender selection and a black caret, both unreadable here. The
         // selection is drawn on its own layer, which the shell's `::selection` cannot reach.
         EditorView.darkTheme.of(true),
         marvisTheme,
+        indentation.of(indentationExtension(options.indentation ?? { useSpaces: true, size: 2 })),
         languageExtension(options.language),
         syntaxHighlighting(marvisHighlightStyle),
         EditorView.updateListener.of((update) => {
@@ -210,6 +261,7 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
   });
   view.scrollDOM.scrollTop = options.readingPosition.top;
   view.scrollDOM.scrollLeft = options.readingPosition.left;
+  indentationCompartments.set(view, indentation);
   return view;
 }
 

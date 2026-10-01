@@ -11,6 +11,8 @@ import { useMarkdownPreview } from "../presentation/markdown-preview";
 import { isIpcError } from "../domain/ipc";
 import { absoluteFilePath } from "../domain/files";
 import { getReviewRootPath, readCheckoutFile, writeCheckoutFile } from "../lib/ipc";
+import { DEFAULT_SETTINGS } from "../domain/settings";
+import type { EditorSettings } from "../domain/settings";
 import type { SourceLanguageOption } from "../lib/source-languages";
 import {
   PLAIN_TEXT,
@@ -32,8 +34,14 @@ const props = withDefaults(
     gitSnapshot: ActiveGitSnapshot;
     refreshRevision?: number;
     readingPosition?: { top: number; left: number };
+    editorSettings?: EditorSettings;
   }>(),
-  { origin: "checkout", refreshRevision: 0, readingPosition: () => ({ top: 0, left: 0 }) },
+  {
+    origin: "checkout",
+    refreshRevision: 0,
+    readingPosition: () => ({ top: 0, left: 0 }),
+    editorSettings: () => DEFAULT_SETTINGS.editor,
+  },
 );
 const emit = defineEmits<{
   updateMode: [mode: DocumentMode];
@@ -153,6 +161,38 @@ const languageRows = computed<LanguageRow[]>(() => [
 
 const languageIndex = ref(0);
 const activeLanguageRow = computed(() => Math.min(languageIndex.value, Math.max(languageRows.value.length - 1, 0)));
+
+/**
+ * The two preferences CodeMirror's own stylesheet has no room for, and the one it cannot answer
+ * in CSS at all.
+ *
+ * The size and the ligatures go onto the host as custom properties because the editor's theme is
+ * built once and the pane is not rebuilt when a preference changes; the indentation is an extension
+ * rather than a declaration, so it is reconfigured on the editor that is already open, which is
+ * what keeps the document, the undo history and the scroll position where they were.
+ *
+ * The host is watched alongside the settings because the host is a template ref that is null until
+ * a Code view is on the pane: a preference that arrives first and the editor that arrives second
+ * would otherwise leave the second one drawn at the default forever.
+ */
+watch(
+  () => [editorHost.value, props.editorSettings.fontSize, props.editorSettings.ligatures] as const,
+  ([host, fontSize, ligatures]) => {
+    if (!host) return;
+    host.style.setProperty("--marvis-editor-font-size", `${fontSize}px`);
+    host.style.setProperty("--marvis-editor-ligatures", ligatures ? "normal" : "none");
+  },
+  { immediate: true },
+);
+
+watch(
+  () => [editorView, props.editorSettings.indentation] as const,
+  async ([view, indentation]) => {
+    if (!view) return;
+    const { setEditorIndentation } = await import("../lib/code-editor");
+    setEditorIndentation(view, indentation);
+  },
+);
 
 watch(languageQuery, () => {
   languageIndex.value = 0;
@@ -327,6 +367,7 @@ async function ensureEditor(fileIdentity: string) {
       content: content.value,
       language: effectiveLanguage.value,
       readingPosition: readingPosition.value,
+      indentation: props.editorSettings.indentation,
       onChange: updateDraft,
       onScroll: (position) => {
         if (restoringEditorPosition || editorInitializing) return;
@@ -676,7 +717,7 @@ function onMarkdownLink(event: MouseEvent) {
   <main class="document-pane flex min-h-0 flex-1 flex-col">
     <header class="document-toolbar flex h-10 shrink-0 items-center justify-between gap-3 border-b px-3">
       <div class="flex min-w-0 items-center gap-1.5">
-        <span class="min-w-0 truncate text-[11px] text-(--marvis-text-dim)" :title="path ?? undefined">{{
+        <span class="min-w-0 truncate text-[0.6875rem] text-(--marvis-text-dim)" :title="path ?? undefined">{{
           path ?? ""
         }}</span>
         <button
@@ -757,7 +798,7 @@ function onMarkdownLink(event: MouseEvent) {
           <button
             type="button"
             :aria-pressed="mode === 'view'"
-            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
+            class="document-mode-button rounded-sm px-2.5 py-1 text-[0.6875rem]"
             @click="$emit('updateMode', 'view')"
           >
             View
@@ -765,7 +806,7 @@ function onMarkdownLink(event: MouseEvent) {
           <button
             type="button"
             :aria-pressed="mode === 'code'"
-            class="document-mode-button rounded-sm px-2.5 py-1 text-[11px]"
+            class="document-mode-button rounded-sm px-2.5 py-1 text-[0.6875rem]"
             @click="$emit('updateMode', 'code')"
           >
             Code
@@ -829,7 +870,7 @@ function onMarkdownLink(event: MouseEvent) {
         </div>
         <div
           v-else-if="compactSource"
-          class="source-read flex py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
+          class="source-read flex py-2 font-mono text-[0.8125rem] leading-5 text-(--marvis-text)"
           aria-label="Source code"
         >
           <pre class="source-line-number" aria-hidden="true">{{ sourceLineNumbers }}</pre>
@@ -842,7 +883,7 @@ function onMarkdownLink(event: MouseEvent) {
         </div>
         <div
           v-else
-          class="source-read min-w-max py-2 font-mono text-[13px] leading-5 text-(--marvis-text)"
+          class="source-read min-w-max py-2 font-mono text-[0.8125rem] leading-5 text-(--marvis-text)"
           aria-label="Source code"
         >
           <div v-for="(line, index) in sourceLines" :key="index" class="flex min-h-5 whitespace-pre">
@@ -1107,7 +1148,10 @@ function onMarkdownLink(event: MouseEvent) {
   background: var(--marvis-bg-0);
   color: var(--marvis-text);
   font-family: var(--marvis-font);
-  font-size: 13px;
+  /* The two preferences the shell cannot own: CodeMirror paints its own text, so the size and the
+     ligatures come from the settings rather than from the type scale the rest of the app follows. */
+  font-size: var(--marvis-editor-font-size, 13px);
+  font-variant-ligatures: var(--marvis-editor-ligatures, normal);
 }
 
 /* CodeMirror's own focus ring, which is not ours to keep: its base theme draws a dotted outline

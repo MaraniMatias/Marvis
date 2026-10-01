@@ -590,6 +590,32 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("draws the editor at the size and the ligatures the settings ask for", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/example.ts", content: "const a = 1;" });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("src/example.ts", "code"),
+        editorSettings: { fontSize: 17, ligatures: false, indentation: { useSpaces: true, size: 2 } },
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    // The host is a template ref that does not exist until a Code view is on the pane, so a
+    // preference that was already loaded when the component was created has to be applied again
+    // once the host is there. Reading it off the host rather than the editor is the whole point:
+    // CodeMirror builds its theme once and nothing reconfigures it for a preference.
+    const host = wrapper.get<HTMLElement>(".code-editor-host").element;
+    expect(host.style.getPropertyValue("--marvis-editor-font-size")).toBe("17px");
+    expect(host.style.getPropertyValue("--marvis-editor-ligatures")).toBe("none");
+
+    await wrapper.setProps({
+      editorSettings: { fontSize: 20, ligatures: true, indentation: { useSpaces: true, size: 2 } },
+    });
+    expect(host.style.getPropertyValue("--marvis-editor-font-size")).toBe("20px");
+    expect(host.style.getPropertyValue("--marvis-editor-ligatures")).toBe("normal");
+    wrapper.unmount();
+  });
+
   it("uses compact source rendering above the line bound", async () => {
     mocks.readCheckoutFile.mockResolvedValue({ path: "logs/output.txt", content: Array(5001).fill("line").join("\n") });
     const wrapper = mount(DocumentPane, { props: documentPaneProps("logs/output.txt", "view") });

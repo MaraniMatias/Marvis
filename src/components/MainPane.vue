@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, defineAsyncComponent, ref } from "vue";
 import type { DocumentMode, MainView } from "../domain/main-document";
-import type { TerminalScrollbarMode } from "../domain/ui-state";
+import type { EditorSettings, TerminalSettings } from "../domain/settings";
 import type { Checkout, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
+import { DEFAULT_SETTINGS } from "../domain/settings";
 import DocumentPane from "./DocumentPane.vue";
 import SessionPane from "./SessionPane.vue";
 
@@ -32,7 +33,8 @@ const props = withDefaults(
     diffScrollTop?: number;
     split?: boolean;
     previewWidth?: number;
-    terminalScrollbar?: TerminalScrollbarMode;
+    terminalSettings?: TerminalSettings;
+    editorSettings?: EditorSettings;
     zoom?: number;
   }>(),
   {
@@ -43,7 +45,8 @@ const props = withDefaults(
     registeredSessionIds: () => [],
     split: false,
     previewWidth: 360,
-    terminalScrollbar: "hidden",
+    terminalSettings: () => DEFAULT_SETTINGS.terminal,
+    editorSettings: () => DEFAULT_SETTINGS.editor,
     zoom: 1,
   },
 );
@@ -117,7 +120,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
         :visible="ready && (split || terminal)"
         :shell-request="shellRequest"
         :registered-session-ids="registeredSessionIds"
-        :terminal-scrollbar="terminalScrollbar"
+        :terminal-settings="terminalSettings"
         :zoom="zoom"
         @open-folder="$emit('openFolder')"
         @workspace-updated="$emit('workspaceUpdated', $event)"
@@ -162,6 +165,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
             :git-snapshot="gitSnapshot"
             :refresh-revision="refreshRevision"
             :reading-position="readingPosition"
+            :editor-settings="editorSettings"
             @update-mode="$emit('updateDocumentMode', $event)"
             @reading-position-changed="$emit('readingPositionChanged', $event)"
             @open-markdown-link="$emit('openMarkdownLink', $event)"

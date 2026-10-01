@@ -520,7 +520,11 @@ fn validate_review_timestamp(date: &str, timestamp: &str) -> Result<(), IpcError
 /// The replacement arrives carrying the mode of the file it replaces, because a temporary file is
 /// created with the default one and `rename` does not reconcile it: without this a saved script
 /// loses its executable bit and a private file gains a group-read it never had.
-fn atomic_write(path: &Path, content: &[u8], permissions: fs::Permissions) -> Result<(), IpcError> {
+pub(crate) fn atomic_write(
+    path: &Path,
+    content: &[u8],
+    permissions: fs::Permissions,
+) -> Result<(), IpcError> {
     let parent = path.parent().ok_or_else(|| {
         IpcError::new(
             IpcErrorCode::InvalidPath,

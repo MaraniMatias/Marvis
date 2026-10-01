@@ -7,7 +7,6 @@ import { ligatureRanges } from "./ligature-joiner";
 
 /** The face shared by the terminal and editor and bundled in `src/assets/fonts`. */
 export const TERMINAL_FONT_FAMILY = '"Marvis Nerd Mono", monospace';
-const TERMINAL_FONT_SIZE = 16;
 
 /**
  * The cell size the terminal draws at, which is the size it is drawn at whether or not the
@@ -18,8 +17,8 @@ const TERMINAL_FONT_SIZE = 16;
  * reason for the cancel: leaving the host scaled would let the compositor stretch an already drawn
  * WebGL canvas, which is how a terminal ends up legible and soft at the same time.
  */
-export function terminalFontSize(zoom: number): number {
-  return TERMINAL_FONT_SIZE * zoom;
+export function terminalFontSize(fontSize: number, zoom: number): number {
+  return fontSize * zoom;
 }
 
 /**
@@ -68,14 +67,16 @@ export type RendererLevel = "webgl" | "dom";
  *
  * The scale is a parameter because the terminal's cell size has to be the size it is drawn at
  * before it is ever opened: a terminal built at the unscaled cell and scaled afterwards spends
- * its first frame measuring a grid that is already the wrong size.
+ * its first frame measuring a grid that is already the wrong size. The size and the cursor are
+ * preferences from `~/.marvis/config.yml`, read here for the same reason; the ligatures are not,
+ * because the joiner only exists once the terminal is on the page.
  */
-export function createMarvisTerminal(zoom = 1): Terminal {
+export function createMarvisTerminal(fontSize = 16, cursorBlink = true, zoom = 1): Terminal {
   const terminal = new Terminal({
     allowProposedApi: true,
-    cursorBlink: true,
+    cursorBlink,
     fontFamily: TERMINAL_FONT_FAMILY,
-    fontSize: terminalFontSize(zoom),
+    fontSize: terminalFontSize(fontSize, zoom),
     lineHeight: 1.2,
     scrollback: 10000,
     theme: TERMINAL_THEME,
@@ -120,12 +121,38 @@ export function preloadTerminalFonts(): Promise<unknown> {
  * "Terminal must be opened first" before that, and a terminal that cannot be created at all is
  * a far worse outcome than one that draws `=>` as two characters.
  */
-export function enableTerminalLigatures(terminal: Terminal): void {
+function registerLigatures(terminal: Terminal): number {
   try {
-    terminal.registerCharacterJoiner(ligatureRanges);
+    return terminal.registerCharacterJoiner(ligatureRanges);
   } catch {
-    // Nothing to announce: the panel still works, it just spells the sequences out.
+    // Nothing to announce: the panel still works, it just spells the sequences out. The id is
+    // never handed out, so the joiner that was asked for does not exist to be taken back.
+    return -1;
   }
+}
+
+/** The joiner id each live terminal has, so the preference can be switched and not only set. */
+const ligatureJoiners = new WeakMap<Terminal, number>();
+
+/**
+ * Turns the ligatures on or off on a terminal that is already on screen.
+ *
+ * Turning them off deregisters the joiner rather than registering another: xterm.js keeps one at a
+ * time, so a second request would silently replace the first and leave nothing to take back. The
+ * panel is not recreated for this, which is why the setting reaches the terminals that were
+ * already open and not only the next one to be drawn.
+ */
+export function setTerminalLigatures(terminal: Terminal, enabled: boolean): void {
+  if (enabled === ligatureJoiners.has(terminal)) return;
+  if (enabled) {
+    const joiner = registerLigatures(terminal);
+    // A terminal that refused the joiner has none to take back, and remembering a fake one would
+    // deregister somebody else's.
+    if (joiner >= 0) ligatureJoiners.set(terminal, joiner);
+    return;
+  }
+  terminal.deregisterCharacterJoiner(ligatureJoiners.get(terminal)!);
+  ligatureJoiners.delete(terminal);
 }
 
 /**
