@@ -298,11 +298,22 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
                   : "Open a folder to start a terminal."
             }}
           </p>
-          <Button v-if="checkout && !checkout.isMissing && !isStarting" class="mt-4" @click="createTerminalSession()">
+          <Button
+            v-if="checkout && !checkout.isMissing && !isStarting"
+            variant="primary"
+            class="mt-4"
+            @click="createTerminalSession()"
+          >
             <PlusIcon class="size-3.5 shrink-0" aria-hidden="true" />
             New terminal
           </Button>
-          <Button v-else-if="!checkout" class="mt-4" :disabled="isOpening" @click="$emit('openFolder')">
+          <Button
+            v-else-if="!checkout"
+            variant="primary"
+            class="mt-4"
+            :disabled="isOpening"
+            @click="$emit('openFolder')"
+          >
             <PlusIcon class="size-3.5 shrink-0" aria-hidden="true" />
             {{ isOpening ? "Opening…" : "Open directory" }}
           </Button>

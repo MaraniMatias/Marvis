@@ -643,23 +643,23 @@ const agentTitle = computed(() =>
 }
 
 /* Make room under the overlay so a long title ellipsizes instead of running
-   beneath the icons. Two icons plus the gap is the widest strip most rows need;
+   beneath the icons. The strip is two 24px icons and their gap, plus a gutter;
    a repo root with archived worktrees carries a third, and reserves its own. */
 .workdir-item:hover .workdir-select {
-  padding-right: 46px;
+  padding-right: 54px;
   transition: padding-right 0.12s ease;
 }
 
 .workdir-item.has-three-actions:hover .workdir-select {
-  padding-right: 68px;
+  padding-right: 80px;
 }
 
 .workdir-action {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 20px;
-  height: 20px;
+  width: 24px;
+  height: 24px;
   padding: 0;
   background: transparent;
   border: none;

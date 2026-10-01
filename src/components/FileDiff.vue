@@ -552,7 +552,7 @@ onUnmounted(() => {
             data-testid="send-review"
             :disabled="!canSend"
             :aria-label="sender.target === 'markdown' ? 'Export as Markdown' : 'Send to opencode'"
-            class="marvis-control h-7 justify-center px-2.5 text-xs"
+            class="marvis-button marvis-button-primary marvis-button-sm"
             @click="requestSend"
           >
             {{ sender.target === "markdown" ? "Export as Markdown" : "Send to opencode" }}
@@ -633,7 +633,7 @@ onUnmounted(() => {
             <button
               type="button"
               data-testid="send-now"
-              class="marvis-control h-6 justify-center px-2 text-xs"
+              class="marvis-button marvis-button-primary marvis-button-xs"
               @click="sendNow(false)"
             >
               Send now
@@ -641,7 +641,7 @@ onUnmounted(() => {
             <button
               type="button"
               data-testid="send-queue"
-              class="marvis-control h-6 justify-center px-2 text-xs"
+              class="marvis-button marvis-button-secondary marvis-button-xs"
               @click="sendNow(true)"
             >
               Queue
@@ -649,7 +649,7 @@ onUnmounted(() => {
             <button
               type="button"
               data-testid="send-not-now"
-              class="px-2 text-xs text-(--marvis-text-faint) hover:text-(--marvis-text)"
+              class="marvis-button marvis-button-quiet marvis-button-xs text-(--marvis-text-faint) hover:text-(--marvis-text)"
               @click="busyChoiceOpen = false"
             >
               Not now
@@ -799,7 +799,7 @@ onUnmounted(() => {
                     <button
                       v-if="rowAnchor(row.line)"
                       type="button"
-                      class="ml-auto shrink-0 px-2 text-[0.6875rem] text-(--marvis-accent) opacity-0 group-hover:opacity-100"
+                      class="marvis-button marvis-button-quiet marvis-button-xs ml-auto shrink-0 text-(--marvis-accent) opacity-0 group-hover:opacity-100"
                       :aria-label="`Add review note on line ${rowAnchor(row.line)!.line}`"
                       @click="openDraft(rowAnchor(row.line)!.side, rowAnchor(row.line)!.line)"
                     >

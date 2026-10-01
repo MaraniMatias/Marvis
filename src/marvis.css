@@ -251,33 +251,97 @@
   color: var(--marvis-red);
 }
 
-/* A control with a surface, in three states: resting, hover, and pressed darker.
-   The resting surface is the accent washed over the background rather than a flat neutral, so
-   a control reads as a control and not as a piece of text. The accent still never fills
-   opaquely: these are tints, and the foreground stays light. */
+/* Compact, low-contrast surfaces keep secondary actions quiet; accent marks the primary action. */
+.marvis-button,
 .marvis-control {
   display: inline-flex;
+  min-height: 28px;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  border: none;
-  border-radius: var(--marvis-radius);
-  background: color-mix(in srgb, var(--marvis-accent) 14%, transparent);
-  padding: 3px 8px;
+  border: 1px solid color-mix(in srgb, var(--marvis-border) 72%, transparent);
+  border-radius: 4px;
+  padding: 0 10px;
   cursor: pointer;
   font-family: inherit;
   transition:
     background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease;
+}
+.marvis-button {
+  font-size: 0.75rem;
+  font-weight: 500;
+}
+.marvis-control,
+.marvis-button-secondary {
+  background: var(--marvis-bg-1);
+  color: var(--marvis-text-secondary);
+}
+.marvis-control:not(.marvis-button-primary):hover:not(:disabled),
+.marvis-button-secondary:hover:not(:disabled) {
+  border-color: var(--marvis-text-faint);
+  background: var(--marvis-bg-2);
+  color: var(--marvis-text);
+}
+.marvis-button-primary {
+  border-color: var(--marvis-accent);
+  background: var(--marvis-accent);
+  color: var(--marvis-bg-0);
+}
+.marvis-button-primary:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--marvis-accent) 88%, var(--marvis-text));
+}
+.marvis-button-quiet {
+  border-color: transparent;
+  background: transparent;
+}
+.marvis-button-quiet:hover:not(:disabled) {
+  background: var(--marvis-bg-2);
+  color: var(--marvis-text);
+}
+.marvis-button-md {
+  min-height: 28px;
+  padding: 0 10px;
+}
+.marvis-button-sm {
+  min-height: 26px;
+  padding: 0 8px;
+}
+.marvis-button-xs {
+  min-height: 22px;
+  padding: 0 6px;
+  font-size: 0.6875rem;
+}
+.marvis-icon-control {
+  display: inline-flex;
+  width: 28px;
+  height: 28px;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 4px;
+  background: transparent;
+  color: var(--marvis-text-secondary);
+  cursor: pointer;
+  transition:
+    background-color 120ms ease,
     color 120ms ease;
 }
-.marvis-control:hover {
-  background: color-mix(in srgb, var(--marvis-accent) 24%, transparent);
+.marvis-icon-control:hover:not(:disabled) {
+  background: var(--marvis-bg-2);
+  color: var(--marvis-text);
 }
-.marvis-control:active {
-  background: color-mix(in srgb, var(--marvis-accent) 8%, transparent);
-}
-.marvis-control:disabled {
+.marvis-button:disabled,
+.marvis-control:disabled,
+.marvis-icon-control:disabled {
   cursor: not-allowed;
-  opacity: 0.6;
+  opacity: 0.55;
+}
+button:focus-visible {
+  outline: 2px solid var(--marvis-accent);
+  outline-offset: 2px;
 }
 
 /* The trigger of a select, drawn as one of the app's own controls so it reads the same on
@@ -338,32 +402,34 @@
   max-height: min(60vh, var(--reka-select-content-available-height));
 }
 
-/* The three answers a dialog's footer carries, so a dialog in this app is built the same way
-   wherever it is asked from. Cancel and the neutral answer are `.marvis-control` and stay in the
-   mockup's vocabulary; the destructive one is the only filled button in the app, because it is
-   the only one that reaches the disk. The focus ring is here rather than left to the browser,
-   which draws one this design does not have. */
 .marvis-button-danger {
   display: inline-flex;
+  min-height: 28px;
   align-items: center;
+  justify-content: center;
   gap: 6px;
-  border: none;
-  border-radius: var(--marvis-radius);
-  padding: 8px 12px;
-  background: var(--marvis-red);
-  color: var(--marvis-bg-0);
+  border: 1px solid color-mix(in srgb, var(--marvis-red) 45%, transparent);
+  border-radius: 4px;
+  padding: 0 10px;
+  background: color-mix(in srgb, var(--marvis-red) 12%, transparent);
+  color: var(--marvis-red);
   font: inherit;
   font-size: 0.75rem;
   font-weight: 500;
   cursor: pointer;
-  transition: opacity 120ms ease;
+  transition:
+    background-color 120ms ease,
+    border-color 120ms ease,
+    color 120ms ease,
+    opacity 120ms ease;
 }
 .marvis-button-danger:hover:enabled {
-  opacity: 0.8;
+  border-color: var(--marvis-red);
+  background: color-mix(in srgb, var(--marvis-red) 22%, transparent);
 }
 .marvis-button-danger:disabled {
   cursor: not-allowed;
-  opacity: 0.4;
+  opacity: 0.55;
 }
 
 /* A control that is nothing but its own name with a list of things behind it: no surface at

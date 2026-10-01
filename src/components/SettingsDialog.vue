@@ -150,13 +150,7 @@ function onDialogKeydown(event: KeyboardEvent) {
           <h2 id="settings-title" class="text-base font-semibold text-(--marvis-text)">Settings</h2>
           <p class="mt-1 text-xs text-(--marvis-text-faint)">Saved to ~/.marvis/config.yml</p>
         </div>
-        <button
-          type="button"
-          aria-label="Close"
-          :disabled="saving"
-          class="marvis-control px-2 py-1 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
-          @click="requestClose"
-        >
+        <button type="button" aria-label="Close" :disabled="saving" class="marvis-icon-control" @click="requestClose">
           ×
         </button>
       </header>
@@ -251,7 +245,7 @@ function onDialogKeydown(event: KeyboardEvent) {
         <button
           type="button"
           :disabled="isDefault || saving"
-          class="marvis-control px-3 py-2 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+          class="marvis-button marvis-button-quiet"
           @click="resetDraft"
         >
           Reset to defaults
@@ -270,7 +264,7 @@ function onDialogKeydown(event: KeyboardEvent) {
         <button
           type="button"
           :disabled="saving"
-          class="marvis-control px-3 py-2 text-xs text-(--marvis-text) hover:text-(--marvis-text)"
+          class="marvis-control marvis-button-primary px-3 py-2 text-xs"
           @click="emit('apply', draft)"
         >
           {{ saving ? "Saving…" : "Apply" }}

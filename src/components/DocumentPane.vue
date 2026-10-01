@@ -907,13 +907,19 @@ function onMarkdownLink(event: MouseEvent) {
       class="flex shrink-0 items-center justify-end gap-2 px-3 py-2"
       aria-label="Unsaved changes"
     >
-      <button type="button" aria-label="Cancel" class="document-action-button" :disabled="saving" @click="cancelDraft">
+      <button
+        type="button"
+        aria-label="Cancel"
+        class="marvis-button marvis-button-secondary marvis-button-sm"
+        :disabled="saving"
+        @click="cancelDraft"
+      >
         Cancel
       </button>
       <button
         type="button"
         aria-label="Save"
-        class="document-action-button document-action-primary"
+        class="marvis-button marvis-button-primary marvis-button-sm"
         :disabled="saving"
         @click="saveDraft"
       >
@@ -1204,35 +1210,18 @@ function onMarkdownLink(event: MouseEvent) {
   background: color-mix(in srgb, var(--marvis-border) 35%, transparent);
 }
 
-.toolbar-icon-button,
-.document-action-button {
+.toolbar-icon-button {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
   border-radius: var(--marvis-radius);
   color: var(--marvis-text-secondary);
 }
 
-.toolbar-icon-button {
-  display: inline-flex;
-  padding: 0.2rem;
-}
-
-.toolbar-icon-button:hover,
-.document-action-button:hover:not(:disabled) {
+.toolbar-icon-button:hover {
   background: var(--marvis-border);
   color: var(--marvis-text);
-}
-
-.document-action-button {
-  padding: 0.3rem 0.65rem;
-  font-size: 0.75rem;
-}
-
-.document-action-primary {
-  background: var(--marvis-accent);
-  color: var(--marvis-bg-0);
-}
-
-.document-action-button:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
 }
 </style>

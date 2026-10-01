@@ -64,16 +64,12 @@ function submit() {
     </p>
     <p v-if="error" role="alert" class="mt-1 text-[0.625rem] text-(--marvis-red)">{{ error }}</p>
     <div class="mt-1 flex items-center gap-2">
-      <button
-        type="submit"
-        class="rounded-sm bg-(--marvis-border) px-2 py-0.5 text-[0.6875rem] text-(--marvis-text)"
-        :disabled="!content.trim()"
-      >
+      <button type="submit" class="marvis-button marvis-button-primary marvis-button-xs" :disabled="!content.trim()">
         Save note
       </button>
       <button
         type="button"
-        class="rounded-sm px-2 py-0.5 text-[0.6875rem] text-(--marvis-text-faint) hover:text-(--marvis-text)"
+        class="marvis-button marvis-button-quiet marvis-button-xs text-(--marvis-text-faint)"
         @click="$emit('cancel')"
       >
         Cancel

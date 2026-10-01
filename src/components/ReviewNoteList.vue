@@ -68,7 +68,7 @@ function canResolve(note: ReviewNote): boolean {
           <button
             v-if="note.status === 'sent' && !note.outdated && canResolve(note)"
             type="button"
-            class="text-(--marvis-green) hover:text-(--marvis-text)"
+            class="marvis-button marvis-button-quiet marvis-button-xs text-(--marvis-green) hover:text-(--marvis-text)"
             :aria-label="`Mark note on line ${note.lineStart} as resolved`"
             @click="$emit('resolveNote', note.id)"
           >
@@ -77,7 +77,7 @@ function canResolve(note: ReviewNote): boolean {
           <button
             v-if="note.outdated"
             type="button"
-            class="text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+            class="marvis-button marvis-button-quiet marvis-button-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
             :aria-label="`Accept note on line ${note.lineStart} even though the line changed`"
             @click="$emit('clearOutdated', note.id)"
           >
@@ -85,7 +85,7 @@ function canResolve(note: ReviewNote): boolean {
           </button>
           <button
             type="button"
-            class="text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+            class="marvis-button marvis-button-quiet marvis-button-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
             :aria-label="`Edit note on line ${note.lineStart}`"
             @click="startEditing(note)"
           >
@@ -93,7 +93,7 @@ function canResolve(note: ReviewNote): boolean {
           </button>
           <button
             type="button"
-            class="text-(--marvis-text-secondary) hover:text-(--marvis-red)"
+            class="marvis-button marvis-button-quiet marvis-button-xs text-(--marvis-text-secondary) hover:text-(--marvis-red)"
             :aria-label="`Delete note on line ${note.lineStart}`"
             @click="$emit('deleteNote', note.id)"
           >
@@ -110,15 +110,10 @@ function canResolve(note: ReviewNote): boolean {
           @keydown.esc.stop.prevent="editingId = null"
         />
         <div class="mt-1 flex gap-2">
-          <button
-            type="submit"
-            class="rounded-sm bg-(--marvis-border) px-2 py-0.5 text-[0.6875rem] text-(--marvis-text)"
-          >
-            Save
-          </button>
+          <button type="submit" class="marvis-button marvis-button-primary marvis-button-xs">Save</button>
           <button
             type="button"
-            class="rounded-sm px-2 py-0.5 text-[0.6875rem] text-(--marvis-text-faint) hover:text-(--marvis-text)"
+            class="marvis-button marvis-button-quiet marvis-button-xs text-(--marvis-text-faint)"
             @click="editingId = null"
           >
             Cancel

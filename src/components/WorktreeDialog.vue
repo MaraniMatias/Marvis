@@ -224,13 +224,7 @@ function messageOf(cause: unknown): string {
             {{ checkout?.branch || checkout?.path }} · {{ repo?.name }}
           </p>
         </div>
-        <button
-          aria-label="Close"
-          class="marvis-control px-2 py-1 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
-          @click="$emit('close')"
-        >
-          ×
-        </button>
+        <button aria-label="Close" class="marvis-icon-control" @click="$emit('close')">×</button>
       </header>
 
       <div v-if="loading && !removal" class="py-6 text-sm text-(--marvis-text-secondary)" role="status">
@@ -275,12 +269,11 @@ function messageOf(cause: unknown): string {
           >
             Cancel
           </button>
-          <!-- The confirm is not filled: the accent never paints a surface, so the button that
-               matters is the one with text, not the one with a block behind it. -->
+          <!-- Creating and opening the shell is this dialog's primary action. -->
           <button
             type="submit"
             :disabled="isBusy || !defaultBranch"
-            class="marvis-control px-3 py-2 text-xs text-(--marvis-text) hover:text-(--marvis-text)"
+            class="marvis-control marvis-button-primary px-3 py-2 text-xs"
           >
             {{ isBusy ? "Creating…" : "Create and open shell" }}
           </button>
@@ -289,13 +282,7 @@ function messageOf(cause: unknown): string {
 
       <div v-else-if="mode === 'remove' && error && !removal" class="space-y-4">
         <p role="alert" class="text-sm text-(--marvis-red)">{{ error }}</p>
-        <button
-          type="button"
-          class="rounded px-3 py-2 text-xs text-(--marvis-text-secondary) hover:bg-(--marvis-border)"
-          @click="$emit('close')"
-        >
-          Close
-        </button>
+        <button type="button" class="marvis-button marvis-button-secondary" @click="$emit('close')">Close</button>
       </div>
 
       <div v-else-if="removal" class="space-y-4">
@@ -324,7 +311,11 @@ function messageOf(cause: unknown): string {
             </li>
             <li v-if="removal.dirtyFiles.length > 8">and {{ removal.dirtyFiles.length - 8 }} more…</li>
           </ul>
-          <button type="button" class="mt-2 text-xs text-(--marvis-accent) underline" @click="openShell">
+          <button
+            type="button"
+            class="marvis-button marvis-button-quiet marvis-button-xs mt-2 text-(--marvis-accent) underline"
+            @click="openShell"
+          >
             Open a shell to commit or stash first
           </button>
           <label class="mt-3 flex items-start gap-2 text-xs text-(--marvis-text-faint)">
@@ -375,8 +366,7 @@ function messageOf(cause: unknown): string {
         </label>
         <p v-if="error" role="alert" class="text-sm text-(--marvis-red)">{{ error }}</p>
         <footer class="flex items-center gap-2 pt-1">
-          <!-- Delete is the only answer that reaches the disk, so it is the only one painted
-               in the failure colour, and it sits apart from the two that do not. -->
+          <!-- Delete reaches the disk, so it alone uses the destructive treatment. -->
           <button type="button" :disabled="isBusy || !canRemove" class="marvis-button-danger" @click="submitRemove">
             {{ isBusy ? "Deleting…" : "Delete" }}
           </button>

@@ -52,7 +52,7 @@ const titleId = computed(() => `confirm-${props.title.replace(/\W+/g, "-").toLow
         <button
           type="button"
           :disabled="busy"
-          :class="destructive ? 'marvis-button-danger' : 'marvis-control px-3 py-2 text-xs text-(--marvis-text)'"
+          :class="destructive ? 'marvis-button-danger' : 'marvis-button marvis-button-primary'"
           @click="emit('confirm')"
         >
           {{ busy ? "Working…" : confirmLabel }}

@@ -1,20 +1,15 @@
 <script setup lang="ts">
-/**
- * A quiet action, in the mockup's own vocabulary.
- *
- * There is no filled accent button in the mockup: `--marvis-accent` only ever paints a
- * selection bar, an active icon, the prompt or a focus ring. An accent-filled button with
- * dark text reads as a different product, so the accent stays out of the surface and the
- * action sits on the background until it is hovered.
- */
+/** Reusable action button with semantic visual variants and compact sizing. */
 defineOptions({ name: "UiButton" });
 
 withDefaults(
   defineProps<{
     disabled?: boolean;
     type?: "button" | "submit";
+    variant?: "primary" | "secondary" | "quiet" | "danger";
+    size?: "sm" | "md";
   }>(),
-  { disabled: false, type: "button" },
+  { disabled: false, type: "button", variant: "secondary", size: "md" },
 );
 </script>
 
@@ -22,7 +17,8 @@ withDefaults(
   <button
     :type="type"
     :disabled="disabled"
-    class="marvis-control h-7 justify-center px-2.5 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text) disabled:opacity-60"
+    class="marvis-button"
+    :class="[`marvis-button-${variant}`, `marvis-button-${size}`]"
   >
     <slot />
   </button>
