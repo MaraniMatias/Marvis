@@ -8,6 +8,16 @@ here still gets its generated notes.
 
 ## Unreleased
 
+- **Settings has an About section that says what Marvis is made of.** At the bottom of the dialog:
+  the Catppuccin file icons, the Lucide icons in the interface, Zed's One palettes, the bundled
+  Fira Code, and the libraries the window is assembled from — each with the licence it travels
+  under, and the repository at the end. Every one of those licences asks its notice to travel with
+  the software, and until now the notices were only in the source: the Catppuccin copyright in the
+  header of a generated file, the font's OFL beside files Vite never bundles, the Zed credit in a
+  comment above a color block. Somebody with the app installed had none of them. The list is checked
+  against `package.json`, so swapping a dependency out fails a test instead of leaving a credit
+  naming something that no longer ships.
+
 - **`Cmd`/`Ctrl` `+`, `-` and `0` scale the window.** Eight steps from 80% to 150%, and the scale is
   remembered between launches. Each change says where it landed — `Zoom 120% (Cmd 0 to reset)` —
   with the name of the key that was pressed, because the handler needs a modifier either way and so

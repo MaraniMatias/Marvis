@@ -7,6 +7,7 @@ import { defineComponent, h, inject, onMounted } from "vue";
 import type { InjectionKey, Ref } from "vue";
 import { DEFAULT_APP_LAYOUT, DEFAULT_CHECKOUT_UI_STATE } from "./domain/ui-state";
 import type { AppLayoutState } from "./domain/ui-state";
+import { ACKNOWLEDGEMENT, CREDITS, REPOSITORY } from "./domain/credits";
 import { DEFAULT_SETTINGS, SETTINGS_SECTIONS, cloneSettings } from "./domain/settings";
 import type { AppSettings } from "./domain/settings";
 import type { ReviewNote } from "./domain/review";
@@ -2201,6 +2202,24 @@ describe("App UI integration", () => {
         .trigger("click");
       expect(wrapper.find('[role="dialog"]').exists()).toBe(false);
       expect(mocks.saveSettings).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("draws every credit the About section carries, each with the licence it travels under", async () => {
+      const wrapper = await openSettings();
+      // Read the list rather than a copy of it, for the reason the field test above does: what
+      // matters is that nothing in `credits.ts` is dropped on the way to the screen.
+      const about = wrapper.get('[data-testid="about-section"]').text();
+      expect(about).toContain(ACKNOWLEDGEMENT);
+      for (const group of CREDITS) {
+        expect(about, group.title).toContain(group.title);
+        for (const entry of group.entries) {
+          expect(about, entry.name).toContain(entry.name);
+          expect(about, entry.name).toContain(entry.license);
+        }
+      }
+      // And the repository, which is the one thing a person in this section is most likely to want.
+      expect(about).toContain(REPOSITORY);
       wrapper.unmount();
     });
 
