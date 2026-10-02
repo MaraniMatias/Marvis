@@ -12,9 +12,13 @@ use crate::{
 };
 
 #[tauri::command]
-pub async fn restore_workspace(database: State<'_, Database>) -> Result<WorkspaceState, IpcError> {
+pub async fn restore_workspace(
+    database: State<'_, Database>,
+    home: State<'_, services::workspace::HomeDirectory>,
+) -> Result<WorkspaceState, IpcError> {
     let database = database.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || services::workspace::restore(&database))
+    let home = home.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || services::workspace::restore(&database, &home))
         .await
         .map_err(operation_error)?
 }

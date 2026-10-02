@@ -136,6 +136,7 @@ pub struct WindowGeometry {
 #[derive(Clone)]
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
+    home_checkout_id: Arc<Mutex<Option<String>>>,
 }
 
 impl Database {
@@ -164,12 +165,126 @@ impl Database {
 
         Ok(Self {
             connection: Arc::new(Mutex::new(connection)),
+            home_checkout_id: Arc::new(Mutex::new(None)),
         })
     }
 
     #[cfg(test)]
     fn open_in_memory() -> Result<Self, String> {
         Self::from_connection(Connection::open_in_memory().map_err(db_error)?)
+    }
+
+    pub fn ensure_not_home_checkout(&self, checkout_id: &str) -> Result<(), String> {
+        let home_checkout_id = self
+            .home_checkout_id
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone();
+        if home_checkout_id.as_deref() == Some(checkout_id) {
+            return Err("the Home workdir cannot be removed".into());
+        }
+        Ok(())
+    }
+
+    pub fn set_home_checkout_id(&self, checkout_id: String) -> Result<(), String> {
+        *self
+            .home_checkout_id
+            .lock()
+            .map_err(|error| error.to_string())? = Some(checkout_id);
+        Ok(())
+    }
+
+    /// Ensures the operating-system Home directory is listed first without treating it as a
+    /// recently opened folder or changing its last-opened timestamp.
+    pub fn register_home_repo(&self, repo: &Repo) -> Result<(), String> {
+        let checkout = repo.checkouts.first().ok_or("Home has no checkout")?;
+        if repo.kind != RepoKind::Plain
+            || repo.id != crate::domain::workspace::repo_id_for_path(&repo.root)
+            || repo.checkouts.len() != 1
+            || !checkout.is_primary
+            || checkout.repo_id != repo.id
+            || checkout.id != crate::domain::workspace::checkout_id_for_path(&repo.root)
+            || checkout.canonical_path != repo.root
+            || Path::new(&repo.root).canonicalize().ok().as_deref() != Some(Path::new(&repo.root))
+        {
+            return Err("Home directory failed backend identity validation".into());
+        }
+
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        let existing = transaction
+            .query_row(
+                "SELECT r.id, c.id FROM checkouts c JOIN repos r ON r.id = c.repo_id
+                 WHERE c.canonical_path = ?1",
+                [&repo.root],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(db_error)?;
+
+        let max_position: i64 = transaction
+            .query_row("SELECT COALESCE(MAX(position), 0) FROM repos", [], |row| {
+                row.get(0)
+            })
+            .map_err(db_error)?;
+        let offset = max_position + 2;
+        transaction
+            .execute("UPDATE repos SET position = position + ?1", [offset])
+            .map_err(db_error)?;
+        transaction
+            .execute("UPDATE repos SET position = position - ?1 + 1", [offset])
+            .map_err(db_error)?;
+
+        if let Some((repo_id, checkout_id)) = existing {
+            if checkout_id != checkout.id {
+                return Err("Home checkout has an unexpected identity".into());
+            }
+            transaction
+                .execute(
+                    "UPDATE repos SET name = 'Home', position = 0 WHERE id = ?1",
+                    [&repo_id],
+                )
+                .map_err(db_error)?;
+        } else {
+            let repo_id_in_use: bool = transaction
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM repos WHERE id = ?1)",
+                    [&repo.id],
+                    |row| row.get(0),
+                )
+                .map_err(db_error)?;
+            if repo_id_in_use {
+                return Err("Home repository identity is already in use".into());
+            }
+            transaction
+                .execute(
+                    "INSERT INTO repos (id, kind, name, root, default_branch, position, created_at, last_opened_at)
+                     VALUES (?1, 'plain', 'Home', ?2, NULL, 0, ?3, ?4)",
+                    params![repo.id, repo.root, repo.created_at, repo.last_opened_at],
+                )
+                .map_err(db_error)?;
+            transaction
+                .execute(
+                    "INSERT INTO checkouts
+                     (id, repo_id, path, canonical_path, is_primary, branch, head, ahead_of_default, changed_files, position)
+                     VALUES (?1, ?2, ?3, ?4, 1, NULL, NULL, NULL, 0, 0)",
+                    params![checkout.id, repo.id, checkout.path, checkout.canonical_path],
+                )
+                .map_err(db_error)?;
+        }
+        transaction
+            .execute(
+                "DELETE FROM recent_paths WHERE canonical_path = ?1",
+                [&repo.root],
+            )
+            .map_err(db_error)?;
+        transaction.commit().map_err(db_error)?;
+        drop(connection);
+        *self
+            .home_checkout_id
+            .lock()
+            .map_err(|error| error.to_string())? = Some(checkout.id.clone());
+        Ok(())
     }
 
     pub fn register_plain_repo(&self, repo: Repo) -> Result<WorkspaceState, String> {
@@ -834,6 +949,7 @@ impl Database {
         checkout_id: &str,
         require_missing: bool,
     ) -> Result<WorkspaceState, String> {
+        self.ensure_not_home_checkout(checkout_id)?;
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.unchecked_transaction().map_err(db_error)?;
         let (repo_id, is_primary, stored_missing, kind, path) = transaction
@@ -936,6 +1052,7 @@ impl Database {
     /// in it is refused for the same reason a close is: the process would outlive the
     /// row that names it.
     pub fn archive_checkout(&self, checkout_id: &str) -> Result<WorkspaceState, String> {
+        self.ensure_not_home_checkout(checkout_id)?;
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.unchecked_transaction().map_err(db_error)?;
         let (repo_id, is_primary, stored_missing, kind, path) = transaction
@@ -1108,6 +1225,7 @@ impl Database {
         repo_id: &str,
         checkout_id: &str,
     ) -> Result<WorkspaceState, String> {
+        self.ensure_not_home_checkout(checkout_id)?;
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.unchecked_transaction().map_err(db_error)?;
         let checkout = transaction
@@ -1370,7 +1488,14 @@ impl Database {
 
     pub fn load_workspace(&self) -> Result<WorkspaceState, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        load_workspace(&connection)
+        let mut state = load_workspace(&connection)?;
+        drop(connection);
+        state.home_checkout_id = self
+            .home_checkout_id
+            .lock()
+            .map_err(|error| error.to_string())?
+            .clone();
+        Ok(state)
     }
 
     /// The folders opened before, newest first, inside the ten the writes keep. The stamps are
@@ -2345,6 +2470,7 @@ fn load_workspace(connection: &Connection) -> Result<WorkspaceState, String> {
 
     Ok(WorkspaceState {
         repos,
+        home_checkout_id: None,
         archived_worktrees,
         active_checkout_id: get_preference(connection, ACTIVE_CHECKOUT)?,
         active_session_id: get_preference(connection, ACTIVE_SESSION)?,
@@ -2447,6 +2573,66 @@ mod tests {
 
     fn plain_repo(path: &Path, now: &str) -> Repo {
         Repo::plain(path, now).expect("plain repo")
+    }
+
+    #[test]
+    fn home_is_pinned_first_without_recent_activity_and_cannot_be_closed() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        let other = temp.path().join("other");
+        fs::create_dir(&home).unwrap();
+        fs::create_dir(&other).unwrap();
+        let database = Database::open_in_memory().unwrap();
+        let home_repo = plain_repo(&home, "home-opened");
+        let home_checkout_id = home_repo.checkouts[0].id.clone();
+
+        database
+            .register_plain_repo(plain_repo(&other, "other-opened"))
+            .unwrap();
+        database.register_plain_repo(home_repo.clone()).unwrap();
+        database.register_home_repo(&home_repo).unwrap();
+        let first = database.load_workspace().unwrap();
+        assert_eq!(first.repos[0].name, "Home");
+        assert_eq!(first.repos[0].checkouts[0].id, home_checkout_id);
+        assert_eq!(
+            first.home_checkout_id.as_deref(),
+            Some(home_checkout_id.as_str())
+        );
+        assert!(!database
+            .list_recent_paths()
+            .unwrap()
+            .iter()
+            .any(|recent| recent.canonical_path == home_repo.root));
+
+        database
+            .register_home_repo(&plain_repo(&home, "later"))
+            .unwrap();
+        let repeated = database.load_workspace().unwrap();
+        assert_eq!(repeated.repos[0].last_opened_at, "home-opened");
+        assert_eq!(
+            repeated
+                .repos
+                .iter()
+                .filter(|repo| repo.name == "Home")
+                .count(),
+            1
+        );
+        assert!(database
+            .close_checkout(&home_checkout_id)
+            .unwrap_err()
+            .contains("Home"));
+        assert!(database
+            .close_missing_checkout(&home_checkout_id)
+            .unwrap_err()
+            .contains("Home"));
+        assert!(database
+            .archive_checkout(&home_checkout_id)
+            .unwrap_err()
+            .contains("Home"));
+        assert!(database
+            .remove_checkout(&home_repo.id, &home_checkout_id)
+            .unwrap_err()
+            .contains("Home"));
     }
 
     /// A file with no stamp gets the whole schema, a file already stamped with this build's

@@ -26,6 +26,7 @@ const props = withDefaults(
     repos: Repo[];
     activeCheckoutId: string | null;
     activeSessionId: string | null;
+    homeCheckoutId?: string | null;
     isOpening: boolean;
     sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
     /**
@@ -44,6 +45,7 @@ const props = withDefaults(
     agent?: AgentHeadline | null;
   }>(),
   {
+    homeCheckoutId: null,
     sessionRuntimeStatuses: () => ({}),
     archivedWorktrees: () => [],
     agent: null,
@@ -362,6 +364,7 @@ interface Workdir {
    * (closing it). Nothing behind it can be selected, run or created.
    */
   missing: boolean;
+  home: boolean;
   active: boolean;
   items: WorkdirItem[];
 }
@@ -419,12 +422,10 @@ function workdirTooltip(checkout: Checkout): string {
 function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
   const isGit = repo.kind === "git";
   const counts = isGit ? diffStats.checkoutTotals[checkout.id] : undefined;
-  const title = workdirTitle(checkout);
+  const title = workdirTitle(repo, checkout);
   return {
     checkout,
-    // A git repo root is named by the branch it is on, the same as a worktree. The only
-    // checkouts with no branch to show — a plain folder, or a repo on a detached HEAD — keep
-    // the plain "Base".
+    // Git roots use their branch (or "Base" when detached); plain workdirs use the repo name.
     title,
     label: branchLabel(title),
     additions: counts?.additions || undefined,
@@ -437,6 +438,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     worktree: isGit && !checkout.isPrimary,
     archived: archivedByRepo.value.get(repo.id) ?? 0,
     missing: checkout.isMissing,
+    home: checkout.id === props.homeCheckoutId,
     active: checkout.id === props.activeCheckoutId,
     items: checkout.sessions.map((session) => {
       const status = props.sessionRuntimeStatuses[session.id];
@@ -447,7 +449,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
           .filter((sibling) => sibling.id !== checkout.id && !sibling.isMissing)
           .map((sibling) => ({
             id: sibling.id,
-            label: workdirTitle(sibling),
+            label: workdirTitle(repo, sibling),
             title: sibling.path,
           })),
         active: session.id === props.activeSessionId,
@@ -549,7 +551,7 @@ const agentTitle = computed(() =>
                      off the panel takes the whole list with it. It is not the trash's business
                      either: nothing here deletes a file. -->
                 <button
-                  v-if="!workdir.missing && !workdir.worktree"
+                  v-if="!workdir.home && !workdir.missing && !workdir.worktree"
                   type="button"
                   class="workdir-action"
                   :aria-label="`Remove from list: ${workdir.title}`"
@@ -561,7 +563,7 @@ const agentTitle = computed(() =>
                 <!-- A missing directory has nothing to remove from disk, so the row offers
                      the one thing left to do with it: take it off the list. -->
                 <button
-                  v-if="workdir.missing"
+                  v-if="workdir.missing && !workdir.home"
                   type="button"
                   class="workdir-action"
                   :aria-label="`Close missing checkout: ${workdir.title}`"
@@ -574,7 +576,7 @@ const agentTitle = computed(() =>
                      once: the cross opens the dialog that holds both, and nothing is removed,
                      hidden or deleted before the answer comes back. -->
                 <button
-                  v-if="workdir.worktree && !workdir.missing"
+                  v-if="workdir.worktree && !workdir.missing && !workdir.home"
                   type="button"
                   class="workdir-action"
                   :aria-label="`Remove or archive worktree ${workdir.title}`"

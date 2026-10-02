@@ -16,6 +16,9 @@ use crate::{
     services::{folder, worktree},
 };
 
+#[derive(Clone)]
+pub struct HomeDirectory(pub PathBuf);
+
 pub fn register_folder(
     database: &Database,
     path: &Path,
@@ -320,7 +323,10 @@ fn operation_error(error: String) -> IpcError {
     IpcError::new(IpcErrorCode::OperationFailed, error)
 }
 
-pub fn restore(database: &Database) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
+pub fn restore(
+    database: &Database,
+    home: &HomeDirectory,
+) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
     let state = database
         .load_workspace()
         .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?;
@@ -344,8 +350,15 @@ pub fn restore(database: &Database) -> Result<crate::domain::workspace::Workspac
     database
         .prune_missing_checkouts()
         .map_err(operation_error)?;
+    let mut home_repo = Repo::plain(&home.0, timestamp())
+        .map_err(|error| IpcError::new(IpcErrorCode::InvalidPath, error))?;
+    home_repo.name = "Home".into();
+    let home_checkout_id = home_repo.checkouts[0].id.clone();
     database
-        .load_workspace()
+        .register_home_repo(&home_repo)
+        .map_err(operation_error)?;
+    database
+        .select_checkout(Some(home_checkout_id))
         .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
 }
 
@@ -525,7 +538,7 @@ mod tests {
 
     use super::{
         archive_checkout, close_checkout, close_missing_checkout, locate_missing_checkout,
-        register_folder, restore, set_default_branch, sync_repo,
+        register_folder, restore, set_default_branch, sync_repo, HomeDirectory,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -553,6 +566,12 @@ mod tests {
 
     fn database(path: &Path) -> Database {
         Database::open(path.join("workspace.sqlite3")).expect("database")
+    }
+
+    fn home_directory(parent: &Path) -> HomeDirectory {
+        let path = parent.join("home");
+        fs::create_dir_all(&path).unwrap();
+        HomeDirectory(path)
     }
 
     #[test]
@@ -722,15 +741,34 @@ mod tests {
         }
 
         let database = Database::open(&database_path).unwrap();
-        let restored = restore(&database).unwrap();
-        let repo = &restored.repos[0];
+        let home = temp.path().join("home");
+        fs::create_dir(&home).unwrap();
+        let restored = restore(&database, &super::HomeDirectory(home.clone())).unwrap();
+        let home_checkout_id = crate::domain::workspace::checkout_id_for_path(
+            &home.canonicalize().unwrap().display().to_string(),
+        );
+        assert_eq!(restored.repos[0].name, "Home");
+        assert_eq!(
+            restored.home_checkout_id.as_deref(),
+            Some(home_checkout_id.as_str())
+        );
+        assert_eq!(
+            restored.active_checkout_id.as_deref(),
+            Some(home_checkout_id.as_str())
+        );
+        let repo = restored
+            .repos
+            .iter()
+            .find(|repo| {
+                repo.id
+                    == crate::domain::workspace::repo_id_for_path(
+                        &primary.canonicalize().unwrap().display().to_string(),
+                    )
+            })
+            .unwrap();
         assert_eq!(repo.checkouts.len(), 2);
         assert!(repo.checkouts[0].is_primary);
         assert_eq!(repo.checkouts[1].branch.as_deref(), Some("feature"));
-        assert_eq!(
-            restored.active_checkout_id.as_deref(),
-            Some(session.checkout_id.as_str())
-        );
         // The session the previous process selected is gone with its PTY, so nothing points at it.
         assert_eq!(restored.active_session_id, None);
         assert!(repo.checkouts[1].sessions.is_empty());
@@ -762,22 +800,22 @@ mod tests {
             .expect("opening the worktree selects it");
         fs::remove_dir_all(&linked).unwrap();
 
-        let state = restore(&db).unwrap();
+        let state = restore(&db, &home_directory(temp.path())).unwrap();
 
         // Git still lists the deleted worktree, so reconciliation re-inserts it first. The
         // prune is what runs last, and the worktree is gone from the reopened list.
-        assert!(state.repos[0]
+        let repo = state
+            .repos
+            .iter()
+            .find(|repo| repo.kind == RepoKind::Git)
+            .unwrap();
+        assert!(repo
             .checkouts
             .iter()
             .all(|checkout| checkout.canonical_path != linked_canonical));
-        assert_eq!(state.repos[0].checkouts.len(), 1);
-        // The selection that pointed at the removed worktree falls back to the repo's
-        // primary instead of naming a row that no longer exists.
-        assert_eq!(
-            state.active_checkout_id.as_deref(),
-            Some(state.repos[0].checkouts[0].id.as_str())
-        );
-        assert!(state.repos[0].checkouts[0].is_primary);
+        assert_eq!(repo.checkouts.len(), 1);
+        assert!(repo.checkouts[0].is_primary);
+        assert_eq!(state.active_checkout_id, state.home_checkout_id);
         assert_ne!(
             state.active_checkout_id.as_deref(),
             Some(removed_id.as_str())
@@ -793,10 +831,11 @@ mod tests {
         register_folder(&db, &primary).unwrap();
         fs::remove_dir_all(&primary).unwrap();
 
-        let state = restore(&db).unwrap();
+        let state = restore(&db, &home_directory(temp.path())).unwrap();
 
-        assert!(state.repos.is_empty());
-        assert_eq!(state.active_checkout_id, None);
+        assert_eq!(state.repos.len(), 1);
+        assert_eq!(state.repos[0].name, "Home");
+        assert_eq!(state.active_checkout_id, state.home_checkout_id);
     }
 
     #[test]
@@ -818,14 +857,16 @@ mod tests {
             ],
         );
 
-        let restored = restore(&db).unwrap();
+        let restored = restore(&db, &home_directory(temp.path())).unwrap();
 
-        assert_eq!(restored.repos.len(), 1);
-        assert_eq!(restored.repos[0].checkouts.len(), 2);
-        assert_eq!(
-            restored.repos[0].checkouts[1].branch.as_deref(),
-            Some("external")
-        );
+        let repo = restored
+            .repos
+            .iter()
+            .find(|repo| repo.kind == RepoKind::Git)
+            .unwrap();
+        assert_eq!(repo.checkouts.len(), 2);
+        assert_eq!(repo.checkouts[1].branch.as_deref(), Some("external"));
+        assert_eq!(restored.active_checkout_id, restored.home_checkout_id);
     }
 
     /// A worktree is created by more than one hand: an agent running `git worktree add` in a
@@ -1002,10 +1043,16 @@ mod tests {
             .clone();
 
         archive_checkout(&db, &worktree_id).unwrap();
-        let restored = restore(&db).unwrap();
+        let restored = restore(&db, &home_directory(temp.path())).unwrap();
 
-        assert_eq!(restored.repos[0].checkouts.len(), 1);
-        assert!(restored.repos[0].checkouts[0].is_primary);
+        let repo = restored
+            .repos
+            .iter()
+            .find(|repo| repo.kind == RepoKind::Git)
+            .unwrap();
+        assert_eq!(repo.checkouts.len(), 1);
+        assert!(repo.checkouts[0].is_primary);
+        assert_eq!(restored.active_checkout_id, restored.home_checkout_id);
         assert_eq!(restored.archived_worktrees.len(), 1);
         assert_eq!(restored.archived_worktrees[0].id, worktree_id);
     }

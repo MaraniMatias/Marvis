@@ -143,8 +143,7 @@ describe("Sidebar workdir rows", () => {
   });
 
   it("keeps the plain name for a git root Git has no branch to name it by", () => {
-    // A detached HEAD is the only checkout Git reports without a branch, and the row still has
-    // to be called something: "Base", the same as a plain folder.
+    // A detached HEAD is the only checkout Git reports without a branch, so its root is "Base".
     const wrapper = mount(Sidebar, {
       props: {
         repos: [repo({ checkouts: [{ ...checkout(), branch: undefined }] })],
@@ -191,10 +190,59 @@ describe("Sidebar workdir rows", () => {
 
     // A plain folder is one checkout of its own, so it can be taken off the panel; what it
     // never has is a worktree action, which belongs to Git alone.
-    expect(wrapper.get(".workdir-actions button").attributes("aria-label")).toBe("Remove from list: Base");
+    expect(wrapper.get(".workdir-actions button").attributes("aria-label")).toBe("Remove from list: notes");
     expect(wrapper.find("button[aria-label^='Add worktree']").exists()).toBe(false);
     expect(wrapper.find("button[aria-label^='Remove or archive']").exists()).toBe(false);
-    expect(wrapper.find("button[aria-label='New terminal for Base']").exists()).toBe(true);
+    expect(wrapper.find("button[aria-label='New terminal for notes']").exists()).toBe(true);
+  });
+
+  it("protects Home by checkout identity rather than folder name", () => {
+    const home = repo({
+      id: "repo:/home",
+      kind: "plain",
+      name: "Home",
+      root: "/home",
+      checkouts: [
+        checkout({
+          id: "checkout:/home",
+          repoId: "repo:/home",
+          path: "/home",
+          canonicalPath: "/home",
+          branch: undefined,
+        }),
+      ],
+    });
+    const namedHome = repo({
+      id: "repo:/other",
+      kind: "plain",
+      name: "Home",
+      root: "/other",
+      checkouts: [
+        checkout({
+          id: "checkout:/other",
+          repoId: "repo:/other",
+          path: "/other",
+          canonicalPath: "/other",
+          branch: undefined,
+        }),
+      ],
+    });
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [home, namedHome],
+        homeCheckoutId: "checkout:/home",
+        activeCheckoutId: "checkout:/home",
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+
+    const homeRow = wrapper.get('[data-workdir-checkout="checkout:/home"]');
+    const namedHomeRow = wrapper.get('[data-workdir-checkout="checkout:/other"]');
+    expect(homeRow.get(".workdir-name").text()).toBe("Home");
+    expect(homeRow.find(".workdir-action").exists()).toBe(false);
+    expect(namedHomeRow.get(".workdir-action").attributes("aria-label")).toBe("Remove from list: Home");
+    expect(wrapper.find('button[aria-label="New terminal for Home"]').exists()).toBe(true);
   });
 
   it("offers a terminal on every workdir that has a directory, and on none that does not", () => {
@@ -357,7 +405,7 @@ describe("Sidebar workdir rows", () => {
     expect(sessions[1].get(".workdir-status-icon").classes()).not.toContain("is-running");
     expect(wrapper.find('[role="img"]').exists()).toBe(false);
     expect(wrapper.text()).not.toContain("Concurrent");
-    expect(wrapper.get(".workdir-item.has-active").get(".workdir-name").text()).toBe("Base");
+    expect(wrapper.get(".workdir-item.has-active").get(".workdir-name").text()).toBe("activity");
 
     expect(wrapper.find('button[aria-label="Close terminal session: Exited"]').exists()).toBe(true);
     await wrapper.get('button[aria-label="Terminal session: Unknown"]').trigger("click");

@@ -8,6 +8,10 @@ here still gets its generated notes.
 
 ## Unreleased
 
+- **Home is always the first workdir.** Marvis opens a shell there on launch, keeps it running when
+  you switch workdirs, and lets you close it like any other terminal. The Home row cannot be removed;
+  regular folders with the same name remain ordinary removable workdirs.
+
 - **Settings has an About section that says what Marvis is made of.** At the bottom of the dialog:
   the Catppuccin file icons, the Lucide icons in the interface, Zed's One palettes, the bundled
   Fira Code, and the libraries the window is assembled from — each with the licence it travels

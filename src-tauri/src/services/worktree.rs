@@ -315,6 +315,9 @@ pub fn remove(
     checkout_id: &str,
     confirmation: &WorktreeRemovalConfirmation,
 ) -> Result<RemovedWorktree, IpcError> {
+    database
+        .ensure_not_home_checkout(checkout_id)
+        .map_err(operation_error)?;
     let info = removal_info(database, checkout_id)?;
     if info.is_primary {
         return Err(IpcError::new(

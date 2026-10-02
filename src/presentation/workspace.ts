@@ -17,6 +17,7 @@ export function useWorkspaceState() {
   const workspace = ref<WorkspaceState>(createWorkspaceState());
   const activeCheckout = computed(() => getActiveCheckout(workspace.value));
   const isOpening = ref(true);
+  const launchCheckoutId = ref<string | null>(null);
   /** The last failure, for callers that want to read it; the toast is what shows it (A.6). */
   const error = ref<string | null>(null);
   const promptingDefaultBranch = new Set<string>();
@@ -57,6 +58,10 @@ export function useWorkspaceState() {
   onMounted(async () => {
     try {
       workspace.value = await restoreWorkspace();
+      const homeCheckout = workspace.value.repos
+        .flatMap((repo) => repo.checkouts)
+        .find((checkout) => checkout.id === workspace.value.homeCheckoutId);
+      if (homeCheckout && homeCheckout.sessions.length === 0) launchCheckoutId.value = homeCheckout.id;
     } catch (cause) {
       reportError(cause);
     } finally {
@@ -87,6 +92,7 @@ export function useWorkspaceState() {
       workspace.value = next;
     },
     activeCheckout,
+    launchCheckoutId,
     isOpening,
     error,
     chooseFolder,

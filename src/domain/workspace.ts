@@ -73,6 +73,7 @@ export interface WorkspaceState {
   archivedWorktrees?: ArchivedCheckout[];
   activeCheckoutId: string | null;
   activeSessionId: string | null;
+  homeCheckoutId?: string | null;
 }
 
 /** A folder Marvis has opened before, as the workdir menu lists it. */
@@ -84,13 +85,11 @@ export interface RecentPath {
 /**
  * How a checkout is named wherever it is listed.
  *
- * A checkout with a branch is named by it, the repo root included; the only two with no branch
- * to show are a plain folder and a repo on a detached HEAD, and both keep the plain "Base".
- * The titlebar menus borrow the rule rather than invent one, so a workdir never answers to two
- * different names depending on which surface is naming it.
+ * Git checkouts are named by their branch, with "Base" for a detached repo root. Plain
+ * workdirs use their repo name so the sidebar and titlebar agree.
  */
-export function workdirTitle(checkout: Checkout): string {
-  return checkout.branch || (checkout.isPrimary ? "Base" : checkout.path);
+export function workdirTitle(repo: Repo, checkout: Checkout): string {
+  return checkout.branch || (repo.kind === "plain" ? repo.name : checkout.isPrimary ? "Base" : checkout.path);
 }
 
 export function repoIdForPath(canonicalPath: string): string {

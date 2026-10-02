@@ -8,7 +8,7 @@ use crate::{
         ipc::IpcError,
     },
     persistence::Database,
-    services::{self, files::ReviewRoot},
+    services::{self, files::ReviewRoot, workspace::HomeDirectory},
 };
 
 #[tauri::command]
@@ -29,11 +29,15 @@ pub async fn files_list(
 pub async fn files_search(
     checkout_id: String,
     database: State<'_, Database>,
+    home: State<'_, HomeDirectory>,
 ) -> Result<FileSearchResult, IpcError> {
     let database = database.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || services::files::search(&database, &checkout_id))
-        .await
-        .map_err(operation_error)?
+    let home = home.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        services::files::search(&database, &checkout_id, &home)
+    })
+    .await
+    .map_err(operation_error)?
 }
 
 #[tauri::command]

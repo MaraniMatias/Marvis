@@ -20,6 +20,7 @@ use crate::{
         workspace::{Checkout, Repo, RepoKind},
     },
     persistence::Database,
+    services::workspace::HomeDirectory,
 };
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -137,10 +138,20 @@ pub fn list(
     })
 }
 
-pub fn search(database: &Database, checkout_id: &str) -> Result<FileSearchResult, IpcError> {
+pub fn search(
+    database: &Database,
+    checkout_id: &str,
+    home: &HomeDirectory,
+) -> Result<FileSearchResult, IpcError> {
     let (repo, checkout) = registered_checkout(database, checkout_id)?;
     ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
     let root = Path::new(&checkout.canonical_path);
+    if root == home.0.as_path() {
+        return Err(IpcError::new(
+            IpcErrorCode::OperationFailed,
+            "file search is disabled for the Home workdir",
+        ));
+    }
     let (mut entries, truncated) = if repo.kind == RepoKind::Git {
         search_git_files(root)?
     } else {
@@ -1039,7 +1050,7 @@ mod tests {
 
     use super::{
         export_review_markdown, list, probe, read, read_markdown_image, search, write, FileContent,
-        IpcError, MAX_ROUND_PROMPT_BYTES,
+        HomeDirectory, IpcError, MAX_ROUND_PROMPT_BYTES,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -1667,6 +1678,30 @@ mod tests {
     }
 
     #[test]
+    fn home_file_search_is_blocked_but_lazy_listing_still_works() {
+        let temp = tempdir().unwrap();
+        let home = temp.path().join("home");
+        fs::create_dir_all(home.join("nested")).unwrap();
+        fs::write(home.join("nested/file.txt"), "content").unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &home).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+        let canonical_home = HomeDirectory(home.canonicalize().unwrap());
+
+        let error = search(&database, checkout_id, &canonical_home).unwrap_err();
+        assert_eq!(error.code, IpcErrorCode::OperationFailed);
+        assert_eq!(
+            error.message,
+            "file search is disabled for the Home workdir"
+        );
+        assert!(list(&database, checkout_id, ".")
+            .unwrap()
+            .entries
+            .iter()
+            .any(|entry| entry.name == "nested"));
+    }
+
+    #[test]
     fn file_search_includes_git_files_and_untracked_binary_files_but_honors_ignores() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("repo");
@@ -1691,7 +1726,12 @@ mod tests {
         fs::write(root.join("ignored.log"), "ignore me").unwrap();
         let database = db(temp.path());
         let state = workspace::register_folder(&database, &root).unwrap();
-        let result = search(&database, &state.repos[0].checkouts[0].id).unwrap();
+        let result = search(
+            &database,
+            &state.repos[0].checkouts[0].id,
+            &HomeDirectory(temp.path().join("unrelated-home")),
+        )
+        .unwrap();
         let paths: Vec<_> = result
             .entries
             .iter()

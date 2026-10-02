@@ -14,7 +14,7 @@ import {
   Square as SquareIcon,
   X as XIcon,
 } from "@lucide/vue";
-import type { Checkout } from "./domain/workspace";
+import type { Checkout, Repo } from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
 import type { TitlebarMenuItem, TitlebarMenuSection } from "./domain/titlebar-menu";
@@ -80,6 +80,7 @@ import {
 const {
   workspace,
   activeCheckout,
+  launchCheckoutId,
   isOpening,
   chooseFolder,
   openPath,
@@ -182,6 +183,9 @@ watch(
   },
 );
 const shellRequest = ref<{ checkoutId: string; token: number } | null>(null);
+watch(launchCheckoutId, (checkoutId) => {
+  if (checkoutId) void requestShell(checkoutId);
+});
 
 // The recents are read when the workdir menu is about to be read, so a folder opened a moment
 // ago is already in the list. A failure is a toast, and the menu opens without the group.
@@ -333,7 +337,9 @@ const workdirMenu = computed<TitlebarMenuSection[]>(() => {
     {
       kind: "group",
       label: "This Window",
-      items: open.map((checkout) => workdirItem(checkout, `workdir:${checkout.id}`, repoName(checkout))),
+      items: workspace.value.repos.flatMap((repo) =>
+        repo.checkouts.map((checkout) => workdirItem(repo, checkout, `workdir:${checkout.id}`, repo.name)),
+      ),
     },
     ...(recents.length ? [{ kind: "group" as const, label: "Recent Projects", items: recents }] : []),
     { kind: "separator" },
@@ -354,7 +360,7 @@ const worktreeMenu = computed<TitlebarMenuSection[]>(() => {
       label: "Worktrees",
       // A branch names one worktree, so nothing has to tell two rows apart here: the path is
       // in the row's tooltip, where it does not cost the name its width.
-      items: repo.checkouts.map((checkout) => workdirItem(checkout, `worktree:${checkout.id}`)),
+      items: repo.checkouts.map((checkout) => workdirItem(repo, checkout, `worktree:${checkout.id}`)),
     },
     { kind: "separator" },
     {
@@ -406,10 +412,10 @@ function setCrumbOpen(name: string, open: boolean) {
   openCrumb.value = open ? name : null;
 }
 
-function workdirItem(checkout: Checkout, id: string, hint?: string): TitlebarMenuItem {
+function workdirItem(repo: Repo, checkout: Checkout, id: string, hint?: string): TitlebarMenuItem {
   return {
     id,
-    label: workdirTitle(checkout),
+    label: workdirTitle(repo, checkout),
     ...(hint !== undefined && { hint }),
     title: checkout.path,
     checked: checkout.id === workspace.value.activeCheckoutId,
@@ -1465,6 +1471,7 @@ function reportWarning(message: string) {
       >
         <Sidebar
           :repos="workspace.repos"
+          :home-checkout-id="workspace.homeCheckoutId"
           :active-checkout-id="workspace.activeCheckoutId"
           :active-session-id="workspace.activeSessionId"
           :session-runtime-statuses="sessionRuntimeStatuses"

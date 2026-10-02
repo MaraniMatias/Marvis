@@ -115,6 +115,7 @@ pub struct ArchivedCheckout {
 #[serde(rename_all = "camelCase")]
 pub struct WorkspaceState {
     pub repos: Vec<Repo>,
+    pub home_checkout_id: Option<String>,
     /// The worktrees that are registered but off the panel, so the repo root can offer
     /// them back. Empty on every workspace with nothing archived, which is why it is not
     /// always on the wire.

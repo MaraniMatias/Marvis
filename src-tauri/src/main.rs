@@ -62,10 +62,16 @@ fn main() {
 
             let data_dir = app.path().app_data_dir()?;
             let home = app.path().home_dir()?;
+            let home_directory = services::workspace::HomeDirectory(std::fs::canonicalize(&home)?);
             let review_root = services::files::review_root(&home);
             let config_file = config::config_file(&home);
             std::fs::create_dir_all(&data_dir)?;
             let database = persistence::Database::open(data_dir.join("marvis.sqlite3"))
+                .map_err(std::io::Error::other)?;
+            database
+                .set_home_checkout_id(crate::domain::workspace::checkout_id_for_path(
+                    &home_directory.0.display().to_string(),
+                ))
                 .map_err(std::io::Error::other)?;
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(Some(geometry)) = database.window_geometry() {
@@ -125,6 +131,7 @@ fn main() {
                 });
             }
             app.manage(database);
+            app.manage(home_directory);
             app.manage(review_root);
             app.manage(config_file);
             app.manage(std::sync::Arc::new(terminal::TerminalBackend::default()));

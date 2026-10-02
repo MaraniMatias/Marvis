@@ -19,6 +19,7 @@ import type { Checkout, Repo, Session, WorkspaceState } from "./domain/workspace
 const mocks = vi.hoisted(() => ({
   initialWorkspace: null as WorkspaceState | null,
   workspaceRef: null as { value: WorkspaceState } | null,
+  launchCheckoutId: null as { value: string | null } | null,
   sessionPaneMounts: 0,
   saveAppLayout: vi.fn(),
   loadAppLayout: vi.fn(),
@@ -37,6 +38,7 @@ const mocks = vi.hoisted(() => ({
   listRecentPaths: vi.fn(),
   openPath: vi.fn(),
   selectCheckout: vi.fn(),
+  restoreWorkspace: vi.fn(),
   toggleMaximize: vi.fn(),
   minimize: vi.fn(),
   isDecorated: vi.fn(),
@@ -259,6 +261,7 @@ vi.mock("./lib/ipc", () => ({
   // so returning undefined here crashed the next render. Only the shell and Neovim requests
   // reach it from the titlebar, so it also reports that a terminal was asked for.
   selectCheckout: mocks.selectCheckout,
+  restoreWorkspace: mocks.restoreWorkspace,
 }));
 vi.mock("./presentation/workspace", async () => {
   const { computed, ref } = await import("vue");
@@ -273,6 +276,8 @@ vi.mock("./presentation/workspace", async () => {
             .find((checkout) => checkout.id === workspace.value.activeCheckoutId) ?? null,
       );
       const isOpening = ref(false);
+      const launchCheckoutId = ref<string | null>(null);
+      mocks.launchCheckoutId = launchCheckoutId;
       const error = ref<string | null>(null);
       const setActiveCheckout = (checkoutId: string | null, sessionId: string | null = null) => {
         workspace.value = { ...workspace.value, activeCheckoutId: checkoutId, activeSessionId: sessionId };
@@ -280,6 +285,7 @@ vi.mock("./presentation/workspace", async () => {
       return {
         workspace,
         activeCheckout,
+        launchCheckoutId,
         isOpening,
         error,
         chooseFolder: vi.fn(),
@@ -884,6 +890,48 @@ describe("App UI integration", () => {
       await wrapper.get('[data-testid="menu-item-new-terminal"]').trigger("click");
       await flushPromises();
       expect(mocks.selectCheckout).toHaveBeenCalledWith("checkout:one");
+      wrapper.unmount();
+    });
+
+    it("requests a shell for the launch checkout", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+      mocks.launchCheckoutId!.value = "checkout:one";
+      await flushPromises();
+
+      expect(mocks.selectCheckout).toHaveBeenCalledTimes(1);
+      expect(mocks.selectCheckout).toHaveBeenCalledWith("checkout:one");
+      wrapper.unmount();
+    });
+
+    it("launches Home after restore when it has no terminal session", async () => {
+      const homeCheckout = checkout("checkout:home");
+      const homeRepo: Repo = {
+        ...workspaceWith(homeCheckout).repos[0]!,
+        kind: "plain",
+        name: "Home",
+      };
+      mocks.restoreWorkspace.mockResolvedValue({
+        repos: [homeRepo],
+        activeCheckoutId: homeCheckout.id,
+        activeSessionId: null,
+        homeCheckoutId: homeCheckout.id,
+      });
+      const { useWorkspaceState } =
+        await vi.importActual<typeof import("./presentation/workspace")>("./presentation/workspace");
+      let launchCheckoutId: Ref<string | null> | undefined;
+      const host = defineComponent({
+        setup() {
+          launchCheckoutId = useWorkspaceState().launchCheckoutId;
+          return () => h("div");
+        },
+      });
+
+      const wrapper = mount(host);
+      await flushPromises();
+
+      expect(mocks.restoreWorkspace).toHaveBeenCalledTimes(1);
+      expect(launchCheckoutId?.value).toBe(homeCheckout.id);
       wrapper.unmount();
     });
 
