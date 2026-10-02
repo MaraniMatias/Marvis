@@ -12,7 +12,6 @@ import {
   getWorktreeRemovalInfo,
   removeWorktree,
 } from "../lib/ipc";
-import SelectControl from "./ui/select/SelectControl.vue";
 
 const props = defineProps<{
   open: boolean;
@@ -38,7 +37,7 @@ const branchEdited = ref(false);
 const removal = ref<WorktreeRemovalInfo | null>(null);
 const dirtyConfirmed = ref(false);
 const sessionsConfirmed = ref(false);
-const branchAction = ref<"keep" | "delete">("delete");
+const deleteBranch = ref(false);
 const isBusy = computed(() => loading.value);
 const canRemove = computed(
   () =>
@@ -60,15 +59,6 @@ const archiveBlocked = computed(
     (removal.value.activeSessions.length > 0 || removal.value.activeAgentSessions.length > 0),
 );
 
-/** What the two answers to the branch are called, which changes with what the branch holds. */
-const branchActions = computed(() => [
-  { value: "keep", label: "Keep branch" },
-  {
-    value: "delete",
-    label: `Delete branch${removal.value?.unmergedCommits ? " and its unmerged commits" : ""}`,
-  },
-]);
-
 watch(
   () => [props.open, props.mode, props.checkout?.id] as const,
   async ([open]) => {
@@ -78,7 +68,7 @@ watch(
     removal.value = null;
     dirtyConfirmed.value = false;
     sessionsConfirmed.value = false;
-    branchAction.value = "delete";
+    deleteBranch.value = false;
     try {
       if (props.mode === "create") {
         taskName.value = "new-task";
@@ -143,7 +133,7 @@ async function submitRemove() {
       removal.value.activeSessions.map((session) => session.id),
       removal.value.branch,
       removal.value.unmergedCommits,
-      branchAction.value === "delete",
+      deleteBranch.value,
     );
     emit("workspaceUpdated", result.workspace);
     if (result.warning) emit("warning", result.warning);
@@ -347,26 +337,12 @@ function onDialogKeydown(event: KeyboardEvent) {
           An active agent is using this checkout. Stop the agent before removing it:
           {{ removal.activeAgentSessions.map((session) => session.name).join(", ") }}.
         </p>
-        <label v-if="removal.branch" class="block text-xs text-(--marvis-text-secondary)">
-          Local branch
-          <SelectControl
-            v-model="branchAction"
-            :options="branchActions"
-            variant="field"
-            label="Local branch"
-            class="mt-1.5"
-          />
+        <label v-if="removal.branch" class="flex items-center gap-2 text-xs text-(--marvis-text-secondary)">
+          <input v-model="deleteBranch" type="checkbox" class="marvis-check" />
+          Delete branch{{ removal.unmergedCommits ? " and its unmerged commits" : "" }}
         </label>
         <p v-if="error" role="alert" class="text-sm text-(--marvis-danger-fg)">{{ error }}</p>
         <footer class="flex items-center gap-2 pt-1">
-          <!-- Delete reaches the disk, so it alone uses the destructive treatment. -->
-          <button type="button" :disabled="isBusy || !canRemove" class="marvis-button-danger" @click="submitRemove">
-            {{ isBusy ? "Deleting…" : "Delete" }}
-          </button>
-          <span class="flex-1" />
-          <button type="button" autofocus class="marvis-button marvis-button-subtle" @click="$emit('close')">
-            Cancel
-          </button>
           <button
             type="button"
             :disabled="isBusy || archiveBlocked"
@@ -374,6 +350,14 @@ function onDialogKeydown(event: KeyboardEvent) {
             @click="submitArchive"
           >
             {{ isBusy ? "Archiving…" : "Archive" }}
+          </button>
+          <span class="flex-1" />
+          <button type="button" autofocus class="marvis-button marvis-button-subtle" @click="$emit('close')">
+            Cancel
+          </button>
+          <!-- Delete reaches the disk, so it alone uses the destructive treatment. -->
+          <button type="button" :disabled="isBusy || !canRemove" class="marvis-button-danger" @click="submitRemove">
+            {{ isBusy ? "Deleting…" : "Delete" }}
           </button>
         </footer>
       </div>

@@ -87,7 +87,7 @@ describe("WorktreeDialog", () => {
     prompt.mockRestore();
   });
 
-  it("shows dirty files and active sessions, defaults to deleting the branch, and requires confirmation", async () => {
+  it("shows dirty files and active sessions, defaults to keeping the branch, and requires confirmation", async () => {
     ipc.getWorktreeRemovalInfo.mockResolvedValue({
       checkoutId: "checkout:feature",
       isPrimary: false,
@@ -107,10 +107,12 @@ describe("WorktreeDialog", () => {
 
     expect(wrapper.text()).toContain("uncommitted.txt");
     expect(wrapper.text()).toContain("zsh · feature");
-    // The branch choice is a list the app draws, and what it says is what is chosen. It opens on
-    // delete, so confirming the removal takes the branch with it unless the other row is picked.
-    const trigger = wrapper.get('[aria-label="Local branch"]');
-    expect(trigger.text()).toContain("Delete branch");
+    // Branch deletion is opt-in; without checking this box, removal keeps it.
+    const deleteBranch = wrapper
+      .findAll('input[type="checkbox"]')
+      .find((input) => input.element.closest("label")?.textContent?.includes("Delete branch"));
+    expect((deleteBranch?.element as HTMLInputElement | undefined)?.checked).toBe(false);
+    expect(wrapper.text()).toContain("Delete branch and its unmerged commits");
     const removeButton = wrapper.findAll("button").find((button) => button.text() === "Delete");
     expect(removeButton?.attributes("disabled")).toBeDefined();
 
@@ -129,9 +131,41 @@ describe("WorktreeDialog", () => {
       ["session:1"],
       "feature",
       2,
-      true,
+      false,
     );
     expect(wrapper.emitted("workspaceUpdated")).toEqual([[workspace]]);
+  });
+
+  it("deletes the branch only when its checkbox is selected", async () => {
+    ipc.getWorktreeRemovalInfo.mockResolvedValue({
+      checkoutId: "checkout:feature",
+      isPrimary: false,
+      isMissing: false,
+      branch: "feature",
+      dirtyFiles: [],
+      unmergedCommits: 0,
+      activeSessions: [],
+      activeAgentSessions: [],
+    });
+    ipc.removeWorktree.mockResolvedValue({ workspace });
+    const worktree = { ...checkout, id: "checkout:feature", isPrimary: false, branch: "feature" };
+    const wrapper = mount(WorktreeDialog, {
+      props: { open: true, mode: "remove", repo, checkout: worktree },
+    });
+    await flushPromises();
+
+    const deleteBranch = wrapper
+      .findAll('input[type="checkbox"]')
+      .find((input) => input.element.closest("label")?.textContent?.includes("Delete branch"));
+    expect((deleteBranch?.element as HTMLInputElement | undefined)?.checked).toBe(false);
+    await deleteBranch?.setValue(true);
+    await wrapper
+      .findAll("button")
+      .find((button) => button.text() === "Delete")
+      ?.trigger("click");
+    await flushPromises();
+
+    expect(ipc.removeWorktree).toHaveBeenCalledWith("checkout:feature", false, [], [], "feature", 0, true);
   });
 
   it("offers a shell for commit or stash and blocks removal while an agent is active", async () => {
@@ -189,19 +223,25 @@ describe("WorktreeDialog", () => {
     expect(del?.classes()).toContain("marvis-button-danger");
     expect(wrapper.findAll("button").map((button) => button.text())).toContain("Archive");
     expect(wrapper.findAll("button").map((button) => button.text())).toContain("Cancel");
+    expect(
+      wrapper
+        .findAll("button")
+        .slice(-3)
+        .map((button) => button.text()),
+    ).toEqual(["Archive", "Cancel", "Delete"]);
     // Focus opens on the answer that does nothing, so a stray Enter cannot delete a worktree.
     expect(wrapper.get("button[autofocus]").text()).toBe("Cancel");
 
     document.body.append(wrapper.element);
     const first = wrapper.get('button[aria-label="Close"]');
-    const archive = wrapper.findAll("button").find((button) => button.text() === "Archive")!;
-    (archive.element as HTMLButtonElement).focus();
-    await archive.trigger("keydown", { key: "Tab" });
+    const lastButton = wrapper.findAll("button").find((button) => button.text() === "Delete")!;
+    (lastButton.element as HTMLButtonElement).focus();
+    await lastButton.trigger("keydown", { key: "Tab" });
     expect(document.activeElement).toBe(first.element);
 
     (first.element as HTMLButtonElement).focus();
     await first.trigger("keydown", { key: "Tab", shiftKey: true });
-    expect(document.activeElement).toBe(archive.element);
+    expect(document.activeElement).toBe(lastButton.element);
     wrapper.unmount();
   });
 
