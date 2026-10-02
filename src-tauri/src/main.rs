@@ -101,6 +101,8 @@ fn main() {
                 }
                 let tracked_window = window.clone();
                 let window_database = database.clone();
+                #[cfg(target_os = "macos")]
+                let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if !matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                         return;
@@ -128,6 +130,8 @@ fn main() {
                     if let Err(error) = window_database.set_window_maximized(maximized) {
                         log::warn!("the window's maximized state was not saved: {error}");
                     }
+                    #[cfg(target_os = "macos")]
+                    app_handle.exit(0);
                 });
             }
             app.manage(database);
