@@ -12,6 +12,8 @@ export interface TerminalSessionStatus {
   foregroundProcess?: boolean;
   /** The program in front of the shell, by name: `opencode`, `nvim`. Absent when it is idle. */
   foregroundApp?: string;
+  /** Title most recently set by the PTY via OSC 0/2, if any. */
+  terminalTitle?: string | null;
 }
 
 export interface Repo {

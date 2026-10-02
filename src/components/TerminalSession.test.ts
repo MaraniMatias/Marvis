@@ -10,6 +10,7 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     channel: null as { onmessage: (buffer: ArrayBuffer) => void } | null,
     input: null as ((value: string) => void) | null,
     resizes: [] as Array<(size: { cols: number; rows: number }) => void>,
+    titles: [] as Array<(title: string) => void>,
     scrolls: [] as Array<() => void>,
     output: [] as number[][],
     openCalls: 0,
@@ -53,6 +54,10 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     }
     onResize(callback: (size: { cols: number; rows: number }) => void) {
       terminalMock.resizes.push(callback);
+    }
+    onTitleChange(callback: (title: string) => void) {
+      terminalMock.titles.push(callback);
+      return { dispose: () => {} };
     }
     onScroll(callback: () => void) {
       terminalMock.scrolls.push(callback);
@@ -210,6 +215,7 @@ describe("TerminalSession UI", () => {
     terminalMock.channel = null;
     terminalMock.input = null;
     terminalMock.resizes = [];
+    terminalMock.titles = [];
     terminalMock.scrolls = [];
     terminalMock.output = [];
     terminalMock.openCalls = 0;
@@ -253,6 +259,23 @@ describe("TerminalSession UI", () => {
     expect(terminalLib.attachTerminalRenderer).toHaveBeenCalledTimes(1);
     expect(writeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", new TextEncoder().encode("λ pasted"));
     expect(resizeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", 97, 31);
+    wrapper.unmount();
+  });
+
+  it("publishes sanitized OSC terminal title changes", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    terminalMock.titles[0]?.(" OpenCode: review task\u001b[31m ");
+    expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({
+      state: "running",
+      terminalTitle: "OpenCode: review task[31m",
+    });
+
+    terminalMock.titles[0]?.("\u001b[0m");
+    expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({ terminalTitle: "[0m" });
+    terminalMock.titles[0]?.("  ");
+    expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({ terminalTitle: null });
     wrapper.unmount();
   });
 

@@ -397,7 +397,12 @@ describe("Sidebar workdir rows", () => {
         activeSessionId: null,
         isOpening: false,
         sessionRuntimeStatuses: {
-          "session:agent": { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
+          "session:agent": {
+            state: "running",
+            foregroundProcess: true,
+            foregroundApp: "opencode",
+            terminalTitle: "OpenCode: review task",
+          },
           "session:editing": { state: "running", foregroundProcess: true, foregroundApp: "nvim" },
           // Running with nothing in front: the resting state, which has no name to show.
           "session:idle": { state: "running", foregroundProcess: false },
@@ -408,7 +413,10 @@ describe("Sidebar workdir rows", () => {
     // A row is named after what is running in it, and there is no second chip saying the same:
     // the idle terminal is back to the shell it was opened as, because nothing is in front of it.
     const names = wrapper.findAll(".workdir-child .workdir-name").map((row) => row.text());
-    expect(names.slice(0, 3)).toEqual(["opencode", "nvim", "zsh"]);
+    expect(names.slice(0, 3)).toEqual(["OpenCode: review task", "nvim", "zsh"]);
+    expect(wrapper.get('button[aria-label="Terminal session: OpenCode: review task"]').attributes("title")).toBe(
+      "OpenCode: review task",
+    );
     expect(wrapper.find(".app-chip").exists()).toBe(false);
     wrapper.unmount();
   });

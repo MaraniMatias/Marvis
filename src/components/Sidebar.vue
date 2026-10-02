@@ -454,12 +454,10 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
         exited: sessionState(session) === "exited",
         app,
         /**
-         * What the row is called while it is on screen: the program in front of the shell, so a
-         * terminal running Neovim or the agent reads as that, and an idle one reads as the shell it
-         * was opened as. `session.name` is the persisted one and does not change — a row is named
-         * after what is running in it, not after what it is asked to run.
+         * A program-set terminal title wins; otherwise name the foreground process, or the shell
+         * when idle. The title is separate from process identity, which still owns agent detection.
          */
-        title: app ?? session.name,
+        title: terminalSessionTitle(session),
         /**
          * The agent this terminal is running, and only that: the checkout's agent belongs to a
          * row whose foreground process is the agent, and to no other row in the workdir.
@@ -468,6 +466,11 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
       };
     }),
   };
+}
+
+function terminalSessionTitle(session: Session): string {
+  const status = props.sessionRuntimeStatuses[session.id];
+  return status?.terminalTitle || status?.foregroundApp || session.name;
 }
 
 function sessionState(session: Session) {
@@ -650,7 +653,7 @@ const agentTitle = computed(() =>
                   type="button"
                   class="workdir-select"
                   :aria-current="item.active ? 'page' : undefined"
-                  :aria-label="`Terminal session: ${item.session.name}`"
+                  :aria-label="`Terminal session: ${item.title}`"
                   :aria-haspopup="item.destinations.length ? 'menu' : undefined"
                   :aria-expanded="item.destinations.length ? moveMenuFor === item.session.id : undefined"
                   :title="item.title"
@@ -794,7 +797,7 @@ const agentTitle = computed(() =>
         :style="{ left: pointerDrag.x + 14 + 'px', top: pointerDrag.y + 14 + 'px' }"
       >
         <SquareTerminalIcon class="size-3.5 shrink-0" />
-        <span>{{ sessionRuntimeStatuses[pointerDrag.session.id]?.foregroundApp ?? pointerDrag.session.name }}</span>
+        <span>{{ terminalSessionTitle(pointerDrag.session) }}</span>
       </div>
     </Teleport>
   </aside>

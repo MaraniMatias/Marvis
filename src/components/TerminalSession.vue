@@ -65,6 +65,7 @@ const scrollbarEnabled = computed(() => props.scrollbar !== "hidden");
 const scrollbarVisible = computed(() => props.scrollbar === "always" || scrollbarLit.value);
 
 let sessionId: string | null = null;
+let terminalTitle: string | null = null;
 let channel: Channel<ArrayBuffer> | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let statusTimer: number | undefined;
@@ -258,8 +259,8 @@ function onScrollbarKeydown(event: KeyboardEvent) {
 }
 
 function updateStatus(status: TerminalSessionStatus) {
-  state.value = status;
-  emit("statusChanged", status);
+  state.value = { ...status, ...(terminalTitle !== null && { terminalTitle }) };
+  emit("statusChanged", state.value);
   if (status.state !== "exited") return;
   if (statusTimer !== undefined) {
     window.clearInterval(statusTimer);
@@ -472,6 +473,16 @@ async function startSession() {
 }
 
 terminal.onData(queueInput);
+terminal.onTitleChange((title) => {
+  // PTY titles are untrusted text: keep them short and strip control characters before exposing them to UI.
+  terminalTitle =
+    title
+      .replace(/\p{Cc}/gu, "")
+      .trim()
+      .slice(0, 80) || null;
+  state.value = { ...state.value, terminalTitle };
+  emit("statusChanged", state.value);
+});
 terminal.onResize(({ cols, rows }) => queueResize(cols, rows));
 // xterm fires this whenever the viewport moves, whether a wheel, a drag, Shift+PageUp or output
 // arriving at the bottom caused it, and it does not promise what the payload is — some paths send
