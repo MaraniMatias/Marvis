@@ -15,7 +15,7 @@ import {
   X as XIcon,
 } from "@lucide/vue";
 import type { ArchivedCheckout, Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
-import { workdirTitle } from "../domain/workspace";
+import { sessionTitle, workdirTitle } from "../domain/workspace";
 import type { AgentHeadline } from "../presentation/agent-sessions";
 import { useDiffStats } from "../presentation/diff-stats";
 
@@ -456,10 +456,10 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
         exited: sessionState(session) === "exited",
         app,
         /**
-         * A program-set terminal title wins; otherwise name the foreground process, or the shell
-         * when idle. The title is separate from process identity, which still owns agent detection.
+         * The row's name, by the rule the titlebar crumb reads too: `sessionTitle`. The title is
+         * separate from process identity, which still owns agent detection.
          */
-        title: terminalSessionTitle(session),
+        title: sessionTitle(session, status),
         /**
          * The agent this terminal is running, and only that: the checkout's agent belongs to a
          * row whose foreground process is the agent, and to no other row in the workdir.
@@ -468,11 +468,6 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
       };
     }),
   };
-}
-
-function terminalSessionTitle(session: Session): string {
-  const status = props.sessionRuntimeStatuses[session.id];
-  return status?.terminalTitle || status?.foregroundApp || session.name;
 }
 
 function sessionState(session: Session) {
@@ -799,7 +794,7 @@ const agentTitle = computed(() =>
         :style="{ left: pointerDrag.x + 14 + 'px', top: pointerDrag.y + 14 + 'px' }"
       >
         <SquareTerminalIcon class="size-3.5 shrink-0" />
-        <span>{{ terminalSessionTitle(pointerDrag.session) }}</span>
+        <span>{{ sessionTitle(pointerDrag.session, sessionRuntimeStatuses[pointerDrag.session.id]) }}</span>
       </div>
     </Teleport>
   </aside>

@@ -7,7 +7,9 @@ import {
   openRepo,
   selectCheckout,
   selectSession,
+  sessionTitle,
   type Repo,
+  type Session,
 } from "./workspace";
 
 const openedFolder = (path: string, name = "repo") => ({ path, name });
@@ -173,5 +175,26 @@ describe("workspace domain", () => {
     expect(state).toMatchObject({ activeCheckoutId: worktree.id, activeSessionId: server.id });
     expect(primary.sessions).toEqual([shell]);
     expect(worktree.sessions).toEqual([server]);
+  });
+
+  it("names a session after what is in front of it, and after the name it was opened with", () => {
+    const shell: Session = {
+      id: "session-shell",
+      type: "shell",
+      checkoutId: "checkout:/work/app",
+      name: "zsh",
+      createdAt: "now",
+      status: "active",
+    };
+
+    // The title a program sets is the name it wants to be known by; the program in front is the
+    // next thing down, and the stored name is what is left when nothing is in front at all —
+    // which is also what a terminal with no live status has to be named by.
+    expect(sessionTitle(shell, { state: "running", terminalTitle: "OpenCode: review task" })).toBe(
+      "OpenCode: review task",
+    );
+    expect(sessionTitle(shell, { state: "running", foregroundProcess: true, foregroundApp: "nvim" })).toBe("nvim");
+    expect(sessionTitle(shell, { state: "running", foregroundProcess: false })).toBe("zsh");
+    expect(sessionTitle(shell)).toBe("zsh");
   });
 });

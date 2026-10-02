@@ -698,6 +698,14 @@
   flex: 0 0 auto;
 }
 
+/* The item crumb is the one name with no length of its own: it is whatever the PTY last set — a
+   prompt, an editor's project line — and a line is bounded by its share of the window, so an
+   uncapped crumb would run past it and over the gear at the end. The ends keep their text, which
+   here means a share of it: the full name is the crumb's own `title` and the row in its menu. */
+.crumb-terminal {
+  max-width: 40ch;
+}
+
 /* The separator inside the file crumb, which is the same rule the rest of the line is joined
    with: the line's own separators get their space from the gap between its children, and this
    one is inside a run of text, so it carries the same space itself. */

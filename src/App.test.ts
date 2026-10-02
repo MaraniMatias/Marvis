@@ -417,6 +417,7 @@ const SidebarStub = defineComponent({
 
 const SessionPaneStub = defineComponent({
   name: "SessionPane",
+  emits: ["sessionStatusChanged"],
   setup(_, { expose }) {
     onMounted(() => (mocks.sessionPaneMounts += 1));
     expose({ focusActiveTerminal: vi.fn() });
@@ -890,6 +891,36 @@ describe("App UI integration", () => {
       await wrapper.get('[data-testid="menu-item-new-terminal"]').trigger("click");
       await flushPromises();
       expect(mocks.selectCheckout).toHaveBeenCalledWith("checkout:one");
+      wrapper.unmount();
+    });
+
+    it("names the open terminal the way the sidebar row names it", async () => {
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one", [session("session:one", "zsh"), session("session:two", "Neovim")])),
+      );
+
+      await wrapper.get('[data-testid="menu-item-session:one"]').trigger("click");
+      await flushPromises();
+
+      // Nothing is in front of the shell yet, so the crumb is on the name the database holds.
+      expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("zsh");
+
+      wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", "session:one", {
+        state: "running",
+        foregroundProcess: true,
+        foregroundApp: "opencode",
+        terminalTitle: "OpenCode: review task",
+      });
+      await flushPromises();
+
+      // The crumb and the row that opens it are one list read twice, so the title the program set
+      // is what the header says as well — and the menu offers the names the sidebar is showing.
+      expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("OpenCode: review task");
+      expect(wrapper.get('[data-testid="item-crumb"]').attributes("title")).toBe("OpenCode: review task");
+      expect(wrapper.findAll('[data-testid^="menu-item-session:"]').map((row) => row.text())).toEqual([
+        "OpenCode: review task",
+        "Neovim",
+      ]);
       wrapper.unmount();
     });
 

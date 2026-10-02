@@ -15,6 +15,7 @@ import {
   X as XIcon,
 } from "@lucide/vue";
 import type { Checkout, Repo } from "./domain/workspace";
+import { sessionTitle } from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
 import type { TitlebarMenuItem, TitlebarMenuSection } from "./domain/titlebar-menu";
@@ -236,8 +237,19 @@ const activeSession = computed(() => {
     null
   );
 });
+/**
+ * The open session under the name the sidebar row gives it.
+ *
+ * The crumb and the row list the same terminals, so both ask `sessionTitle` for the name: what the
+ * PTY last set, the program in front of the shell, or the name it was opened with. A crumb reading
+ * the stored name alone said `zsh` over a terminal running something else.
+ */
+const activeSessionTitle = computed(() => {
+  const session = activeSession.value;
+  return session ? sessionTitle(session, sessionRuntimeStatuses.value[session.id]) : null;
+});
 /** What the last crumb names. A file or a change set is not a session, so it is named as itself. */
-const activeViewLabel = computed(() => mainViewLabel(activeMainView.value, activeSession.value?.name ?? null));
+const activeViewLabel = computed(() => mainViewLabel(activeMainView.value, activeSessionTitle.value));
 /**
  * Whether there is a last crumb at all.
  *
@@ -383,13 +395,18 @@ const worktreeMenu = computed<TitlebarMenuSection[]>(() => {
 const terminalMenu = computed<TitlebarMenuSection[]>(() => {
   const checkout = activeCheckout.value;
   if (!checkout) return [];
-  const sessions: TitlebarMenuItem[] = checkout.sessions.map((session) => ({
-    id: session.id,
-    label: session.name,
-    title: session.name,
-    checked: session.id === workspace.value.activeSessionId,
-    run: () => void activateTerminalSession(session.id),
-  }));
+  const sessions: TitlebarMenuItem[] = checkout.sessions.map((session) => {
+    // The rows are named the way the sidebar names them, so the menu of the open terminal and the
+    // row that opened it cannot say two different things about the same session.
+    const name = sessionTitle(session, sessionRuntimeStatuses.value[session.id]);
+    return {
+      id: session.id,
+      label: name,
+      title: name,
+      checked: session.id === workspace.value.activeSessionId,
+      run: () => void activateTerminalSession(session.id),
+    };
+  });
   return [
     { kind: "group", label: "Terminals", items: sessions },
     { kind: "separator" },

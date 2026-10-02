@@ -92,6 +92,18 @@ export function workdirTitle(repo: Repo, checkout: Checkout): string {
   return checkout.branch || (repo.kind === "plain" ? repo.name : checkout.isPrimary ? "Base" : checkout.path);
 }
 
+/**
+ * How a session is named wherever it is listed: the sidebar row and the titlebar crumb are the
+ * same list read twice, so the rule is written once and neither of them keeps its own.
+ *
+ * A program-set terminal title wins; otherwise the program in front of the shell, and the name it
+ * was opened with when nothing is in front of it — which is also what a terminal with no live
+ * status, one that is not on the panel, has to be named by.
+ */
+export function sessionTitle(session: Session, status?: TerminalSessionStatus | null): string {
+  return status?.terminalTitle || status?.foregroundApp || session.name;
+}
+
 export function repoIdForPath(canonicalPath: string): string {
   return `repo:${canonicalPath}`;
 }
