@@ -1,6 +1,6 @@
 use std::{
     env,
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
 
@@ -77,11 +77,12 @@ pub fn create_with_options(
         status: SessionStatus::Active,
     };
 
+    let args = inherited_shell_args(&program);
     backend.spawn(
         session.id.clone(),
         SpawnOptions {
             program,
-            args: vec!["-l".into()],
+            args,
             cwd,
             cols,
             rows,
@@ -142,6 +143,14 @@ fn inherited_shell() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("/bin/sh"))
 }
 
+fn inherited_shell_args(program: &Path) -> Vec<String> {
+    let mut args = vec!["-l".into()];
+    if program.file_name().and_then(|name| name.to_str()) == Some("zsh") {
+        args.extend(["-o".into(), "AUTO_MENU".into()]);
+    }
+    args
+}
+
 /// Terminals take no prompt any more: the review goes to the agent bridge, not a PTY.
 fn reject_prompt(prompt: Option<&str>) -> Result<(), String> {
     match prompt {
@@ -152,7 +161,7 @@ fn reject_prompt(prompt: Option<&str>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path};
+    use std::{fs, path::Path, process::Command};
 
     use tempfile::tempdir;
 
@@ -162,10 +171,58 @@ mod tests {
         terminal::{OutputSink, TerminalBackend},
     };
 
-    use super::{create, create_with_options, rename, TerminalOptions};
+    use super::{create, create_with_options, inherited_shell_args, rename, TerminalOptions};
 
     fn plain_repo(path: &Path) -> Repo {
         Repo::plain(path, "now").unwrap()
+    }
+
+    #[test]
+    fn enables_native_zsh_menu_completion_and_leaves_startup_files_untouched() {
+        assert_eq!(
+            inherited_shell_args(Path::new("/bin/zsh")),
+            vec!["-l", "-o", "AUTO_MENU"]
+        );
+        assert_eq!(inherited_shell_args(Path::new("/bin/bash")), vec!["-l"]);
+        if Command::new("zsh").arg("--version").output().is_err() {
+            return;
+        }
+
+        let directory = tempdir().unwrap();
+        let startup_files = [
+            (".zshenv", "export MARVIS_ZSHENV=loaded\n"),
+            (".zprofile", "export MARVIS_ZPROFILE=loaded\n"),
+            (".zshrc", "export MARVIS_ZSHRC=loaded\n"),
+        ];
+        for (name, contents) in startup_files {
+            fs::write(directory.path().join(name), contents).unwrap();
+        }
+        let before: Vec<_> = startup_files
+            .iter()
+            .map(|(name, _)| fs::read(directory.path().join(name)).unwrap())
+            .collect();
+
+        let args = inherited_shell_args(Path::new("zsh"));
+        let output = Command::new("zsh")
+            .args(&args)
+            .args([
+                "-i",
+                "-c",
+                "[[ -o AUTO_MENU && $MARVIS_ZSHENV == loaded && $MARVIS_ZPROFILE == loaded && $MARVIS_ZSHRC == loaded ]]",
+            ])
+            .env("HOME", directory.path())
+            .env("ZDOTDIR", directory.path())
+            .env("HISTFILE", directory.path().join(".zsh_history"))
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "zsh did not preserve menu completion/startup semantics: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        for ((name, _), original) in startup_files.iter().zip(before) {
+            assert_eq!(fs::read(directory.path().join(name)).unwrap(), original);
+        }
     }
 
     #[test]
