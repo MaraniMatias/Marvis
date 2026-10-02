@@ -20,6 +20,8 @@ type ReviewApi = Pick<
 const props = withDefaults(
   defineProps<{
     checkout: Checkout | null;
+    /** Every checkout on the panel, which is what a terminal can be moved to. */
+    checkouts?: Checkout[];
     view: MainView;
     ready: boolean;
     gitSnapshot: ActiveGitSnapshot;
@@ -40,6 +42,7 @@ const props = withDefaults(
   {
     refreshRevision: 0,
     readingPosition: () => ({ top: 0, left: 0 }),
+    checkouts: () => [],
     diffScrollTop: 0,
     shellRequest: null,
     registeredSessionIds: () => [],
@@ -69,6 +72,8 @@ let resizePointerId: number | null = null;
 defineExpose({
   focusActiveTerminal: () => sessionPane.value?.focusActiveTerminal(),
   requestClose: (sessionId: string) => sessionPane.value?.requestClose(sessionId) ?? Promise.resolve(false),
+  moveSession: (sessionId: string, targetCheckoutId: string) =>
+    sessionPane.value?.moveSession(sessionId, targetCheckoutId) ?? Promise.resolve(),
 });
 
 /** The three views, one of them visible (D.1). */
@@ -116,6 +121,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
         ref="sessionPane"
         class="absolute inset-0"
         :checkout="ready ? checkout : null"
+        :checkouts="checkouts"
         :active-session-id="activeSessionId"
         :is-opening="isOpening || !ready"
         :visible="ready && (split || terminal)"
@@ -147,7 +153,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
     >
       <div
         aria-hidden="true"
-        class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-(--marvis-text-faint)"
+        class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 bg-(--marvis-text-faint)"
       />
     </div>
     <section

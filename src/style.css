@@ -91,12 +91,12 @@ body {
 }
 
 .window-control:hover {
-  background: var(--marvis-border);
+  background: var(--marvis-control-hover);
   color: var(--marvis-text);
 }
 
 .window-control-close:hover {
-  background: var(--marvis-red);
+  background: var(--marvis-danger);
   color: var(--marvis-bg-1);
 }
 .app-sidebar,
@@ -107,7 +107,9 @@ body {
 
 .surface-popover {
   background: var(--marvis-bg-2);
-  border: 1px solid var(--marvis-border);
+  border: 1px solid var(--marvis-border-strong);
+  border-radius: 0;
+  box-shadow: var(--marvis-shadow);
 }
 
 .app-splitter {
@@ -144,6 +146,10 @@ body {
   background: var(--marvis-accent);
 }
 
+.splitter-handle:focus-visible {
+  outline: none;
+}
+
 .right-inspector-drawer {
   position: absolute;
   z-index: 30;
@@ -151,8 +157,9 @@ body {
   right: 0;
   bottom: 0;
   width: min(var(--inspector-width, 320px), calc(100vw - 80px)) !important;
-  border-left: 1px solid var(--marvis-border);
-  box-shadow: -10px 0 24px rgb(0 0 0 / 20%);
+  border-left: 1px solid var(--marvis-border-strong);
+  background: var(--marvis-bg-2);
+  box-shadow: var(--marvis-shadow);
 }
 
 .split-inspector-drawer {
@@ -202,7 +209,7 @@ body {
 }
 
 .diff-viewport {
-  background: var(--marvis-bg-0);
+  background: var(--marvis-content-bg-0);
 }
 
 .document-toolbar {
@@ -214,8 +221,8 @@ body {
    carries none of it. */
 .document-mode-control {
   border: 1px solid var(--marvis-border);
-  border-radius: var(--marvis-radius);
-  background: var(--marvis-bg-2);
+  border-radius: 0;
+  background: var(--marvis-control-bg);
   padding: 0.125rem;
 }
 
@@ -227,16 +234,16 @@ body {
   transition: background-color 120ms ease;
 }
 
-.document-mode-button:hover {
-  background: var(--marvis-bg-2);
+.document-mode-button:hover:not([aria-pressed="true"]) {
+  background: var(--marvis-control-hover);
 }
 
 .document-mode-button:active {
-  background: var(--marvis-border);
+  background: var(--marvis-control-pressed);
 }
 
 .document-mode-button[aria-pressed="true"] {
-  background: var(--marvis-border);
+  background: var(--marvis-control-pressed);
   color: var(--marvis-text);
 }
 
@@ -250,7 +257,7 @@ body {
 }
 
 .terminal-surface {
-  background: var(--marvis-bg-0);
+  background: var(--marvis-content-bg-0);
 }
 
 .terminal-region {
@@ -263,7 +270,7 @@ body {
      and its own border against the last column, and every pixel of padding here is a row and a
      half-column the grid never gets. */
   padding: 0;
-  background: var(--marvis-bg-0);
+  background: var(--marvis-content-bg-0);
 }
 
 /* Share the sub-cell space left by the fitted grid between opposite edges. The viewport still
@@ -277,11 +284,10 @@ body {
   margin-inline: auto;
 }
 
-/* xterm.js paints its own background as an inline style from the theme it was given, so owning the
-   surface from CSS means out-specifying it here. One declaration instead of a second copy of the
-   same hex, and the terminal keeps a background that is the page's background. */
+/* xterm.js paints its own background inline, so the viewport and canvas both read the terminal's
+   content background token instead of carrying a second color value. */
 .terminal-host .xterm-viewport {
-  background: var(--marvis-bg-0) !important;
+  background: var(--marvis-content-bg-0) !important;
   overflow-y: auto;
 }
 
@@ -336,11 +342,16 @@ body {
   pointer-events: auto;
 }
 
+.terminal-scrollbar:focus-visible {
+  outline: 1px solid var(--marvis-control-focus);
+  outline-offset: -1px;
+}
+
 .terminal-scrollbar-thumb {
   position: absolute;
   right: 2px;
   width: 6px;
-  border-radius: 3px;
+  border-radius: 0;
   background: var(--marvis-scrollbar);
   transition:
     width 120ms ease-out,
@@ -348,8 +359,7 @@ body {
 }
 
 .terminal-scrollbar:hover .terminal-scrollbar-thumb,
-.terminal-scrollbar:active .terminal-scrollbar-thumb,
-.terminal-scrollbar:focus-visible .terminal-scrollbar-thumb {
+.terminal-scrollbar:active .terminal-scrollbar-thumb {
   right: 1px;
   width: 8px;
 }

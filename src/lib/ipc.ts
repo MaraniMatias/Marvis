@@ -308,6 +308,17 @@ export function renameTerminal(checkoutId: string, sessionId: string, name: stri
   return invoke<WorkspaceState>("terminal_rename", { checkoutId, sessionId, name });
 }
 
+/**
+ * Hands a live terminal to another worktree of the same repository.
+ *
+ * The process, its output and its name stay: what moves is the row the sidebar groups by, so the
+ * terminal is listed under the worktree it now belongs to. A destination outside that repository
+ * is refused, because two worktrees of one repo share a Git directory and another repo does not.
+ */
+export function moveTerminal(checkoutId: string, sessionId: string, targetCheckoutId: string): Promise<WorkspaceState> {
+  return invoke<WorkspaceState>("terminal_move", { checkoutId, sessionId, targetCheckoutId });
+}
+
 export function loadTerminalLayout(checkoutId: string): Promise<CheckoutTerminalLayout | null> {
   return invoke<CheckoutTerminalLayout | null>("terminal_layout_load", { checkoutId });
 }

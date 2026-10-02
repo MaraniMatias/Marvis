@@ -42,8 +42,14 @@ const PROBE_TTL_MS = 5_000;
 const MAX_CACHED_PATHS = 256;
 
 export interface FileLinkOptions {
-  /** The checkout the terminal belongs to, which is the only tree a path may name. */
-  checkoutId: string;
+  /**
+   * The checkout the terminal belongs to, which is the only tree a path may name.
+   *
+   * Read through a getter because a terminal keeps its process and this registration when it is
+   * moved to another worktree: the tree a path may name is a property of the terminal's current
+   * worktree, not of the moment it was opened.
+   */
+  readonly checkoutId: string;
   /** Opens a confirmed file in the preview. */
   open: (path: string) => void;
 }

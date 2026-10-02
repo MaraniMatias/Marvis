@@ -76,6 +76,7 @@ function mountInspector(props: {
   repo?: Repo;
   gitSnapshot?: ActiveGitSnapshot;
   savedState?: CheckoutUiState | null;
+  fontScale?: number;
 }) {
   return mount(InspectorPane, {
     props: { ...props, gitSnapshot: props.gitSnapshot ?? gitSnapshot(props.checkout?.id ?? "none") },
@@ -259,6 +260,32 @@ describe("InspectorPane", () => {
     await tree.trigger("scroll");
     expect(tree.text()).toContain("file-499.txt");
     expect(tree.text()).not.toContain("file-0.txt");
+    wrapper.unmount();
+  });
+
+  it("scales the row height with the UI font size, and windows the list at the height it draws", async () => {
+    const entries = Array.from({ length: 500 }, (_, index) => ({
+      name: `file-${index}.txt`,
+      path: `file-${index}.txt`,
+      kind: "file" as const,
+    }));
+    mocks.listCheckoutFiles.mockResolvedValue({ entries, truncated: false });
+    // 20px is `UI_FONT_SIZE_LIMITS.max`, so this is the largest row the preference can ask for.
+    const wrapper = mountInspector({ checkout: checkout("large"), fontScale: 20 / 14 });
+    await flushPromises();
+
+    const tree = wrapper.get('[aria-label="Checkout files"]');
+    const rowHeight = publishedRowHeight(wrapper);
+    // A row pinned at the design height held the larger label in a line box too short for it.
+    expect(rowHeight).toBeGreaterThan(ROW_HEIGHT);
+    expect(rowHeight).toBe(Math.round(ROW_HEIGHT * (20 / 14)));
+
+    (tree.element as HTMLElement).scrollTop = 100 * rowHeight;
+    await tree.trigger("scroll");
+    const first = 100 - OVERSCAN;
+    const rows = tree.findAll("button");
+    expect(rows[0]!.text()).toContain(`file-${first}.txt`);
+    expect(tree.find("div[style]").attributes("style")).toContain(`padding-top: ${first * rowHeight}px`);
     wrapper.unmount();
   });
 

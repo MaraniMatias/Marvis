@@ -1305,6 +1305,69 @@ impl Database {
         self.load_workspace()
     }
 
+    /// Moves a terminal session to another worktree of the same repository.
+    ///
+    /// The process is not touched: a session is a row, and moving it hands the row to another
+    /// checkout so the terminal belongs to the worktree it is listed under. Both layouts are
+    /// reconciled in the same transaction as the row, because a layout still naming a session its
+    /// checkout no longer holds is a layout the next read prunes and the next save refuses.
+    pub fn move_terminal_session(
+        &self,
+        session_id: &str,
+        target_checkout_id: &str,
+    ) -> Result<WorkspaceState, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        let source_checkout_id: String = transaction
+            .query_row(
+                "SELECT checkout_id FROM sessions WHERE id = ?1",
+                [session_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "session does not exist".to_string())?;
+        if source_checkout_id == target_checkout_id {
+            return Err("the terminal session is already in that worktree".into());
+        }
+        let target_repo_id: String = transaction
+            .query_row(
+                "SELECT repo_id FROM checkouts WHERE id = ?1 AND is_missing = 0 AND is_archived = 0",
+                [target_checkout_id],
+                |row| row.get(0),
+            )
+            .optional()
+            .map_err(db_error)?
+            .ok_or_else(|| "checkout does not exist or is missing".to_string())?;
+        let source_repo_id: String = transaction
+            .query_row(
+                "SELECT repo_id FROM checkouts WHERE id = ?1",
+                [&source_checkout_id],
+                |row| row.get(0),
+            )
+            .map_err(db_error)?;
+        // One repository is one Git directory, so its worktrees are the only checkouts a session
+        // may be handed to; anything else would be a session labelled with a tree it is not in.
+        if source_repo_id != target_repo_id {
+            return Err("a terminal session cannot leave the repository it was opened in".into());
+        }
+        transaction
+            .execute(
+                "UPDATE sessions SET checkout_id = ?1 WHERE id = ?2",
+                params![target_checkout_id, session_id],
+            )
+            .map_err(db_error)?;
+        reconcile_stored_layout(&transaction, &source_checkout_id)?;
+        reconcile_stored_layout(&transaction, target_checkout_id)?;
+        // The worktree the session now belongs to is the one whose files, changes and agent the
+        // window shows, so the move selects it and the session inside it.
+        set_preference(&transaction, ACTIVE_CHECKOUT, Some(target_checkout_id))?;
+        set_preference(&transaction, ACTIVE_SESSION, Some(session_id))?;
+        transaction.commit().map_err(db_error)?;
+        drop(connection);
+        self.load_workspace()
+    }
+
     pub fn load_workspace(&self) -> Result<WorkspaceState, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         load_workspace(&connection)
@@ -1919,6 +1982,38 @@ fn validate_terminal_layout(
     let session_ids = terminal_layout_session_ids(connection, checkout_id)?;
     let session_ids = session_ids.into_iter().collect();
     layout.validate(&session_ids)
+}
+
+/// Brings one checkout's stored layout back in line with the sessions it holds now.
+///
+/// A checkout with no stored layout needs nothing here: the next read builds one from its
+/// sessions, which is the same shape this would have written.
+fn reconcile_stored_layout(transaction: &Transaction<'_>, checkout_id: &str) -> Result<(), String> {
+    let Some(serialized) = transaction
+        .query_row(
+            "SELECT layout_json FROM checkout_terminal_layouts WHERE checkout_id = ?1",
+            [checkout_id],
+            |row| row.get::<_, String>(0),
+        )
+        .optional()
+        .map_err(db_error)?
+    else {
+        return Ok(());
+    };
+    let mut layout: CheckoutTerminalLayout = serde_json::from_str(&serialized)
+        .map_err(|error| format!("saved terminal layout is invalid: {error}"))?;
+    layout.reconcile_sessions(&terminal_layout_session_ids(transaction, checkout_id)?);
+    let reconciled = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
+    if reconciled == serialized {
+        return Ok(());
+    }
+    transaction
+        .execute(
+            "UPDATE checkout_terminal_layouts SET layout_json = ?1 WHERE checkout_id = ?2",
+            params![reconciled, checkout_id],
+        )
+        .map_err(db_error)?;
+    Ok(())
 }
 
 fn safe_checkout_relative_path(path: &str) -> bool {
@@ -3317,6 +3412,111 @@ mod tests {
                 .expect("load layout from SQLite"),
             None
         );
+    }
+
+    #[test]
+    fn moving_a_session_hands_the_row_to_a_sibling_worktree_and_takes_it_off_the_panels() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        let other = temp.path().join("other");
+        let other_worktree = temp.path().join("other-worktree");
+        for folder in [&root, &worktree, &other, &other_worktree] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let (other_repo, other_worktree_id) = git_repo_with_worktree(&other, &other_worktree);
+        let root_id = repo.checkouts[0].id.clone();
+        let other_root_id = other_repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo, &worktree_id).unwrap();
+        database
+            .register_git_repo(other_repo, &other_worktree_id)
+            .unwrap();
+        let session = Session {
+            id: "session:moved".into(),
+            session_type: SessionType::Shell,
+            checkout_id: root_id.clone(),
+            name: "zsh".into(),
+            created_at: "now".into(),
+            status: SessionStatus::Active,
+        };
+        database.add_terminal_session(&session).unwrap();
+        database
+            .save_terminal_layout(
+                &root_id,
+                &CheckoutTerminalLayout {
+                    active_tab_id: Some("tab:moved".into()),
+                    tabs: vec![TerminalLayoutTab {
+                        id: "tab:moved".into(),
+                        root: TerminalLayoutNode::Session {
+                            session_id: session.id.clone(),
+                        },
+                    }],
+                    session_order: vec![session.id.clone()],
+                },
+            )
+            .unwrap();
+
+        // Another repository is a different Git directory, so it is never a destination.
+        assert!(database
+            .move_terminal_session(&session.id, &other_root_id)
+            .is_err());
+        assert_eq!(
+            database.terminal_session_checkout(&session.id).unwrap(),
+            Some(root_id.clone())
+        );
+        assert!(database
+            .move_terminal_session(&session.id, &root_id)
+            .is_err());
+        assert!(database
+            .move_terminal_session("session:unknown", &worktree_id)
+            .is_err());
+
+        let moved = database
+            .move_terminal_session(&session.id, &worktree_id)
+            .unwrap();
+
+        let moved_repo = moved
+            .repos
+            .iter()
+            .find(|item| item.checkouts.iter().any(|checkout| checkout.id == root_id))
+            .unwrap();
+        let source = moved_repo
+            .checkouts
+            .iter()
+            .find(|item| item.id == root_id)
+            .unwrap();
+        let target = moved_repo
+            .checkouts
+            .iter()
+            .find(|item| item.id == worktree_id)
+            .unwrap();
+        assert!(source.sessions.is_empty());
+        assert_eq!(target.sessions.len(), 1);
+        assert_eq!(target.sessions[0].id, session.id);
+        // The worktree the terminal now belongs to is the one the window shows, so the files and
+        // the changes on screen are that worktree's.
+        assert_eq!(
+            moved.active_checkout_id.as_deref(),
+            Some(worktree_id.as_str())
+        );
+        assert_eq!(
+            moved.active_session_id.as_deref(),
+            Some(session.id.as_str())
+        );
+        // Both layouts follow the row: the source loses the pane, the destination gains one.
+        assert_eq!(
+            database.load_terminal_layout(&root_id).unwrap(),
+            Some(CheckoutTerminalLayout {
+                active_tab_id: None,
+                tabs: vec![],
+                session_order: vec![],
+            })
+        );
+        // The destination had no stored layout, so it has none to repair: the pane its sessions
+        // name is built on the next read, and the session it gained is in it.
+        assert_eq!(database.load_terminal_layout(&worktree_id).unwrap(), None);
     }
 
     #[test]

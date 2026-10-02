@@ -174,6 +174,22 @@ pub async fn terminal_rename(
     .map_err(|error| error.to_string())?
 }
 
+#[tauri::command]
+pub async fn terminal_move(
+    checkout_id: String,
+    session_id: String,
+    target_checkout_id: String,
+    database: State<'_, Database>,
+) -> Result<WorkspaceState, String> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        validate_session_owner(&database, &session_id, &checkout_id)?;
+        database.move_terminal_session(&session_id, &target_checkout_id)
+    })
+    .await
+    .map_err(|error| error.to_string())?
+}
+
 fn validate_session_owner(
     database: &Database,
     session_id: &str,

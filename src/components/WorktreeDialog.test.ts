@@ -191,6 +191,18 @@ describe("WorktreeDialog", () => {
     expect(wrapper.findAll("button").map((button) => button.text())).toContain("Cancel");
     // Focus opens on the answer that does nothing, so a stray Enter cannot delete a worktree.
     expect(wrapper.get("button[autofocus]").text()).toBe("Cancel");
+
+    document.body.append(wrapper.element);
+    const first = wrapper.get('button[aria-label="Close"]');
+    const archive = wrapper.findAll("button").find((button) => button.text() === "Archive")!;
+    (archive.element as HTMLButtonElement).focus();
+    await archive.trigger("keydown", { key: "Tab" });
+    expect(document.activeElement).toBe(first.element);
+
+    (first.element as HTMLButtonElement).focus();
+    await first.trigger("keydown", { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(archive.element);
+    wrapper.unmount();
   });
 
   it("archives without the confirmations Delete needs, and keeps the dialog open when it fails", async () => {

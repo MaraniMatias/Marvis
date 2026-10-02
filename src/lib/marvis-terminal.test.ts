@@ -161,8 +161,8 @@ describe("createMarvisTerminal", () => {
     // this file's: a terminal opened in the light palette gets the light one without a second copy
     // of the values anywhere.
     const style = document.createElement("style");
-    style.textContent = `:root { --marvis-bg-0: #282c33; --marvis-text: #dce0e5; }
-      :root[data-theme="light"] { --marvis-bg-0: #fafafa; --marvis-text: #242529; }`;
+    style.textContent = `:root { --marvis-content-bg-0: #282c33; --marvis-content-text: #dce0e5; }
+      :root[data-theme="light"] { --marvis-content-bg-0: #fafafa; --marvis-content-text: #242529; }`;
     document.head.append(style);
     try {
       document.documentElement.dataset.theme = "dark";

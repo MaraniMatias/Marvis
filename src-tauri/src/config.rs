@@ -85,6 +85,8 @@ pub struct TerminalSettings {
     pub ligatures: bool,
     pub cursor_blink: bool,
     pub scrollbar: String,
+    /// Whether moving a terminal to another worktree also moves the shell's working directory.
+    pub change_directory_on_move: bool,
 }
 
 impl Default for TerminalSettings {
@@ -94,6 +96,7 @@ impl Default for TerminalSettings {
             ligatures: true,
             cursor_blink: true,
             scrollbar: "hidden".into(),
+            change_directory_on_move: false,
         }
     }
 }
@@ -322,6 +325,7 @@ mod tests {
                 ligatures: false,
                 cursor_blink: false,
                 scrollbar: "always".into(),
+                change_directory_on_move: true,
             },
             editor: EditorSettings {
                 font_size: 15.0,

@@ -4,6 +4,7 @@ import { computed, ref, watch } from "vue";
 import type { Checkout, Repo, WorkspaceState } from "../domain/workspace";
 import type { WorktreeRemovalInfo } from "../domain/worktree";
 import { isIpcError } from "../domain/ipc";
+import { trapDialogTab } from "../lib/dialog-focus";
 import {
   archiveCheckout,
   createWorktree,
@@ -193,6 +194,16 @@ function openShell() {
 function messageOf(cause: unknown): string {
   return isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
 }
+
+function onDialogKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    event.stopPropagation();
+    event.preventDefault();
+    emit("close");
+    return;
+  }
+  trapDialogTab(event, event.currentTarget as HTMLElement);
+}
 </script>
 
 <template>
@@ -206,8 +217,8 @@ function messageOf(cause: unknown): string {
       aria-modal="true"
       tabindex="-1"
       :aria-labelledby="mode === 'create' ? 'worktree-create-title' : 'worktree-remove-title'"
-      class="surface-popover w-full max-w-xl rounded-[var(--marvis-radius)] p-5 shadow-2xl"
-      @keydown.esc.stop.prevent="$emit('close')"
+      class="surface-popover w-full max-w-xl p-5"
+      @keydown="onDialogKeydown"
     >
       <header class="mb-4 flex items-start justify-between gap-4">
         <div>
@@ -239,7 +250,7 @@ function messageOf(cause: unknown): string {
             autofocus
             required
             maxlength="120"
-            class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text) outline-none focus:border-(--marvis-text-faint)"
+            class="marvis-input mt-1.5 w-full"
             @input="updateTaskName(($event.target as HTMLInputElement).value)"
           />
           <span class="mt-1 block text-[0.6875rem] text-(--marvis-text-faint)"
@@ -248,41 +259,26 @@ function messageOf(cause: unknown): string {
         </label>
         <label class="block text-xs text-(--marvis-text-secondary)">
           New branch
-          <input
-            v-model="branch"
-            required
-            class="mt-1.5 w-full rounded border border-(--marvis-border) bg-(--marvis-bg-0) px-3 py-2 text-sm text-(--marvis-text) outline-none focus:border-(--marvis-text-faint)"
-            @input="branchEdited = true"
-          />
+          <input v-model="branch" required class="marvis-input mt-1.5 w-full" @input="branchEdited = true" />
         </label>
         <p v-if="defaultBranch" class="text-xs text-(--marvis-text-faint)">
           Starting point: <code class="text-(--marvis-text-secondary)">{{ defaultBranch }}</code> · Worktrees are
           created under <code class="text-(--marvis-text-secondary)">{{ location }}</code
           >.
         </p>
-        <p v-if="error" role="alert" class="text-sm text-(--marvis-red)">{{ error }}</p>
+        <p v-if="error" role="alert" class="text-sm text-(--marvis-danger-fg)">{{ error }}</p>
         <footer class="flex justify-end gap-2 pt-1">
-          <button
-            type="button"
-            class="marvis-control px-3 py-2 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
-            @click="$emit('close')"
-          >
-            Cancel
-          </button>
+          <button type="button" class="marvis-button marvis-button-subtle" @click="$emit('close')">Cancel</button>
           <!-- Creating and opening the shell is this dialog's primary action. -->
-          <button
-            type="submit"
-            :disabled="isBusy || !defaultBranch"
-            class="marvis-control marvis-button-primary px-3 py-2 text-xs"
-          >
+          <button type="submit" :disabled="isBusy || !defaultBranch" class="marvis-button marvis-button-tinted">
             {{ isBusy ? "Creating…" : "Create and open shell" }}
           </button>
         </footer>
       </form>
 
       <div v-else-if="mode === 'remove' && error && !removal" class="space-y-4">
-        <p role="alert" class="text-sm text-(--marvis-red)">{{ error }}</p>
-        <button type="button" class="marvis-button marvis-button-secondary" @click="$emit('close')">Close</button>
+        <p role="alert" class="text-sm text-(--marvis-danger-fg)">{{ error }}</p>
+        <button type="button" class="marvis-button marvis-button-subtle" @click="$emit('close')">Close</button>
       </div>
 
       <div v-else-if="removal" class="space-y-4">
@@ -296,11 +292,11 @@ function messageOf(cause: unknown): string {
         </p>
         <p
           v-if="removal.isMissing"
-          class="rounded border border-(--marvis-border) bg-(--marvis-bg-0) p-3 text-sm text-(--marvis-text-secondary)"
+          class="border border-(--marvis-border) bg-(--marvis-bg-1) p-3 text-sm text-(--marvis-text-secondary)"
         >
           This checkout is missing. Git will prune its stale worktree metadata and remove it from Marvis.
         </p>
-        <div v-if="removal.dirtyFiles.length" class="rounded border border-(--marvis-border) bg-(--marvis-bg-0) p-3">
+        <div v-if="removal.dirtyFiles.length" class="border border-(--marvis-border) bg-(--marvis-bg-1) p-3">
           <p class="text-sm text-(--marvis-text)">
             {{ removal.dirtyFiles.length }} uncommitted change{{ removal.dirtyFiles.length === 1 ? "" : "s" }} will be
             discarded if you continue.
@@ -313,43 +309,40 @@ function messageOf(cause: unknown): string {
           </ul>
           <button
             type="button"
-            class="marvis-button marvis-button-quiet marvis-button-xs mt-2 text-(--marvis-accent) underline"
+            class="marvis-button marvis-button-ghost marvis-button-xs mt-2 underline"
             @click="openShell"
           >
             Open a shell to commit or stash first
           </button>
           <label class="mt-3 flex items-start gap-2 text-xs text-(--marvis-text-faint)">
-            <input v-model="dirtyConfirmed" type="checkbox" class="mt-0.5 accent-(--marvis-accent)" />
+            <input v-model="dirtyConfirmed" type="checkbox" class="marvis-check mt-0.5" />
             I understand uncommitted files may be lost; remove anyway.
           </label>
         </div>
         <p
           v-if="removal.unmergedCommits"
-          class="rounded border border-(--marvis-border) bg-(--marvis-bg-0) p-3 text-sm text-(--marvis-text)"
+          class="border border-(--marvis-border) bg-(--marvis-bg-1) p-3 text-sm text-(--marvis-text)"
         >
           This branch has {{ removal.unmergedCommits }} commit{{ removal.unmergedCommits === 1 ? "" : "s" }} not merged
           into the default branch. Keeping the branch preserves them.
         </p>
-        <div
-          v-if="removal.activeSessions.length"
-          class="rounded border border-(--marvis-border) bg-(--marvis-bg-0) p-3"
-        >
+        <div v-if="removal.activeSessions.length" class="border border-(--marvis-border) bg-(--marvis-bg-1) p-3">
           <p class="text-sm text-(--marvis-text)">These active sessions will be stopped:</p>
           <ul class="mt-2 space-y-1 text-xs text-(--marvis-text-faint)">
             <li v-for="session in removal.activeSessions" :key="session.id">{{ session.name }} · {{ session.type }}</li>
           </ul>
           <label class="mt-3 flex items-start gap-2 text-xs text-(--marvis-text-faint)">
-            <input v-model="sessionsConfirmed" type="checkbox" class="mt-0.5 accent-(--marvis-accent)" />
+            <input v-model="sessionsConfirmed" type="checkbox" class="marvis-check mt-0.5" />
             Stop the listed sessions and remove this checkout.
           </label>
         </div>
-        <p v-if="archiveBlocked" class="text-xs text-(--marvis-text-faint)">
+        <p v-if="archiveBlocked" class="text-xs text-(--marvis-warning-fg)">
           Archive stays unavailable while a session runs here: close it first.
         </p>
         <p
           v-if="removal.activeAgentSessions.length"
           role="alert"
-          class="rounded bg-(--marvis-bg-0) p-3 text-sm text-(--marvis-red)"
+          class="bg-(--marvis-bg-1) p-3 text-sm text-(--marvis-danger-fg)"
         >
           An active agent is using this checkout. Stop the agent before removing it:
           {{ removal.activeAgentSessions.map((session) => session.name).join(", ") }}.
@@ -364,25 +357,20 @@ function messageOf(cause: unknown): string {
             class="mt-1.5"
           />
         </label>
-        <p v-if="error" role="alert" class="text-sm text-(--marvis-red)">{{ error }}</p>
+        <p v-if="error" role="alert" class="text-sm text-(--marvis-danger-fg)">{{ error }}</p>
         <footer class="flex items-center gap-2 pt-1">
           <!-- Delete reaches the disk, so it alone uses the destructive treatment. -->
           <button type="button" :disabled="isBusy || !canRemove" class="marvis-button-danger" @click="submitRemove">
             {{ isBusy ? "Deleting…" : "Delete" }}
           </button>
           <span class="flex-1" />
-          <button
-            type="button"
-            autofocus
-            class="marvis-control px-3 py-2 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
-            @click="$emit('close')"
-          >
+          <button type="button" autofocus class="marvis-button marvis-button-subtle" @click="$emit('close')">
             Cancel
           </button>
           <button
             type="button"
             :disabled="isBusy || archiveBlocked"
-            class="marvis-control px-3 py-2 text-xs text-(--marvis-text) hover:text-(--marvis-text)"
+            class="marvis-button marvis-button-subtle"
             @click="submitArchive"
           >
             {{ isBusy ? "Archiving…" : "Archive" }}

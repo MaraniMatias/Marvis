@@ -2,8 +2,9 @@
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { Checkout, Session, WorkspaceState } from "../domain/workspace";
+import { DEFAULT_SETTINGS } from "../domain/settings";
 import { addSessionToLayout, createTerminalLayout } from "../domain/terminal-layout";
-import { loadTerminalLayout, saveTerminalLayout } from "../lib/ipc";
+import { loadTerminalLayout, moveTerminal, saveTerminalLayout } from "../lib/ipc";
 import { useToasts } from "../presentation/toasts";
 import SessionPane from "./SessionPane.vue";
 
@@ -15,10 +16,14 @@ const terminalMock = vi.hoisted(() => ({
   closeRequests: 0,
   createdCount: 0,
   closedIds: [] as string[],
+  /** The directories the mock terminal was told to change into, and whether it could. */
+  directoryChanges: [] as string[],
+  busy: false,
 }));
 
 vi.mock("../lib/ipc", () => ({
   loadTerminalLayout: vi.fn(),
+  moveTerminal: vi.fn(),
   saveTerminalLayout: vi.fn(),
 }));
 
@@ -47,6 +52,11 @@ vi.mock("./TerminalSession.vue", async () => {
               activeCheckoutId: props.checkoutId,
               activeSessionId: null,
             });
+            return true;
+          },
+          changeDirectory: async (path: string) => {
+            if (terminalMock.busy) return false;
+            terminalMock.directoryChanges.push(path);
             return true;
           },
         });
@@ -102,6 +112,8 @@ beforeEach(() => {
   terminalMock.closeRequests = 0;
   terminalMock.createdCount = 0;
   terminalMock.closedIds = [];
+  terminalMock.directoryChanges = [];
+  terminalMock.busy = false;
   vi.mocked(loadTerminalLayout).mockResolvedValue(null);
   vi.mocked(saveTerminalLayout).mockResolvedValue(undefined);
   for (const toast of [...toasts.value]) dismiss(toast.id);
@@ -357,6 +369,114 @@ describe("SessionPane terminal UI", () => {
         tabs: [expect.objectContaining({ root: { kind: "session", sessionId: "session:old" } })],
       }),
     );
+    wrapper.unmount();
+  });
+
+  it("moves a live terminal to another worktree without restarting it", async () => {
+    terminalMock.autoCreate = true;
+    const target: Checkout = { ...checkout, id: "checkout:/work/repo-wt", path: "/work/repo-wt" };
+    vi.mocked(moveTerminal).mockResolvedValue({
+      repos: [],
+      activeCheckoutId: target.id,
+      activeSessionId: "session:live",
+    });
+    const wrapper = mount(SessionPane, {
+      props: {
+        checkout,
+        checkouts: [checkout, target],
+        activeSessionId: null,
+        isOpening: true,
+        shellRequest: null,
+        terminalSettings: { ...DEFAULT_SETTINGS.terminal },
+      },
+    });
+    await wrapper.setProps({
+      isOpening: false,
+      shellRequest: { checkoutId: checkout.id, token: 1 },
+      activeSessionId: "session:live",
+      registeredSessionIds: ["session:live"],
+    });
+    await flushPromises();
+
+    // The process is the one already running, so a move is a row change and nothing is mounted.
+    await wrapper.vm.moveSession("session:live", target.id);
+    await flushPromises();
+
+    expect(moveTerminal).toHaveBeenCalledWith(checkout.id, "session:live", target.id);
+    expect(terminalMock.mounts).toBe(1);
+    expect(terminalMock.closeRequests).toBe(0);
+    // The layout that had the pane gives it up, and the one that gained it takes it.
+    expect(saveTerminalLayout).toHaveBeenCalledWith(
+      checkout.id,
+      expect.objectContaining({ sessionOrder: ["session:old"] }),
+    );
+    expect(saveTerminalLayout).toHaveBeenCalledWith(
+      target.id,
+      expect.objectContaining({ sessionOrder: ["session:live"] }),
+    );
+    // Off by default: a move is not a `cd`.
+    expect(terminalMock.directoryChanges).toEqual([]);
+    wrapper.unmount();
+  });
+
+  it("changes the directory after a move only when asked, and only for an idle shell", async () => {
+    terminalMock.autoCreate = true;
+    const target: Checkout = { ...checkout, id: "checkout:/work/repo-wt", path: "/work/repo-wt" };
+    vi.mocked(moveTerminal).mockResolvedValue({
+      repos: [],
+      activeCheckoutId: target.id,
+      activeSessionId: "session:live",
+    });
+    const wrapper = mount(SessionPane, {
+      props: {
+        checkout,
+        checkouts: [checkout, target],
+        activeSessionId: null,
+        isOpening: true,
+        shellRequest: null,
+        terminalSettings: { ...DEFAULT_SETTINGS.terminal, changeDirectoryOnMove: true },
+      },
+    });
+    await wrapper.setProps({
+      isOpening: false,
+      shellRequest: { checkoutId: checkout.id, token: 1 },
+      activeSessionId: "session:live",
+      registeredSessionIds: ["session:live"],
+    });
+    await flushPromises();
+
+    terminalMock.busy = true;
+    await wrapper.vm.moveSession("session:live", target.id);
+    await flushPromises();
+
+    // The session moved either way; what a busy shell refuses is the `cd`, and that is said out
+    // loud rather than passed over in silence.
+    expect(moveTerminal).toHaveBeenCalledTimes(1);
+    expect(terminalMock.directoryChanges).toEqual([]);
+    expect(toasts.value.map((toast) => toast.message)).toEqual([
+      `${target.path}: the terminal is busy, so its directory was left alone.`,
+    ]);
+    wrapper.unmount();
+  });
+
+  it("refuses a move to a worktree that is not on the panel", async () => {
+    terminalMock.autoCreate = true;
+    vi.mocked(moveTerminal).mockResolvedValue({ repos: [], activeCheckoutId: null, activeSessionId: null });
+    const wrapper = mount(SessionPane, {
+      props: { checkout, checkouts: [checkout], activeSessionId: null, isOpening: true },
+    });
+    await wrapper.setProps({
+      isOpening: false,
+      activeSessionId: "session:live",
+      registeredSessionIds: ["session:live"],
+    });
+    await flushPromises();
+
+    await wrapper.vm.moveSession("session:live", "checkout:unknown");
+    await wrapper.vm.moveSession("session:live", checkout.id);
+    await flushPromises();
+
+    expect(moveTerminal).not.toHaveBeenCalled();
     wrapper.unmount();
   });
 

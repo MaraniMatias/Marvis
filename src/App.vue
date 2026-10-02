@@ -682,10 +682,12 @@ async function applyFromDialog(next: AppSettings) {
  * everything here is drawn in pixels: a base font size would move the padding and the icons with
  * the text, and what a person changes in Settings is the text.
  */
+const fontScale = computed(() => uiFontScale(settings.value.ui.fontSize));
+
 watch(
-  () => settings.value.ui.fontSize,
-  (fontSize) => {
-    document.documentElement.style.setProperty("--marvis-ui-font-scale", String(uiFontScale(fontSize)));
+  fontScale,
+  (scale) => {
+    document.documentElement.style.setProperty("--marvis-ui-font-scale", String(scale));
   },
   { immediate: true },
 );
@@ -1256,6 +1258,17 @@ async function closeTerminalSession(sessionId: string) {
 }
 
 /**
+ * Hands a live terminal to another worktree of the same repository.
+ *
+ * The pane owns the live views, so it is the one that can move a terminal without restarting it:
+ * this only carries the destination across. The workspace the backend returns already selects the
+ * destination worktree, which is what puts the files and the changes panel on it.
+ */
+async function moveTerminalSession(sessionId: string, targetCheckoutId: string) {
+  await mainPane.value?.moveSession(sessionId, targetCheckoutId);
+}
+
+/**
  * Names a terminal session.
  *
  * The database decides the name, not this call: it trims, refuses an empty or over-long one
@@ -1469,6 +1482,7 @@ function reportWarning(message: string) {
           @restore-archived="restoreArchivedWorktrees"
           @close-session="closeTerminalSession"
           @rename-session="renameTerminalSession"
+          @move-session="moveTerminalSession"
         />
       </SplitterPanel>
       <SplitterResizeHandle
@@ -1480,7 +1494,7 @@ function reportWarning(message: string) {
       >
         <div
           aria-hidden="true"
-          class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-(--marvis-text-faint)"
+          class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 bg-(--marvis-text-faint)"
         />
       </SplitterResizeHandle>
       <SplitterPanel
@@ -1492,6 +1506,7 @@ function reportWarning(message: string) {
         <MainPane
           ref="mainPane"
           :checkout="activeCheckout"
+          :checkouts="allCheckouts"
           :view="activeMainView"
           :split="isSplitLayout"
           :preview-width="appLayout.previewWidth"
@@ -1531,7 +1546,7 @@ function reportWarning(message: string) {
       >
         <div
           aria-hidden="true"
-          class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 rounded-full bg-(--marvis-text-faint)"
+          class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 bg-(--marvis-text-faint)"
         />
       </SplitterResizeHandle>
       <SplitterPanel
@@ -1559,6 +1574,7 @@ function reportWarning(message: string) {
             :repo="checkoutUiReady ? activeRepo : null"
             :git-snapshot="gitSnapshot"
             :saved-state="activeCheckout ? checkoutUiStates[activeCheckout.id] : null"
+            :font-scale="fontScale"
             @open-file="openFileDocument"
             @open-change="openChangedDocument"
             @open-all-changes="openAllChanges"

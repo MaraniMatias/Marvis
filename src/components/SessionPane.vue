@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { Plus as PlusIcon } from "@lucide/vue";
 import type { Checkout, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { TerminalSettings } from "../domain/settings";
@@ -10,7 +10,7 @@ import {
   removeSessionFromLayout,
 } from "../domain/terminal-layout";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
-import { loadTerminalLayout, saveTerminalLayout } from "../lib/ipc";
+import { loadTerminalLayout, moveTerminal, saveTerminalLayout } from "../lib/ipc";
 import { useToasts } from "../presentation/toasts";
 import Button from "./ui/button/Button.vue";
 import TerminalSession from "./TerminalSession.vue";
@@ -22,6 +22,13 @@ import TerminalSession from "./TerminalSession.vue";
 // the pane is visible unless told otherwise.
 const props = defineProps<{
   checkout: Checkout | null;
+  /**
+   * Every checkout on the panel, and the reason it is here at all: a move names a destination the
+   * pane cannot select, so it needs to know the destination exists, is not missing, and where it
+   * is on disk. A caller with no moves to offer passes nothing, and then there is nowhere to
+   * move to.
+   */
+  checkouts?: Checkout[];
   activeSessionId: string | null;
   isOpening: boolean;
   visible?: boolean;
@@ -47,6 +54,7 @@ interface TerminalView {
 }
 interface TerminalSessionHandle {
   requestClose(): Promise<boolean>;
+  changeDirectory(path: string): Promise<boolean>;
   focus(): void;
 }
 
@@ -157,7 +165,50 @@ async function requestClose(sessionId: string) {
   return (await terminalRefs.get(view.key)?.requestClose()) ?? false;
 }
 
-defineExpose({ focusActiveTerminal, requestClose });
+/**
+ * Hands a live terminal to another worktree of the same repository.
+ *
+ * The process is not restarted and its output is not lost: what moves is which checkout's layout
+ * the pane belongs to, and the session row that says so. Both layouts are rewritten — the session
+ * leaves the one it was in and opens as a tab in the one it moved to — because a layout that kept
+ * a pane for a session its checkout no longer holds is the layout the backend refuses to save.
+ *
+ * With `terminal.changeDirectoryOnMove` on, a shell sitting at a prompt is also told to `cd`. A
+ * shell with something running in front of it is left where it is, and says so: typing `cd` into a
+ * build would feed the build.
+ */
+async function moveSession(sessionId: string, targetCheckoutId: string) {
+  const view = views.value.find((item) => item.session?.id === sessionId);
+  const target = (props.checkouts ?? []).find((checkout) => checkout.id === targetCheckoutId);
+  if (!view || !view.session || !target || target.isMissing || view.checkoutId === targetCheckoutId) return;
+  const source = view.checkoutId;
+  let workspace: WorkspaceState;
+  try {
+    workspace = await moveTerminal(source, sessionId, targetCheckoutId);
+  } catch (cause) {
+    reportTerminalError(cause);
+    return;
+  }
+  view.checkoutId = targetCheckoutId;
+  view.session = { ...view.session, checkoutId: targetCheckoutId };
+  void saveLayout(source, removeSessionFromLayout(layouts.value[source] ?? createTerminalLayout([]), sessionId));
+  void saveLayout(
+    targetCheckoutId,
+    addSessionToLayout(layouts.value[targetCheckoutId] ?? createTerminalLayout([]), view.session),
+  );
+  emit("workspaceUpdated", workspace);
+  if (!props.terminalSettings?.changeDirectoryOnMove) return;
+  // The pane's own checkout prop is what the session is written under, and the new one only
+  // reaches the terminal on the next tick. Writing before that would address the `cd` to the
+  // worktree the session just left, which the backend refuses.
+  await nextTick();
+  const changed = await terminalRefs.get(view.key)?.changeDirectory(target.path);
+  if (changed === false) {
+    pushToast(`${target.path}: the terminal is busy, so its directory was left alone.`);
+  }
+}
+
+defineExpose({ focusActiveTerminal, requestClose, moveSession });
 
 function onCreated(key: string, result: { session: Session; workspace: WorkspaceState }) {
   const view = views.value.find((item) => item.key === key);
@@ -300,7 +351,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
           </p>
           <Button
             v-if="checkout && !checkout.isMissing && !isStarting"
-            variant="primary"
+            variant="tinted"
             class="mt-4"
             @click="createTerminalSession()"
           >
@@ -309,7 +360,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
           </Button>
           <Button
             v-else-if="!checkout"
-            variant="primary"
+            variant="tinted"
             class="mt-4"
             :disabled="isOpening"
             @click="$emit('openFolder')"

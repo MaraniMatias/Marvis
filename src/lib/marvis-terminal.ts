@@ -35,10 +35,10 @@ export function terminalFontSize(fontSize: number, zoom: number): number {
  * pretending the canvas is not painted.
  */
 const TERMINAL_THEME_TOKENS = {
-  background: "--marvis-bg-0",
-  foreground: "--marvis-text",
-  cursor: "--marvis-accent",
-  cursorAccent: "--marvis-bg-0",
+  background: "--marvis-content-bg-0",
+  foreground: "--marvis-content-text",
+  cursor: "--marvis-content-accent",
+  cursorAccent: "--marvis-content-bg-0",
   selectionBackground: "--marvis-selection",
   black: "--marvis-ansi-black",
   red: "--marvis-ansi-red",

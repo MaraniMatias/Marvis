@@ -57,12 +57,15 @@ describe("SelectControl", () => {
     const wrapper = select();
 
     const rows = await open(wrapper);
+    const trigger = wrapper.get('[aria-label="Local branch"]');
+    expect(trigger.attributes("aria-expanded")).toBe("true");
     rows[1].dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true }));
     await flushPromises();
 
     // Escape says "close this list"; it is the dialog's own Escape that says "close me", and
     // the list is portalled out of the dialog's tree so it cannot answer for it.
     expect(wrapper.emitted("update:modelValue")).toBeUndefined();
+    expect(trigger.attributes("aria-expanded")).toBe("false");
     wrapper.unmount();
   });
 

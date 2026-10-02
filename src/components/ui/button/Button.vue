@@ -6,10 +6,10 @@ withDefaults(
   defineProps<{
     disabled?: boolean;
     type?: "button" | "submit";
-    variant?: "primary" | "secondary" | "quiet" | "danger";
-    size?: "sm" | "md";
+    variant?: "filled" | "tinted" | "outlined" | "subtle" | "ghost" | "danger";
+    size?: "sm" | "md" | "lg";
   }>(),
-  { disabled: false, type: "button", variant: "secondary", size: "md" },
+  { disabled: false, type: "button", variant: "subtle", size: "md" },
 );
 </script>
 

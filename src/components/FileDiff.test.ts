@@ -415,13 +415,20 @@ describe("FileDiff", () => {
     expect(single.find('[data-testid="send-target"]').exists()).toBe(false);
     single.unmount();
 
-    const many = senderStub([session("ses_one"), session("ses_two", { title: "review two" })], "ses_two", 2);
+    const longTitle = "Review this session with a descriptive title longer than one line";
+    const many = senderStub([session("ses_one"), session("ses_two", { title: longTitle })], "ses_two", 2);
     const wrapper = mountDiff({ review: reviewApi([note()]) }, many.sender);
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="send-target"]').text()).toContain("review two");
+    expect(wrapper.get('[data-testid="send-review"]').classes()).toContain("marvis-button-md");
+    expect(wrapper.get('[data-testid="send-target"]').classes()).toContain("marvis-select");
+    expect(wrapper.find(".session-target-menu").exists()).toBe(true);
+    expect(wrapper.get('[data-testid="send-target"]').attributes("title")).toBe(longTitle);
     const options = wrapper.findAll(SESSION_OPTION);
-    expect(options.map((option) => option.text())).toEqual(["ses_one", "review two"]);
+    expect(options.map((option) => option.text())).toEqual(["ses_one", longTitle]);
+    expect(options[1].attributes("title")).toBe(longTitle);
+    expect(options[1].get(".session-target-label").text()).toBe(longTitle);
+    expect(options[1].classes()).toContain("session-target-option");
     // The chosen one is the one that carries the check, so the list says where it already points.
     expect(options[1].attributes("aria-selected")).toBe("true");
     expect(options[1].find("svg").exists()).toBe(true);

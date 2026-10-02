@@ -15,6 +15,8 @@ import { computed, nextTick, ref, watch } from "vue";
 import { ACKNOWLEDGEMENT, CREDITS, REPOSITORY } from "../domain/credits";
 import { DEFAULT_SETTINGS, SETTINGS_SECTIONS, cloneSettings, valueAt, withValue } from "../domain/settings";
 import type { AppSettings, SettingsField, SettingsPath, SettingsValue } from "../domain/settings";
+import { trapDialogTab } from "../lib/dialog-focus";
+import Button from "./ui/button/Button.vue";
 import SelectControl from "./ui/select/SelectControl.vue";
 
 const props = defineProps<{
@@ -108,24 +110,7 @@ function onDialogKeydown(event: KeyboardEvent) {
 
   const dialog = dialogElement.value;
   if (!dialog) return;
-  const focusable = dialog.querySelectorAll<HTMLElement>(
-    'button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), a[href], [tabindex]:not([tabindex="-1"])',
-  );
-  if (!focusable.length) {
-    event.preventDefault();
-    dialog.focus();
-    return;
-  }
-  const first = focusable[0]!;
-  const last = focusable[focusable.length - 1]!;
-  const active = document.activeElement;
-  if (event.shiftKey && (active === first || !dialog.contains(active))) {
-    event.preventDefault();
-    last.focus();
-  } else if (!event.shiftKey && (active === last || !dialog.contains(active))) {
-    event.preventDefault();
-    first.focus();
-  }
+  trapDialogTab(event, dialog);
 }
 </script>
 
@@ -142,7 +127,7 @@ function onDialogKeydown(event: KeyboardEvent) {
       :aria-busy="saving"
       aria-labelledby="settings-title"
       tabindex="-1"
-      class="surface-popover flex max-h-[85vh] w-full max-w-xl flex-col rounded-[var(--marvis-radius)] shadow-2xl"
+      class="surface-popover flex max-h-[85vh] w-full max-w-xl flex-col"
       @keydown="onDialogKeydown"
     >
       <header class="flex items-start justify-between gap-4 px-5 pt-5">
@@ -177,7 +162,7 @@ function onDialogKeydown(event: KeyboardEvent) {
                   :id="controlId(field.path)"
                   type="checkbox"
                   :disabled="saving"
-                  class="marvis-check size-4"
+                  class="marvis-check"
                   :checked="valueAt(draft, field.path) === true"
                   @change="change(field.path, !valueAt(draft, field.path))"
                 />
@@ -242,59 +227,28 @@ function onDialogKeydown(event: KeyboardEvent) {
       </div>
 
       <footer class="flex items-center gap-2 border-t border-(--marvis-border) px-5 py-4">
-        <button
-          type="button"
-          :disabled="isDefault || saving"
-          class="marvis-button marvis-button-quiet"
-          @click="resetDraft"
-        >
-          Reset to defaults
-        </button>
+        <Button variant="ghost" :disabled="isDefault || saving" @click="resetDraft"> Reset to defaults </Button>
         <span class="flex-1" />
         <button
           ref="cancelButton"
           type="button"
           autofocus
           :disabled="saving"
-          class="marvis-control px-3 py-2 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+          class="marvis-button marvis-button-subtle"
           @click="requestClose"
         >
           Cancel
         </button>
-        <button
-          type="button"
-          :disabled="saving"
-          class="marvis-control marvis-button-primary px-3 py-2 text-xs"
-          @click="emit('apply', draft)"
-        >
+        <Button variant="tinted" :disabled="saving" @click="emit('apply', draft)">
           {{ saving ? "Saving…" : "Apply" }}
-        </button>
+        </Button>
       </footer>
     </section>
   </div>
 </template>
 
 <style scoped>
-/* The input the dialog's own numbers are drawn from, so a number and a picker in the same column
-   have the same height and the same border. It matches the inputs in `WorktreeDialog` and the
-   `field` variant of `SelectControl`, which is the pair the two kinds of control have to agree
-   with for the column to read as one. */
-.marvis-input {
-  border: 1px solid var(--marvis-border);
-  border-radius: var(--marvis-radius);
-  background: var(--marvis-bg-0);
-  padding: 8px 12px;
-  font: inherit;
-  font-size: 0.875rem;
-  color: var(--marvis-text);
-  outline: none;
-}
-.marvis-input:hover,
-.marvis-input:focus {
-  border-color: var(--marvis-text-faint);
-}
 .marvis-check {
   margin-left: auto;
-  accent-color: var(--marvis-accent);
 }
 </style>

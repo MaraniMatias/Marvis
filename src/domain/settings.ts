@@ -33,6 +33,14 @@ export interface TerminalSettings {
   ligatures: boolean;
   cursorBlink: boolean;
   scrollbar: TerminalScrollbarMode;
+  /**
+   * Whether moving a terminal to another worktree also makes its shell change directory.
+   *
+   * Off by default because the two answers are both defensible and only the person using the
+   * terminal knows which one they meant: a shell sitting at a prompt is happy to `cd`, and a shell
+   * with a build running is not asked to.
+   */
+  changeDirectoryOnMove: boolean;
 }
 
 export interface IndentationSettings {
@@ -65,7 +73,7 @@ export const INDENTATION_SIZE_LIMITS = { min: 1, max: 8 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
   ui: { fontSize: 14, zoom: 1, theme: "system" },
-  terminal: { fontSize: 16, ligatures: true, cursorBlink: true, scrollbar: "hidden" },
+  terminal: { fontSize: 16, ligatures: true, cursorBlink: true, scrollbar: "hidden", changeDirectoryOnMove: false },
   editor: {
     fontSize: 13,
     ligatures: true,
@@ -119,6 +127,7 @@ export function normalizeSettings(value: unknown): AppSettings {
       ligatures: flag(terminal.ligatures, DEFAULT_SETTINGS.terminal.ligatures),
       cursorBlink: flag(terminal.cursorBlink, DEFAULT_SETTINGS.terminal.cursorBlink),
       scrollbar: isTerminalScrollbarMode(terminal.scrollbar) ? terminal.scrollbar : DEFAULT_SETTINGS.terminal.scrollbar,
+      changeDirectoryOnMove: flag(terminal.changeDirectoryOnMove, DEFAULT_SETTINGS.terminal.changeDirectoryOnMove),
     },
     editor: {
       fontSize: boundedNumber(editor.fontSize, EDITOR_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.editor.fontSize),
@@ -145,6 +154,7 @@ export type SettingsPath =
   | "terminal.ligatures"
   | "terminal.cursorBlink"
   | "terminal.scrollbar"
+  | "terminal.changeDirectoryOnMove"
   | "editor.fontSize"
   | "editor.ligatures"
   | "editor.indentation.useSpaces"
@@ -212,11 +222,11 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         kind: "select",
         path: "ui.theme",
         label: "Theme",
-        description: "One Dark and One Light, as Zed draws them.",
+        description: "The app's light and dark palettes; code keeps its own colors.",
         options: [
           { value: "system", label: "System" },
-          { value: "light", label: "One Light" },
-          { value: "dark", label: "One Dark" },
+          { value: "light", label: "Light" },
+          { value: "dark", label: "Dark" },
         ],
         parse: IDENTIFIER,
       },
@@ -258,6 +268,13 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
           { value: "always", label: "Always" },
         ],
         parse: IDENTIFIER,
+      },
+      {
+        kind: "toggle",
+        path: "terminal.changeDirectoryOnMove",
+        label: "Change directory when moved",
+        description:
+          "Moving a terminal hands the session to another worktree and leaves the process alone. Turn this on and a shell sitting at a prompt also changes directory; one with a command running is left where it is.",
       },
     ],
   },

@@ -552,7 +552,7 @@ onUnmounted(() => {
             data-testid="send-review"
             :disabled="!canSend"
             :aria-label="sender.target === 'markdown' ? 'Export as Markdown' : 'Send to opencode'"
-            class="marvis-button marvis-button-primary marvis-button-sm"
+            class="marvis-button marvis-button-tinted marvis-button-md"
             @click="requestSend"
           >
             {{ sender.target === "markdown" ? "Export as Markdown" : "Send to opencode" }}
@@ -572,7 +572,7 @@ onUnmounted(() => {
               data-testid="send-target"
               aria-label="Send review to"
               :title="targetSession?.title"
-              class="text-menu-control max-w-44 gap-1 whitespace-nowrap"
+              class="marvis-select max-w-64"
             >
               <span class="min-w-0 truncate">{{ targetSession?.title ?? "Choose a session" }}</span>
               <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
@@ -586,7 +586,7 @@ onUnmounted(() => {
                 side="bottom"
                 align="end"
                 :side-offset="4"
-                class="surface-popover marvis-menu w-64"
+                class="surface-popover marvis-menu session-target-menu"
                 @keydown.down.prevent="moveTargetRow(1)"
                 @keydown.up.prevent="moveTargetRow(-1)"
                 @keydown.enter.prevent="chooseActiveTarget"
@@ -607,11 +607,11 @@ onUnmounted(() => {
                     role="option"
                     :aria-selected="row.id === sender.targetId"
                     :title="row.title"
-                    class="menu-item select-none text-left"
+                    class="menu-item session-target-option select-none text-left"
                     :class="{ 'is-active': index === activeTargetRow }"
                     @click="chooseTarget(row.id)"
                   >
-                    <span class="menu-item-label">{{ row.title }}</span>
+                    <span class="menu-item-label session-target-label">{{ row.title }}</span>
                     <CheckIcon v-if="row.id === sender.targetId" class="icon-xxs menu-check" aria-hidden="true" />
                   </button>
                   <p v-if="!targetRows.length" class="menu-note">No session matches "{{ targetQuery }}".</p>
@@ -633,7 +633,7 @@ onUnmounted(() => {
             <button
               type="button"
               data-testid="send-now"
-              class="marvis-button marvis-button-primary marvis-button-xs"
+              class="marvis-button marvis-button-tinted marvis-button-xs"
               @click="sendNow(false)"
             >
               Send now
@@ -641,7 +641,7 @@ onUnmounted(() => {
             <button
               type="button"
               data-testid="send-queue"
-              class="marvis-button marvis-button-secondary marvis-button-xs"
+              class="marvis-button marvis-button-subtle marvis-button-xs"
               @click="sendNow(true)"
             >
               Queue
@@ -649,7 +649,7 @@ onUnmounted(() => {
             <button
               type="button"
               data-testid="send-not-now"
-              class="marvis-button marvis-button-quiet marvis-button-xs text-(--marvis-text-faint) hover:text-(--marvis-text)"
+              class="marvis-button marvis-button-ghost marvis-button-xs"
               @click="busyChoiceOpen = false"
             >
               Not now
@@ -664,12 +664,7 @@ onUnmounted(() => {
           {{ sender.unfinishedRounds }} {{ sender.unfinishedRounds === 1 ? "round" : "rounds" }} not finished
         </p>
         <label v-if="outdatedCount > 0" class="flex items-center gap-1.5 text-[0.6875rem] text-(--marvis-text-faint)">
-          <input
-            v-model="includeOutdated"
-            type="checkbox"
-            data-testid="include-outdated"
-            class="accent-(--marvis-accent)"
-          />
+          <input v-model="includeOutdated" type="checkbox" class="marvis-check" data-testid="include-outdated" />
           Include {{ outdatedCount }} outdated {{ outdatedCount === 1 ? "note" : "notes" }}
         </label>
       </div>
@@ -760,7 +755,7 @@ onUnmounted(() => {
                   <button
                     v-if="row.line?.kind === 'hunk'"
                     type="button"
-                    class="diff-hunk h-full w-full truncate px-2 text-left text-(--marvis-accent)"
+                    class="diff-hunk h-full w-full truncate px-2 text-left text-(--marvis-content-accent)"
                     :aria-expanded="!row.collapsed"
                     :title="row.line.text"
                     @click="toggleHunk(row.hunkIndex)"
@@ -768,20 +763,20 @@ onUnmounted(() => {
                     {{ row.collapsed ? "▸" : "▾" }} {{ row.line.text }}
                   </button>
                   <template v-else-if="row.line">
-                    <span class="w-12 shrink-0 select-none pr-2 text-right text-(--marvis-text-faint)">{{
+                    <span class="w-12 shrink-0 select-none pr-2 text-right text-(--marvis-content-text-faint)">{{
                       row.line.oldLineNumber ?? ""
                     }}</span>
-                    <span class="w-12 shrink-0 select-none pr-2 text-right text-(--marvis-text-faint)">{{
+                    <span class="w-12 shrink-0 select-none pr-2 text-right text-(--marvis-content-text-faint)">{{
                       row.line.newLineNumber ?? ""
                     }}</span>
                     <span
                       class="w-4 shrink-0 text-center"
                       :class="
                         row.line.kind === 'added'
-                          ? 'text-(--marvis-green)'
+                          ? 'text-(--marvis-content-added)'
                           : row.line.kind === 'removed'
-                            ? 'text-(--marvis-red)'
-                            : 'text-(--marvis-text-faint)'
+                            ? 'text-(--marvis-content-removed)'
+                            : 'text-(--marvis-content-text-faint)'
                       "
                       >{{ row.line.text[0] }}</span
                     >
@@ -789,24 +784,26 @@ onUnmounted(() => {
                       class="pr-4"
                       :class="
                         row.line.kind === 'added'
-                          ? 'text-(--marvis-green)'
+                          ? 'text-(--marvis-content-added)'
                           : row.line.kind === 'removed'
-                            ? 'text-(--marvis-red)'
-                            : 'text-(--marvis-text-secondary)'
+                            ? 'text-(--marvis-content-removed)'
+                            : 'text-(--marvis-content-text-muted)'
                       "
                       >{{ row.line.text.slice(1) }}</code
                     >
                     <button
                       v-if="rowAnchor(row.line)"
                       type="button"
-                      class="marvis-button marvis-button-quiet marvis-button-xs ml-auto shrink-0 text-(--marvis-accent) opacity-0 group-hover:opacity-100"
+                      class="marvis-button marvis-button-ghost marvis-button-xs ml-auto shrink-0 opacity-0 group-hover:opacity-100"
                       :aria-label="`Add review note on line ${rowAnchor(row.line)!.line}`"
                       @click="openDraft(rowAnchor(row.line)!.side, rowAnchor(row.line)!.line)"
                     >
                       + note
                     </button>
                   </template>
-                  <span v-else class="px-2 text-(--marvis-text-faint)">{{ row.error || "Loading diff page…" }}</span>
+                  <span v-else class="px-2 text-(--marvis-content-text-muted)">{{
+                    row.error || "Loading diff page…"
+                  }}</span>
                 </div>
                 <template v-if="row.line">
                   <ReviewComposer
@@ -843,7 +840,7 @@ onUnmounted(() => {
             <section v-for="(hunk, index) in diffHunks" :key="`${path}-${index}`" class="min-w-0">
               <button
                 type="button"
-                class="diff-hunk mb-1 w-full truncate border-b border-(--marvis-border) px-2 py-1 text-left font-mono text-[0.625rem] text-(--marvis-text-dim)"
+                class="diff-hunk mb-1 w-full truncate border-b border-(--marvis-content-border) px-2 py-1 text-left font-mono text-[0.625rem] text-(--marvis-content-text-muted)"
                 :aria-expanded="!collapsedHunks.includes(index)"
                 :title="hunk.title"
                 @click="toggleHunk(index)"
@@ -924,29 +921,35 @@ onUnmounted(() => {
   :deep(
     :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"]) .diff-style-root
   ) {
-  --diff-border--: var(--marvis-border);
-  --diff-plain-content--: var(--marvis-bg-0);
-  --diff-plain-lineNumber--: var(--marvis-bg-0);
-  --diff-expand-content--: var(--marvis-bg-1);
-  --diff-expand-lineNumber--: var(--marvis-bg-1);
-  --diff-empty-content--: var(--marvis-bg-0);
-  --diff-plain-lineNumber-color--: var(--marvis-text-faint);
-  --diff-expand-lineNumber-color--: var(--marvis-text-faint);
+  --diff-border--: var(--marvis-content-border);
+  --diff-plain-content--: var(--marvis-content-bg-0);
+  --diff-plain-lineNumber--: var(--marvis-content-bg-0);
+  --diff-expand-content--: var(--marvis-content-bg-1);
+  --diff-expand-lineNumber--: var(--marvis-content-bg-1);
+  --diff-empty-content--: var(--marvis-content-bg-0);
+  --diff-plain-lineNumber-color--: var(--marvis-content-text-faint);
+  --diff-expand-lineNumber-color--: var(--marvis-content-text-faint);
   /* An added or removed line is the diff's green and red, the same ones the stats use. */
-  --diff-add-content--: color-mix(in srgb, var(--marvis-green) 14%, var(--marvis-bg-0));
-  --diff-del-content--: color-mix(in srgb, var(--marvis-red) 14%, var(--marvis-bg-0));
-  --diff-add-lineNumber--: color-mix(in srgb, var(--marvis-green) 22%, var(--marvis-bg-0));
-  --diff-del-lineNumber--: color-mix(in srgb, var(--marvis-red) 22%, var(--marvis-bg-0));
-  --diff-add-content-highlight--: color-mix(in srgb, var(--marvis-green) 24%, var(--marvis-bg-0));
-  --diff-del-content-highlight--: color-mix(in srgb, var(--marvis-red) 24%, var(--marvis-bg-0));
-  --diff-hunk-content--: var(--marvis-bg-1);
-  --diff-hunk-lineNumber--: var(--marvis-bg-1);
-  --diff-hunk-lineNumber-hover--: var(--marvis-accent);
-  --diff-hunk-content-color--: var(--marvis-text-secondary);
+  --diff-add-content--: color-mix(in srgb, var(--marvis-content-added) 14%, var(--marvis-content-bg-0));
+  --diff-del-content--: color-mix(in srgb, var(--marvis-content-removed) 14%, var(--marvis-content-bg-0));
+  --diff-add-lineNumber--: color-mix(in srgb, var(--marvis-content-added) 22%, var(--marvis-content-bg-0));
+  --diff-del-lineNumber--: color-mix(in srgb, var(--marvis-content-removed) 22%, var(--marvis-content-bg-0));
+  --diff-add-content-highlight--: color-mix(in srgb, var(--marvis-content-added) 24%, var(--marvis-content-bg-0));
+  --diff-del-content-highlight--: color-mix(in srgb, var(--marvis-content-removed) 24%, var(--marvis-content-bg-0));
+  --diff-hunk-content--: var(--marvis-content-bg-1);
+  --diff-hunk-lineNumber--: var(--marvis-content-bg-1);
+  --diff-hunk-lineNumber-hover--: var(--marvis-content-accent);
+  --diff-hunk-content-color--: var(--marvis-content-text-muted);
   --diff-add-widget--: var(--marvis-accent);
-  --diff-add-widget-color--: var(--marvis-text);
+  --diff-add-widget-color--: var(--marvis-accent-fg);
   --diff-multi-select-bg: var(--marvis-accent);
   --diff-multi-select-border: var(--marvis-accent);
+}
+
+.diff-viewport :deep(.diff-add-widget),
+.diff-viewport :deep(.diff-widget-tooltip),
+.diff-viewport :deep(.diff-widget-tooltip::after) {
+  border-radius: 0;
 }
 
 .diff-viewport
@@ -962,7 +965,7 @@ onUnmounted(() => {
   :deep(
     :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"]) [data-state="hunk"]
   ) {
-  color: var(--marvis-text);
+  color: var(--marvis-content-text);
 }
 
 /* The syntax inside a diff is highlighted by the library's own highlight.js, which ships a GitHub
@@ -1084,18 +1087,18 @@ onUnmounted(() => {
 
 /* Hunk headers sit on the change's own surface, as the mockup's group rows do. */
 .diff-hunk {
-  background: var(--marvis-bg-1);
-  color: var(--marvis-text-secondary);
+  background: var(--marvis-content-bg-1);
+  color: var(--marvis-content-text-muted);
 }
 
 .diff-hunk:hover {
-  background: var(--marvis-bg-2);
-  color: var(--marvis-text);
+  background: var(--marvis-content-bg-2);
+  color: var(--marvis-content-text);
 }
 
 /* One row per changed file in the whole change set, and its diff under it. */
 .diff-file + .diff-file {
-  border-top: 1px solid var(--marvis-border);
+  border-top: 1px solid var(--marvis-content-border);
 }
 
 .diff-file-header {
@@ -1117,11 +1120,11 @@ onUnmounted(() => {
 }
 
 .diff-file-header:hover {
-  background: var(--marvis-bg-2);
+  background: var(--marvis-control-hover);
 }
 
 .review-range-selected {
-  background: color-mix(in srgb, var(--marvis-accent) 16%, var(--marvis-bg-0));
+  background: color-mix(in srgb, var(--marvis-content-accent) 16%, var(--marvis-content-bg-0));
 }
 
 .diff-status {
@@ -1131,15 +1134,19 @@ onUnmounted(() => {
 }
 
 .diff-status[data-status="A"] {
-  color: var(--marvis-green);
+  color: var(--marvis-success-fg);
 }
 
 .diff-status[data-status="D"] {
-  color: var(--marvis-red);
+  color: var(--marvis-danger-fg);
 }
 
 .diff-status[data-status="U"] {
   color: var(--marvis-text-faint);
+}
+
+.diff-file-header:hover .diff-status[data-status="U"] {
+  color: var(--marvis-text);
 }
 
 /* A file inside the change-set stack scrolls on its own, so the virtual window of a large

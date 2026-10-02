@@ -615,6 +615,198 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
   });
 
+  it("moves a terminal with a tree-style pointer drag after the threshold", async () => {
+    const worktree = checkout({ id: "checkout:wt", isPrimary: false, branch: "feature/x", path: "/test-wt" });
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [repo({ checkouts: [{ ...checkout(), sessions: [session("session:one", "zsh")] }, worktree] })],
+        activeCheckoutId: "checkout:primary",
+        activeSessionId: null,
+        isOpening: false,
+      },
+      attachTo: document.body,
+    });
+    const oldHitTest = Object.getOwnPropertyDescriptor(document, "elementFromPoint");
+    const hitTest = vi.fn();
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: hitTest });
+    const pointer = (type: string, x: number) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.assign(event, { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0, clientX: x, clientY: 20 });
+      return event;
+    };
+
+    try {
+      const row = wrapper.get('button[aria-label="Terminal session: zsh"]');
+      const target = wrapper.findAll(".workdir-item:not(.workdir-child)").at(-1)!;
+      const targetList = wrapper.findAll(".workdir-items").at(-1)!;
+
+      // A short move does not start a drag or interfere with selecting the session.
+      row.element.dispatchEvent(pointer("pointerdown", 10));
+      window.dispatchEvent(pointer("pointermove", 13));
+      expect(document.body.querySelector(".terminal-drag-ghost")).toBeNull();
+      window.dispatchEvent(pointer("pointerup", 13));
+      await row.trigger("click");
+      expect(wrapper.emitted("selectSession")).toEqual([["session:one"]]);
+
+      // Beyond 5px, the row dims, a copy follows the pointer, and the worktree shows an insertion.
+      row.element.dispatchEvent(pointer("pointerdown", 10));
+      hitTest.mockReturnValue(target.element);
+      window.dispatchEvent(pointer("pointermove", 18));
+      await flushPromises();
+      expect(wrapper.findAll(".is-being-dragged")).toHaveLength(1);
+      expect(wrapper.findAll(".is-drop-target")).toHaveLength(1);
+      expect(wrapper.findAll(".terminal-drop-insertion")).toHaveLength(1);
+      expect(document.body.querySelector(".terminal-drag-ghost")?.textContent).toContain("zsh");
+
+      // Dropping over the child list moves the item and suppresses the click browsers synthesize.
+      hitTest.mockReturnValue(targetList.element);
+      window.dispatchEvent(pointer("pointerup", 18));
+      await row.trigger("click", { detail: 1 });
+      expect(wrapper.emitted("moveSession")).toEqual([["session:one", "checkout:wt"]]);
+      expect(wrapper.emitted("selectSession")).toEqual([["session:one"]]);
+      expect(wrapper.findAll(".is-drop-target")).toHaveLength(0);
+      expect(document.body.querySelector(".terminal-drag-ghost")).toBeNull();
+    } finally {
+      if (oldHitTest) Object.defineProperty(document, "elementFromPoint", oldHitTest);
+      else Reflect.deleteProperty(document, "elementFromPoint");
+      wrapper.unmount();
+    }
+  });
+
+  it("cancels on Escape and rejects missing worktrees and other repositories", async () => {
+    const valid = checkout({ id: "checkout:valid", isPrimary: false, branch: "valid" });
+    const gone = checkout({ id: "checkout:gone", isPrimary: false, branch: "gone", isMissing: true });
+    const elsewhere = repo({
+      id: "repo:elsewhere",
+      name: "elsewhere",
+      root: "/elsewhere",
+      checkouts: [checkout({ id: "checkout:elsewhere", repoId: "repo:elsewhere", path: "/elsewhere" })],
+    });
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({ checkouts: [{ ...checkout(), sessions: [session("session:one", "zsh")] }, valid, gone] }),
+          elsewhere,
+        ],
+        activeCheckoutId: "checkout:primary",
+        activeSessionId: null,
+        isOpening: false,
+      },
+      attachTo: document.body,
+    });
+    const oldHitTest = Object.getOwnPropertyDescriptor(document, "elementFromPoint");
+    const hitTest = vi.fn();
+    Object.defineProperty(document, "elementFromPoint", { configurable: true, value: hitTest });
+    const pointer = (type: string, pointerId: number, x: number) => {
+      const event = new Event(type, { bubbles: true, cancelable: true });
+      Object.assign(event, { pointerId, pointerType: "mouse", isPrimary: true, button: 0, clientX: x, clientY: 20 });
+      return event;
+    };
+    const checkoutRow = (id: string) =>
+      wrapper.findAll("[data-workdir-checkout]").find((row) => row.attributes("data-workdir-checkout") === id)!;
+
+    try {
+      const row = wrapper.get('button[aria-label="Terminal session: zsh"]');
+      // A valid hover lights the destination, but Escape cancels without changing ownership.
+      row.element.dispatchEvent(pointer("pointerdown", 1, 10));
+      hitTest.mockReturnValue(checkoutRow("checkout:valid").element);
+      window.dispatchEvent(pointer("pointermove", 1, 20));
+      await flushPromises();
+      expect(wrapper.find(".app-sidebar").classes()).toContain("is-terminal-dragging");
+      expect(hitTest).toHaveBeenCalled();
+      expect(wrapper.findAll(".is-drop-target")).toHaveLength(1);
+      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape", bubbles: true, cancelable: true }));
+      await flushPromises();
+      expect(wrapper.findAll(".is-drop-target")).toHaveLength(0);
+      expect(document.body.querySelector(".terminal-drag-ghost")).toBeNull();
+      expect(wrapper.emitted("moveSession")).toBeUndefined();
+
+      // Missing worktrees and another Git directory never show a drop target and cannot take it.
+      for (const [pointerId, targetId] of [
+        [2, "checkout:gone"],
+        [3, "checkout:elsewhere"],
+      ] as const) {
+        row.element.dispatchEvent(pointer("pointerdown", pointerId, 10));
+        hitTest.mockReturnValue(checkoutRow(targetId).element);
+        window.dispatchEvent(pointer("pointermove", pointerId, 20));
+        expect(wrapper.findAll(".is-drop-target")).toHaveLength(0);
+        window.dispatchEvent(pointer("pointerup", pointerId, 20));
+      }
+
+      // Pointer cancellation is scoped to the captured pointer; releasing outside never moves it.
+      row.element.dispatchEvent(pointer("pointerdown", 4, 10));
+      hitTest.mockReturnValue(checkoutRow("checkout:valid").element);
+      window.dispatchEvent(pointer("pointermove", 4, 20));
+      await flushPromises();
+      window.dispatchEvent(pointer("pointercancel", 99, 20));
+      expect(wrapper.find(".app-sidebar").classes()).toContain("is-terminal-dragging");
+      window.dispatchEvent(pointer("pointercancel", 4, 20));
+      await flushPromises();
+      expect(wrapper.findAll(".is-drop-target")).toHaveLength(0);
+
+      row.element.dispatchEvent(pointer("pointerdown", 5, 10));
+      hitTest.mockReturnValue(checkoutRow("checkout:valid").element);
+      window.dispatchEvent(pointer("pointermove", 5, 20));
+      hitTest.mockReturnValue(null);
+      window.dispatchEvent(pointer("pointerup", 5, 20));
+      await flushPromises();
+      expect(wrapper.emitted("moveSession")).toBeUndefined();
+    } finally {
+      if (oldHitTest) Object.defineProperty(document, "elementFromPoint", oldHitTest);
+      else Reflect.deleteProperty(document, "elementFromPoint");
+      wrapper.unmount();
+    }
+  });
+
+  it("offers the sibling worktrees of the same repository to a keyboard, and nowhere else", async () => {
+    const worktree = checkout({ id: "checkout:wt", isPrimary: false, branch: "feature/x", path: "/test-wt" });
+    const otherWorktree = checkout({ id: "checkout:other-wt", isPrimary: false, branch: "y", path: "/test-other" });
+    const gone = checkout({ id: "checkout:gone", isPrimary: false, branch: "gone", isMissing: true });
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [{ ...checkout(), sessions: [session("session:one", "zsh")] }, worktree, otherWorktree, gone],
+          }),
+          repo({
+            id: "repo:elsewhere",
+            name: "elsewhere",
+            root: "/elsewhere",
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:elsewhere", repoId: "repo:elsewhere", path: "/elsewhere" }),
+                // One worktree of its own, so neither gesture has anywhere to go.
+                sessions: [session("session:two", "fish", "checkout:elsewhere")],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:primary",
+        activeSessionId: null,
+        isOpening: false,
+      },
+      attachTo: document.body,
+    });
+
+    const rows = wrapper.findAll('button[aria-label^="Terminal session:"]');
+    // Native browser dragging is off; a row with a destination advertises its keyboard menu.
+    expect(rows.map((row) => row.attributes("draggable"))).toEqual([undefined, undefined]);
+    expect(rows.map((row) => row.attributes("aria-haspopup"))).toEqual(["menu", undefined]);
+
+    // A drag is not a keyboard, so the same move is on the key the platform asks a row for.
+    await rows[0].trigger("keydown", { key: "F10", shiftKey: true });
+    const destinations = wrapper.findAll('[role="menu"] [role="menuitem"]');
+    // The other repositories are not on the list, and a directory that is gone is nowhere to
+    // put a shell that is running.
+    expect(destinations.map((item) => item.text())).toEqual(["feature/x", "y"]);
+
+    await destinations[1].trigger("click");
+    expect(wrapper.emitted("moveSession")).toEqual([["session:one", "checkout:other-wt"]]);
+    // And the list closes, so the move can be aimed again from the same row.
+    expect(wrapper.find('[role="menu"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("keeps a long workdir title ellipsizable under the hover gutter", () => {
     const wrapper = mount(Sidebar, {
       props: {

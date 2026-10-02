@@ -42,7 +42,7 @@ function submit() {
 
 <template>
   <form
-    class="m-1 rounded-sm border border-(--marvis-border) bg-(--marvis-bg-1) p-2 text-xs"
+    class="m-1 border border-(--marvis-border) bg-(--marvis-bg-1) p-2 text-xs"
     aria-label="New review note"
     @submit.prevent="submit"
     @keydown.esc.stop.prevent="$emit('cancel')"
@@ -57,21 +57,17 @@ function submit() {
       rows="2"
       aria-label="Review note"
       placeholder="What should change here?"
-      class="w-full resize-y rounded-sm border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none placeholder:text-(--marvis-text-faint) focus:border-(--marvis-text-faint)"
+      class="review-note-input w-full resize-y border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none"
     />
     <p v-if="isRange" class="mt-1 text-[0.625rem] text-(--marvis-text-faint)">
       This note covers the selected lines. Cancel to start over.
     </p>
-    <p v-if="error" role="alert" class="mt-1 text-[0.625rem] text-(--marvis-red)">{{ error }}</p>
+    <p v-if="error" role="alert" class="mt-1 text-[0.625rem] text-(--marvis-danger-fg)">{{ error }}</p>
     <div class="mt-1 flex items-center gap-2">
-      <button type="submit" class="marvis-button marvis-button-primary marvis-button-xs" :disabled="!content.trim()">
+      <button type="submit" class="marvis-button marvis-button-tinted marvis-button-xs" :disabled="!content.trim()">
         Save note
       </button>
-      <button
-        type="button"
-        class="marvis-button marvis-button-quiet marvis-button-xs text-(--marvis-text-faint)"
-        @click="$emit('cancel')"
-      >
+      <button type="button" class="marvis-button marvis-button-ghost marvis-button-xs" @click="$emit('cancel')">
         Cancel
       </button>
     </div>

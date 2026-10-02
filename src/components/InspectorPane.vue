@@ -15,6 +15,8 @@ const props = defineProps<{
   repo?: Repo | null;
   gitSnapshot: ActiveGitSnapshot;
   savedState?: CheckoutUiState | null;
+  /** `ui.fontSize` as a ratio of the 14px the panel is drawn at. Defaults to 1, the design size. */
+  fontScale?: number;
 }>();
 
 const emit = defineEmits<{
@@ -91,6 +93,11 @@ let pendingRefreshCheckoutId: string | null = null;
  * `.file-row` box is `3px + (22 - 6px) line box + 3px` = 22px exactly. Change one without the
  * other and the virtual window drifts from the rendered rows. 80 rows x 28px was 2240px of
  * tree; the same surface at 22px is ~64 rows, with ~10 of them as overscan.
+ *
+ * It is the height at the 14px the design is drawn at, and the row scales with `ui.fontSize`
+ * because the row's own `font-size: 0.75rem` does: a row left at 22px held a 17px label in a
+ * 16px line box at the top of the range and clipped it. The scale is a prop rather than read
+ * back off the root so the number the window math multiplies is the number the box is drawn at.
  */
 const TREE_ROW_HEIGHT = 22;
 const TREE_WINDOW_SIZE = 64;
@@ -418,20 +425,23 @@ function rowIndent(depth: number): string {
   return `${6 + depth * 14}px`;
 }
 
-/** Both lists are flat and every row is TREE_ROW_HEIGHT tall, so one window serves both. */
-function virtualWindow<T>(rows: T[], scrollTop: number) {
+/** Both lists are flat and every row is rowHeight tall, so one window serves both. */
+function virtualWindow<T>(rows: T[], scrollTop: number, rowHeight: number) {
   const maximumStart = Math.max(0, rows.length - TREE_WINDOW_SIZE);
-  const start = Math.min(maximumStart, Math.max(0, Math.floor(scrollTop / TREE_ROW_HEIGHT) - TREE_OVERSCAN));
+  const start = Math.min(maximumStart, Math.max(0, Math.floor(scrollTop / rowHeight) - TREE_OVERSCAN));
   const end = Math.min(rows.length, start + TREE_WINDOW_SIZE);
   return {
     rows: rows.slice(start, end),
-    paddingTop: start * TREE_ROW_HEIGHT,
-    paddingBottom: (rows.length - end) * TREE_ROW_HEIGHT,
+    paddingTop: start * rowHeight,
+    paddingBottom: (rows.length - end) * rowHeight,
   };
 }
 
-const treeWindow = computed(() => virtualWindow(visibleEntries.value, treeScrollTop.value));
-const changeWindow = computed(() => virtualWindow(changeRows.value, changesScrollTop.value));
+/** The row height this font size draws at. See TREE_ROW_HEIGHT. */
+const rowHeight = computed(() => Math.round(TREE_ROW_HEIGHT * (props.fontScale ?? 1)));
+
+const treeWindow = computed(() => virtualWindow(visibleEntries.value, treeScrollTop.value, rowHeight.value));
+const changeWindow = computed(() => virtualWindow(changeRows.value, changesScrollTop.value, rowHeight.value));
 
 function onTreeScroll(event: Event) {
   treeScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
@@ -509,7 +519,7 @@ const matchedSearchEntries = searchEntries.value
 <template>
   <aside
     class="app-inspector flex h-full w-full min-w-0 flex-col border-l"
-    :style="{ '--tree-row-height': `${TREE_ROW_HEIGHT}px` }"
+    :style="{ '--tree-row-height': `${rowHeight}px` }"
   >
     <div class="details-tabs" role="tablist" aria-label="Inspector sections" @keydown="onInspectorTabKeydown">
       <button
@@ -725,12 +735,17 @@ const matchedSearchEntries = searchEntries.value
    transparent rest and accent underline, and takes the hover and pressed states on top. A
    resting surface here would break the strip into separate blocks. */
 .details-tab:hover {
-  color: var(--marvis-text-secondary);
-  background: var(--marvis-bg-2);
+  color: var(--marvis-text);
+  background: transparent;
 }
 
 .details-tab:active {
-  background: var(--marvis-border);
+  background: var(--marvis-control-pressed);
+  color: var(--marvis-text);
+}
+
+.details-tab:active .details-tab-count {
+  color: var(--marvis-text);
 }
 
 .details-tab[aria-selected="true"] {
@@ -754,10 +769,10 @@ const matchedSearchEntries = searchEntries.value
 }
 
 /*
- * Every row in both lists is exactly TREE_ROW_HEIGHT tall, which the component publishes as
- * `--tree-row-height`: 3px of padding + a (height - 6px) line box + 3px of padding. The
- * virtual window multiplies and divides by the same number, so this box and TREE_ROW_HEIGHT
- * have to move together.
+ * Every row in both lists is exactly `--tree-row-height` tall, which the component publishes from
+ * its window math: 3px of padding + a (height - 6px) line box + 3px of padding. The virtual
+ * window multiplies and divides by the same number, so this box and that constant have to move
+ * together.
  */
 .file-row {
   display: flex;
@@ -779,13 +794,13 @@ const matchedSearchEntries = searchEntries.value
 }
 
 .file-row:hover {
-  background: var(--marvis-bg-2);
+  background: var(--marvis-control-hover);
   color: var(--marvis-text);
 }
 
 /* What is open, or the change under review, is the one row with a surface (E.3) */
 .file-row.is-selected {
-  background: var(--marvis-bg-2);
+  background: var(--marvis-el-selected);
   color: var(--marvis-text);
 }
 
@@ -854,15 +869,20 @@ const matchedSearchEntries = searchEntries.value
 }
 
 .file-status[data-status="A"] {
-  color: var(--marvis-green);
+  color: var(--marvis-success-fg);
 }
 
 .file-status[data-status="D"] {
-  color: var(--marvis-red);
+  color: var(--marvis-danger-fg);
 }
 
 .file-status[data-status="U"] {
   color: var(--marvis-text-faint);
+}
+
+.file-row:hover .file-status[data-status="U"],
+.file-row.is-selected .file-status[data-status="U"] {
+  color: var(--marvis-text);
 }
 
 .details-all-changes {
@@ -872,6 +892,10 @@ const matchedSearchEntries = searchEntries.value
 
 .file-row.new-item {
   color: var(--marvis-text-dim);
+}
+
+.file-row.new-item:hover {
+  color: var(--marvis-text);
 }
 
 /* Group header sits on the panel gutter, its rows one level in */

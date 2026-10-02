@@ -74,13 +74,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   gap: 8px;
   width: 100%;
   padding: 8px;
-  border: 1px solid var(--marvis-border);
+  border: 1px solid var(--marvis-border-strong);
   /* How loud a message is is a stripe down the left edge, opposite the dismiss button: a grey
      note, a red failure. The edge states its own importance without putting a glyph in the text's
      way. */
   border-left: 4px solid var(--marvis-text-secondary);
-  border-radius: var(--marvis-radius);
+  border-radius: 0;
   background: var(--marvis-bg-2);
+  box-shadow: var(--marvis-shadow);
   color: var(--marvis-text);
   font-size: 0.8125rem;
   line-height: 1.4;
@@ -88,7 +89,7 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
 }
 
 .toast-error {
-  border-left-color: var(--marvis-red);
+  border-left-color: var(--marvis-danger);
 }
 
 .toast-message {
@@ -108,14 +109,14 @@ onUnmounted(() => window.removeEventListener("keydown", onKeydown));
   flex-shrink: 0;
   padding: 0;
   border: none;
-  border-radius: var(--marvis-radius);
+  border-radius: 0;
   background: transparent;
   color: var(--marvis-text-secondary);
   cursor: pointer;
 }
 
 .toast-dismiss:hover {
-  background: var(--marvis-border);
+  background: var(--marvis-control-hover);
   color: var(--marvis-text);
 }
 </style>

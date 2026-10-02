@@ -1316,7 +1316,9 @@ describe("App UI integration", () => {
       mocks.onProgrammaticPanelResize = resizeCalls;
 
       const handles = wrapper.findAllComponents(SplitterResizeHandle);
-      expect(handles[0]!.find(".rounded-full").exists()).toBe(true);
+      const grip = handles[0]!.find(".h-6.w-1");
+      expect(grip.exists()).toBe(true);
+      expect(grip.classes().some((className) => className.startsWith("rounded"))).toBe(false);
       await handles[0]!.trigger("dblclick");
       await flushPromises();
 

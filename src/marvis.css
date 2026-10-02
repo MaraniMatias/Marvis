@@ -33,39 +33,71 @@
    in a scoped component block. Imported before style.css so the unlayered rules
    below win over tailwind's `utilities` layer. */
 :root {
-  --marvis-radius: 6px;
+  --marvis-radius: 0;
   /* The terminal and editor use one family; system monospace faces are fallbacks if the bundled
      webfont cannot be loaded. */
   --marvis-font: "Marvis Nerd Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color-scheme: dark;
 }
 
-/* Two palettes, One Dark and One Light, modeled on the themes Zed ships
-   (https://github.com/zed-industries/zed/blob/main/assets/themes/one/one.json, MIT). The theme the
-   window is drawn in is the `data-theme` attribute on this element, which App.vue writes from the
-   `ui.theme` preference; the dark half is the `:root` block itself rather than a second selector,
-   so a page nobody has told which theme it is in is still painted in a complete palette instead of
-   in nothing. `src-tauri/tauri.conf.json` opens the window on this page's background, and
-   `src-tauri/src/main.rs` is the test that keeps the two from drifting apart.
-
-   Zed's values are the ones here where they are readable, moved a step darker where they are not:
-   One Light draws its green, its dimmed text and its comments at 2.4–3.8:1, which is a band wider
-   than text can be read across. */
+/* UI chrome follows the Raymond design reference. The terminal, editor and diff keep their own
+   content palette below so changing the shell does not repaint what the user is reading. The
+   `data-theme` attribute is written from the `ui.theme` preference; dark is the complete fallback
+   palette and also the native window's startup background (checked in `src-tauri/src/main.rs`). */
 :root {
-  --marvis-bg-0: #282c33;
-  --marvis-bg-1: #2f343e;
-  --marvis-bg-2: #363c46;
-  --marvis-border: #464b57;
-  --marvis-text: #dce0e5;
-  --marvis-text-secondary: #a9afbc;
-  --marvis-text-dim: #8d94a3;
-  --marvis-text-faint: #767d8d;
-  --marvis-accent: #74ade8;
-  --marvis-green: #a1c181;
-  --marvis-red: #d97f84;
+  --marvis-bg-0: #16181d;
+  --marvis-bg-1: #1c1f26;
+  --marvis-bg-2: #242830;
+  --marvis-border: #2c313b;
+  --marvis-border-strong: #3a404c;
+  --marvis-text: #d7dae0;
+  --marvis-text-muted: #8b909c;
+  --marvis-text-disabled: #565b67;
+  --marvis-placeholder-fg: var(--marvis-text-muted);
+  --marvis-text-secondary: var(--marvis-text-muted);
+  --marvis-text-dim: var(--marvis-text-muted);
+  --marvis-text-faint: var(--marvis-text-muted);
+  --marvis-el: #242830;
+  --marvis-el-hover: #2d323c;
+  --marvis-el-active: #363c48;
+  --marvis-el-selected: #2c3b57;
+  --marvis-accent: #5b97ff;
+  --marvis-accent-fg: #0d1626;
+  --marvis-accent-tint: #1f2f4d;
+  --marvis-accent-tint-fg: #83b1ff;
+  --marvis-danger: #f07178;
+  --marvis-danger-fg: #f7adb1;
+  --marvis-success: #5fc98a;
+  --marvis-success-fg: var(--marvis-success);
+  --marvis-warning: #e3b341;
+  --marvis-warning-fg: var(--marvis-warning);
+  --marvis-focus: #5b97ff;
+  --marvis-shadow: 0 8px 24px rgba(0, 0, 0, 0.45);
+  --marvis-content-added: #a1c181;
+  --marvis-content-removed: #d97f84;
+  --marvis-control-bg: var(--marvis-el);
+  --marvis-control-hover: var(--marvis-el-hover);
+  --marvis-control-pressed: var(--marvis-el-active);
+  --marvis-control-border: var(--marvis-border);
+  --marvis-control-border-strong: var(--marvis-border-strong);
+  --marvis-control-border-hover: var(--marvis-border-strong);
+  --marvis-control-text: var(--marvis-text);
+  --marvis-control-muted: var(--marvis-text-secondary);
+  --marvis-field-bg: var(--marvis-bg-0);
+  --marvis-field-hover: var(--marvis-bg-0);
+  --marvis-control-focus: var(--marvis-focus);
+  --marvis-control-danger: var(--marvis-danger);
+  --marvis-content-bg-0: #282c33;
+  --marvis-content-bg-1: #2f343e;
+  --marvis-content-bg-2: #363c46;
+  --marvis-content-border: #464b57;
+  --marvis-content-text: #dce0e5;
+  --marvis-content-text-muted: #a9afbc;
+  --marvis-content-text-faint: #767d8d;
+  --marvis-content-accent: #74ade8;
   --marvis-scrollbar: #c8ccd44c;
   /* One selection, for the DOM and for the terminal canvas: the terminal reads its colors out of
-     here rather than carrying a second copy of the value. It is the accent at a quarter, so a
+     here rather than carrying a second copy of the value. It is the content accent at a quarter, so a
      selection reads as a band over what it covers rather than as a fill that hides it. */
   --marvis-selection: #74ade83d;
 
@@ -128,19 +160,56 @@
 
 :root[data-theme="light"] {
   color-scheme: light;
-  --marvis-bg-0: #fafafa;
-  --marvis-bg-1: #ebebec;
-  --marvis-bg-2: #dfdfe0;
-  --marvis-border: #c9c9ca;
-  --marvis-text: #242529;
-  --marvis-text-secondary: #58585a;
-  --marvis-text-dim: #6c6d70;
-  --marvis-text-faint: #8a8b8f;
-  /* Zed's `#5c78e2` is the accent on a link and on a hunk header, and at 3.8:1 on `#fafafa` that
-     is text that cannot be read comfortably. One step deeper is the same blue at 5.3:1. */
-  --marvis-accent: #455fd0;
-  --marvis-green: #3f7a35;
-  --marvis-red: #b8453a;
+  --marvis-bg-0: #f6f6f7;
+  --marvis-bg-1: #ffffff;
+  --marvis-bg-2: #ffffff;
+  --marvis-border: #e1e2e5;
+  --marvis-border-strong: #c9cbd0;
+  --marvis-text: #1c1e23;
+  --marvis-text-muted: #6b7080;
+  --marvis-text-disabled: #a9adb8;
+  --marvis-placeholder-fg: var(--marvis-text-muted);
+  --marvis-text-secondary: var(--marvis-text-muted);
+  --marvis-text-dim: var(--marvis-text-muted);
+  --marvis-text-faint: var(--marvis-text-muted);
+  --marvis-el: #eef0f2;
+  --marvis-el-hover: #e4e6ea;
+  --marvis-el-active: #d9dce2;
+  --marvis-el-selected: #d6e4ff;
+  --marvis-accent: #2f6fed;
+  --marvis-accent-fg: #ffffff;
+  --marvis-accent-tint: #e3ecff;
+  --marvis-accent-tint-fg: #1251cf;
+  --marvis-danger: #d63b3b;
+  --marvis-danger-fg: #982020;
+  --marvis-success: #1f9d55;
+  --marvis-success-fg: #166b3a;
+  --marvis-warning: #c98a0a;
+  --marvis-warning-fg: #7e5505;
+  --marvis-focus: #2f6fed;
+  --marvis-shadow: 0 8px 24px rgba(20, 22, 30, 0.14);
+  --marvis-content-added: #3f7a35;
+  --marvis-content-removed: #b8453a;
+  --marvis-control-bg: var(--marvis-el);
+  --marvis-control-hover: var(--marvis-el-hover);
+  --marvis-control-pressed: var(--marvis-el-active);
+  --marvis-control-border: var(--marvis-border);
+  --marvis-control-border-strong: var(--marvis-border-strong);
+  --marvis-control-border-hover: var(--marvis-border-strong);
+  --marvis-control-text: var(--marvis-text);
+  --marvis-control-muted: var(--marvis-text-secondary);
+  --marvis-field-bg: var(--marvis-bg-0);
+  --marvis-field-hover: var(--marvis-bg-0);
+  --marvis-control-focus: var(--marvis-focus);
+  --marvis-control-danger: var(--marvis-danger);
+  --marvis-content-bg-0: #fafafa;
+  --marvis-content-bg-1: #ebebec;
+  --marvis-content-bg-2: #dfdfe0;
+  --marvis-content-border: #c9c9ca;
+  --marvis-content-text: #242529;
+  --marvis-content-text-muted: #58585a;
+  --marvis-content-text-faint: #8a8b8f;
+  --marvis-content-accent: #455fd0;
   --marvis-scrollbar: #383a414c;
   --marvis-selection: #455fd03d;
 
@@ -199,11 +268,7 @@
   --marvis-syntax-token-changed: #8a6000;
 }
 
-/* No focus ring. A window does not draw a web form's outline around its controls, and the browser
-   default that would replace ours is worse, so this one rule is the whole of it: global, not
-   `.app-shell`, because reka-ui portals the menus and the popovers out of the shell. An input that
-   carries a border of its own turns that border to `--marvis-text-faint` instead, and the search
-   field — which has no border and only a surface — keeps the lift its wrapper already makes. */
+/* Remove browser-specific focus styling, then restore one keyboard-visible treatment below. */
 :focus {
   outline: none;
 }
@@ -245,69 +310,122 @@
 
 /* Diff stats, shared by both sidebars */
 .diff-add {
-  color: var(--marvis-green);
+  color: var(--marvis-success-fg);
 }
 .diff-del {
-  color: var(--marvis-red);
+  color: var(--marvis-danger-fg);
 }
 
-/* Compact, low-contrast surfaces keep secondary actions quiet; accent marks the primary action. */
+/* Shared button geometry; variants below carry the meaning. */
 .marvis-button,
-.marvis-control {
+.marvis-button-danger {
   display: inline-flex;
   min-height: 28px;
   align-items: center;
   justify-content: center;
   gap: 6px;
-  border: 1px solid color-mix(in srgb, var(--marvis-border) 72%, transparent);
-  border-radius: 4px;
-  padding: 0 10px;
+  border: 1px solid transparent;
+  border-radius: 0;
+  padding: 0 12px;
   cursor: pointer;
   font-family: inherit;
   transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
-    color 120ms ease,
-    opacity 120ms ease;
+    background-color 100ms ease,
+    border-color 100ms ease,
+    color 100ms ease,
+    filter 100ms ease;
 }
-.marvis-button {
-  font-size: 0.75rem;
+.marvis-button,
+.marvis-button-danger {
+  font-size: 0.8125rem;
   font-weight: 500;
 }
-.marvis-control,
-.marvis-button-secondary {
-  background: var(--marvis-bg-1);
-  color: var(--marvis-text-secondary);
-}
-.marvis-control:not(.marvis-button-primary):hover:not(:disabled),
-.marvis-button-secondary:hover:not(:disabled) {
-  border-color: var(--marvis-text-faint);
-  background: var(--marvis-bg-2);
-  color: var(--marvis-text);
-}
-.marvis-button-primary {
-  border-color: var(--marvis-accent);
+.marvis-button-filled {
   background: var(--marvis-accent);
-  color: var(--marvis-bg-0);
+  color: var(--marvis-accent-fg);
 }
-.marvis-button-primary:hover:not(:disabled) {
+.marvis-button-filled:hover:not(:disabled) {
+  filter: brightness(1.08);
+}
+.marvis-button-filled:active:not(:disabled) {
+  filter: brightness(0.94);
+}
+/* Filtering the whole light button dims its white label too; darken the fill alone instead. */
+:root[data-theme="light"] .marvis-button-filled:hover:not(:disabled) {
+  filter: none;
   background: color-mix(in srgb, var(--marvis-accent) 88%, var(--marvis-text));
 }
-.marvis-button-quiet {
-  border-color: transparent;
-  background: transparent;
+:root[data-theme="light"] .marvis-button-filled:active:not(:disabled) {
+  filter: none;
+  background: color-mix(in srgb, var(--marvis-accent) 84%, var(--marvis-text));
 }
-.marvis-button-quiet:hover:not(:disabled) {
-  background: var(--marvis-bg-2);
-  color: var(--marvis-text);
+.marvis-button-tinted {
+  background: var(--marvis-accent-tint);
+  color: var(--marvis-accent-tint-fg);
+}
+.marvis-button-tinted:hover:not(:disabled) {
+  filter: brightness(0.96);
+}
+.marvis-button-tinted:active:not(:disabled) {
+  background: color-mix(in srgb, var(--marvis-accent-tint) 82%, var(--marvis-accent));
+}
+.marvis-button-outlined {
+  border-color: var(--marvis-control-border-strong);
+  background: transparent;
+  color: var(--marvis-control-text);
+}
+.marvis-button-outlined:hover:not(:disabled) {
+  background: var(--marvis-control-hover);
+  color: var(--marvis-control-text);
+}
+.marvis-button-outlined:active:not(:disabled) {
+  background: var(--marvis-control-pressed);
+}
+.marvis-button-subtle {
+  background: var(--marvis-control-bg);
+  color: var(--marvis-control-text);
+}
+.marvis-button-subtle:hover:not(:disabled) {
+  background: var(--marvis-control-hover);
+  color: var(--marvis-control-text);
+}
+.marvis-button-subtle:active:not(:disabled) {
+  background: var(--marvis-control-pressed);
+}
+.marvis-button-ghost {
+  background: transparent;
+  color: var(--marvis-control-text);
+}
+.marvis-button-ghost:hover:not(:disabled) {
+  background: var(--marvis-control-hover);
+  color: var(--marvis-control-text);
+}
+.marvis-button-ghost:active:not(:disabled) {
+  background: var(--marvis-control-pressed);
+}
+.marvis-button-danger {
+  border-color: var(--marvis-control-danger);
+  background: transparent;
+  color: var(--marvis-danger-fg);
+}
+.marvis-button-danger:hover:not(:disabled) {
+  background: color-mix(in srgb, var(--marvis-control-danger) 12%, transparent);
+}
+.marvis-button-danger:active:not(:disabled) {
+  background: color-mix(in srgb, var(--marvis-control-danger) 20%, transparent);
 }
 .marvis-button-md {
   min-height: 28px;
-  padding: 0 10px;
+  padding: 0 12px;
 }
 .marvis-button-sm {
-  min-height: 26px;
+  min-height: 22px;
   padding: 0 8px;
+  font-size: 0.75rem;
+}
+.marvis-button-lg {
+  min-height: 34px;
+  padding: 0 16px;
 }
 .marvis-button-xs {
   min-height: 22px;
@@ -321,27 +439,151 @@
   align-items: center;
   justify-content: center;
   border: 1px solid transparent;
-  border-radius: 4px;
+  border-radius: 0;
   background: transparent;
-  color: var(--marvis-text-secondary);
+  color: var(--marvis-control-muted);
   cursor: pointer;
   transition:
-    background-color 120ms ease,
-    color 120ms ease;
+    background-color 100ms ease,
+    color 100ms ease;
 }
 .marvis-icon-control:hover:not(:disabled) {
-  background: var(--marvis-bg-2);
-  color: var(--marvis-text);
+  background: var(--marvis-control-hover);
+  color: var(--marvis-control-text);
+}
+.marvis-icon-control:active:not(:disabled) {
+  background: var(--marvis-control-pressed);
 }
 .marvis-button:disabled,
-.marvis-control:disabled,
+.marvis-button-danger:disabled,
 .marvis-icon-control:disabled {
+  border-color: transparent;
+  background: var(--marvis-control-bg);
+  color: var(--marvis-text-disabled);
   cursor: not-allowed;
-  opacity: 0.55;
+  filter: none;
 }
-button:focus-visible {
-  outline: 2px solid var(--marvis-accent);
-  outline-offset: 2px;
+:where(
+  button,
+  a,
+  summary,
+  [role="button"],
+  [role="link"],
+  [role="menuitem"],
+  [role="menuitemradio"],
+  [role="option"],
+  [role="tab"]
+):focus-visible,
+.menu-item:focus-visible,
+.text-menu-control:focus-visible {
+  outline: 1px solid var(--marvis-control-focus);
+  outline-offset: -1px;
+}
+.marvis-button:focus-visible,
+.marvis-button-danger:focus-visible,
+.marvis-icon-control:focus-visible {
+  border-color: var(--marvis-control-focus);
+  outline: none;
+}
+
+.marvis-check {
+  appearance: none;
+  display: inline-grid;
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  place-content: center;
+  border: 1px solid var(--marvis-control-border-strong);
+  border-radius: 0;
+  background: var(--marvis-field-bg);
+  cursor: pointer;
+  transition:
+    background-color 100ms ease,
+    border-color 100ms ease;
+}
+.marvis-check::before {
+  width: 8px;
+  height: 8px;
+  background: var(--marvis-accent-fg);
+  clip-path: polygon(14% 44%, 0 59%, 39% 100%, 100% 15%, 85% 0, 37% 62%);
+  content: "";
+  visibility: hidden;
+}
+.marvis-check:checked {
+  border-color: var(--marvis-control-focus);
+  background: var(--marvis-control-focus);
+}
+.marvis-check:checked::before {
+  visibility: visible;
+}
+.marvis-check:hover:not(:disabled) {
+  border-color: var(--marvis-control-border-hover);
+  background-color: var(--marvis-field-hover);
+}
+.marvis-check:checked:hover:not(:disabled) {
+  border-color: var(--marvis-control-focus);
+  background-color: var(--marvis-control-focus);
+}
+.marvis-check:focus-visible {
+  outline: 1px solid var(--marvis-control-focus);
+  outline-offset: 1px;
+}
+.marvis-check:disabled {
+  border-color: transparent;
+  background: var(--marvis-control-bg);
+  cursor: not-allowed;
+}
+.marvis-check:disabled::before {
+  background: var(--marvis-text-disabled);
+}
+.marvis-input {
+  min-height: 30px;
+  border: 1px solid var(--marvis-control-border-strong);
+  border-radius: 0;
+  background: var(--marvis-field-bg);
+  padding: 0 12px;
+  font: inherit;
+  font-size: 0.8125rem;
+  color: var(--marvis-control-text);
+  transition:
+    background-color 100ms ease,
+    border-color 100ms ease,
+    color 100ms ease;
+}
+.marvis-input:hover:not(:disabled) {
+  border-color: var(--marvis-text-muted);
+  background: var(--marvis-field-hover);
+}
+.marvis-input:focus {
+  border-color: var(--marvis-control-focus);
+  background: var(--marvis-field-bg);
+}
+.marvis-input:focus-visible {
+  outline: none;
+}
+.marvis-input::placeholder,
+.review-note-input::placeholder {
+  color: var(--marvis-placeholder-fg);
+}
+.review-note-input {
+  min-height: 64px;
+  border-color: var(--marvis-control-border-strong);
+  background: var(--marvis-field-bg);
+  padding: 8px 12px;
+  color: var(--marvis-control-text);
+}
+.review-note-input:focus {
+  border-color: var(--marvis-control-focus);
+}
+.review-note-input:focus-visible {
+  outline: none;
+}
+.marvis-input:disabled,
+.review-note-input:disabled {
+  border-color: var(--marvis-control-border);
+  background: var(--marvis-control-bg);
+  color: var(--marvis-text-disabled);
+  cursor: not-allowed;
 }
 
 /* The trigger of a select, drawn as one of the app's own controls so it reads the same on
@@ -354,44 +596,58 @@ button:focus-visible {
   justify-content: space-between;
   gap: 8px;
   min-width: 0;
-  padding: 3px 8px;
-  border: none;
-  border-radius: var(--marvis-radius);
-  height: 28px;
-  background: color-mix(in srgb, var(--marvis-accent) 14%, transparent);
-  color: var(--marvis-text-secondary);
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid var(--marvis-control-border);
+  border-radius: 0;
+  background: var(--marvis-control-bg);
+  color: var(--marvis-control-text);
   font: inherit;
-  font-size: 0.75rem;
+  font-size: 0.8125rem;
   cursor: pointer;
   transition:
-    background-color 120ms ease,
-    color 120ms ease;
+    background-color 100ms ease,
+    border-color 100ms ease,
+    color 100ms ease;
 }
-.marvis-select:hover,
+.marvis-select:hover:not(:disabled):not([data-state="open"]) {
+  border-color: var(--marvis-control-border-hover);
+  background: var(--marvis-control-hover);
+  color: var(--marvis-control-text);
+}
 .marvis-select[data-state="open"] {
-  background: color-mix(in srgb, var(--marvis-accent) 24%, transparent);
-  color: var(--marvis-text);
+  border-color: var(--marvis-control-focus);
+  background: var(--marvis-control-pressed);
+  color: var(--marvis-control-text);
+}
+.marvis-select:focus-visible {
+  outline: none;
+  border-color: var(--marvis-control-focus);
 }
 /* The field variant is the one inside a dialog, where every input around it carries a border
    and spans the column: a picker that reads as a toolbar button there is a control in the
    wrong family. */
 .marvis-select-field {
   width: 100%;
-  height: auto;
-  padding: 8px 12px;
-  border: 1px solid var(--marvis-border);
-  background: var(--marvis-bg-0);
-  font-size: 0.875rem;
-  color: var(--marvis-text);
+  min-height: 30px;
+  padding: 0 12px;
+  border-color: var(--marvis-control-border-strong);
+  background: var(--marvis-field-bg);
+  color: var(--marvis-control-text);
 }
-.marvis-select-field:hover,
+.marvis-select-field:hover:not(:disabled):not([data-state="open"]) {
+  border-color: var(--marvis-text-muted);
+  background: var(--marvis-field-hover);
+}
 .marvis-select-field[data-state="open"] {
-  border-color: var(--marvis-text-faint);
-  background: var(--marvis-bg-0);
+  border-color: var(--marvis-control-focus);
+  background: var(--marvis-field-hover);
 }
 .marvis-select:disabled {
+  border-color: transparent;
+  background: var(--marvis-control-bg);
+  color: var(--marvis-text-disabled);
   cursor: not-allowed;
-  opacity: 0.6;
 }
 
 /* The list takes the trigger's width so a short choice does not open a narrower menu, and the
@@ -400,36 +656,6 @@ button:focus-visible {
   min-width: var(--reka-select-trigger-width);
   max-width: min(24rem, var(--reka-select-content-available-width));
   max-height: min(60vh, var(--reka-select-content-available-height));
-}
-
-.marvis-button-danger {
-  display: inline-flex;
-  min-height: 28px;
-  align-items: center;
-  justify-content: center;
-  gap: 6px;
-  border: 1px solid color-mix(in srgb, var(--marvis-red) 45%, transparent);
-  border-radius: 4px;
-  padding: 0 10px;
-  background: color-mix(in srgb, var(--marvis-red) 12%, transparent);
-  color: var(--marvis-red);
-  font: inherit;
-  font-size: 0.75rem;
-  font-weight: 500;
-  cursor: pointer;
-  transition:
-    background-color 120ms ease,
-    border-color 120ms ease,
-    color 120ms ease,
-    opacity 120ms ease;
-}
-.marvis-button-danger:hover:enabled {
-  border-color: var(--marvis-red);
-  background: color-mix(in srgb, var(--marvis-red) 22%, transparent);
-}
-.marvis-button-danger:disabled {
-  cursor: not-allowed;
-  opacity: 0.55;
 }
 
 /* A control that is nothing but its own name with a list of things behind it: no surface at
@@ -507,7 +733,7 @@ button:focus-visible {
 
 /* A menu over the app: roomy type and a shadow, so it reads as floating rather than as a
    surface of the pane it opened over. Global because reka-ui portals it out of the shell, which
-   is also why the no-focus-ring rule above is written without a scope. The column it stands in
+   is also why the focus rules above are written without a scope. The column it stands in
    is not part of it: the crumb menu is the wider of the two, because a branch name is a long
    one and "C" is not.
 
@@ -520,9 +746,13 @@ button:focus-visible {
   z-index: 60;
   padding: 4px;
   font-size: 0.8125rem;
-  line-height: 18px;
+  /* The line box is type, so it is stated in `rem` and follows `ui.fontSize` with the size it
+     holds. In `px` it was 18px at every font size, which at the top of the range is shorter than
+     the 18.6px label it carries: the menu clipped its own items, and every menu in the app is
+     this rule. 1.125rem is the same 18px at the size the design is drawn at, so nothing moves
+     until the preference does. */
+  line-height: 1.125rem;
   color: var(--marvis-text);
-  box-shadow: 0 12px 32px rgb(0 0 0 / 45%);
 }
 
 /* A list short enough to scroll as one piece with the field that filters it. A longer one
@@ -530,6 +760,23 @@ button:focus-visible {
 .marvis-menu-scroll {
   max-height: 60vh;
   overflow-y: auto;
+}
+
+.language-menu {
+  display: flex;
+  max-height: min(calc(100dvh - 16px), var(--reka-popover-content-available-height));
+  flex-direction: column;
+  overflow: hidden;
+}
+
+.language-menu .marvis-menu-scroll {
+  min-height: 0;
+  max-height: min(60vh, calc(100dvh - 60px), max(0px, calc(var(--reka-popover-content-available-height) - 44px)));
+}
+
+.session-target-menu {
+  width: min(36rem, var(--reka-popover-content-available-width, 36rem), calc(100vw - 16px));
+  min-width: min(20rem, var(--reka-popover-content-available-width, 20rem), calc(100vw - 16px));
 }
 
 /* The search sits on the surface and rules the list off. */
@@ -544,14 +791,18 @@ button:focus-visible {
   color: var(--marvis-text);
   font: inherit;
 }
+.marvis-menu-search:focus-visible {
+  outline: none;
+  border-bottom-color: var(--marvis-control-focus);
+}
 .marvis-menu-search::placeholder {
-  color: var(--marvis-text-faint);
+  color: var(--marvis-placeholder-fg);
 }
 
 .menu-item {
   display: flex;
   align-items: center;
-  gap: 8px;
+  gap: 16px;
   width: 100%;
   padding: 5px 8px;
   border-radius: var(--marvis-radius);
@@ -568,20 +819,46 @@ button:focus-visible {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.menu-item[data-highlighted],
-.menu-item:hover {
-  background: var(--marvis-border);
+.menu-item[data-highlighted]:not([data-disabled]):not(:disabled),
+.menu-item:hover:not([data-disabled]):not(:disabled) {
+  background: var(--marvis-control-hover);
 }
-.menu-item[data-disabled] {
-  opacity: 0.5;
-  cursor: default;
+.menu-item.is-pinned[data-highlighted]:not([data-disabled]):not(:disabled),
+.menu-item.is-pinned:hover:not([data-disabled]):not(:disabled),
+.menu-item.is-pinned:focus-visible:not([data-disabled]):not(:disabled),
+.menu-item.is-pinned.is-active:not([data-disabled]):not(:disabled) {
+  color: var(--marvis-control-text);
+}
+.menu-item[data-disabled],
+.menu-item:disabled {
+  color: var(--marvis-text-disabled);
+  cursor: not-allowed;
 }
 
 /* The row the arrow keys are on. A menu row is marked by the pointer or by the menu's own
    focus, so this is the one that carries its highlight on the row instead: the grammar list is
    walked with the arrows from the search field, and the field is what keeps the focus. */
-.menu-item.is-active {
-  background: var(--marvis-border);
+.menu-item.is-active:not(:hover):not(:focus-visible):not([data-disabled]):not(:disabled) {
+  background: var(--marvis-control-hover);
+  box-shadow: inset 0 0 0 1px var(--marvis-control-focus);
+}
+
+/* The session check marks the selected option; keyboard navigation uses a neutral row fill, not a second blue marker. */
+.session-target-option.is-active:not(:hover):not(:focus-visible):not([data-disabled]):not(:disabled),
+.session-target-option:focus-visible:not([data-disabled]):not(:disabled) {
+  background: var(--marvis-control-hover);
+  box-shadow: none;
+  outline: none;
+}
+
+.session-target-label {
+  display: -webkit-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 /* An action at the foot of the menu is a command, not a place: it reads a step back, and it is
@@ -605,6 +882,18 @@ button:focus-visible {
   font-size: 0.6875rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.menu-item[data-highlighted]:not([data-disabled]):not(:disabled) .menu-item-hint,
+.menu-item:hover:not([data-disabled]):not(:disabled) .menu-item-hint,
+.menu-item:focus-visible:not([data-disabled]):not(:disabled) .menu-item-hint,
+.menu-item.is-active:not([data-disabled]):not(:disabled) .menu-item-hint {
+  color: var(--marvis-control-text);
+}
+
+.menu-item[data-disabled] .menu-item-hint,
+.menu-item:disabled .menu-item-hint {
+  color: var(--marvis-text-disabled);
 }
 
 .menu-note {

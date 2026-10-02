@@ -497,6 +497,17 @@ describe("DocumentPane", () => {
     // A search reads the label, the grammar name, or the suffix a file wears.
     await search.setValue("yml");
     expect(languageRowLabels(wrapper)).toEqual(["Auto", "Plain text", "YAML"]);
+    expect(search.attributes("aria-expanded")).toBe("false");
+    expect(search.attributes("aria-activedescendant")).toBeUndefined();
+    const activeRow = wrapper.get("#language-option-1");
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(activeRow.element, "scrollIntoView", { value: scrollIntoView });
+    await search.trigger("keydown.down");
+    await flushPromises();
+    expect(search.attributes("aria-activedescendant")).toBe("language-option-1");
+    expect(activeRow.classes()).toContain("is-active");
+    expect(activeRow.attributes("tabindex")).toBe("-1");
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
 
     await search.setValue("pyt");
     await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.down");

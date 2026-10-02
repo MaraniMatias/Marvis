@@ -849,6 +849,30 @@ describe("TerminalSession UI", () => {
     confirm.mockRestore();
   });
 
+  it("changes the directory of an idle shell, and leaves a busy one alone", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+    vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running", foregroundProcess: false });
+    const changed = await wrapper.vm.changeDirectory("/work/repo-wt");
+    expect(changed).toBe(true);
+    expect(writeTerminal).toHaveBeenLastCalledWith(
+      "checkout:repo",
+      "session:new",
+      new TextEncoder().encode("cd '/work/repo-wt'\n"),
+    );
+
+    // A build in front of the shell is not told anything: typing `cd` would feed the build.
+    vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running", foregroundProcess: true });
+    expect(await wrapper.vm.changeDirectory("/work/repo-wt")).toBe(false);
+
+    // A path is typed into a shell, so anything that could end the line or start a second command
+    // is refused rather than quoted into shape.
+    vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running", foregroundProcess: false });
+    await wrapper.vm.changeDirectory("/work/repo\nrm -rf /");
+    expect(writeTerminal).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
   it("stops asking for status once the process is gone", async () => {
     vi.useFakeTimers();
     try {

@@ -8,16 +8,26 @@ describe("Button", () => {
   it("paints the variant and the size it was asked for", () => {
     // The variants are the only vocabulary the app has for how loud an action is, so the
     // prop has to land on the class the stylesheet draws, not merely be accepted.
-    const classes = mount(Button, { props: { variant: "primary", size: "sm" } }).classes();
+    const classes = mount(Button, { props: { variant: "tinted", size: "sm" } }).classes();
     expect(classes).toContain("marvis-button");
-    expect(classes).toContain("marvis-button-primary");
+    expect(classes).toContain("marvis-button-tinted");
     expect(classes).toContain("marvis-button-sm");
   });
 
-  it("falls back to a quiet action rather than an unmarked one", () => {
+  it("defaults to subtle and exposes the filled variant without using it as the default", () => {
     const classes = mount(Button).classes();
-    expect(classes).toContain("marvis-button-secondary");
+    expect(classes).toContain("marvis-button-subtle");
     expect(classes).toContain("marvis-button-md");
+
+    const filledClasses = mount(Button, { props: { variant: "filled", size: "lg" } }).classes();
+    expect(filledClasses).toContain("marvis-button-filled");
+    expect(filledClasses).toContain("marvis-button-lg");
+  });
+
+  it("maps every available variant to its shared class", () => {
+    for (const variant of ["filled", "tinted", "outlined", "subtle", "ghost", "danger"] as const) {
+      expect(mount(Button, { props: { variant } }).classes()).toContain(`marvis-button-${variant}`);
+    }
   });
 
   it("submits only when it is the submit button, and never answers while disabled", async () => {

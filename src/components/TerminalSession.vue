@@ -387,7 +387,56 @@ async function requestClose() {
   }
 }
 
-defineExpose({ requestClose, focus: () => terminal.focus() });
+/**
+ * Puts the file links on the tree this terminal currently belongs to.
+ *
+ * Read fresh on every registration rather than captured once, because a terminal moved to another
+ * worktree keeps its process, its scrollback and this component: the only thing that changed is
+ * which checkout a path may be looked up in, and a provider still holding the old one would
+ * underline paths that are not files here and refuse the ones that are.
+ */
+function registerFileLinks() {
+  fileLinks?.dispose();
+  fileLinks = registerFilePathLinks(terminal, {
+    get checkoutId() {
+      return props.checkoutId;
+    },
+    open: (path) => emit("openFile", path),
+  });
+}
+
+/**
+ * Tells an idle shell to change directory, and answers whether it did.
+ *
+ * `false` means the directory was left alone, and the caller says so out loud rather than
+ * pretending the move changed anything: a shell with a command in front of it cannot be told
+ * anything without feeding that command, and a session that has exited has no shell left to tell.
+ * The `cd` is written as a line the shell reads rather than asked of the backend, because a PTY
+ * has no way to move a process that is already running.
+ */
+async function changeDirectory(path: string): Promise<boolean> {
+  if (!sessionId || closing.value) return false;
+  // Read rather than believe: the polled state can be most of a second old, and a build that
+  // started since the last poll would have the `cd` fed to it instead of read by a shell.
+  const status = await getTerminalStatus(props.checkoutId, sessionId);
+  if (status.state !== "running" || status.foregroundProcess) return false;
+  // A directory is typed into the shell as input, so anything that could end the line or run a
+  // second command is refused rather than quoted into shape.
+  if (/[\n\r\0]/.test(path)) return false;
+  queueInput(`cd '${path.replaceAll("'", `'\\''`)}'\n`);
+  await inputQueue;
+  return true;
+}
+
+/** A moved terminal keeps its process, so which tree a path may name is a thing that changes. */
+watch(
+  () => props.checkoutId,
+  () => {
+    if (terminalReady) registerFileLinks();
+  },
+);
+
+defineExpose({ requestClose, changeDirectory, focus: () => terminal.focus() });
 
 async function startSession() {
   if (started || disposed || !terminalReady || !props.active || !terminalElement.value) return;
@@ -524,10 +573,7 @@ onMounted(async () => {
   // After the copy, because both own the mouse: a path that turns out to be a file is also a
   // path a person might want to select, and the click that opens it is already narrowed to
   // ctrl+click, so the two do not contend for the same gesture.
-  fileLinks = registerFilePathLinks(terminal, {
-    checkoutId: props.checkoutId,
-    open: (path) => emit("openFile", path),
-  });
+  registerFileLinks();
   fitActiveView();
   resizeObserver = new ResizeObserver(() => fitActiveView());
   resizeObserver.observe(terminalElement.value);
@@ -585,7 +631,11 @@ onUnmounted(() => {
         />
       </div>
     </div>
-    <p v-if="error" role="alert" class="m-0 border-t border-(--marvis-border) px-3 py-2 text-xs text-(--marvis-red)">
+    <p
+      v-if="error"
+      role="alert"
+      class="m-0 border-t border-(--marvis-border) px-3 py-2 text-xs text-(--marvis-danger-fg)"
+    >
       {{ error }}
     </p>
   </section>

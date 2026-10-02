@@ -63,7 +63,7 @@ const COLORS: CreditsGroup = {
   entries: [
     {
       name: "Zed",
-      role: "One Dark and One Light, the themes these palettes are modeled on",
+      role: "One Dark and One Light, retained for editor, diff, and terminal content",
       license: "MIT",
     },
   ],

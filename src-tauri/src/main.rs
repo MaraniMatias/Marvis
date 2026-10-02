@@ -204,6 +204,7 @@ fn main() {
             commands::terminal::terminal_status,
             commands::terminal::terminal_close,
             commands::terminal::terminal_rename,
+            commands::terminal::terminal_move,
             commands::terminal::terminal_layout_load,
             commands::terminal::terminal_layout_save,
             commands::ui_state::ui_layout_load,

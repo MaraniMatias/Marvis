@@ -18,7 +18,7 @@ describe("the settings file", () => {
   it("names the three surfaces and everything they carry", () => {
     expect(DEFAULT_SETTINGS).toEqual({
       ui: { fontSize: 14, zoom: 1, theme: "system" },
-      terminal: { fontSize: 16, ligatures: true, cursorBlink: true, scrollbar: "hidden" },
+      terminal: { fontSize: 16, ligatures: true, cursorBlink: true, scrollbar: "hidden", changeDirectoryOnMove: false },
       editor: { fontSize: 13, ligatures: true, indentation: { useSpaces: true, size: 2 } },
     });
   });
@@ -26,7 +26,13 @@ describe("the settings file", () => {
   it("reads what was written, and a file with lines missing from it", () => {
     const written = {
       ui: { fontSize: 16, zoom: 1.2 as const, theme: "light" as const },
-      terminal: { fontSize: 18, ligatures: false, cursorBlink: false, scrollbar: "always" as const },
+      terminal: {
+        fontSize: 18,
+        ligatures: false,
+        cursorBlink: false,
+        scrollbar: "always" as const,
+        changeDirectoryOnMove: true,
+      },
       editor: { fontSize: 15, ligatures: false, indentation: { useSpaces: false, size: 4 } },
     };
     expect(normalizeSettings(JSON.parse(JSON.stringify(written)))).toEqual(written);

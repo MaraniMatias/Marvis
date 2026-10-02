@@ -4,7 +4,7 @@
    `>`, the formatter rewrites that to `/>`. The formatter owns it, as in the other panes that
    hold a field. */
 /* eslint-disable vue/html-self-closing */
-import { computed, nextTick, ref, shallowRef, toRef } from "vue";
+import { computed, nextTick, onUnmounted, ref, shallowRef, toRef } from "vue";
 import {
   ArchiveRestore as ArchiveRestoreIcon,
   Folder as FolderIcon,
@@ -62,6 +62,8 @@ const emit = defineEmits<{
   restoreArchived: [repoId: string];
   closeSession: [sessionId: string];
   renameSession: [sessionId: string, name: string];
+  /** Hands a live terminal to another worktree of the same repository. */
+  moveSession: [sessionId: string, targetCheckoutId: string];
 }>();
 
 /** The one session whose name is being typed, and the text as typed so far. */
@@ -99,6 +101,206 @@ function cancelRename() {
   editingId.value = null;
 }
 
+/** The one session whose destination list is open. */
+const moveMenuFor = ref<string | null>(null);
+
+interface PointerDrag {
+  session: Session;
+  pointerId: number;
+  originX: number;
+  originY: number;
+  x: number;
+  y: number;
+  started: boolean;
+  source: HTMLElement;
+}
+
+/** A press selects as usual; only a deliberate 5px move turns it into a tree drag. */
+const DRAG_THRESHOLD = 5;
+const AUTO_SCROLL_EDGE = 36;
+const pointerDrag = ref<PointerDrag | null>(null);
+const dropCheckoutId = ref<string | null>(null);
+const sidebarScroll = ref<HTMLElement | null>(null);
+let autoScrollFrame: number | undefined;
+let suppressedClickSessionId: string | null = null;
+let suppressedClickTimer: number | undefined;
+
+/** A session may land on another live worktree of the same repository, never elsewhere. */
+function moveDestination(session: Session, target: Checkout): string | null {
+  if (target.isMissing || target.id === session.checkoutId) return null;
+  const sourceRepo = props.repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === session.checkoutId));
+  return sourceRepo?.checkouts.some((checkout) => checkout.id === target.id && !checkout.isMissing) ? target.id : null;
+}
+
+function selectSession(sessionId: string, event: MouseEvent) {
+  if (event.detail > 0 && suppressedClickSessionId === sessionId) {
+    suppressedClickSessionId = null;
+    if (suppressedClickTimer !== undefined) window.clearTimeout(suppressedClickTimer);
+    suppressedClickTimer = undefined;
+    return;
+  }
+  emit("selectSession", sessionId);
+}
+
+function startPointerDrag(session: Session, event: PointerEvent) {
+  // Mouse only: a touch pointer must retain the normal vertical scroll gesture of the tree.
+  if (event.pointerType !== "mouse" || !event.isPrimary || event.button !== 0) return;
+  const sourceRepo = props.repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === session.checkoutId));
+  if (!sourceRepo?.checkouts.some((checkout) => moveDestination(session, checkout))) return;
+  const source = event.currentTarget as HTMLElement;
+  pointerDrag.value = {
+    session,
+    pointerId: event.pointerId,
+    originX: event.clientX,
+    originY: event.clientY,
+    x: event.clientX,
+    y: event.clientY,
+    started: false,
+    source,
+  };
+  moveMenuFor.value = null;
+  if (suppressedClickTimer !== undefined) window.clearTimeout(suppressedClickTimer);
+  suppressedClickSessionId = null;
+  try {
+    source.setPointerCapture(event.pointerId);
+  } catch {
+    // Global listeners below still track the press if a webview declines pointer capture.
+  }
+  window.addEventListener("pointermove", onPointerMove);
+  window.addEventListener("pointerup", onPointerUp);
+  window.addEventListener("pointercancel", onPointerCancel);
+  window.addEventListener("keydown", onDragKeydown);
+  window.addEventListener("blur", cancelPointerDrag);
+}
+
+function checkoutAtPoint(x: number, y: number): Checkout | null {
+  const target = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-workdir-checkout]");
+  const checkoutId = target?.dataset.workdirCheckout;
+  return checkoutId
+    ? (props.repos.flatMap((repo) => repo.checkouts).find((checkout) => checkout.id === checkoutId) ?? null)
+    : null;
+}
+
+function updateDropTarget(x: number, y: number) {
+  const drag = pointerDrag.value;
+  const target = checkoutAtPoint(x, y);
+  dropCheckoutId.value = drag?.started && target ? moveDestination(drag.session, target) : null;
+}
+
+function onPointerMove(event: PointerEvent) {
+  const drag = pointerDrag.value;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  drag.x = event.clientX;
+  drag.y = event.clientY;
+  if (!drag.started && Math.hypot(event.clientX - drag.originX, event.clientY - drag.originY) >= DRAG_THRESHOLD) {
+    drag.started = true;
+    moveMenuFor.value = null;
+  }
+  if (!drag.started) return;
+  event.preventDefault();
+  updateDropTarget(drag.x, drag.y);
+  scheduleAutoScroll();
+}
+
+function suppressNextClick(sessionId: string) {
+  if (suppressedClickTimer !== undefined) window.clearTimeout(suppressedClickTimer);
+  suppressedClickSessionId = sessionId;
+  suppressedClickTimer = window.setTimeout(() => {
+    suppressedClickSessionId = null;
+    suppressedClickTimer = undefined;
+  }, 0);
+}
+
+function onPointerUp(event: PointerEvent) {
+  const drag = pointerDrag.value;
+  if (!drag || event.pointerId !== drag.pointerId) return;
+  if (drag.started) updateDropTarget(event.clientX, event.clientY);
+  const destination = dropCheckoutId.value;
+  const sessionId = drag.session.id;
+  const shouldMove = drag.started && destination !== null;
+  finishPointerDrag();
+  if (drag.started) suppressNextClick(sessionId);
+  if (shouldMove && destination) emit("moveSession", sessionId, destination);
+}
+
+function onDragKeydown(event: KeyboardEvent) {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  cancelPointerDrag();
+}
+
+function onPointerCancel(event: PointerEvent) {
+  if (pointerDrag.value?.pointerId === event.pointerId) cancelPointerDrag();
+}
+
+function cancelPointerDrag() {
+  if (pointerDrag.value?.started) suppressNextClick(pointerDrag.value.session.id);
+  finishPointerDrag();
+}
+
+function finishPointerDrag() {
+  const drag = pointerDrag.value;
+  pointerDrag.value = null;
+  dropCheckoutId.value = null;
+  if (autoScrollFrame !== undefined) window.cancelAnimationFrame(autoScrollFrame);
+  autoScrollFrame = undefined;
+  window.removeEventListener("pointermove", onPointerMove);
+  window.removeEventListener("pointerup", onPointerUp);
+  window.removeEventListener("pointercancel", onPointerCancel);
+  window.removeEventListener("keydown", onDragKeydown);
+  window.removeEventListener("blur", cancelPointerDrag);
+  try {
+    if (drag && drag.source.hasPointerCapture(drag.pointerId)) drag.source.releasePointerCapture(drag.pointerId);
+  } catch {
+    // A pointer can lose capture between its last event and cleanup.
+  }
+}
+
+function onLostPointerCapture(event: PointerEvent) {
+  if (pointerDrag.value?.pointerId === event.pointerId) cancelPointerDrag();
+}
+
+function scheduleAutoScroll() {
+  if (autoScrollFrame === undefined) autoScrollFrame = window.requestAnimationFrame(autoScroll);
+}
+
+function autoScroll() {
+  autoScrollFrame = undefined;
+  const drag = pointerDrag.value;
+  const element = sidebarScroll.value;
+  if (!drag?.started || !element) return;
+  const bounds = element.getBoundingClientRect();
+  const distance =
+    drag.y < bounds.top + AUTO_SCROLL_EDGE
+      ? drag.y - (bounds.top + AUTO_SCROLL_EDGE)
+      : drag.y > bounds.bottom - AUTO_SCROLL_EDGE
+        ? drag.y - (bounds.bottom - AUTO_SCROLL_EDGE)
+        : 0;
+  if (!distance) return;
+  const delta = Math.sign(distance) * Math.min(14, Math.max(2, Math.abs(distance) / 2));
+  const previous = element.scrollTop;
+  element.scrollTop += delta;
+  if (element.scrollTop === previous) return;
+  updateDropTarget(drag.x, drag.y);
+  scheduleAutoScroll();
+}
+
+onUnmounted(() => {
+  finishPointerDrag();
+  if (suppressedClickTimer !== undefined) window.clearTimeout(suppressedClickTimer);
+});
+
+/** Opens the list without a button: the context-menu key, or the same gesture with a pointer. */
+function openMoveMenu(sessionId: string) {
+  moveMenuFor.value = moveMenuFor.value === sessionId ? null : sessionId;
+}
+
+/** The list closes on the move itself, so a rejected move can be aimed again without a second click. */
+function chooseDestination(sessionId: string, targetCheckoutId: string) {
+  moveMenuFor.value = null;
+  emit("moveSession", sessionId, targetCheckoutId);
+}
+
 /** The one program in front of a shell that is also an agent, and so owns the row's agent line. */
 const AGENT_APP = "opencode";
 
@@ -114,6 +316,14 @@ type IconKind = keyof typeof icons;
 
 interface WorkdirItem {
   session: Session;
+  /**
+   * The worktrees this terminal can be moved to: the others in the same repository.
+   *
+   * A terminal's session belongs to one worktree, and moving it to a worktree of another
+   * repository would mean handing a shell to a Git directory it has nothing to do with — so the
+   * destinations are the siblings, and a row with none offers no action.
+   */
+  destinations: { id: string; label: string; title: string }[];
   active: boolean;
   exited: boolean;
   /** The program in front of the shell, when one is: `opencode`, `nvim`. */
@@ -233,6 +443,13 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
       const app = status?.foregroundApp;
       return {
         session,
+        destinations: repo.checkouts
+          .filter((sibling) => sibling.id !== checkout.id && !sibling.isMissing)
+          .map((sibling) => ({
+            id: sibling.id,
+            label: workdirTitle(sibling),
+            title: sibling.path,
+          })),
         active: session.id === props.activeSessionId,
         exited: sessionState(session) === "exited",
         app,
@@ -269,20 +486,25 @@ const agentTitle = computed(() =>
 </script>
 
 <template>
-  <aside class="app-sidebar flex h-full min-h-0 flex-col border-r text-sm">
+  <aside
+    class="app-sidebar flex h-full min-h-0 flex-col border-r text-sm"
+    :class="{ 'is-terminal-dragging': pointerDrag?.started }"
+  >
     <!-- The right padding is the scrollbar's: macOS draws its own overlay scrollbar over the
          content, so a row whose title and counts end at the edge are read through it. -->
-    <div class="min-h-0 flex-1 overflow-y-auto pr-2">
+    <div ref="sidebarScroll" class="min-h-0 flex-1 overflow-y-auto pr-2">
       <div v-for="group in groups" :key="group.label" class="workdir-group">
         <div class="group-header" :title="group.label">{{ group.label }}</div>
 
         <template v-for="workdir in group.workdirs" :key="workdir.checkout.id">
           <div
             class="workdir-item"
+            :data-workdir-checkout="workdir.checkout.id"
             :class="{
               active: workdir.active,
               'has-active': workdir.items.some((item) => item.active),
               'has-three-actions': workdir.gitdir && !workdir.missing && workdir.archived > 0,
+              'is-drop-target': dropCheckoutId === workdir.checkout.id,
             }"
           >
             <div class="workdir-row">
@@ -388,13 +610,18 @@ const agentTitle = computed(() =>
                "New terminal" is deliberately NOT gated on having terminals open, unlike the
                mockup: picking a workdir no longer opens a terminal by itself, so a workdir
                with nothing running would otherwise offer no way to start one from here. A
-               directory that is gone has no live sessions and nothing to run one in. -->
-          <div v-if="!workdir.missing" class="workdir-items">
+               directory that is gone has no live sessions and nothing to run one in.
+               The whole list is the rest of the workdir's drop zone: a terminal is dropped on
+               the worktree it should belong to, not on whichever of its rows is under it. -->
+          <div v-if="!workdir.missing" class="workdir-items" :data-workdir-checkout="workdir.checkout.id">
             <div
               v-for="item in workdir.items"
               :key="item.session.id"
               class="workdir-item workdir-child"
-              :class="{ active: item.active }"
+              :class="{
+                active: item.active,
+                'is-being-dragged': pointerDrag?.started && pointerDrag.session.id === item.session.id,
+              }"
             >
               <div class="workdir-row">
                 <!-- Editing swaps the button for the field, rather than nesting an input inside
@@ -416,16 +643,24 @@ const agentTitle = computed(() =>
                     />
                   </div>
                 </div>
+                <!-- A terminal moves by mouse after a small pointer threshold; an ordinary click
+                     still selects it. The menu remains the keyboard equivalent. -->
                 <button
                   v-else
                   type="button"
                   class="workdir-select"
                   :aria-current="item.active ? 'page' : undefined"
                   :aria-label="`Terminal session: ${item.session.name}`"
+                  :aria-haspopup="item.destinations.length ? 'menu' : undefined"
+                  :aria-expanded="item.destinations.length ? moveMenuFor === item.session.id : undefined"
                   :title="item.title"
-                  @click="emit('selectSession', item.session.id)"
+                  @pointerdown="startPointerDrag(item.session, $event)"
+                  @lostpointercapture="onLostPointerCapture"
+                  @click="selectSession(item.session.id, $event)"
                   @dblclick="startRename(item.session)"
                   @keydown.f2.prevent="startRename(item.session)"
+                  @keydown.shift.f10.prevent="item.destinations.length && openMoveMenu(item.session.id)"
+                  @contextmenu.prevent="item.destinations.length && openMoveMenu(item.session.id)"
                 >
                   <component :is="icons.terminal" class="workdir-status-icon" aria-hidden="true" />
                   <div class="workdir-main">
@@ -471,7 +706,39 @@ const agentTitle = computed(() =>
                     <XIcon class="icon-xs" aria-hidden="true" />
                   </button>
                 </div>
+
+                <!-- The destinations as a menu, for the move a drag cannot make. It hangs below the
+                     row rather than pushing it, so a list of worktrees never changes the
+                     panel it is read from. -->
+                <ul
+                  v-if="item.destinations.length && moveMenuFor === item.session.id"
+                  class="marvis-menu move-menu"
+                  role="menu"
+                  :aria-label="`Move ${item.title} to`"
+                  @keydown.esc.prevent="moveMenuFor = null"
+                >
+                  <li v-for="destination in item.destinations" :key="destination.id" role="none">
+                    <button
+                      type="button"
+                      role="menuitem"
+                      class="menu-item select-none text-left"
+                      :title="destination.title"
+                      @click="chooseDestination(item.session.id, destination.id)"
+                    >
+                      <span class="menu-item-label">{{ destination.label }}</span>
+                    </button>
+                  </li>
+                </ul>
               </div>
+            </div>
+
+            <div
+              v-if="pointerDrag?.started && dropCheckoutId === workdir.checkout.id"
+              class="terminal-drop-insertion workdir-child"
+              aria-hidden="true"
+            >
+              <SquareTerminalIcon class="workdir-status-icon" />
+              <span>Drop terminal here</span>
             </div>
 
             <div class="workdir-item workdir-child">
@@ -519,6 +786,17 @@ const agentTitle = computed(() =>
         </button>
       </div>
     </div>
+    <Teleport to="body">
+      <div
+        v-if="pointerDrag?.started"
+        class="terminal-drag-ghost"
+        aria-hidden="true"
+        :style="{ left: pointerDrag.x + 14 + 'px', top: pointerDrag.y + 14 + 'px' }"
+      >
+        <SquareTerminalIcon class="size-3.5 shrink-0" />
+        <span>{{ sessionRuntimeStatuses[pointerDrag.session.id]?.foregroundApp ?? pointerDrag.session.name }}</span>
+      </div>
+    </Teleport>
   </aside>
 </template>
 
@@ -548,8 +826,10 @@ const agentTitle = computed(() =>
   flex-direction: column;
 }
 
-/* Child items: one level in from the workdir row */
+/* Child items: one level in from the workdir row. Relative, because the destination list hangs
+   below the row it belongs to rather than being placed against the panel. */
 .workdir-child {
+  position: relative;
   padding-left: 24px;
 }
 
@@ -560,7 +840,7 @@ const agentTitle = computed(() =>
 
 /* The current item lifts off the hover surface and takes the accent icon */
 .workdir-child.active {
-  background: var(--marvis-border);
+  background: var(--marvis-el-selected);
 }
 
 .workdir-child.active .workdir-status-icon {
@@ -568,12 +848,12 @@ const agentTitle = computed(() =>
 }
 
 .workdir-item:hover {
-  background: var(--marvis-bg-2);
+  background: var(--marvis-control-hover);
 }
 
 /* An active child marks its workdir the same way, minus the accent */
 .workdir-item.has-active {
-  background: var(--marvis-border);
+  background: var(--marvis-control-bg);
   box-shadow: inset 2px 0 0 var(--marvis-text-secondary);
 }
 
@@ -582,7 +862,7 @@ const agentTitle = computed(() =>
 }
 
 .workdir-item.active {
-  background: var(--marvis-bg-2);
+  background: var(--marvis-el-selected);
   box-shadow: inset 2px 0 0 var(--marvis-accent);
 }
 
@@ -605,13 +885,22 @@ const agentTitle = computed(() =>
    unavailable: nothing behind it can be selected, and the single action beside it is the only
    thing the row still does. */
 .workdir-select[aria-disabled="true"] {
-  opacity: 0.5;
-  cursor: default;
+  color: var(--marvis-text-disabled);
+  cursor: not-allowed;
+}
+
+.workdir-select[aria-disabled="true"] .workdir-title,
+.workdir-select[aria-disabled="true"] .workdir-status-icon {
+  color: var(--marvis-text-disabled);
 }
 
 .workdir-select.new-item .workdir-name {
   color: var(--marvis-text-dim);
   font-size: 0.75rem;
+}
+
+.workdir-select.new-item:hover .workdir-name {
+  color: var(--marvis-text);
 }
 
 /* Keep the plus in the same 14px layout slot as the terminal icon. Its 1px inset keeps the 12px
@@ -663,14 +952,75 @@ const agentTitle = computed(() =>
   padding: 0;
   background: transparent;
   border: none;
-  border-radius: var(--marvis-radius);
+  border-radius: 0;
   color: var(--marvis-text-secondary);
   cursor: pointer;
 }
 
 .workdir-action:hover {
-  background: var(--marvis-border);
+  background: var(--marvis-control-hover);
   color: var(--marvis-text);
+}
+
+/* The destination list, hanging below the row it belongs to. It is out of flow so a list of
+   worktrees does not push the rows after it, and it does not fade with a hover: a menu that
+   disappears when the pointer leaves the row cannot be read. */
+.move-menu {
+  position: absolute;
+  top: 26px;
+  left: 0;
+  z-index: 20;
+  min-width: 200px;
+}
+
+/* The row a dragged terminal would land in, which is the only thing about a drop that is
+   announced before the pointer is let go. */
+.workdir-item.is-drop-target {
+  background: var(--marvis-control-bg);
+  box-shadow: inset 2px 0 0 var(--marvis-accent);
+}
+
+.app-sidebar.is-terminal-dragging,
+.app-sidebar.is-terminal-dragging * {
+  user-select: none !important;
+  cursor: grabbing !important;
+}
+
+.workdir-child.is-being-dragged {
+  opacity: 0.42;
+}
+
+.terminal-drop-insertion {
+  display: flex;
+  min-height: 30px;
+  flex-direction: row;
+  align-items: center;
+  gap: 6px;
+  border: 1px dashed var(--marvis-accent);
+  color: var(--marvis-accent);
+  font-size: 0.6875rem;
+}
+
+.terminal-drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 240px;
+  padding: 6px 10px;
+  overflow: hidden;
+  border: 1px solid var(--marvis-accent);
+  background: var(--marvis-control-bg);
+  color: var(--marvis-text);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 30%);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.terminal-drag-ghost span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 /* Centered on the title's line box, so it needs no nudging */
@@ -746,7 +1096,12 @@ const agentTitle = computed(() =>
 }
 
 .workdir-meta-error {
-  color: var(--marvis-red);
+  color: var(--marvis-danger-fg);
+}
+
+.workdir-item.has-active .workdir-meta:not(.workdir-meta-error),
+.workdir-item.active .workdir-meta:not(.workdir-meta-error) {
+  color: var(--marvis-text);
 }
 
 /* A program running in a terminal, in the same right-hand slot and dimmed like the counts:
@@ -760,6 +1115,11 @@ const agentTitle = computed(() =>
   border: none;
   color: var(--marvis-text);
   font: inherit;
+}
+
+.workdir-rename:focus-visible {
+  outline: 1px solid var(--marvis-control-focus);
+  outline-offset: -1px;
 }
 
 .agent-chip {
@@ -780,11 +1140,16 @@ const agentTitle = computed(() =>
   width: 6px;
   height: 6px;
   flex-shrink: 0;
-  border-radius: 999px;
+  border-radius: 0;
 }
 
 .workdir-meta-pinned .agent-chip {
   color: var(--marvis-text-secondary);
+}
+
+.workdir-item:hover .workdir-meta-pinned .agent-chip,
+.workdir-item.active .workdir-meta-pinned .agent-chip {
+  color: var(--marvis-text);
 }
 
 /* A spinner for "working": the turn reports no percentage, so this says only that one is
@@ -793,8 +1158,8 @@ const agentTitle = computed(() =>
   width: 7px;
   height: 7px;
   flex-shrink: 0;
-  border-radius: 999px;
-  border: 1.5px solid currentColor;
+  border-radius: 0;
+  border: 1px solid currentColor;
   border-top-color: transparent;
   animation: agent-turn 0.7s linear infinite;
 }

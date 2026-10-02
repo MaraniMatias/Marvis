@@ -57,9 +57,24 @@ describe("ConfirmDialog", () => {
     expect(wrapper.get("button[autofocus]").text()).toBe("Cancel");
     expect(wrapper.emitted("confirm")).toBeUndefined();
 
-    await wrapper.get('[role="dialog"]').trigger("keydown.esc");
+    await wrapper.get('[role="dialog"]').trigger("keydown", { key: "Escape" });
     expect(wrapper.emitted("close")).toEqual([[]]);
     expect(wrapper.emitted("confirm")).toBeUndefined();
+  });
+
+  it("keeps Tab inside the modal", async () => {
+    const wrapper = dialog();
+    document.body.append(wrapper.element);
+    const [cancel, confirm] = wrapper.findAll("footer button");
+    (confirm!.element as HTMLButtonElement).focus();
+
+    await confirm!.trigger("keydown", { key: "Tab" });
+    expect(document.activeElement).toBe(cancel!.element);
+
+    (cancel!.element as HTMLButtonElement).focus();
+    await cancel!.trigger("keydown", { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(confirm!.element);
+    wrapper.unmount();
   });
 
   it("cannot be answered twice while the action behind it is still running", () => {

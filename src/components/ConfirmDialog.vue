@@ -2,6 +2,7 @@
 /* The overlay and the surface are the ones `WorktreeDialog` draws, so a question asked here
    looks like the rest of the app rather than like the browser's own dialog. */
 import { computed } from "vue";
+import { trapDialogTab } from "../lib/dialog-focus";
 
 const props = withDefaults(
   defineProps<{
@@ -21,6 +22,16 @@ const emit = defineEmits<{ confirm: []; close: [] }>();
 
 /** The heading names the dialog, so it is what a screen reader announces on open. */
 const titleId = computed(() => `confirm-${props.title.replace(/\W+/g, "-").toLowerCase()}`);
+
+function onDialogKeydown(event: KeyboardEvent) {
+  if (event.key === "Escape") {
+    event.stopPropagation();
+    event.preventDefault();
+    emit("close");
+    return;
+  }
+  trapDialogTab(event, event.currentTarget as HTMLElement);
+}
 </script>
 
 <template>
@@ -34,25 +45,20 @@ const titleId = computed(() => `confirm-${props.title.replace(/\W+/g, "-").toLow
       aria-modal="true"
       tabindex="-1"
       :aria-labelledby="titleId"
-      class="surface-popover w-full max-w-md rounded-[var(--marvis-radius)] p-5 shadow-2xl"
-      @keydown.esc.stop.prevent="emit('close')"
+      class="surface-popover w-full max-w-md p-5"
+      @keydown="onDialogKeydown"
     >
       <h2 :id="titleId" class="text-base font-semibold text-(--marvis-text)">{{ title }}</h2>
       <p class="mt-2 text-sm text-(--marvis-text-secondary)">{{ message }}</p>
       <footer class="mt-5 flex justify-end gap-2">
         <!-- Focus opens on the answer that does nothing, so a stray Enter cannot answer yes. -->
-        <button
-          type="button"
-          autofocus
-          class="marvis-control px-3 py-2 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
-          @click="emit('close')"
-        >
+        <button type="button" autofocus class="marvis-button marvis-button-subtle" @click="emit('close')">
           Cancel
         </button>
         <button
           type="button"
           :disabled="busy"
-          :class="destructive ? 'marvis-button-danger' : 'marvis-button marvis-button-primary'"
+          :class="destructive ? 'marvis-button-danger' : 'marvis-button marvis-button-tinted'"
           @click="emit('confirm')"
         >
           {{ busy ? "Working…" : confirmLabel }}
