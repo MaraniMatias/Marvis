@@ -32,7 +32,9 @@ const viewBox = computed(() => CATPPUCCIN_ICON_VIEWBOX_OVERRIDE[icon.value] ?? C
 <template>
   <!-- The upstream markup is inlined rather than loaded as an image: nothing is fetched, and
        the content security policy's `img-src` never enters into it. The strokes carry their own
-       per-type colour, so quieting a row is opacity on this element. -->
+       per-type colour, so quieting a row is opacity on this element. The markup interpolated below is
+       one of our own literal SVG strings, so it is never user input. -->
+  <!-- eslint-disable vue/no-v-html -->
   <svg
     class="file-icon shrink-0"
     :class="`file-icon-${prominence}`"
@@ -42,6 +44,7 @@ const viewBox = computed(() => CATPPUCCIN_ICON_VIEWBOX_OVERRIDE[icon.value] ?? C
     aria-hidden="true"
     v-html="CATPPUCCIN_ICON_MARKUP[icon]"
   />
+  <!-- eslint-enable vue/no-v-html -->
 </template>
 
 <style scoped>

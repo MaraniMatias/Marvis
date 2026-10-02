@@ -403,10 +403,6 @@ const terminalMenu = computed<TitlebarMenuSection[]>(() => {
 /** What the workdir crumb says: the repo, or the folder when there is no repo to name. */
 const workdirLabel = computed(() => activeRepo.value?.name ?? activeCheckout.value?.path.split(/[\\/]/).at(-1) ?? "");
 
-function repoName(checkout: Checkout): string {
-  return workspace.value.repos.find((repo) => repo.id === checkout.repoId)?.name ?? checkout.path;
-}
-
 /** One crumb menu at a time: the name it reports becomes the one that is open. */
 function setCrumbOpen(name: string, open: boolean) {
   openCrumb.value = open ? name : null;

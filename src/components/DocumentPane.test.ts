@@ -1,4 +1,6 @@
 // @vitest-environment happy-dom
+// Test doubles intentionally colocate small component shells and omit production prop defaults.
+/* eslint-disable vue/one-component-per-file */
 import { flushPromises, mount } from "@vue/test-utils";
 import type { VueWrapper } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
