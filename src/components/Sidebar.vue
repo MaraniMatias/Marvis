@@ -19,6 +19,13 @@ import {
   SquareTerminal as SquareTerminalIcon,
   X as XIcon,
 } from "@lucide/vue";
+import {
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuPortal,
+  DropdownMenuRoot,
+  DropdownMenuTrigger,
+} from "reka-ui";
 import type { ArchivedCheckout, Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
 import { sessionTitle, workdirTitle } from "../domain/workspace";
 import type { AgentHeadline } from "../presentation/agent-sessions";
@@ -111,38 +118,25 @@ function cancelRename() {
 /** The one session whose destination list is open. */
 const moveMenuFor = ref<string | null>(null);
 
-/** The one group whose actions menu is open. */
+/**
+ * The one group whose actions menu is open.
+ *
+ * The menu is reka's, like the titlebar's: it brings the outside press, the Escape, the arrows,
+ * the typeahead and the focus back to the button, none of which the panel was giving it. What the
+ * panel keeps is which of the groups is open, because that is the one thing reka does not know —
+ * there is a menu per group and only one of them is allowed to be.
+ */
 const groupMenuFor = ref<string | null>(null);
 
+/** A right click anywhere on the header opens the menu the button opens. */
 function openGroupMenu(groupId: string) {
   moveMenuFor.value = null;
   groupMenuFor.value = groupId;
-  // Capture phase, so a press on anything else closes the menu before that thing reacts to it.
-  window.addEventListener("pointerdown", onGroupMenuOutside, true);
-  window.addEventListener("keydown", onGroupMenuKeydown);
 }
 
+/** Closing, from the menu itself or from a row that was chosen. reka says when. */
 function closeGroupMenu() {
   groupMenuFor.value = null;
-  window.removeEventListener("pointerdown", onGroupMenuOutside, true);
-  window.removeEventListener("keydown", onGroupMenuKeydown);
-}
-
-function toggleGroupMenu(groupId: string) {
-  if (groupMenuFor.value === groupId) closeGroupMenu();
-  else openGroupMenu(groupId);
-}
-
-function onGroupMenuOutside(event: PointerEvent) {
-  // The button and the list are inside the menu's own world: pressing them is not "outside".
-  if ((event.target as HTMLElement | null)?.closest(".group-menu, .group-more")) return;
-  closeGroupMenu();
-}
-
-function onGroupMenuKeydown(event: KeyboardEvent) {
-  if (event.key !== "Escape") return;
-  event.preventDefault();
-  closeGroupMenu();
 }
 
 interface PointerDrag {
@@ -328,7 +322,6 @@ function autoScroll() {
 
 onUnmounted(() => {
   finishPointerDrag();
-  closeGroupMenu();
   if (suppressedClickTimer !== undefined) window.clearTimeout(suppressedClickTimer);
 });
 
@@ -648,55 +641,65 @@ const agentTitle = computed(() =>
             <span v-if="group.shortPath" class="group-path">{{ group.shortPath }}</span>
           </div>
 
-          <button
+          <!-- reka's menu, the same one the titlebar crumbs open, so the outside press, the
+               Escape, the arrows and the focus back to the button are the library's to get right.
+               The panel only says which group is open: there is a menu per group and `groupMenuFor`
+               is the one that may be. A right click on the header sets it directly, which is the
+               only way in that the trigger is not part of. -->
+          <DropdownMenuRoot
             v-if="group.hasMenu"
-            type="button"
-            class="workdir-action group-more"
-            :aria-label="`Actions for ${group.label}`"
-            aria-haspopup="menu"
-            :aria-expanded="groupMenuFor === group.id"
-            title="More actions"
-            @click="toggleGroupMenu(group.id)"
+            :open="groupMenuFor === group.id"
+            @update:open="(isOpen) => (isOpen ? openGroupMenu(group.id) : closeGroupMenu())"
           >
-            <EllipsisIcon class="icon-xs" aria-hidden="true" />
-          </button>
-
-          <!-- Hangs below the header rather than pushing the rows, like the move menu. -->
-          <ul
-            v-if="group.hasMenu && groupMenuFor === group.id"
-            class="surface-popover marvis-menu group-menu"
-            role="menu"
-            :aria-label="`Actions for ${group.label}`"
-          >
-            <li v-if="group.canAdd" role="none">
-              <button type="button" role="menuitem" class="menu-item select-none text-left" @click="addWorktree(group)">
-                <GitBranchPlusIcon class="icon-xs" aria-hidden="true" />
-                <span class="menu-item-label">New worktree</span>
-              </button>
-            </li>
-            <!-- Only while there is something to bring back, and the count says how much. -->
-            <li v-if="group.canRestore" role="none">
-              <button
-                type="button"
-                role="menuitem"
-                class="menu-item select-none text-left"
-                :aria-label="`Restore ${group.archived} archived worktree${group.archived === 1 ? '' : 's'}`"
-                @click="restoreArchived(group)"
+            <DropdownMenuTrigger
+              class="workdir-action group-more"
+              :aria-label="`Actions for ${group.label}`"
+              title="More actions"
+            >
+              <EllipsisIcon class="icon-xs" aria-hidden="true" />
+            </DropdownMenuTrigger>
+            <!-- Portalled and placed by reka, like every other menu in the app: the rows are
+                 absolutely positioned, so the pane under them paints over anything left in place. -->
+            <DropdownMenuPortal>
+              <DropdownMenuContent
+                class="surface-popover marvis-menu group-menu"
+                side="bottom"
+                align="end"
+                :side-offset="4"
+                :aria-label="`Actions for ${group.label}`"
               >
-                <ArchiveRestoreIcon class="icon-xs" aria-hidden="true" />
-                <span class="menu-item-label">Restore archived worktrees</span>
-                <span class="group-menu-count">{{ group.archived }}</span>
-              </button>
-            </li>
-            <!-- Taking the repo off the panel takes its whole list with it. Nothing here deletes a
-                 file, and the home directory is the one thing that cannot be closed. -->
-            <li v-if="group.canClose" role="none" class="group-menu-danger">
-              <button type="button" role="menuitem" class="menu-item select-none text-left" @click="closeGroup(group)">
-                <FolderMinusIcon class="icon-xs" aria-hidden="true" />
-                <span class="menu-item-label">Remove from panel</span>
-              </button>
-            </li>
-          </ul>
+                <DropdownMenuItem
+                  v-if="group.canAdd"
+                  class="menu-item select-none text-left"
+                  @select="addWorktree(group)"
+                >
+                  <GitBranchPlusIcon class="icon-xs" aria-hidden="true" />
+                  <span class="menu-item-label">New worktree</span>
+                </DropdownMenuItem>
+                <!-- Only while there is something to bring back, and the count says how much. -->
+                <DropdownMenuItem
+                  v-if="group.canRestore"
+                  class="menu-item select-none text-left"
+                  :aria-label="`Restore ${group.archived} archived worktree${group.archived === 1 ? '' : 's'}`"
+                  @select="restoreArchived(group)"
+                >
+                  <ArchiveRestoreIcon class="icon-xs" aria-hidden="true" />
+                  <span class="menu-item-label">Restore archived worktrees</span>
+                  <span class="group-menu-count">{{ group.archived }}</span>
+                </DropdownMenuItem>
+                <!-- Taking the repo off the panel takes its whole list with it. Nothing here deletes
+                     a file, and the home directory is the one thing that cannot be closed. -->
+                <DropdownMenuItem
+                  v-if="group.canClose"
+                  class="menu-item select-none text-left group-menu-danger"
+                  @select="closeGroup(group)"
+                >
+                  <FolderMinusIcon class="icon-xs" aria-hidden="true" />
+                  <span class="menu-item-label">Remove from panel</span>
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenuPortal>
+          </DropdownMenuRoot>
         </div>
 
         <template v-for="workdir in group.workdirs" :key="workdir.checkout.id">
@@ -1043,39 +1046,17 @@ const agentTitle = computed(() =>
   color: var(--marvis-text);
 }
 
-/* Hangs below the header, out of flow, and does not fade with a hover: a menu that disappears
-   when the pointer leaves the header cannot be read. */
+/* Nothing here positions the menu: reka hangs it below the button and portals it to the body, the
+   way every other menu in the app is placed. What is left is what this one says that the others do
+   not — a width for whole phrases rather than branch names, the gap its leading icon asks for, the
+   icon itself, and the count at the end of a row. The surface comes from `surface-popover` and the
+   rows from `.menu-item`, so the two kinds of menu cannot drift apart. */
 .group-menu {
-  position: absolute;
-  top: 100%;
-  right: 8px;
-  z-index: 20;
   min-width: 224px;
-  margin: 0;
-  padding: 4px 0;
-  list-style: none;
-  /* The surface itself (background, border, shadow) comes from `surface-popover`, the same class
-     the titlebar menus use, so the two kinds of menu cannot drift apart. `marvis-menu` alone
-     draws none, which is why the rows behind this list used to show through it. */
 }
 
 .group-menu .menu-item {
-  display: flex;
-  align-items: center;
   gap: 8px;
-  width: 100%;
-  padding: 6px 10px;
-  background: transparent;
-  border: none;
-  color: var(--marvis-text);
-  font: inherit;
-  font-size: 0.8125rem;
-  cursor: pointer;
-}
-
-.group-menu .menu-item:hover,
-.group-menu .menu-item:focus-visible {
-  background: var(--marvis-control-hover);
 }
 
 .group-menu .menu-item .icon-xs {
@@ -1083,23 +1064,21 @@ const agentTitle = computed(() =>
   color: var(--marvis-text-secondary);
 }
 
-.group-menu .menu-item-label {
-  flex: 1;
-}
-
 .group-menu-count {
   color: var(--marvis-text-faint);
   font-size: 0.6875rem;
 }
 
-/* The destructive action is set apart by a rule, and is the only place red appears on hover. */
-.group-menu li + .group-menu-danger {
+/* The destructive action is set apart by a rule, and is the only place red appears. The colour
+   follows the row the way the shared rule does: `data-highlighted` is what reka puts on the row the
+   arrows are on, which a CSS `:focus-visible` cannot see, because the menu moves that focus itself. */
+.group-menu .group-menu-danger {
   margin-top: 4px;
-  padding-top: 4px;
   border-top: 1px solid var(--marvis-control-hover);
 }
 
-.group-menu-danger .menu-item:hover {
+.group-menu .group-menu-danger[data-highlighted]:not([data-disabled]),
+.group-menu .group-menu-danger:hover {
   color: var(--marvis-danger-fg);
 }
 

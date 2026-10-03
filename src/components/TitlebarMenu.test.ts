@@ -57,6 +57,9 @@ vi.mock("reka-ui", async () => {
     DropdownMenuSeparator: passThrough("DropdownMenuSeparator"),
     DropdownMenuFilter: filter,
     DropdownMenuItem: row,
+    // A group and its label only wrap the rows, so the stub draws them the way it draws the rest.
+    DropdownMenuGroup: passThrough("DropdownMenuGroup"),
+    DropdownMenuLabel: passThrough("DropdownMenuLabel"),
   };
 });
 

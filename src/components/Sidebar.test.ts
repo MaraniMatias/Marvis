@@ -1124,6 +1124,71 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
   });
 
+  it("puts the actions of a repo in one menu, and says which one is open", async () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              { ...checkout({ id: "checkout:primary" }), branch: "main" },
+              { ...checkout({ id: "checkout:feature", isPrimary: false }), branch: "feature" },
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+        archivedWorktrees: [{ id: "checkout:gone", repoId: "repo:test", path: "/test-gone", branch: "temporary" }],
+      },
+    });
+
+    const more = wrapper.get('button[aria-label="Actions for test"]');
+    // reka hands the list to the body, so the menu is read off the document and not off the panel.
+    const menu = () => document.querySelector(".group-menu");
+    expect(menu()).toBe(null);
+
+    // The button is the way in, and what it opens is the repo's three actions in one list.
+    await more.trigger("click");
+    await flushPromises();
+    expect(menu()?.getAttribute("role")).toBe("menu");
+    expect(menu()?.textContent).toContain("New worktree");
+    expect(menu()?.textContent).toContain("Restore archived worktrees");
+    expect(menu()?.textContent).toContain("Remove from panel");
+    // The count says how much there is to bring back, and nothing is offered for nothing.
+    expect(menu()?.textContent).toContain("1");
+
+    const restore = document.querySelector('[aria-label="Restore 1 archived worktree"]') as HTMLElement;
+    restore.click();
+    await flushPromises();
+    expect(wrapper.emitted("restoreArchived")).toEqual([["repo:test"]]);
+    // A row that was chosen closes the list behind it.
+    expect(menu()).toBe(null);
+    wrapper.unmount();
+  });
+
+  it("opens the repo menu from a right click on the header, and closes it on Escape", async () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [repo({ checkouts: [{ ...checkout({ id: "checkout:primary" }), branch: "main" }] })],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    const menu = () => document.querySelector(".group-menu");
+
+    // A right click anywhere on the header is the way in that the button is not part of.
+    await wrapper.get(".group-heading").trigger("contextmenu");
+    await flushPromises();
+    expect(menu()).not.toBe(null);
+
+    // The list answers the Escape, which the panel used to answer with a listener of its own.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(menu()).toBe(null);
+    wrapper.unmount();
+  });
+
   it("hangs the restore action on the repo root, and only while it has something to restore", async () => {
     const gitdir = { ...checkout({ id: "checkout:primary" }), branch: "main" };
     const worktree = {

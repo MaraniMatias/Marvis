@@ -223,6 +223,10 @@ vi.mock("reka-ui", async () => {
     DropdownMenuSeparator: passThrough("DropdownMenuSeparator"),
     DropdownMenuFilter: menuFilter,
     DropdownMenuItem: menuRow,
+    // A group and its label only wrap the rows: the stub always renders their content, which is
+    // what lets a grouped menu be reached without driving the open state, the same as the rest.
+    DropdownMenuGroup: passThrough("DropdownMenuGroup"),
+    DropdownMenuLabel: passThrough("DropdownMenuLabel"),
   };
 });
 
