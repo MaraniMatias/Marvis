@@ -316,6 +316,12 @@ const icons = {
 
 type IconKind = keyof typeof icons;
 
+/**
+ * What the terminal is doing, as the row's left bar paints it: blue while it runs, red when it
+ * ended badly, and no bar at all when it is simply idle or finished cleanly.
+ */
+type SessionTone = "running" | "error" | "idle";
+
 interface WorkdirItem {
   session: Session;
   /**
@@ -328,6 +334,8 @@ interface WorkdirItem {
   destinations: { id: string; label: string; title: string }[];
   active: boolean;
   exited: boolean;
+  /** Drives the colour of the row's left bar, independently of whether the row is selected. */
+  tone: SessionTone;
   /** The program in front of the shell, when one is: `opencode`, `nvim`. */
   app?: string;
   /** What the row is called on screen: the program in front, or the shell it was opened as. */
@@ -347,18 +355,12 @@ interface Workdir {
   /** What is wrong with this workdir, if anything (E.4). */
   error?: string;
   kind: IconKind;
-  /** Repo roots can host a new worktree. */
-  gitdir: boolean;
-  /** Worktrees can be removed; repo roots cannot. */
-  worktree: boolean;
   /**
-   * How many worktrees this repo has archived.
-   *
-   * Only the repo root carries the action that brings them back, and it carries it only
-   * when there is something to bring back: a button that can only ever answer "nothing
-   * archived" is a button that teaches the row it belongs to means nothing.
+   * Worktrees can be removed; repo roots cannot. Everything that acts on the repo as a whole
+   * (add a worktree, restore archived ones, take it off the panel) lives in the group header,
+   * so a row only ever carries the action that belongs to itself.
    */
-  archived: number;
+  worktree: boolean;
   /**
    * The directory is gone, so the row keeps only its reason for existing and its one way out
    * (closing it). Nothing behind it can be selected, run or created.
@@ -369,17 +371,26 @@ interface Workdir {
   items: WorkdirItem[];
 }
 
+interface Group {
+  id: string;
+  label: string;
+  /** Where the repo lives, cut for drawing; the full path is the tooltip. */
+  path: string;
+  shortPath: string;
+  /** The repo root, which is the checkout the header's actions are addressed to. */
+  root: Checkout | null;
+  git: boolean;
+  home: boolean;
+  missing: boolean;
+  /** How many worktrees this repo archived. The restore action only exists while this is above zero. */
+  archived: number;
+  workdirs: Workdir[];
+}
+
 // The sidebar names every checkout at once, so it asks for the totals of all of them in one
 // call rather than per row. The active checkout is named too, so the Changes tab of the
 // inspector shares the same refresh instead of running a second listener.
 const diffStats = useDiffStats(toRef(props, "repos"), toRef(props, "activeCheckoutId"));
-
-const groups = computed(() =>
-  props.repos.map((repo) => ({
-    label: repo.name,
-    workdirs: repo.checkouts.map((checkout) => toWorkdir(repo, checkout)),
-  })),
-);
 
 /** How many worktrees each repo archived, counted once so no row walks the list itself. */
 const archivedByRepo = computed(() => {
@@ -390,6 +401,43 @@ const archivedByRepo = computed(() => {
   return counts;
 });
 
+const groups = computed<Group[]>(() =>
+  props.repos.map((repo) => {
+    const root = repo.checkouts.find((checkout) => checkout.isPrimary) ?? repo.checkouts[0] ?? null;
+    return {
+      id: repo.id,
+      label: repo.name,
+      path: root?.path ?? "",
+      shortPath: shortPath(root?.path ?? ""),
+      root,
+      git: repo.kind === "git",
+      home: root !== null && root.id === props.homeCheckoutId,
+      missing: root?.isMissing ?? false,
+      archived: archivedByRepo.value.get(repo.id) ?? 0,
+      workdirs: repo.checkouts.map((checkout) => toWorkdir(repo, checkout)),
+    };
+  }),
+);
+
+/**
+ * A path small enough to sit under a header: the last two segments, with a leading ellipsis when
+ * something was dropped. CSS cannot truncate the middle of a string, and the end of a path is
+ * the half that says where it is.
+ */
+function shortPath(path: string): string {
+  const parts = path.split(/[\\/]/).filter(Boolean);
+  return parts.length <= 2 ? path : `…/${parts.slice(-2).join("/")}`;
+}
+
+/** A missing root is closed through its own event, since there is nothing on disk to close. */
+function closeGroup(group: Group) {
+  if (!group.root) return;
+  // Two literal calls rather than one with a computed event name: `emit` is overloaded per
+  // event, and a union of names matches none of the overloads.
+  if (group.missing) emit("closeMissing", group.root.id);
+  else emit("closeWorkdir", group.root.id);
+}
+
 /**
  * Whether the row is advertising changes, which is what makes clicking it open the full diff.
  * The counts are the same ones the row paints, so the click and the numbers cannot disagree.
@@ -399,19 +447,20 @@ function hasChanges(workdir: Workdir): boolean {
 }
 
 /**
- * A checkout's name in two halves, so that the half which names the branch survives the row's
- * width. The tail is what tells two branches of the same repo apart; the head is the ticket
- * prefix every one of them carries, and the first thing a cut name would otherwise throw away.
+ * A checkout's name, cut to what identifies it. A ticket-based branch such as
+ * `bug/13133933180-fix-login` carries two things the row has no room for at once: the kind
+ * (`bug/`) and the ticket number, which is the same noise on every row. The kind stays, the
+ * number becomes an ellipsis, and the slug that follows is what the row is really called.
  *
- * The head ends at the first `-` that follows a run of digits in the segment after the last `/` —
- * the boundary a ticket-based branch name puts there. A name with no ticket in it, like `main`
- * or `release/1.2.0`, has no head to keep and is drawn whole, which is all the room it needs.
+ * The head ends right after the `/` that precedes the ticket segment; the tail begins at the `-`
+ * that closes the digits. A name with no ticket in it, like `main` or `release/1.2.0`, has
+ * nothing to cut and is drawn whole. The full name is always in the row's tooltip.
  */
 function branchLabel(title: string): { head: string; tail: string } {
   const segment = title.slice(title.lastIndexOf("/") + 1);
-  const ticket = /^(.*?\d)-(.*)$/.exec(segment);
+  const ticket = /^(.*?\d)-(.+)$/.exec(segment);
   if (!ticket) return { head: "", tail: title };
-  return { head: title.slice(0, title.length - segment.length) + ticket[1] + "-", tail: ticket[2] };
+  return { head: title.slice(0, title.length - segment.length) + "…", tail: "-" + ticket[2] };
 }
 
 /** The row's name at full length, which the row cannot fit, and where the checkout lives. */
@@ -434,9 +483,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     // directory is gone, so it belongs in that row and not in a toast about the window.
     error: checkout.isMissing ? "Directory missing" : undefined,
     kind: !isGit ? "folder" : checkout.isPrimary ? "git" : "worktree",
-    gitdir: isGit && checkout.isPrimary,
     worktree: isGit && !checkout.isPrimary,
-    archived: archivedByRepo.value.get(repo.id) ?? 0,
     missing: checkout.isMissing,
     home: checkout.id === props.homeCheckoutId,
     active: checkout.id === props.activeCheckoutId,
@@ -454,6 +501,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
           })),
         active: session.id === props.activeSessionId,
         exited: sessionState(session) === "exited",
+        tone: sessionTone(session),
         app,
         /**
          * The row's name, by the rule the titlebar crumb reads too: `sessionTitle`. The title is
@@ -472,6 +520,17 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
 
 function sessionState(session: Session) {
   return props.sessionRuntimeStatuses[session.id]?.state ?? (session.status === "active" ? "running" : "exited");
+}
+
+/**
+ * Running is blue, a shell that ended with a non-zero code is red, anything else is quiet.
+ * `exitCode` is read defensively: if the runtime status does not carry one, an exited terminal
+ * is simply idle rather than wrongly accused.
+ */
+function sessionTone(session: Session): SessionTone {
+  if (sessionState(session) !== "exited") return "running";
+  const status = props.sessionRuntimeStatuses[session.id] as { exitCode?: number | null } | undefined;
+  return status?.exitCode ? "error" : "idle";
 }
 
 /** A session that is working, stuck or failed stays on screen through a hover. */
@@ -493,17 +552,61 @@ const agentTitle = computed(() =>
     <!-- The right padding is the scrollbar's: macOS draws its own overlay scrollbar over the
          content, so a row whose title and counts end at the edge are read through it. -->
     <div ref="sidebarScroll" class="min-h-0 flex-1 overflow-y-auto pr-2">
-      <div v-for="group in groups" :key="group.label" class="workdir-group">
-        <div class="group-header" :title="group.label">{{ group.label }}</div>
+      <div v-for="group in groups" :key="group.id" class="workdir-group">
+        <!-- The header is where the repo as a whole is acted on. Adding a worktree or taking the
+             repo off the panel used to sit on the `main` row, which made them read as actions on
+             that branch; here they sit on the thing they actually change. -->
+        <div class="group-heading" :class="{ 'has-restore': group.git && !group.missing && group.archived > 0 }">
+          <div class="group-heading-text" :title="group.path || group.label">
+            <span class="group-name">{{ group.label }}</span>
+            <span v-if="group.shortPath" class="group-path">{{ group.shortPath }}</span>
+          </div>
+
+          <div v-if="group.root" class="group-actions">
+            <!-- Only a repo root has worktrees to put back, and only while it has any. -->
+            <button
+              v-if="group.git && !group.missing && group.archived > 0"
+              type="button"
+              class="workdir-action"
+              :aria-label="`Restore ${group.archived} archived worktree${group.archived === 1 ? '' : 's'} from ${group.label}`"
+              title="Restore archived worktrees"
+              @click="emit('restoreArchived', group.root.repoId)"
+            >
+              <ArchiveRestoreIcon class="icon-xs" aria-hidden="true" />
+            </button>
+            <button
+              v-if="group.git && !group.missing"
+              type="button"
+              class="workdir-action"
+              :aria-label="`Add worktree to ${group.label}`"
+              title="Add worktree"
+              @click="emit('createWorktree', group.root.id)"
+            >
+              <PlusIcon class="icon-xs" aria-hidden="true" />
+            </button>
+            <!-- Taking the repo off the panel takes its whole list with it. Nothing here deletes a
+                 file, and the home directory is the one thing that cannot be closed. -->
+            <button
+              v-if="!group.home"
+              type="button"
+              class="workdir-action"
+              :aria-label="`Remove from list: ${group.label}`"
+              :title="group.missing ? 'Remove from list' : 'Remove from panel'"
+              @click="closeGroup(group)"
+            >
+              <XIcon class="icon-xs" aria-hidden="true" />
+            </button>
+          </div>
+        </div>
 
         <template v-for="workdir in group.workdirs" :key="workdir.checkout.id">
           <div
-            class="workdir-item"
+            class="workdir-item workdir-parent"
             :data-workdir-checkout="workdir.checkout.id"
             :class="{
               active: workdir.active,
               'has-active': workdir.items.some((item) => item.active),
-              'has-three-actions': workdir.gitdir && !workdir.missing && workdir.archived > 0,
+              'has-action': workdir.worktree && !workdir.home,
               'is-drop-target': dropCheckoutId === workdir.checkout.id,
             }"
           >
@@ -541,24 +644,13 @@ const agentTitle = computed(() =>
                 </div>
               </button>
 
-              <div class="workdir-actions">
-                <!-- A repo root is the head of the list its worktrees hang off, so taking it
-                     off the panel takes the whole list with it. It is not the trash's business
-                     either: nothing here deletes a file. -->
-                <button
-                  v-if="!workdir.home && !workdir.missing && !workdir.worktree"
-                  type="button"
-                  class="workdir-action"
-                  :aria-label="`Remove from list: ${workdir.title}`"
-                  title="Remove from panel"
-                  @click="emit('closeWorkdir', workdir.checkout.id)"
-                >
-                  <XIcon class="icon-xs" aria-hidden="true" />
-                </button>
+              <!-- A worktree is the only row with an action of its own. A repo root's actions are
+                   in the group header above. -->
+              <div v-if="workdir.worktree && !workdir.home" class="workdir-actions">
                 <!-- A missing directory has nothing to remove from disk, so the row offers
                      the one thing left to do with it: take it off the list. -->
                 <button
-                  v-if="workdir.missing && !workdir.home"
+                  v-if="workdir.missing"
                   type="button"
                   class="workdir-action"
                   :aria-label="`Close missing checkout: ${workdir.title}`"
@@ -571,7 +663,7 @@ const agentTitle = computed(() =>
                      once: the cross opens the dialog that holds both, and nothing is removed,
                      hidden or deleted before the answer comes back. -->
                 <button
-                  v-if="workdir.worktree && !workdir.missing && !workdir.home"
+                  v-else
                   type="button"
                   class="workdir-action"
                   :aria-label="`Remove or archive worktree ${workdir.title}`"
@@ -579,28 +671,6 @@ const agentTitle = computed(() =>
                   @click="emit('removeWorktree', workdir.checkout.id)"
                 >
                   <XIcon class="icon-xs" aria-hidden="true" />
-                </button>
-                <!-- Only a repo root has worktrees to put back, and only while it has any:
-                     the button is the way to the ones this repo archived. -->
-                <button
-                  v-if="workdir.gitdir && !workdir.missing && workdir.archived > 0"
-                  type="button"
-                  class="workdir-action"
-                  :aria-label="`Restore ${workdir.archived} archived worktree${workdir.archived === 1 ? '' : 's'} from ${workdir.checkout.branch || workdir.checkout.path}`"
-                  title="Restore archived worktrees"
-                  @click="emit('restoreArchived', workdir.checkout.repoId)"
-                >
-                  <ArchiveRestoreIcon class="icon-xs" aria-hidden="true" />
-                </button>
-                <button
-                  v-if="workdir.gitdir && !workdir.missing"
-                  type="button"
-                  class="workdir-action"
-                  :aria-label="`Add worktree from ${workdir.checkout.branch || workdir.checkout.path}`"
-                  title="Add worktree"
-                  @click="emit('createWorktree', workdir.checkout.id)"
-                >
-                  <PlusIcon class="icon-xs" aria-hidden="true" />
                 </button>
               </div>
             </div>
@@ -618,10 +688,13 @@ const agentTitle = computed(() =>
               v-for="item in workdir.items"
               :key="item.session.id"
               class="workdir-item workdir-child"
-              :class="{
-                active: item.active,
-                'is-being-dragged': pointerDrag?.started && pointerDrag.session.id === item.session.id,
-              }"
+              :class="[
+                `tone-${item.tone}`,
+                {
+                  active: item.active,
+                  'is-being-dragged': pointerDrag?.started && pointerDrag.session.id === item.session.id,
+                },
+              ]"
             >
               <div class="workdir-row">
                 <!-- Editing swaps the button for the field, rather than nesting an input inside
@@ -805,6 +878,71 @@ const agentTitle = computed(() =>
   padding: 2px 0 6px;
 }
 
+/* Group header: the repo's name at a size and weight that read as a section, its location
+   underneath, and the actions that act on the whole repo on the right, on hover. */
+.group-heading {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding: 12px 8px 6px 10px;
+}
+
+.group-heading-text {
+  min-width: 0;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  transition: padding-right 0.12s ease;
+}
+
+.group-name {
+  overflow: hidden;
+  color: var(--marvis-text);
+  font-size: 0.875rem;
+  font-weight: 600;
+  line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.group-path {
+  overflow: hidden;
+  color: var(--marvis-text-faint);
+  font-size: 0.6875rem;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Two 24px actions and their gap, plus a gutter; a repo with archived worktrees carries a third. */
+.group-heading:hover .group-heading-text,
+.group-heading:focus-within .group-heading-text {
+  padding-right: 56px;
+}
+
+.group-heading.has-restore:hover .group-heading-text,
+.group-heading.has-restore:focus-within .group-heading-text {
+  padding-right: 82px;
+}
+
+.group-actions {
+  position: absolute;
+  top: 50%;
+  right: 8px;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  gap: 2px;
+  opacity: 0;
+  transition: opacity 0.12s ease;
+}
+
+.group-heading:hover .group-actions,
+.group-heading:focus-within .group-actions {
+  opacity: 1;
+}
+
 /* Row wrapper: keeps the hover/active surface, the select button fills it */
 .workdir-item {
   width: 100%;
@@ -833,12 +971,13 @@ const agentTitle = computed(() =>
   padding-left: 24px;
 }
 
-/* One action instead of two, hence a narrower hover gutter */
-.workdir-child:hover .workdir-select {
-  padding-right: 26px;
+.workdir-item:hover {
+  background: var(--marvis-control-hover);
 }
 
-/* The current item lifts off the hover surface and takes the accent icon */
+/* Selection, split by level so that blue marks exactly one thing.
+   The terminal is the focus: it takes the selected surface and the accent icon.
+   The workdir that holds it is only "where you are": a plain grey, no bar, no accent. */
 .workdir-child.active {
   background: var(--marvis-el-selected);
 }
@@ -847,23 +986,45 @@ const agentTitle = computed(() =>
   color: var(--marvis-accent);
 }
 
-.workdir-item:hover {
-  background: var(--marvis-control-hover);
-}
-
-/* An active child marks its workdir the same way, minus the accent */
-.workdir-item.has-active {
+.workdir-parent.active,
+.workdir-parent.has-active {
   background: var(--marvis-control-bg);
-  box-shadow: inset 2px 0 0 var(--marvis-text-secondary);
 }
 
-.workdir-item.has-active .workdir-status-icon {
+.workdir-parent.active .workdir-status-icon,
+.workdir-parent.has-active .workdir-status-icon {
   color: var(--marvis-text-secondary);
 }
 
-.workdir-item.active {
+/* A workdir selected with no terminal under it is the real focus, so it is the one parent
+   that does take the selected surface. */
+.workdir-parent.active:not(.has-active) {
   background: var(--marvis-el-selected);
   box-shadow: inset 2px 0 0 var(--marvis-accent);
+}
+
+.workdir-parent.active:not(.has-active) .workdir-status-icon {
+  color: var(--marvis-accent);
+}
+
+/* The left bar of a terminal says what it is doing, whether or not it is selected.
+   Running is blue (softened when the row is not the selected one, so a long list of live shells
+   does not shout), an error is red at full strength, and an idle terminal has no bar. */
+.workdir-child {
+  --row-bar: transparent;
+  box-shadow: inset 2px 0 0 var(--row-bar);
+}
+
+.workdir-child.tone-running {
+  --row-bar: color-mix(in srgb, var(--marvis-accent) 45%, transparent);
+}
+
+.workdir-child.tone-running.active {
+  --row-bar: var(--marvis-accent);
+}
+
+.workdir-child.tone-error {
+  --row-bar: var(--marvis-danger-fg);
 }
 
 .workdir-select {
@@ -931,16 +1092,12 @@ const agentTitle = computed(() =>
   opacity: 1;
 }
 
-/* Make room under the overlay so a long title ellipsizes instead of running
-   beneath the icons. The strip is two 24px icons and their gap, plus a gutter;
-   a repo root with archived worktrees carries a third, and reserves its own. */
-.workdir-item:hover .workdir-select {
-  padding-right: 54px;
+/* Make room under the overlay so a long title ellipsizes instead of running beneath the icon.
+   Every row that has an action has exactly one, so the gutter is one 24px icon plus a margin. */
+.workdir-item.has-action:hover .workdir-select,
+.workdir-child:hover .workdir-select {
+  padding-right: 30px;
   transition: padding-right 0.12s ease;
-}
-
-.workdir-item.has-three-actions:hover .workdir-select {
-  padding-right: 80px;
 }
 
 .workdir-action {
@@ -1057,10 +1214,10 @@ const agentTitle = computed(() =>
   overflow: hidden;
 }
 
-/* The head never gives way: it is the same width on every branch of a repo, so shrinking it only
-   throws away room the tail could have used. The cap is in characters rather than in percent of
-   the row, because it is a budget for a prefix: it clears the ticket prefixes in use, and a
-   prefix long enough to miss it is cut with an ellipsis instead of taking the row. */
+/* The head never gives way: it is the kind of branch (`bug/…`, `feat/…`), short and constant, so
+   shrinking it only throws away room the tail could have used. The cap is in characters rather
+   than in percent of the row, because it is a budget for a prefix: a prefix long enough to miss
+   it is cut with an ellipsis instead of taking the row. */
 .workdir-name-head {
   flex: 0 0 auto;
   max-width: 18ch;
@@ -1104,8 +1261,6 @@ const agentTitle = computed(() =>
   color: var(--marvis-text);
 }
 
-/* A program running in a terminal, in the same right-hand slot and dimmed like the counts:
-   it is context for the row's name, not the thing the row is for. */
 /* The rename field takes the row's own type so the text does not jump when it appears. */
 .workdir-rename {
   min-width: 0;
