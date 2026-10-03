@@ -4,19 +4,14 @@
    `>`, the formatter rewrites that to `/>`. The formatter owns it, as in the other panes that
    hold a field. */
 /* eslint-disable vue/html-self-closing */
+import type { Component } from "vue";
 import { computed, nextTick, onUnmounted, ref, shallowRef, toRef } from "vue";
 import {
   ArchiveRestore as ArchiveRestoreIcon,
   Ellipsis as EllipsisIcon,
-  Folder as FolderIcon,
-  FolderGit2 as FolderGit2Icon,
   FolderMinus as FolderMinusIcon,
-  FolderX as FolderXIcon,
-  GitBranch as GitBranchIcon,
   GitBranchPlus as GitBranchPlusIcon,
-  House as HouseIcon,
   Plus as PlusIcon,
-  SquareTerminal as SquareTerminalIcon,
   X as XIcon,
 } from "@lucide/vue";
 import {
@@ -27,9 +22,10 @@ import {
   DropdownMenuTrigger,
 } from "reka-ui";
 import type { ArchivedCheckout, Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
-import { sessionTitle, workdirTitle } from "../domain/workspace";
+import { sessionTitle, workdirIconKind, workdirTitle } from "../domain/workspace";
 import type { AgentHeadline } from "../presentation/agent-sessions";
 import { useDiffStats } from "../presentation/diff-stats";
+import { WORKDIR_ICONS } from "../presentation/workdir-icons";
 
 defineOptions({ name: "FolderSidebar" });
 
@@ -339,21 +335,6 @@ function chooseDestination(sessionId: string, targetCheckoutId: string) {
 /** The one program in front of a shell that is also an agent, and so owns the row's agent line. */
 const AGENT_APP = "opencode";
 
-/** The icon roles a workdir row can ask for, resolved to a real lucide component. */
-const icons = {
-  /** A repo root: a folder that is also a Git directory. */
-  git: FolderGit2Icon,
-  /** A worktree is a branch checked out in a directory of its own, not a fork of anything. */
-  worktree: GitBranchIcon,
-  folder: FolderIcon,
-  home: HouseIcon,
-  /** The directory is gone: a folder with a cross, painted in the disabled colour by the row. */
-  missing: FolderXIcon,
-  terminal: SquareTerminalIcon,
-};
-
-type IconKind = keyof typeof icons;
-
 /**
  * What the terminal is doing, as the row's left bar paints it: blue while it runs, red when it
  * ended badly, and no bar at all when it is simply idle or finished cleanly.
@@ -392,7 +373,8 @@ interface Workdir {
   deletions?: number;
   /** What is wrong with this workdir, if anything (E.4). */
   error?: string;
-  kind: IconKind;
+  /** The glyph the row wears: the same one the titlebar's crumb for this checkout wears. */
+  icon: Component;
   /**
    * Worktrees can be removed; repo roots cannot. Everything that acts on the repo as a whole
    * (add a worktree, restore archived ones, take it off the panel) lives in the group header,
@@ -548,15 +530,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     // The one failure that belongs to a single workdir (E.4): it names the checkout whose
     // directory is gone, so it belongs in that row and not in a toast about the window.
     error: checkout.isMissing ? "Directory missing" : undefined,
-    kind: checkout.isMissing
-      ? "missing"
-      : checkout.id === props.homeCheckoutId
-        ? "home"
-        : !isGit
-          ? "folder"
-          : checkout.isPrimary
-            ? "git"
-            : "worktree",
+    icon: WORKDIR_ICONS[workdirIconKind(repo, checkout, props.homeCheckoutId)],
     worktree: isGit && !checkout.isPrimary,
     missing: checkout.isMissing,
     home: checkout.id === props.homeCheckoutId,
@@ -722,7 +696,7 @@ const agentTitle = computed(() =>
                 :title="workdirTooltip(workdir.checkout)"
                 @click="!workdir.missing && emit('selectCheckout', workdir.checkout.id, hasChanges(workdir))"
               >
-                <component :is="icons[workdir.kind]" class="workdir-status-icon" aria-hidden="true" />
+                <component :is="workdir.icon" class="workdir-status-icon" aria-hidden="true" />
                 <div class="workdir-main">
                   <div class="workdir-title">
                     <!-- The name in two halves, so the ellipsis falls on the tail. The split is a
@@ -804,7 +778,7 @@ const agentTitle = computed(() =>
                      one: a control inside a control cannot be focused or read on its own. The
                      row keeps its shape because both are laid out the same way. -->
                 <div v-if="editingId === item.session.id" class="workdir-select">
-                  <component :is="icons.terminal" class="workdir-status-icon" aria-hidden="true" />
+                  <component :is="WORKDIR_ICONS.terminal" class="workdir-status-icon" aria-hidden="true" />
                   <div class="workdir-main">
                     <input
                       :ref="captureRenameField"
@@ -838,7 +812,7 @@ const agentTitle = computed(() =>
                   @keydown.shift.f10.prevent="item.destinations.length && openMoveMenu(item.session.id)"
                   @contextmenu.prevent="item.destinations.length && openMoveMenu(item.session.id)"
                 >
-                  <component :is="icons.terminal" class="workdir-status-icon" aria-hidden="true" />
+                  <component :is="WORKDIR_ICONS.terminal" class="workdir-status-icon" aria-hidden="true" />
                   <div class="workdir-main">
                     <div class="workdir-title">
                       <span class="workdir-name">{{ item.title }}</span>

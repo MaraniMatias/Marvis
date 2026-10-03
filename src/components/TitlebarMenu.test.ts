@@ -4,6 +4,7 @@
 import { mount } from "@vue/test-utils";
 import { describe, expect, it, vi } from "vitest";
 import type { TitlebarMenuItem, TitlebarMenuSection } from "../domain/titlebar-menu";
+import { WORKDIR_ICONS } from "../presentation/workdir-icons";
 
 // reka-ui is stubbed the way App.test.ts stubs it: the keyboard and the focus handling are the
 // library's to get right, so what is under test here is what this component does with a menu.
@@ -96,9 +97,20 @@ describe("TitlebarMenu", () => {
 
     expect(trigger.text()).toBe("Marvis");
     expect(trigger.attributes("title")).toBe("Marvis");
-    // No chip, no chevron: the crumb is a line of text that happens to open a list.
+    // No chip, no chevron: the crumb is a line of text that happens to open a list, and the
+    // glyph that stands for what it names is a thing it is given, not one it draws.
     expect(trigger.find("svg").exists()).toBe(false);
     expect(trigger.classes()).not.toContain("marvis-control");
+  });
+
+  it("wears the glyph it is given ahead of the name, and nothing when it is given none", () => {
+    const trigger = mountMenu({ testid: "repo-crumb", icon: WORKDIR_ICONS.git }).get('[data-testid="repo-crumb"]');
+
+    // The icon is the one the sidebar gives the same row, so the line is that panel sideways.
+    expect(trigger.findComponent(WORKDIR_ICONS.git).exists()).toBe(true);
+    // The name is still what the crumb reads as, glyph and all, so the glyph adds nothing to it.
+    expect(trigger.text()).toBe("Marvis");
+    expect(mountMenu({ testid: "repo-crumb" }).get('[data-testid="repo-crumb"]').find("svg").exists()).toBe(false);
   });
 
   it("marks the current row with a check and nothing else", () => {

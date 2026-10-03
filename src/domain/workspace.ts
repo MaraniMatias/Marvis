@@ -104,6 +104,36 @@ export function sessionTitle(session: Session, status?: TerminalSessionStatus | 
   return status?.terminalTitle || status?.foregroundApp || session.name;
 }
 
+/**
+ * What stands for a checkout, as one word, wherever a checkout is drawn.
+ *
+ * The sidebar row that lists a workdir and the rule that names it are one thing split in two, so
+ * the word is written here and the row asks for it: nothing about the glyph belongs to the panel
+ * that happens to be showing it. `terminal` is in the set because the row of a session asks for
+ * one too, but it is not what a checkout answers: it names an item open inside a workdir, not the
+ * workdir itself.
+ */
+export type WorkdirIconKind = "git" | "worktree" | "folder" | "home" | "missing" | "terminal";
+
+/**
+ * Which icon a checkout wears: a directory that is gone before anything else, the home one, a
+ * plain folder, a repo root, and a worktree of that root.
+ *
+ * The order is the whole rule. A missing directory is still the row it always was, and the home
+ * one is still the place rather than the worktree of a repository, so neither of them can be
+ * decided further down.
+ */
+export function workdirIconKind(
+  repo: Repo | null,
+  checkout: Checkout,
+  homeCheckoutId?: string | null,
+): Exclude<WorkdirIconKind, "terminal"> {
+  if (checkout.isMissing) return "missing";
+  if (checkout.id === homeCheckoutId) return "home";
+  if (repo?.kind !== "git") return "folder";
+  return checkout.isPrimary ? "git" : "worktree";
+}
+
 export function repoIdForPath(canonicalPath: string): string {
   return `repo:${canonicalPath}`;
 }

@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type { Component } from "vue";
 import { computed, ref } from "vue";
 import {
   DropdownMenuContent,
@@ -28,12 +29,19 @@ const props = withDefaults(
     /** When set, the menu opens on a search field over the rows. */
     searchPlaceholder?: string;
     align?: "start" | "end";
+    /**
+     * The glyph that stands for what the crumb names, drawn ahead of the name.
+     *
+     * It is the one the sidebar gives the same row, so the line reads as that panel sideways
+     * instead of as a row of text that happens to have one icon in it.
+     */
+    icon?: Component;
     /** Where this crumb sits in the line, which is what says how bright it reads and what it
      *  gives up when the line runs out of room. */
     crumb?: "workdir" | "branch" | "item";
     testid?: string;
   }>(),
-  { searchPlaceholder: undefined, align: "start", crumb: "item", testid: undefined },
+  { searchPlaceholder: undefined, align: "start", icon: undefined, crumb: "item", testid: undefined },
 );
 
 const emit = defineEmits<{ "update:open": [boolean] }>();
@@ -78,6 +86,7 @@ function onOpenChange(open: boolean) {
       :data-testid="testid"
       :title="label"
     >
+      <component :is="icon" v-if="icon" class="icon-xs crumb-icon" aria-hidden="true" />
       <span class="truncate">{{ label }}</span>
     </DropdownMenuTrigger>
     <DropdownMenuPortal>

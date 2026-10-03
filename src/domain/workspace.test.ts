@@ -8,11 +8,35 @@ import {
   selectCheckout,
   selectSession,
   sessionTitle,
+  workdirIconKind,
   type Repo,
   type Session,
 } from "./workspace";
 
 const openedFolder = (path: string, name = "repo") => ({ path, name });
+
+/** A repo with a root and one worktree, which is the shape the icon rule is asked about. */
+function gitRepo(): Repo {
+  const repoId = "repo:/work/app";
+  return {
+    id: repoId,
+    kind: "git",
+    name: "app",
+    root: "/work/app",
+    checkouts: [
+      createCheckout({ repoId, path: "/work/app", canonicalPath: "/work/app", isPrimary: true, branch: "main" }),
+      createCheckout({
+        repoId,
+        path: "/work/app-feature",
+        canonicalPath: "/work/app-feature",
+        isPrimary: false,
+        branch: "feature",
+      }),
+    ],
+    createdAt: "2026-01-01T00:00:00Z",
+    lastOpenedAt: "2026-01-01T00:00:00Z",
+  };
+}
 
 describe("workspace domain", () => {
   it("models a plain directory as one primary checkout with path-based identity", () => {
@@ -196,5 +220,32 @@ describe("workspace domain", () => {
     expect(sessionTitle(shell, { state: "running", foregroundProcess: true, foregroundApp: "nvim" })).toBe("nvim");
     expect(sessionTitle(shell, { state: "running", foregroundProcess: false })).toBe("zsh");
     expect(sessionTitle(shell)).toBe("zsh");
+  });
+
+  it("gives a checkout the icon its row in the sidebar wears", () => {
+    const git = gitRepo();
+    const root = git.checkouts[0]!;
+    const worktree = git.checkouts[1]!;
+    const plain = createPlainRepo(openedFolder("/work/notes", "notes"), "2026-01-01T00:00:00Z");
+
+    // A plain directory is a folder, a repo root is a Git one, and anything else in a repo is a
+    // branch checked out in a directory of its own.
+    expect(workdirIconKind(plain, plain.checkouts[0]!)).toBe("folder");
+    expect(workdirIconKind(git, root)).toBe("git");
+    expect(workdirIconKind(git, worktree)).toBe("worktree");
+    // The titlebar's first crumb falls back to the folder name when there is no repo to ask.
+    expect(workdirIconKind(null, root)).toBe("folder");
+  });
+
+  it("decides the missing and the home one before anything the repo says", () => {
+    const git = gitRepo();
+    const worktree = git.checkouts[1]!;
+
+    // A directory that is gone is still the row it was, and the home one is still the place, so
+    // neither of them can be answered further down the order.
+    expect(workdirIconKind(git, { ...worktree, isMissing: true }, worktree.id)).toBe("missing");
+    expect(workdirIconKind(git, { ...worktree, isMissing: true })).toBe("missing");
+    expect(workdirIconKind(git, worktree, worktree.id)).toBe("home");
+    expect(workdirIconKind(git, git.checkouts[0]!, git.checkouts[0]!.id)).toBe("home");
   });
 });

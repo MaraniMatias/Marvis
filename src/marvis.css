@@ -698,6 +698,26 @@
   flex: 0 0 auto;
 }
 
+/* The glyph a crumb wears ahead of its name: the one the sidebar gives the same row, in the size
+   and the faint colour the panel gives it. Its space is a margin rather than a gap on the crumb
+   because the control is shared with the toolbar's grammar picker, which has no icon to space
+   from, and because the file crumb wears the same one inside a row of its own. It does not
+   shrink: the name beside it is what gives way. */
+.crumb-icon {
+  color: var(--marvis-text-faint);
+  margin-right: 4px;
+  flex-shrink: 0;
+}
+
+/* The file crumb is a glyph and a run of steps on one line, and the file's own icon is a block,
+   which inside a run of text would put it on a line of its own. A step is a row of its own so
+   the icon can sit on the step that names the file; the separators keep the run and the space
+   they carry everywhere else in the line. */
+.crumb-step {
+  display: inline-flex;
+  align-items: center;
+}
+
 /* The item crumb is the one name with no length of its own: it is whatever the PTY last set — a
    prompt, an editor's project line — and a line is bounded by its share of the window, so an
    uncapped crumb would run past it and over the gear at the end. The ends keep their text, which
