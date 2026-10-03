@@ -1414,15 +1414,14 @@ function reportWarning(message: string) {
                 <span v-if="index > 0" aria-hidden="true" class="crumb-sep">/</span>
                 <!-- The last step is the file, so that is the one wearing its icon: the rest of
                      the path is directories, and an icon at the head of the line would name the
-                     first of them rather than the thing that is open. -->
-                <span class="crumb-step"
-                  ><FileIcon
-                    v-if="index === drawnSteps.length - 1 && itemCrumbFile"
-                    class="icon-xs crumb-icon"
-                    :name="itemCrumbFile.name"
-                    kind="file"
-                  />{{ step }}</span
-                >
+                     first of them rather than the thing that is open.
+
+                     The glyph is a box of its own beside the name rather than inside it, because
+                     a box holding both would be a flex row, and a flex row takes its baseline
+                     from its first item: the step would sit a line below the steps around it. -->
+                <span v-if="index === drawnSteps.length - 1 && itemCrumbFile" class="crumb-icon-slot"
+                  ><FileIcon class="icon-xs crumb-icon" :name="itemCrumbFile.name" kind="file" /></span
+                >{{ step }}
               </template>
             </span>
             <!-- The path at the width it wants, glyph and all: the crumb weighs this probe against
@@ -1437,12 +1436,8 @@ function reportWarning(message: string) {
               aria-hidden="true"
               class="path-probe"
               >{{ activeViewLabel
-              }}<span class="crumb-step"
-                ><FileIcon
-                  v-if="itemCrumbFile"
-                  class="icon-xs crumb-icon"
-                  :name="itemCrumbFile.name"
-                  kind="file" /></span
+              }}<span v-if="itemCrumbFile" class="crumb-icon-slot"
+                ><FileIcon class="icon-xs crumb-icon" :name="itemCrumbFile.name" kind="file" /></span
             ></span>
           </template>
         </template>

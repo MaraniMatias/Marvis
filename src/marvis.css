@@ -715,13 +715,14 @@
   flex-shrink: 0;
 }
 
-/* The file crumb is a glyph and a run of steps on one line, and the file's own icon is a block,
-   which inside a run of text would put it on a line of its own. A step is a row of its own so
-   the icon can sit on the step that names the file; the separators keep the run and the space
-   they carry everywhere else in the line. */
-.crumb-step {
+/* The file crumb's icon is a box of its own beside the name it belongs to. It has to be a box
+   that can take part in the line, because the file's own icon is a block, and a block inside a
+   run of text would push the name onto the line below. It is inline-flex rather than inline so
+   that the glyph is not stretched, and it takes no part in the baseline: it holds the icon and
+   nothing else, so the run of steps keeps the one baseline it has always had. */
+.crumb-icon-slot {
   display: inline-flex;
-  align-items: center;
+  vertical-align: baseline;
 }
 
 /* The item crumb is the one name with no length of its own: it is whatever the PTY last set — a

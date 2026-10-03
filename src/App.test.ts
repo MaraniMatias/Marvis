@@ -798,11 +798,13 @@ describe("App UI integration", () => {
       await wrapper.get('[data-testid="open-nested-file"]').trigger("click");
       await flushPromises();
 
-      // The directories go bare and the file is the step that wears it: an icon at the head of
-      // the path would name the first directory rather than the thing that is open.
-      const steps = wrapper.get('[data-testid="item-crumb"]').findAll(".crumb-step");
-      expect(steps.map((step) => step.findComponent(FileIcon).exists())).toEqual([false, false, true]);
-      expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("src/lib/one.ts");
+      // The one icon in the crumb, and it is the last thing before the file it names: an icon at
+      // the head of the path would name the first directory rather than what is open.
+      const crumb = wrapper.get('[data-testid="item-crumb"]');
+      expect(crumb.findAll(".crumb-icon")).toHaveLength(1);
+      // The glyph stands immediately before the name it belongs to, and after the separator.
+      expect(crumb.element.querySelector(".crumb-icon-slot")?.nextSibling?.textContent).toBe("one.ts");
+      expect(crumb.text()).toBe("src/lib/one.ts");
       // The probe is the crumb at the width it wants, glyph included: a path measured without it
       // would run past the line before it was told to give anything up.
       expect(wrapper.get('[data-testid="path-probe"]').findComponent(FileIcon).exists()).toBe(true);
