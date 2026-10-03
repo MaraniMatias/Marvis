@@ -7,9 +7,14 @@
 import { computed, nextTick, onUnmounted, ref, shallowRef, toRef } from "vue";
 import {
   ArchiveRestore as ArchiveRestoreIcon,
+  Ellipsis as EllipsisIcon,
   Folder as FolderIcon,
   FolderGit2 as FolderGit2Icon,
-  GitFork as GitForkIcon,
+  FolderMinus as FolderMinusIcon,
+  FolderX as FolderXIcon,
+  GitBranch as GitBranchIcon,
+  GitBranchPlus as GitBranchPlusIcon,
+  House as HouseIcon,
   Plus as PlusIcon,
   SquareTerminal as SquareTerminalIcon,
   X as XIcon,
@@ -105,6 +110,40 @@ function cancelRename() {
 
 /** The one session whose destination list is open. */
 const moveMenuFor = ref<string | null>(null);
+
+/** The one group whose actions menu is open. */
+const groupMenuFor = ref<string | null>(null);
+
+function openGroupMenu(groupId: string) {
+  moveMenuFor.value = null;
+  groupMenuFor.value = groupId;
+  // Capture phase, so a press on anything else closes the menu before that thing reacts to it.
+  window.addEventListener("pointerdown", onGroupMenuOutside, true);
+  window.addEventListener("keydown", onGroupMenuKeydown);
+}
+
+function closeGroupMenu() {
+  groupMenuFor.value = null;
+  window.removeEventListener("pointerdown", onGroupMenuOutside, true);
+  window.removeEventListener("keydown", onGroupMenuKeydown);
+}
+
+function toggleGroupMenu(groupId: string) {
+  if (groupMenuFor.value === groupId) closeGroupMenu();
+  else openGroupMenu(groupId);
+}
+
+function onGroupMenuOutside(event: PointerEvent) {
+  // The button and the list are inside the menu's own world: pressing them is not "outside".
+  if ((event.target as HTMLElement | null)?.closest(".group-menu, .group-more")) return;
+  closeGroupMenu();
+}
+
+function onGroupMenuKeydown(event: KeyboardEvent) {
+  if (event.key !== "Escape") return;
+  event.preventDefault();
+  closeGroupMenu();
+}
 
 interface PointerDrag {
   session: Session;
@@ -289,6 +328,7 @@ function autoScroll() {
 
 onUnmounted(() => {
   finishPointerDrag();
+  closeGroupMenu();
   if (suppressedClickTimer !== undefined) window.clearTimeout(suppressedClickTimer);
 });
 
@@ -308,9 +348,14 @@ const AGENT_APP = "opencode";
 
 /** The icon roles a workdir row can ask for, resolved to a real lucide component. */
 const icons = {
+  /** A repo root: a folder that is also a Git directory. */
   git: FolderGit2Icon,
-  worktree: GitForkIcon,
+  /** A worktree is a branch checked out in a directory of its own, not a fork of anything. */
+  worktree: GitBranchIcon,
   folder: FolderIcon,
+  home: HouseIcon,
+  /** The directory is gone: a folder with a cross, painted in the disabled colour by the row. */
+  missing: FolderXIcon,
   terminal: SquareTerminalIcon,
 };
 
@@ -382,8 +427,13 @@ interface Group {
   git: boolean;
   home: boolean;
   missing: boolean;
-  /** How many worktrees this repo archived. The restore action only exists while this is above zero. */
+  /** How many worktrees this repo archived. */
   archived: number;
+  /** What the header menu offers. A group with none of these has no menu at all. */
+  canAdd: boolean;
+  canRestore: boolean;
+  canClose: boolean;
+  hasMenu: boolean;
   workdirs: Workdir[];
 }
 
@@ -404,16 +454,27 @@ const archivedByRepo = computed(() => {
 const groups = computed<Group[]>(() =>
   props.repos.map((repo) => {
     const root = repo.checkouts.find((checkout) => checkout.isPrimary) ?? repo.checkouts[0] ?? null;
+    const git = repo.kind === "git";
+    const missing = root?.isMissing ?? false;
+    const home = root !== null && root.id === props.homeCheckoutId;
+    const archived = archivedByRepo.value.get(repo.id) ?? 0;
+    const canAdd = git && !missing && root !== null;
+    const canRestore = git && !missing && root !== null && archived > 0;
+    const canClose = !home && root !== null;
     return {
       id: repo.id,
       label: repo.name,
       path: root?.path ?? "",
       shortPath: shortPath(root?.path ?? ""),
       root,
-      git: repo.kind === "git",
-      home: root !== null && root.id === props.homeCheckoutId,
-      missing: root?.isMissing ?? false,
-      archived: archivedByRepo.value.get(repo.id) ?? 0,
+      git,
+      home,
+      missing,
+      archived,
+      canAdd,
+      canRestore,
+      canClose,
+      hasMenu: canAdd || canRestore || canClose,
       workdirs: repo.checkouts.map((checkout) => toWorkdir(repo, checkout)),
     };
   }),
@@ -429,8 +490,20 @@ function shortPath(path: string): string {
   return parts.length <= 2 ? path : `…/${parts.slice(-2).join("/")}`;
 }
 
+/** Every header action closes the menu first, so the list never outlives the thing it chose. */
+function addWorktree(group: Group) {
+  closeGroupMenu();
+  if (group.root) emit("createWorktree", group.root.id);
+}
+
+function restoreArchived(group: Group) {
+  closeGroupMenu();
+  if (group.root) emit("restoreArchived", group.root.repoId);
+}
+
 /** A missing root is closed through its own event, since there is nothing on disk to close. */
 function closeGroup(group: Group) {
+  closeGroupMenu();
   if (!group.root) return;
   // Two literal calls rather than one with a computed event name: `emit` is overloaded per
   // event, and a union of names matches none of the overloads.
@@ -482,7 +555,15 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     // The one failure that belongs to a single workdir (E.4): it names the checkout whose
     // directory is gone, so it belongs in that row and not in a toast about the window.
     error: checkout.isMissing ? "Directory missing" : undefined,
-    kind: !isGit ? "folder" : checkout.isPrimary ? "git" : "worktree",
+    kind: checkout.isMissing
+      ? "missing"
+      : checkout.id === props.homeCheckoutId
+        ? "home"
+        : !isGit
+          ? "folder"
+          : checkout.isPrimary
+            ? "git"
+            : "worktree",
     worktree: isGit && !checkout.isPrimary,
     missing: checkout.isMissing,
     home: checkout.id === props.homeCheckoutId,
@@ -553,50 +634,69 @@ const agentTitle = computed(() =>
          content, so a row whose title and counts end at the edge are read through it. -->
     <div ref="sidebarScroll" class="min-h-0 flex-1 overflow-y-auto pr-2">
       <div v-for="group in groups" :key="group.id" class="workdir-group">
-        <!-- The header is where the repo as a whole is acted on. Adding a worktree or taking the
-             repo off the panel used to sit on the `main` row, which made them read as actions on
-             that branch; here they sit on the thing they actually change. -->
-        <div class="group-heading" :class="{ 'has-restore': group.git && !group.missing && group.archived > 0 }">
+        <!-- The header is where the repo as a whole is acted on, and all of it lives in one menu:
+             the three dots, or a right click anywhere on the header. Adding a worktree is the only
+             frequent one, but a button that sat two pixels from "remove" made the two easy to
+             confuse, so the rare and destructive actions are one click further away. -->
+        <div
+          class="group-heading"
+          :class="{ 'menu-open': groupMenuFor === group.id }"
+          @contextmenu.prevent="group.hasMenu && openGroupMenu(group.id)"
+        >
           <div class="group-heading-text" :title="group.path || group.label">
             <span class="group-name">{{ group.label }}</span>
             <span v-if="group.shortPath" class="group-path">{{ group.shortPath }}</span>
           </div>
 
-          <div v-if="group.root" class="group-actions">
-            <!-- Only a repo root has worktrees to put back, and only while it has any. -->
-            <button
-              v-if="group.git && !group.missing && group.archived > 0"
-              type="button"
-              class="workdir-action"
-              :aria-label="`Restore ${group.archived} archived worktree${group.archived === 1 ? '' : 's'} from ${group.label}`"
-              title="Restore archived worktrees"
-              @click="emit('restoreArchived', group.root.repoId)"
-            >
-              <ArchiveRestoreIcon class="icon-xs" aria-hidden="true" />
-            </button>
-            <button
-              v-if="group.git && !group.missing"
-              type="button"
-              class="workdir-action"
-              :aria-label="`Add worktree to ${group.label}`"
-              title="Add worktree"
-              @click="emit('createWorktree', group.root.id)"
-            >
-              <PlusIcon class="icon-xs" aria-hidden="true" />
-            </button>
+          <button
+            v-if="group.hasMenu"
+            type="button"
+            class="workdir-action group-more"
+            :aria-label="`Actions for ${group.label}`"
+            aria-haspopup="menu"
+            :aria-expanded="groupMenuFor === group.id"
+            title="More actions"
+            @click="toggleGroupMenu(group.id)"
+          >
+            <EllipsisIcon class="icon-xs" aria-hidden="true" />
+          </button>
+
+          <!-- Hangs below the header rather than pushing the rows, like the move menu. -->
+          <ul
+            v-if="group.hasMenu && groupMenuFor === group.id"
+            class="marvis-menu group-menu"
+            role="menu"
+            :aria-label="`Actions for ${group.label}`"
+          >
+            <li v-if="group.canAdd" role="none">
+              <button type="button" role="menuitem" class="menu-item select-none text-left" @click="addWorktree(group)">
+                <GitBranchPlusIcon class="icon-xs" aria-hidden="true" />
+                <span class="menu-item-label">New worktree</span>
+              </button>
+            </li>
+            <!-- Only while there is something to bring back, and the count says how much. -->
+            <li v-if="group.canRestore" role="none">
+              <button
+                type="button"
+                role="menuitem"
+                class="menu-item select-none text-left"
+                :aria-label="`Restore ${group.archived} archived worktree${group.archived === 1 ? '' : 's'}`"
+                @click="restoreArchived(group)"
+              >
+                <ArchiveRestoreIcon class="icon-xs" aria-hidden="true" />
+                <span class="menu-item-label">Restore archived worktrees</span>
+                <span class="group-menu-count">{{ group.archived }}</span>
+              </button>
+            </li>
             <!-- Taking the repo off the panel takes its whole list with it. Nothing here deletes a
                  file, and the home directory is the one thing that cannot be closed. -->
-            <button
-              v-if="!group.home"
-              type="button"
-              class="workdir-action"
-              :aria-label="`Remove from list: ${group.label}`"
-              :title="group.missing ? 'Remove from list' : 'Remove from panel'"
-              @click="closeGroup(group)"
-            >
-              <XIcon class="icon-xs" aria-hidden="true" />
-            </button>
-          </div>
+            <li v-if="group.canClose" role="none" class="group-menu-danger">
+              <button type="button" role="menuitem" class="menu-item select-none text-left" @click="closeGroup(group)">
+                <FolderMinusIcon class="icon-xs" aria-hidden="true" />
+                <span class="menu-item-label">Remove from panel</span>
+              </button>
+            </li>
+          </ul>
         </div>
 
         <template v-for="workdir in group.workdirs" :key="workdir.checkout.id">
@@ -879,7 +979,7 @@ const agentTitle = computed(() =>
 }
 
 /* Group header: the repo's name at a size and weight that read as a section, its location
-   underneath, and the actions that act on the whole repo on the right, on hover. */
+   underneath, and one menu button on the right that appears on hover. */
 .group-heading {
   position: relative;
   display: flex;
@@ -915,32 +1015,94 @@ const agentTitle = computed(() =>
   white-space: nowrap;
 }
 
-/* Two 24px actions and their gap, plus a gutter; a repo with archived worktrees carries a third. */
+/* One 24px button, so the text only gives up a gutter for it. */
 .group-heading:hover .group-heading-text,
-.group-heading:focus-within .group-heading-text {
-  padding-right: 56px;
+.group-heading:focus-within .group-heading-text,
+.group-heading.menu-open .group-heading-text {
+  padding-right: 30px;
 }
 
-.group-heading.has-restore:hover .group-heading-text,
-.group-heading.has-restore:focus-within .group-heading-text {
-  padding-right: 82px;
-}
-
-.group-actions {
+.group-more {
   position: absolute;
   top: 50%;
   right: 8px;
   transform: translateY(-50%);
-  display: flex;
-  align-items: center;
-  gap: 2px;
   opacity: 0;
   transition: opacity 0.12s ease;
 }
 
-.group-heading:hover .group-actions,
-.group-heading:focus-within .group-actions {
+.group-heading:hover .group-more,
+.group-heading:focus-within .group-more,
+.group-heading.menu-open .group-more {
   opacity: 1;
+}
+
+/* The button stays lit while its menu is open, so the menu reads as belonging to it. */
+.group-heading.menu-open .group-more {
+  background: var(--marvis-control-hover);
+  color: var(--marvis-text);
+}
+
+/* Hangs below the header, out of flow, and does not fade with a hover: a menu that disappears
+   when the pointer leaves the header cannot be read. */
+.group-menu {
+  position: absolute;
+  top: 100%;
+  right: 8px;
+  z-index: 20;
+  min-width: 224px;
+  margin: 0;
+  padding: 4px 0;
+  list-style: none;
+  /* The surface is declared here rather than borrowed from `marvis-menu`, which on this panel
+     turned out to draw no background: without one, the rows behind the list show through it. */
+  background: var(--marvis-control-bg);
+  border: 1px solid var(--marvis-control-hover);
+  box-shadow: 0 6px 18px rgb(0 0 0 / 40%);
+}
+
+.group-menu .menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  padding: 6px 10px;
+  background: transparent;
+  border: none;
+  color: var(--marvis-text);
+  font: inherit;
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.group-menu .menu-item:hover,
+.group-menu .menu-item:focus-visible {
+  background: var(--marvis-control-hover);
+}
+
+.group-menu .menu-item .icon-xs {
+  flex-shrink: 0;
+  color: var(--marvis-text-secondary);
+}
+
+.group-menu .menu-item-label {
+  flex: 1;
+}
+
+.group-menu-count {
+  color: var(--marvis-text-faint);
+  font-size: 0.6875rem;
+}
+
+/* The destructive action is set apart by a rule, and is the only place red appears on hover. */
+.group-menu li + .group-menu-danger {
+  margin-top: 4px;
+  padding-top: 4px;
+  border-top: 1px solid var(--marvis-control-hover);
+}
+
+.group-menu-danger .menu-item:hover {
+  color: var(--marvis-danger-fg);
 }
 
 /* Row wrapper: keeps the hover/active surface, the select button fills it */
