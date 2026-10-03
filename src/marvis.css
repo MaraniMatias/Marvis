@@ -704,37 +704,33 @@
    from, and because the file crumb wears the same one inside a row of its own. It does not
    shrink: the name beside it is what gives way.
 
-   It stands on the text's baseline rather than in the middle of the line box. The crumb line is
-   24px tall and the type in it only inks 15.5 of them, so a glyph centred in the box hangs
-   below the words instead of beside them; on the baseline its top meets the ascenders and its
-   bottom meets the line they sit on, which is where a glyph belongs.
-
-   The row it sits in has to line itself up on that same baseline, because a flex row takes its
-   cross axis from `align-items` and not from what is inside it: with the row centred and only
-   the glyph on the baseline, the two are measured against different lines and the glyph ends up
-   short of the text by a couple of pixels. */
+   It is centred in the line box, the same line the name is centred in and the same one the
+   sidebar centres its row icons in: a glyph drawn on the baseline instead would hang its whole
+   height above it and read a couple of pixels high beside a name whose own middle sits well
+   below its baseline. Centring is not a compromise here, it is what the sidebar already does —
+   the two are meant to be the same glyph beside the same words. */
 .crumb-icon {
-  align-self: baseline;
+  align-self: center;
   color: var(--marvis-text-faint);
   margin-right: 4px;
   flex-shrink: 0;
 }
 
-/* A crumb that wears a glyph lines its name up on the same baseline, which is what puts the two
-   on one line. The rule is here and not on `.text-menu-control` because that control is shared
-   with the toolbar's grammar picker, which has no glyph and is better off centred. */
-.crumb-with-icon {
-  align-items: baseline;
-}
-
 /* The file crumb's icon is a box of its own beside the name it belongs to. It has to be a box
    that can take part in the line, because the file's own icon is a block, and a block inside a
-   run of text would push the name onto the line below. It is inline-flex rather than inline so
-   that the glyph is not stretched, and it takes no part in the baseline: it holds the icon and
-   nothing else, so the run of steps keeps the one baseline it has always had. */
+   run of text would push the name onto the line below.
+
+   It sits `middle` and not on the baseline, for the same reason the crumb menus centre their
+   glyph instead of standing it on one: this box is only as tall as the glyph inside it, so
+   lining it up with the baseline would put that whole height above the line and read a couple of
+   pixels high beside a name whose own middle sits lower. */
 .crumb-icon-slot {
   display: inline-flex;
-  vertical-align: baseline;
+  vertical-align: middle;
+  /* Half a pixel, which is what is left between `middle` and where the crumb menus' glyphs land:
+     those are centred in a flex row and this box is centred on the text's x-height, and the two
+     middles are half a pixel apart at this size. */
+  margin-bottom: 1px;
 }
 
 /* The item crumb is the one name with no length of its own: it is whatever the PTY last set — a

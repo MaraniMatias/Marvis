@@ -113,20 +113,6 @@ describe("TitlebarMenu", () => {
     expect(mountMenu({ testid: "repo-crumb" }).get('[data-testid="repo-crumb"]').find("svg").exists()).toBe(false);
   });
 
-  it("lines the name up on the glyph's own baseline, and only when it wears one", () => {
-    // A flex row takes its cross axis from `align-items` and not from what is inside it, so a
-    // crumb that wears a glyph has to say so: with the row centred and only the glyph on the
-    // baseline, the two are measured against different lines and the glyph floats above the name.
-    expect(
-      mountMenu({ testid: "worktree-crumb", icon: WORKDIR_ICONS.worktree })
-        .get('[data-testid="worktree-crumb"]')
-        .classes(),
-    ).toContain("crumb-with-icon");
-    expect(mountMenu({ testid: "worktree-crumb" }).get('[data-testid="worktree-crumb"]').classes()).not.toContain(
-      "crumb-with-icon",
-    );
-  });
-
   it("marks the current row with a check and nothing else", () => {
     const wrapper = mountMenu();
 

@@ -82,7 +82,7 @@ function onOpenChange(open: boolean) {
   <DropdownMenuRoot :open="open" @update:open="onOpenChange">
     <DropdownMenuTrigger
       class="text-menu-control select-none"
-      :class="[`crumb-${crumb}`, crumb === 'item' && 'crumb-terminal', icon && 'crumb-with-icon']"
+      :class="[`crumb-${crumb}`, crumb === 'item' && 'crumb-terminal']"
       :data-testid="testid"
       :title="label"
     >
