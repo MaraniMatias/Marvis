@@ -5,8 +5,25 @@ import { Terminal } from "@xterm/xterm";
 import type { ITheme, IDisposable } from "@xterm/xterm";
 import { ligatureRanges } from "./ligature-joiner";
 
-/** The face shared by the terminal and editor and bundled in `src/assets/fonts`. */
-export const TERMINAL_FONT_FAMILY = '"Marvis Nerd Mono", monospace';
+/**
+ * The faces shared by the terminal and editor and bundled in `src/assets/fonts`, icons included.
+ *
+ * The icon face is in the list rather than behind the terminal's back because the atlas is
+ * rasterized per glyph from this string: a face that is not in it gets a tofu box or a borrowed
+ * face drawn at the cell width, and a statusline is mostly separators.
+ */
+export const TERMINAL_FONT_FAMILY = '"Marvis Nerd Mono", "Marvis Nerd Icons", monospace';
+
+/**
+ * A character from the icon face, asked for by name.
+ *
+ * The face carries nothing but icons, so the load has to say which one or it is never fetched:
+ * `document.fonts.load` asks the browser whether a face covers the given text, and with no text it
+ * asks about a space, which this face does not have. U+E0B0 is the powerline separator, the glyph
+ * drawn on more lines of a terminal than any other icon, and it is the character to keep when the
+ * icon set is ever trimmed.
+ */
+const ICON_PROBE = "\uE0B0";
 
 /**
  * The cell size the terminal draws at, which is the size it is drawn at whether or not the
@@ -131,13 +148,16 @@ export function createMarvisTerminal(fontSize = 16, cursorBlink = true, zoom = 1
 let terminalFonts: Promise<unknown> | undefined;
 
 /**
- * Both bundled weights, and the one thing on the path to a drawn terminal that is not the
+ * All three bundled faces, and the one thing on the path to a drawn terminal that is not the
  * terminal's own work.
  *
  * xterm.js cannot measure its grid against a face it does not have, so a panel that opens
  * before these land draws its first frame from the fallback and lays the columns out wrong.
  * The files are local, but they are not small, and parsing them is the part of opening a
- * terminal a person waits on without being able to see why.
+ * terminal a person waits on without being able to see why. The icon face is asked for on its
+ * own rather than through the family list above, because a list is not a request: it says where
+ * to look once a glyph turns up, and a glyph from the private use range only turns up in a
+ * session that has already drawn its first frame at the width the fallback gave it.
  *
  * The request goes out when the app starts rather than when a panel mounts, and the answer is
  * kept: a panel that mounts later awaits a promise that is already settled, so the wait is a
@@ -148,6 +168,7 @@ export function preloadTerminalFonts(): Promise<unknown> {
   terminalFonts ??= Promise.allSettled([
     document.fonts.load(`16px ${TERMINAL_FONT_FAMILY}`),
     document.fonts.load(`700 16px ${TERMINAL_FONT_FAMILY}`),
+    document.fonts.load(`16px "Marvis Nerd Icons"`, ICON_PROBE),
   ]);
   return terminalFonts;
 }

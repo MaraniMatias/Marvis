@@ -35,11 +35,13 @@ here still gets its generated notes.
   and an entry in the sidebar that looks alive. Closing a terminal whose process is still running
   still asks first.
 
-- **The terminal and editor share a bundled typeface.** Fira Code Nerd Font Mono is no longer
-  dependent on fonts installed on the machine; both surfaces use the same regular and bold faces.
-  The terminal waits for them before opening xterm, so the initial grid and glyph atlas are created
-  with the bundled font. This also addresses the reported selection-rendering inconsistency; visual
-  verification on the affected macOS setup is still needed.
+- **The terminal and editor share a bundled typeface, and its icons are a second family.** Neither
+  surface depends on fonts installed on the machine; both use the same regular and bold faces, and
+  a glyph from the private use range resolves to an icon family beside them. The terminal waits for
+  all three before opening xterm, so the initial grid and glyph atlas are created with the bundled
+  fonts. The icons used to be inside both text faces, which meant a face nobody reads was downloaded
+  and parsed twice: 4.6MB of TTF for what is now 1.1MB of woff2. This also addresses the reported
+  selection-rendering inconsistency; visual verification on the affected macOS setup is still needed.
 
 - **The terminal scrollbar is a choice.** It is hidden by default, which is what the terminal has
   always done; `Auto` shows it while you scroll and takes it away when you stop, and `Always` keeps

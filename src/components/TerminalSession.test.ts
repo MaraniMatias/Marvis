@@ -163,8 +163,9 @@ vi.mock("../lib/marvis-terminal", () => ({
   attachTerminalRenderer: terminalLib.attachTerminalRenderer,
   preloadTerminalFonts: () =>
     Promise.allSettled([
-      document.fonts.load('16px "Marvis Nerd Mono", monospace'),
-      document.fonts.load('700 16px "Marvis Nerd Mono", monospace'),
+      document.fonts.load('16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace'),
+      document.fonts.load('700 16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace'),
+      document.fonts.load('16px "Marvis Nerd Icons"', "\uE0B0"),
     ]),
 }));
 
@@ -279,7 +280,7 @@ describe("TerminalSession UI", () => {
     wrapper.unmount();
   });
 
-  it("waits for both bundled weights before opening xterm", async () => {
+  it("waits for every bundled face before opening xterm", async () => {
     let releaseFonts!: () => void;
     terminalMock.fontLoadPromise = new Promise<FontFace[]>((resolve) => {
       releaseFonts = () => resolve([]);
@@ -288,15 +289,18 @@ describe("TerminalSession UI", () => {
     await flushPromises();
 
     expect(terminalMock.fontLoads).toEqual([
-      '16px "Marvis Nerd Mono", monospace',
-      '700 16px "Marvis Nerd Mono", monospace',
+      '16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace',
+      '700 16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace',
+      '16px "Marvis Nerd Icons"',
     ]);
     expect(terminalMock.openCalls).toBe(0);
     releaseFonts();
     await flushPromises();
     expect(terminalMock.events.at(-1)).toBe("open");
+    // The icon face is waited on as well: opening before it lands measures the grid without it,
+    // and the icon glyphs are the ones the atlas is about.
     expect(terminalMock.events.indexOf("open")).toBeGreaterThan(
-      terminalMock.events.indexOf('font:700 16px "Marvis Nerd Mono", monospace'),
+      terminalMock.events.indexOf('font:16px "Marvis Nerd Icons"'),
     );
     expect(terminalMock.clearTextureAtlasCalls).toBe(0);
     wrapper.unmount();
