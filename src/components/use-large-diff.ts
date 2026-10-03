@@ -6,12 +6,26 @@ import { useToasts } from "../presentation/toasts";
 import { getGitDiffPage } from "../lib/ipc";
 
 const DIFF_PAGE_SIZE = 32;
-/** The height the row markup renders at (`h-6`). The window math only lands on the rows the
- *  user is looking at while the two agree, and it is also the max-scroll clamp in `toggleHunk`. */
-export const DIFF_ROW_HEIGHT = 24;
-const DIFF_WINDOW_SIZE = 80;
+/** Rows rendered above and below the ones on screen, so a flick does not land on an unloaded row. */
+const DIFF_WINDOW_OVERSCAN = 4;
+/** The window a viewport that cannot be measured gets, which is also the height a file gets inside
+ *  the change-set stack: one screen of code, and no more. */
+const DIFF_WINDOW_ROWS = 24;
 const MAX_CACHED_DIFF_PAGES = 8;
 const MAX_CONCURRENT_DIFF_PAGE_REQUESTS = 3;
+
+/**
+ * The height one diff row paints at, which the markup and the window math below both have to agree
+ * on: a row that measures anything else puts the window somewhere other than where the user is
+ * looking, and every page fetch follows it there.
+ *
+ * The diff reads at the editor's font size, so this is where the editor's setting reaches the
+ * geometry. The row height is what the arithmetic is in, so the font size has to move it, not only
+ * the glyphs: the editor's own range goes well past a fixed row.
+ */
+export function diffRowHeight(fontSize: number): number {
+  return Math.round(fontSize * 1.55);
+}
 
 interface VirtualHunk {
   rawStart: number;
@@ -53,6 +67,8 @@ export function useLargeDiff(
   diff: Ref<GitFileDiff | null>,
   collapsedHunks: Ref<number[]>,
   scrollTop: Ref<number>,
+  viewport: Ref<HTMLElement | null>,
+  rowHeight: () => number,
 ) {
   const diffPages = shallowRef<Record<number, GitDiffPage>>({});
   // Keyed by page: the row that could not load says so in place, so a repeated failure on
@@ -63,6 +79,9 @@ export function useLargeDiff(
   let pageUseOrder: number[] = [];
   let generation = 0;
   let mounted = true;
+  /** How much of the diff is on screen, which is how many rows have to exist in it. */
+  const viewportHeight = ref(0);
+  let viewportResize: ResizeObserver | null = null;
 
   const virtualHunks = computed<VirtualHunk[]>(() => {
     let visualLine = 0;
@@ -85,9 +104,12 @@ export function useLargeDiff(
   const largeDiffLineCount = computed(() => virtualHunks.value.at(-1)?.visualEnd ?? 0);
   const visibleLargeDiffWindow = computed(() => {
     const total = largeDiffLineCount.value;
-    const maximumStart = Math.max(0, total - DIFF_WINDOW_SIZE);
-    const start = Math.min(maximumStart, Math.max(0, Math.floor(scrollTop.value / DIFF_ROW_HEIGHT) - 10));
-    const end = Math.min(total, start + DIFF_WINDOW_SIZE);
+    const height = rowHeight();
+    const windowRows =
+      Math.ceil((viewportHeight.value || height * DIFF_WINDOW_ROWS) / height) + DIFF_WINDOW_OVERSCAN * 2;
+    const maximumStart = Math.max(0, total - windowRows);
+    const start = Math.min(maximumStart, Math.max(0, Math.floor(scrollTop.value / height) - DIFF_WINDOW_OVERSCAN));
+    const end = Math.min(total, start + windowRows);
     const rows: LargeDiffRow[] = [];
     for (let visualIndex = start; visualIndex < end; visualIndex += 1) {
       const segment = segmentAt(visualIndex, virtualHunks.value);
@@ -106,8 +128,8 @@ export function useLargeDiff(
     }
     return {
       rows,
-      paddingTop: start * DIFF_ROW_HEIGHT,
-      paddingBottom: (total - end) * DIFF_ROW_HEIGHT,
+      paddingTop: start * height,
+      paddingBottom: (total - end) * height,
     };
   });
 
@@ -174,8 +196,30 @@ export function useLargeDiff(
   }
 
   watch([checkoutId, selectedPath], reset, { flush: "sync" });
+
+  // How many rows have to exist is the one thing a resize changes: the diff itself does not move, so
+  // the viewport's own height is measured when it appears and whenever it is resized, and the window
+  // and the pages it asks for follow from that.
+  watch(
+    viewport,
+    (element) => {
+      viewportResize?.disconnect();
+      if (!element) {
+        viewportHeight.value = 0;
+        return;
+      }
+      viewportHeight.value = element.clientHeight;
+      viewportResize = new ResizeObserver(() => {
+        viewportHeight.value = element.clientHeight;
+      });
+      viewportResize.observe(element);
+    },
+    { flush: "post" },
+  );
+
   onUnmounted(() => {
     mounted = false;
+    viewportResize?.disconnect();
     reset();
   });
 

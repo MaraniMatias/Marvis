@@ -165,24 +165,34 @@ const languageList = ref<HTMLElement | null>(null);
 const languageKeyboardNavigation = ref(false);
 
 /**
- * The two preferences CodeMirror's own stylesheet has no room for, and the one it cannot answer
+ * The three preferences CodeMirror's own stylesheet has no room for, and the one it cannot answer
  * in CSS at all.
  *
- * The size and the ligatures go onto the host as custom properties because the editor's theme is
- * built once and the pane is not rebuilt when a preference changes; the indentation is an extension
- * rather than a declaration, so it is reconfigured on the editor that is already open, which is
- * what keeps the document, the undo history and the scroll position where they were.
+ * The size, the ligatures and the blink go onto the host as custom properties because the editor's
+ * theme is built once and the pane is not rebuilt when a preference changes — the blink included,
+ * which is the one of the three CodeMirror draws itself: it blinks the whole cursor layer, so what
+ * it takes to stop it is one `animation-play-state` and nothing to reconfigure in the editor. The
+ * indentation is an extension rather than a declaration, so it is reconfigured on the editor that
+ * is already open, which is what keeps the document, the undo history and the scroll position
+ * where they were.
  *
  * The host is watched alongside the settings because the host is a template ref that is null until
  * a Code view is on the pane: a preference that arrives first and the editor that arrives second
  * would otherwise leave the second one drawn at the default forever.
  */
 watch(
-  () => [editorHost.value, props.editorSettings.fontSize, props.editorSettings.ligatures] as const,
-  ([host, fontSize, ligatures]) => {
+  () =>
+    [
+      editorHost.value,
+      props.editorSettings.fontSize,
+      props.editorSettings.ligatures,
+      props.editorSettings.cursorBlink,
+    ] as const,
+  ([host, fontSize, ligatures, cursorBlink]) => {
     if (!host) return;
     host.style.setProperty("--marvis-editor-font-size", `${fontSize}px`);
     host.style.setProperty("--marvis-editor-ligatures", ligatures ? "normal" : "none");
+    host.style.setProperty("--marvis-editor-cursor-blink", cursorBlink ? "running" : "paused");
   },
   { immediate: true },
 );
@@ -1209,19 +1219,39 @@ function onMarkdownLink(event: MouseEvent) {
 }
 
 /* CodeMirror paints the selection on its own layer, which the shell's `::selection` cannot reach,
-   and it paints that layer and the caret for a light page: a lavender band and a black caret, both
-   unreadable on `#17191f`. Its base theme owns these selectors with more specificity than a theme
-   module of ours could match, and it is injected after this stylesheet, so these have to be
-   *longer* than the ones they beat — a tie would go to CodeMirror. The lavender band is the thing
-   to look for if a CodeMirror upgrade renames that layer. */
+   and it paints that layer for a light page: a lavender band, unreadable on this surface. Its base
+   theme owns these selectors with more specificity than a theme module of ours could match, and it
+   is injected after this stylesheet, so these have to be *longer* than the ones they beat — a tie
+   would go to CodeMirror. The lavender band is the thing to look for if a CodeMirror upgrade
+   renames that layer. */
 .code-editor-host :deep(.cm-selectionBackground),
 .code-editor-host :deep(.cm-focused .cm-scroller .cm-selectionLayer .cm-selectionBackground) {
   background-color: var(--marvis-selection);
 }
 
-.code-editor-host :deep(.cm-cursor),
 .code-editor-host :deep(.cm-dropCursor) {
   border-left-color: var(--marvis-content-accent);
+}
+
+/* The caret is a block, in the two colors the terminal draws its own with: the palette's bright
+   white, and the surface behind the glyph — the swap Konsole makes, and the same two tokens
+   `marvisTerminalTheme` hands xterm.js.
+
+   CodeMirror draws this element on a layer above the text and leaves its width unset for a caret
+   (its own is `null`, and it only writes a width for a selected range), so one cell of the
+   editor's own `ch` is what fits it — and the character under the block is covered rather than
+   inverted, which is the whole of what a block cursor that is only a rectangle can be. */
+.code-editor-host :deep(.cm-focused .cm-scroller .cm-cursorLayer .cm-cursor) {
+  border-left: none;
+  margin-left: 0;
+  width: 1ch;
+  background: var(--marvis-ansi-bright-white);
+}
+
+/* Blinking is CodeMirror's, on the whole layer, so the preference is not a second animation to
+   write and keep in step with the first: it is the one that decides whether CodeMirror's runs. */
+.code-editor-host :deep(.cm-focused .cm-scroller .cm-cursorLayer) {
+  animation-play-state: var(--marvis-editor-cursor-blink, running);
 }
 
 .code-editor-host :deep(.cm-scroller) {

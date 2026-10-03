@@ -1,6 +1,7 @@
 import DOMPurify from "dompurify";
 import { createCssVariablesTheme, createHighlighterCore } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
+import type { HighlighterCore } from "shiki/core";
 import type typescript from "shiki/langs/typescript.mjs";
 import { detectedLanguageName } from "./source-languages";
 
@@ -443,6 +444,20 @@ export function languageForFenceInfo(info: string): LanguageDefinition | undefin
  */
 export function languageForName(name: string): LanguageDefinition | undefined {
   return languageByName.get(name);
+}
+
+/**
+ * The grammar `name` asks for, loaded and ready to tokenize with.
+ *
+ * The diff view highlights through Shiki too rather than through a grammar of its own, so that one
+ * file is one file's colors in both places. It needs the tokens rather than the rendered HTML, which
+ * is all that separates this from `highlightSourceAs`. It shares the one instance per language, so
+ * opening the diff of a file already open costs no second grammar.
+ */
+export function loadSourceHighlighter(name: string): Promise<HighlighterCore> {
+  const language = languageForName(name);
+  if (!language) return Promise.reject(new Error(`No grammar named ${name}`));
+  return highlighterFor(language);
 }
 
 function highlighterFor(language: LanguageDefinition) {

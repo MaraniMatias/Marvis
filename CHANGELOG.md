@@ -55,6 +55,16 @@ here still gets its generated notes.
   stays archived, and a worktree removed elsewhere becomes a row that says its directory is gone,
   which is what closing it from the panel has always done.
 
+- **The file editor has a block caret, in the terminal's colors.** It was a thin blue bar while the
+  terminal next to it drew a block, and the two were the same window. The caret is now a cell wide
+  in the palette's bright white — the same two tokens xterm.js is handed for `cursor` and
+  `cursorAccent` — so the editor and the terminal are painted from one palette in both themes. The
+  cell covers the character under it rather than inverting it, which is what a block drawn as a
+  rectangle can be; a selection still shows the characters it covers, because that band is what is
+  painted over them. Blinking is a preference in the Editor section, the same toggle the terminal
+  already had, and turning it off does not touch the open document: CodeMirror blinks the caret
+  itself, so the answer is one declaration.
+
 ## 0.6.0
 
 - **Markdown export is now the default review destination.** With no saved choice, sending review

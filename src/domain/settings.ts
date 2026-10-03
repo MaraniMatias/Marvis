@@ -52,6 +52,8 @@ export interface IndentationSettings {
 export interface EditorSettings {
   fontSize: number;
   ligatures: boolean;
+  /** The same answer the terminal's own `cursorBlink` is, for the same reason: the caret is a block and a block that blinks is a distraction. */
+  cursorBlink: boolean;
   indentation: IndentationSettings;
 }
 
@@ -77,6 +79,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
   editor: {
     fontSize: 13,
     ligatures: true,
+    cursorBlink: true,
     indentation: { useSpaces: true, size: 2 },
   },
 };
@@ -132,6 +135,7 @@ export function normalizeSettings(value: unknown): AppSettings {
     editor: {
       fontSize: boundedNumber(editor.fontSize, EDITOR_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.editor.fontSize),
       ligatures: flag(editor.ligatures, DEFAULT_SETTINGS.editor.ligatures),
+      cursorBlink: flag(editor.cursorBlink, DEFAULT_SETTINGS.editor.cursorBlink),
       indentation: {
         useSpaces: flag(indentation.useSpaces, DEFAULT_SETTINGS.editor.indentation.useSpaces),
         size: boundedInteger(indentation.size, INDENTATION_SIZE_LIMITS, DEFAULT_SETTINGS.editor.indentation.size),
@@ -157,6 +161,7 @@ export type SettingsPath =
   | "terminal.changeDirectoryOnMove"
   | "editor.fontSize"
   | "editor.ligatures"
+  | "editor.cursorBlink"
   | "editor.indentation.useSpaces"
   | "editor.indentation.size";
 
@@ -290,6 +295,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         unit: "px",
       },
       { kind: "toggle", path: "editor.ligatures", label: "Ligatures" },
+      { kind: "toggle", path: "editor.cursorBlink", label: "Blink cursor" },
       {
         kind: "select",
         path: "editor.indentation.useSpaces",

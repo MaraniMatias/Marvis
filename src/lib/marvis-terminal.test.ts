@@ -147,8 +147,10 @@ describe("createMarvisTerminal", () => {
     expect(stubs.terminal?.options).toMatchObject({
       allowProposedApi: true,
       cursorBlink: true,
-      // A block is what a terminal looks like when it is not asking you to wait for it.
+      // A block is what a terminal looks like when it is not asking you to wait for it, and the
+      // panel that is not the one you are typing into draws a frame instead of a block.
       cursorStyle: "block",
+      cursorInactiveStyle: "outline",
       fontFamily: '"Marvis Nerd Mono", monospace',
       fontSize: 16,
       lineHeight: 1.2,
@@ -161,15 +163,28 @@ describe("createMarvisTerminal", () => {
     // this file's: a terminal opened in the light palette gets the light one without a second copy
     // of the values anywhere.
     const style = document.createElement("style");
-    style.textContent = `:root { --marvis-content-bg-0: #282c33; --marvis-content-text: #dce0e5; }
-      :root[data-theme="light"] { --marvis-content-bg-0: #fafafa; --marvis-content-text: #242529; }`;
+    style.textContent = `:root { --marvis-content-bg-0: #282c33; --marvis-content-text: #dce0e5; --marvis-ansi-bright-white: #fafafa; }
+      :root[data-theme="light"] { --marvis-content-bg-0: #fafafa; --marvis-content-text: #242529; --marvis-ansi-bright-white: #242529; }`;
     document.head.append(style);
     try {
+      // The cursor pair is the requirement rather than a detail of the palette: the block is the
+      // theme's brightest white and the glyph under it the theme's background, so a cell with
+      // default colors under the cursor is drawn inverted and neither value is written here.
       document.documentElement.dataset.theme = "dark";
-      expect(marvisTerminalTheme()).toMatchObject({ background: "#282c33", foreground: "#dce0e5" });
+      expect(marvisTerminalTheme()).toMatchObject({
+        background: "#282c33",
+        foreground: "#dce0e5",
+        cursor: "#fafafa",
+        cursorAccent: "#282c33",
+      });
 
       document.documentElement.dataset.theme = "light";
-      expect(marvisTerminalTheme()).toMatchObject({ background: "#fafafa", foreground: "#242529" });
+      expect(marvisTerminalTheme()).toMatchObject({
+        background: "#fafafa",
+        foreground: "#242529",
+        cursor: "#242529",
+        cursorAccent: "#fafafa",
+      });
     } finally {
       style.remove();
     }

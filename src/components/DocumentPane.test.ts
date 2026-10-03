@@ -608,7 +608,12 @@ describe("DocumentPane", () => {
     const wrapper = mount(DocumentPane, {
       props: {
         ...documentPaneProps("src/example.ts", "code"),
-        editorSettings: { fontSize: 17, ligatures: false, indentation: { useSpaces: true, size: 2 } },
+        editorSettings: {
+          fontSize: 17,
+          ligatures: false,
+          cursorBlink: true,
+          indentation: { useSpaces: true, size: 2 },
+        },
       },
     });
     await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
@@ -622,10 +627,41 @@ describe("DocumentPane", () => {
     expect(host.style.getPropertyValue("--marvis-editor-ligatures")).toBe("none");
 
     await wrapper.setProps({
-      editorSettings: { fontSize: 20, ligatures: true, indentation: { useSpaces: true, size: 2 } },
+      editorSettings: { fontSize: 20, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
     });
     expect(host.style.getPropertyValue("--marvis-editor-font-size")).toBe("20px");
     expect(host.style.getPropertyValue("--marvis-editor-ligatures")).toBe("normal");
+    wrapper.unmount();
+  });
+
+  it("leaves the caret blinking or still without touching the editor", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/example.ts", content: "const a = 1;" });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("src/example.ts", "code"),
+        editorSettings: {
+          fontSize: 13,
+          ligatures: true,
+          cursorBlink: false,
+          indentation: { useSpaces: true, size: 2 },
+        },
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    // CodeMirror blinks the cursor layer itself, so this is a declaration on the host and not a
+    // setting reconfigured into the editor: a preference that rebuilt the editor would take the
+    // document, the undo history and the caret with it to stop a light blinking.
+    const host = wrapper.get<HTMLElement>(".code-editor-host").element;
+    expect(host.style.getPropertyValue("--marvis-editor-cursor-blink")).toBe("paused");
+    expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
+
+    await wrapper.setProps({
+      editorSettings: { fontSize: 13, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
+    });
+    expect(host.style.getPropertyValue("--marvis-editor-cursor-blink")).toBe("running");
+    // The same editor, still: `cm-content` is not rebuilt, so the text it holds is the one above.
+    expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
     wrapper.unmount();
   });
 
@@ -1240,15 +1276,18 @@ describe("DocumentPane", () => {
     const wrapper = mount(FileDiff, {
       props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "large.ts", scrollTop: 0 },
     });
-    await vi.waitFor(() => expect(wrapper.text()).toContain("+line 70"));
+    // The window holds the rows on screen and the overscan either side of them, so the far end of a
+    // 70-row diff is in the DOM only once the user has scrolled to it. Both ends have to be loaded
+    // for the range's code to be whole, and the composer is held by the panel rather than by its row
+    // so it is still there when the scroll that finishes the range has left the first line behind.
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+line 1"));
 
     await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
     const viewport = wrapper.get('[aria-label="Diff contents"]');
-    (viewport.element as HTMLElement).scrollTop = 40 * 22;
+    (viewport.element as HTMLElement).scrollTop = 70 * 22;
     await viewport.trigger("scroll");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+line 70"));
     await wrapper.get('[aria-label="Add review note on line 70"]').trigger("click");
-    (viewport.element as HTMLElement).scrollTop = 0;
-    await viewport.trigger("scroll");
 
     await vi.waitFor(() =>
       expect(wrapper.get('form[aria-label="New review note"]').text()).toContain("new lines 1-70"),

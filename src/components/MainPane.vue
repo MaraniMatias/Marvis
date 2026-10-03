@@ -180,14 +180,21 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
           />
         </section>
         <section v-show="diffView" id="main-view-diff" class="absolute inset-0">
+          <!-- A height, not a position: the diff is its own positioned box (the composer of a large
+               diff is a layer over its bottom edge), and Tailwind emits `.absolute` before
+               `.relative`, so a panel that also said `absolute` here would be overruled by that and
+               `inset-0` would stop giving the diff a height. With no height the diff's own
+               scroll container has nothing to scroll in and the file is drawn at its full length
+               under a panel that clips it. -->
           <FileDiff
             v-if="diffView && checkout"
-            class="absolute inset-0"
+            class="h-full"
             :checkout="checkout"
             :git-snapshot="gitSnapshot"
             :review="review"
             :path="diffView.path"
             :scroll-top="diffScrollTop"
+            :editor-settings="editorSettings"
             @scroll-position-changed="$emit('diffPositionChanged', $event)"
           />
         </section>

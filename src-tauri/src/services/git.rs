@@ -2,7 +2,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
-    io::{self, BufRead, BufReader},
+    io::{self, BufRead, BufReader, Read},
+    os::unix::fs::OpenOptionsExt,
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{mpsc, Arc, Mutex},
@@ -35,6 +36,15 @@ const MAX_DIFF_LINE_BYTES: usize = 64 * 1024;
 const MAX_DIFF_HUNKS: usize = 10_000;
 /// How much of a file is read looking for the NUL byte that makes Git call it binary.
 const BINARY_SNIFF_BYTES: usize = 8_000;
+/// How much of a file's own text a diff carries so its syntax can be read in context.
+///
+/// A grammar reads a file, not a hunk: the lines inside `<script setup lang="ts">` are markup to a
+/// grammar that never saw the opening tag, so a patch on its own highlights the wrong language or
+/// none at all. The text is what the grammar reads and not what the diff draws — the patch still
+/// draws every line — so the cap is a cap on the reading of one file, and past it the file is read
+/// the way this app read every file before any of this. `SMALL_DIFF_BYTES` is the same size a patch
+/// is allowed to be, so a file that small in this repository is carried whole.
+const MAX_SYNTAX_CONTEXT_BYTES: usize = SMALL_DIFF_BYTES;
 /// How many checkouts are read at once when the sidebar names all of them. Each reading is a
 /// handful of `git` processes, so a workspace with many worktrees would otherwise fork all of
 /// them into the machine in the same moment. The point is to overlap the work, not to let the
@@ -88,6 +98,14 @@ pub struct GitStatus {
 pub struct GitFileDiff {
     pub path: String,
     pub patch: String,
+    /// The text of each side of the diff, whole, which is what a grammar reads rather than the
+    /// patch's hunks. Absent rather than empty when there is no text to read: a binary or symlink
+    /// diff, a diff too large to hold, a side that does not exist (an added file's old side, a
+    /// removed file's new one), and a file past `MAX_SYNTAX_CONTEXT_BYTES`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_content: Option<String>,
     pub is_binary: bool,
     pub large: bool,
     pub too_large: bool,
@@ -1025,6 +1043,8 @@ pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFil
         return Ok(GitFileDiff {
             path: path.to_owned(),
             patch: String::new(),
+            old_content: None,
+            new_content: None,
             is_binary: false,
             large: false,
             too_large: false,
@@ -1040,13 +1060,32 @@ pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFil
         None,
     )?;
     ensure_diff_succeeded(&scan.output, changed_file.status == "??", scan.too_large)?;
+    let patch = if scan.large || scan.too_large || scan.is_binary {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&scan.patch).into_owned()
+    };
+    // Only for a diff that is drawn: a patch nothing shows is not worth two more reads of the file.
+    // Each side is the text `diff_args` diffed, read the way it was diffed — the merge base's blob
+    // and the file as it is on disk — rather than the head's or the index's, which the patch of this
+    // diff never saw.
+    let (old_content, new_content) = if patch.is_empty() {
+        (None, None)
+    } else {
+        (
+            merge_base_content(
+                &context.root,
+                &snapshot.merge_base,
+                changed_file.old_path.as_deref().unwrap_or(path),
+            ),
+            worktree_content(&working_path),
+        )
+    };
     Ok(GitFileDiff {
         path: path.to_owned(),
-        patch: if scan.large || scan.too_large || scan.is_binary {
-            String::new()
-        } else {
-            String::from_utf8_lossy(&scan.patch).into_owned()
-        },
+        patch,
+        old_content,
+        new_content,
         is_binary: scan.is_binary,
         large: scan.large,
         too_large: scan.too_large,
@@ -1054,6 +1093,67 @@ pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFil
         hunks: scan.hunks,
         symlink_target: None,
     })
+}
+
+/// The text of the file as it is on disk, or nothing when there is none to read within the cap.
+///
+/// The path is one `validate_diff_target` has resolved inside the checkout and that has already been
+/// turned away if it is a symlink, so this reads a file the checkout owns. `O_NOFOLLOW` is what keeps
+/// that true by the time the file is actually opened: a checkout is writable by whatever is editing
+/// it, and between the check above and the open below the path could have become a link out of the
+/// checkout, which is the one thing `validate_diff_target` exists to prevent. `is_file` on the open
+/// handle is then a statement about the file that was read rather than about the path it was reached
+/// by, which is what keeps this from being a read of a directory, or of a pipe that would never end.
+/// Bytes that are not text are not carried at all, where the patch carries them lossy: text the two
+/// cannot be compared line for line is text no grammar could be handed.
+fn worktree_content(path: &Path) -> Option<String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SYNTAX_CONTEXT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_SYNTAX_CONTEXT_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// The text of the blob `spec` names, or nothing when there is none to read within the cap.
+///
+/// Read through a pipe under a cap rather than through `run_git`, which buffers all of whatever Git
+/// prints: a blob is the size of a file, and this one is read to color a diff rather than to show
+/// it. A merge base with no such path — an added file, an untracked one — fails here, which is the
+/// same answer as an old side with no lines to draw; the exit status is what says so, because a
+/// failure prints nothing on the pipe it would have been read from.
+fn merge_base_content(root: &Path, merge_base: &str, path: &str) -> Option<String> {
+    let mut child = Command::new("git")
+        .args(["cat-file", "blob", &format!("{merge_base}:{path}")])
+        .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        // Nothing is read of Git's own account of a failure, so its pipe is never the reason a read
+        // stops: a blob past the cap ends the read and Git's complaint has nowhere to go.
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut bytes = Vec::new();
+    BufReader::new(child.stdout.take()?)
+        .take(MAX_SYNTAX_CONTEXT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    // A blob past the cap ends the read early and Git never finishes writing, which is one of the
+    // two ways this is nothing rather than the text of a file.
+    if !child.wait().ok()?.success() || bytes.len() > MAX_SYNTAX_CONTEXT_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 pub fn diff_page(
@@ -1999,7 +2099,7 @@ mod tests {
         parse_name_status, parse_numstat, parse_porcelain_v2, receive_debounced_change,
         resolve_default_ref, should_refresh_path, status, untracked_line_count, CachedGitSnapshot,
         GitCounts, GitDiffStats, GitSnapshotCache, GitStatus, GitWatcherManager, PathBuf,
-        RepoWatchPlan, WatchMessage, WatchUpdate, WatchWakeup,
+        RepoWatchPlan, WatchMessage, WatchUpdate, WatchWakeup, MAX_SYNTAX_CONTEXT_BYTES,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -2224,6 +2324,105 @@ line.txt";
         let result = diff(&database, &checkout_id, "nested/removed.txt").unwrap();
 
         assert!(result.patch.contains("-remove me"));
+    }
+
+    #[test]
+    fn a_diff_carries_the_whole_text_of_each_of_its_sides() {
+        // A grammar reads a file, not the hunks of a diff: the lines inside the `<script>` of a Vue
+        // file are markup to a grammar that was never shown the tag that opened them. So each side
+        // travels whole, and each is read the way `diff_args` diffed it — the merge base's blob and
+        // the file as it is on disk.
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        let before = "<template>\n  <p>one</p>\n</template>\n\n<script setup lang=\"ts\">\nconst n = 1;\n</script>\n";
+        let after = "<template>\n  <p>two</p>\n</template>\n\n<script setup lang=\"ts\">\nconst n = 2;\n</script>\n";
+        fs::write(root.join("Widget.vue"), before).unwrap();
+        git(&root, &["add", "Widget.vue"]);
+        git(&root, &["commit", "-m", "widget"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        fs::write(root.join("Widget.vue"), after).unwrap();
+
+        let result = diff(&database, &checkout_id, "Widget.vue").unwrap();
+
+        assert_eq!(result.old_content.as_deref(), Some(before));
+        assert_eq!(result.new_content.as_deref(), Some(after));
+    }
+
+    #[test]
+    fn an_added_file_carries_no_old_text_and_a_removed_one_no_new() {
+        // Each side the diff does not have is absent rather than empty: an added file has no old side
+        // and a removed one no new side, and text that is not there is not something to read.
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        let gone = "const removed = 1;\n";
+        fs::write(root.join("gone.ts"), gone).unwrap();
+        git(&root, &["add", "gone.ts"]);
+        git(&root, &["commit", "-m", "gone"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        fs::write(root.join("added.ts"), "const added = 1;\n").unwrap();
+        fs::remove_file(root.join("gone.ts")).unwrap();
+
+        let added = diff(&database, &checkout_id, "added.ts").unwrap();
+        let removed = diff(&database, &checkout_id, "gone.ts").unwrap();
+
+        assert_eq!(added.old_content, None);
+        assert_eq!(added.new_content.as_deref(), Some("const added = 1;\n"));
+        assert_eq!(removed.old_content.as_deref(), Some(gone));
+        assert_eq!(removed.new_content, None);
+    }
+
+    #[test]
+    fn a_renamed_files_old_text_is_the_path_the_rename_came_from() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::create_dir_all(root.join("before")).unwrap();
+        let original = (0..40)
+            .map(|line| format!("const value{line} = {line};\n"))
+            .collect::<String>();
+        fs::write(root.join("before/View.ts"), &original).unwrap();
+        git(&root, &["add", "before/View.ts"]);
+        git(&root, &["commit", "-m", "view"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        fs::create_dir_all(root.join("after")).unwrap();
+        git(&root, &["mv", "before/View.ts", "after/View.ts"]);
+        let renamed = original.replace("const value20 = 20;\n", "const value20 = 21;\n");
+        fs::write(root.join("after/View.ts"), &renamed).unwrap();
+
+        let result = diff(&database, &checkout_id, "after/View.ts").unwrap();
+
+        assert_eq!(result.old_content.as_deref(), Some(original.as_str()));
+        assert_eq!(result.new_content.as_deref(), Some(renamed.as_str()));
+    }
+
+    #[test]
+    fn no_text_travels_with_a_binary_diff_or_with_a_file_past_the_cap() {
+        // There is nothing to read in the first case, and in the second there is more of it than a
+        // diff is worth carrying: both are absent, which is what leaves the diff to draw itself.
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join("bytes.dat"), [0, 1, 2]).unwrap();
+        git(&root, &["add", "bytes.dat"]);
+        git(&root, &["commit", "-m", "bytes"]);
+        let big = "line\n".repeat(MAX_SYNTAX_CONTEXT_BYTES / 5 + 1);
+        fs::write(root.join("big.txt"), &big).unwrap();
+        git(&root, &["add", "big.txt"]);
+        git(&root, &["commit", "-m", "big"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        fs::write(root.join("bytes.dat"), [0, 2, 3]).unwrap();
+        fs::write(root.join("big.txt"), big.replacen("line\n", "LINE\n", 1)).unwrap();
+
+        let binary = diff(&database, &checkout_id, "bytes.dat").unwrap();
+        let large = diff(&database, &checkout_id, "big.txt").unwrap();
+
+        assert_eq!((binary.old_content, binary.new_content), (None, None));
+        assert!(!binary.is_binary || binary.patch.is_empty());
+        // The change is small, so the patch is still drawn: it is the file's text that does not fit.
+        assert!(!large.patch.is_empty());
+        assert_eq!((large.old_content, large.new_content), (None, None));
     }
 
     #[test]

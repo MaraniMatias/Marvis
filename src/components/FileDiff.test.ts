@@ -8,21 +8,58 @@ import type { VNodeChild } from "vue";
 import type { AgentSession } from "../domain/agent";
 import { buildReviewMarkdown } from "../domain/review";
 import type { ReviewNote } from "../domain/review";
+import { DEFAULT_SETTINGS } from "../domain/settings";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { REVIEW_SENDER } from "../presentation/review-notes";
 import type { NewReviewNoteInput, ReviewSender } from "../presentation/review-notes";
 import { theme } from "../presentation/theme";
+import { diffRowHeight } from "./use-large-diff";
 
 /** The library's `DiffFile`, as the stub above stands in for it. */
 interface DiffFileStub {
   palette: string | undefined;
   notified: number;
+  /** The language the stub was told to read the file as, on each side. */
+  oldLang: string | undefined;
+  newLang: string | undefined;
 }
 
 const mocks = vi.hoisted(() => ({
   getGitDiff: vi.fn(),
   getGitDiffPage: vi.fn(),
+  /** Every `DiffFile` the component built, in order, so a test can read what it asked for. */
+  diffFiles: [] as Array<{ oldLang: string | undefined; newLang: string | undefined; uuid: string | undefined }>,
+  /** What the component asked to have read, in order, one entry per diff it drew. */
+  prepared: [] as Array<{
+    language: string | undefined;
+    contents: Record<string, string | undefined>;
+    /** How far into the file the diff reaches, which is how much of it is read. */
+    lines: number | undefined;
+  }>,
+  /**
+   * The reads a test is holding back, keyed by the text the read was asked for. Keying on the text
+   * rather than on a counter is what keeps a test independent of which other tests ran first and left a
+   * read of their own in flight.
+   */
+  held: new Map<string, Promise<void>>(),
+}));
+
+// The grammar and the reading of the file are one dynamic import away and are covered end to end by
+// `diff-highlighter.test.ts`. What is under test here is the wiring: which file is asked to be read,
+// with what text, and which of two answers is the one the diff on screen is given.
+vi.mock("../lib/diff-highlighter", () => ({
+  prepareDiffHighlighting: async (
+    language: string | undefined,
+    contents: Record<string, string | undefined>,
+    lines: number | undefined,
+  ) => {
+    mocks.prepared.push({ language, contents, lines });
+    await mocks.held.get(contents.new ?? "");
+    // Each answer is its own object, as the real one is: nothing here is shared between two diffs, and
+    // it names the text it was read from so a test can tell whose answer it is looking at.
+    return { name: `read:${contents.new ?? ""}`, type: "class" };
+  },
 }));
 
 vi.mock("../lib/ipc", () => ({
@@ -39,6 +76,19 @@ vi.mock("@git-diff-view/vue", async () => {
       /** What the library is told to paint in, which is the whole of what a palette switch reaches. */
       palette: string | undefined;
       notified = 0;
+      constructor(
+        _oldFileName: string,
+        _oldFileContent: string,
+        _newFileName: string,
+        _newFileContent: string,
+        _diffList: string[],
+        oldLang?: string,
+        newLang?: string,
+        /** The identity each set of hunks is given, which is what tells two checkouts' windows apart. */
+        uuid?: string,
+      ) {
+        mocks.diffFiles.push({ oldLang, newLang, uuid });
+      }
       initTheme(theme?: string) {
         this.palette = theme;
       }
@@ -49,16 +99,60 @@ vi.mock("@git-diff-view/vue", async () => {
       buildUnifiedDiffLines() {}
     },
     DiffModeEnum: { Unified: 4 },
+    // `diff-highlighter.ts` imports this and reuses it: the diff is highlighted by handing the
+    // library an object with this on it. What it returns is never read here, only that it exists.
+    processAST: () => ({ syntaxFileObject: {}, syntaxFileLineNumber: 0 }),
     DiffViewWithMultiSelect: component({
       name: "DiffView",
-      props: { extendData: { type: Object, default: () => ({}) }, diffFile: { type: Object, default: null } },
+      props: {
+        extendData: { type: Object, default: () => ({}) },
+        diffFile: { type: Object, default: null },
+        registerHighlighter: { type: Object, default: undefined },
+        diffViewFontSize: { type: Number, default: undefined },
+      },
       setup: (
-        props: { extendData: { newFile?: Record<string, { data: ReviewNote[] }> } },
+        props: {
+          extendData: { newFile?: Record<string, { data: ReviewNote[] }> };
+          registerHighlighter?: unknown;
+          diffViewFontSize?: number;
+        },
         { slots }: { slots: Record<string, ((payload: never) => VNodeChild) | undefined> },
       ) => {
         const selectedRange = createRef<[number, number] | null>(null);
         return () =>
           createElement("div", { "data-testid": "diff-view" }, [
+            // What the library is handed to highlight with, named so a test can read it: whether one
+            // arrives at all is the whole of what `diff-highlighter.ts` is wired up for.
+            createElement("span", {
+              "data-testid": "diff-highlighter",
+              "data-name": (props.registerHighlighter as { name?: string } | undefined)?.name ?? "",
+            }),
+            createElement("span", { "data-testid": "diff-font-size" }, String(props.diffViewFontSize)),
+            // The library draws a row per `@@` header and its own expand buttons inside that row, and
+            // the rows of the diff itself carry their lines, their widget and their notes, which is
+            // the whole of what the collapse is delegated across.
+            createElement("table", {}, [
+              createElement("tbody", {}, [
+                createElement("tr", { "data-testid": "hunk-row", "data-line": "1-hunk" }, [
+                  createElement("td", { class: "diff-line-hunk" }, "@@ -1 +1 @@"),
+                  createElement(
+                    "td",
+                    {},
+                    createElement("button", { class: "diff-widget-tooltip", "data-testid": "hunk-expand" }, "Expand"),
+                  ),
+                ]),
+                createElement("tr", { "data-line": "2-add" }, [
+                  createElement("td", { "data-testid": "line-number" }, "2"),
+                  createElement("td", { class: "diff-line-content" }, [
+                    createElement("span", { class: "diff-line-syntax-raw" }, "const after = 2;"),
+                    // The note composer and the note cards are rendered into the widget row of the
+                    // line they belong to, which is a row of its own.
+                    createElement("div", { "data-line": "2-widget-content", "data-testid": "line-widget" }),
+                    createElement("div", { "data-line": "2-extend-content", "data-testid": "line-note" }),
+                  ]),
+                ]),
+              ]),
+            ]),
             slots.extend?.({ data: props.extendData?.newFile?.["1"]?.data ?? [] } as never),
             selectedRange.value
               ? slots.widget?.({
@@ -257,31 +351,56 @@ function senderStub(
   return { sender, send, selectTarget, selectReviewTarget };
 }
 
+/**
+ * The path the shell hands the diff, which is reactive so a test can open another file in the mount
+ * it already has rather than building a second one.
+ */
+const openedPath = ref<string | null>(null);
+/**
+ * The checkout the shell hands the diff, reactive for the same reason: the diff is read again when
+ * either of these two changes, and a test that needs a second reading of one file needs one of them
+ * to move.
+ */
+const openedCheckout = ref<Checkout>(checkout);
+
 /** The diff is reached through the shell, so the sender is what the shell provides. */
-function mountDiff(props: Record<string, unknown>, sender: ReviewSender | null = senderStub().sender) {
+function mountDiff(
+  props: Record<string, unknown>,
+  sender: ReviewSender | null = senderStub().sender,
+  options: { attachTo?: Element } = {},
+) {
+  // `null` is a path of its own here: it is the whole change set rather than no file at all.
+  openedPath.value = "path" in props ? (props.path as string | null) : "src/app.ts";
+  openedCheckout.value = checkout;
   const harness = defineComponent({
     setup: () => {
       if (sender) provide(REVIEW_SENDER, sender);
       return () =>
         h(FileDiff, {
-          checkout,
+          checkout: openedCheckout.value,
           gitSnapshot: snapshot(),
           review: reviewApi(),
-          path: "src/app.ts",
           scrollTop: 0,
           ...props,
+          path: openedPath.value,
         });
     },
   });
-  return mount(harness);
+  return mount(harness, options);
 }
 
 describe("FileDiff", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    // Not mocks of their own, so `resetAllMocks` leaves them: every test wants only its own files.
+    mocks.diffFiles.length = 0;
+    mocks.prepared.length = 0;
+    mocks.held.clear();
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      oldContent: "const before = 1;\n",
+      newContent: "const after = 2;\n",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -289,6 +408,238 @@ describe("FileDiff", () => {
       hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
     });
     mocks.getGitDiffPage.mockResolvedValue({ path: "", startLine: 0, totalLines: 0, lines: [] });
+  });
+
+  it("collapses a hunk from the header the library draws, and reopens it from the one it leaves", async () => {
+    const wrapper = mountDiff({});
+    await flushPromises();
+    const rendered = () => wrapper.findAll('[data-testid="diff-view"]');
+    const toggle = () => wrapper.get('[data-testid="hunk-toggle"]');
+    // One header per hunk, and only the library's: it already draws the `@@` row, so a header of our
+    // own above an open hunk would be the same header twice and a row of the diff spent on it. The
+    // control is in the same element either way and says which state the hunk is in.
+    expect(toggle().classes()).toContain("sr-only");
+    expect(toggle().attributes("aria-expanded")).toBe("true");
+    expect(toggle().text().trim()).toBe("");
+
+    // The library's own expand buttons live inside that row and are left to do their own job.
+    await wrapper.get('[data-testid="hunk-expand"]').trigger("click");
+    expect(rendered()).toHaveLength(1);
+
+    await wrapper.get('[data-testid="hunk-row"]').trigger("click");
+    expect(rendered()).toHaveLength(0);
+    // The row that carried the header went with the hunk, so a collapsed one has to get a header back
+    // or there is nothing left to open it from. It says so to a screen reader as well as to the eye.
+    expect(toggle().attributes("aria-expanded")).toBe("false");
+    expect(toggle().classes()).not.toContain("sr-only");
+    expect(toggle().text().trim()).toBe("▸ @@ -1 +1 @@");
+    // What makes it reachable from the keyboard is that it is a real button and not a row with a click
+    // handler on it: a button is in the tab order and answers Enter and Space on its own.
+    expect(toggle().element.tagName).toBe("BUTTON");
+    expect(toggle().attributes("type")).toBe("button");
+    expect(toggle().attributes("tabindex")).toBeUndefined();
+
+    await toggle().trigger("click");
+    expect(rendered()).toHaveLength(1);
+    expect(toggle().attributes("aria-expanded")).toBe("true");
+    wrapper.unmount();
+  });
+
+  it("collapses and reopens a hunk from a control the keyboard can reach, and keeps it focused", async () => {
+    // Mounted in the document because focus is the claim under test, and a detached tree has no
+    // active element to keep.
+    const wrapper = mountDiff({}, undefined, { attachTo: document.body });
+    await flushPromises();
+    const toggle = () => wrapper.get('[data-testid="hunk-toggle"]');
+    const control = toggle();
+    expect(control.element.tagName).toBe("BUTTON");
+    expect(control.attributes("type")).toBe("button");
+    expect(control.attributes("tabindex")).toBeUndefined();
+    expect(control.attributes("aria-label")).toBe("Collapse hunk @@ -1 +1 @@");
+    (control.element as HTMLElement).focus();
+    expect(document.activeElement).toBe(control.element);
+
+    // A native button turns Enter and Space into a click, which is the event the handler is on, and
+    // happy-dom synthesizes no click from a keydown; so the click is what a key press arrives as and
+    // the button is what makes the keyboard send it.
+    await control.trigger("click");
+    expect(toggle().attributes("aria-expanded")).toBe("false");
+    expect(toggle().classes()).not.toContain("sr-only");
+    // The control is the same element in both states, so the focus that collapsed the hunk is still on
+    // it afterwards and the keyboard is never dropped on the floor by the thing it just did.
+    expect(document.activeElement).toBe(control.element);
+
+    await control.trigger("click");
+    expect(toggle().attributes("aria-expanded")).toBe("true");
+    expect(toggle().classes()).toContain("sr-only");
+    expect(document.activeElement).toBe(control.element);
+    wrapper.unmount();
+  });
+
+  it("collapses a hunk only from its own header row", async () => {
+    // The collapse is delegated to the whole hunk, so the guard is the only thing between a click on
+    // the diff and a hunk that closes under the user's hand. The library gives every row of a diff
+    // its own `data-line`, and only the header row's ends in `-hunk`, so a line, the widget a note
+    // is composed in and the cards a note is drawn in are all outside it.
+    const wrapper = mountDiff({});
+    await flushPromises();
+    const collapsed = () => wrapper.get('[data-testid="hunk-toggle"]').attributes("aria-expanded");
+    expect(collapsed()).toBe("true");
+
+    await wrapper.get('[data-testid="line-number"]').trigger("click");
+    expect(collapsed()).toBe("true");
+
+    await wrapper.get(".diff-line-content").trigger("click");
+    expect(collapsed()).toBe("true");
+
+    await wrapper.get('[data-testid="line-widget"]').trigger("click");
+    expect(collapsed()).toBe("true");
+
+    await wrapper.get('[data-testid="line-note"]').trigger("click");
+    expect(collapsed()).toBe("true");
+
+    // A drag across lines ends where the pointer was let go, and the click the browser sends for it
+    // lands on the row the press and the release have in common rather than on either of them. That
+    // row is above the header, so it is not the header either.
+    await wrapper.get('[data-testid="diff-view"] table').trigger("click");
+    expect(collapsed()).toBe("true");
+
+    // The header row is the one that closes it, and the library's own expand buttons inside that row
+    // are left to do their own job.
+    await wrapper.get('[data-testid="hunk-expand"]').trigger("click");
+    expect(collapsed()).toBe("true");
+
+    await wrapper.get('[data-testid="hunk-row"]').trigger("click");
+    expect(collapsed()).toBe("false");
+    wrapper.unmount();
+  });
+
+  it("fills the box it is given, and says so with a height rather than with a position", async () => {
+    // The panel hands the diff a height and the diff keeps its own position, because it is the box
+    // the composer of a large diff is a layer over. Tailwind emits `.absolute` before `.relative`,
+    // so a panel that also said `absolute` would be overruled by the diff's own `relative`, `inset-0`
+    // would stop giving it a height, and the diff's scroll container would have nothing to scroll in.
+    const wrapper = mountDiff({ class: "h-full" });
+    await flushPromises();
+    const root = wrapper.get('section[aria-label="File diff"]').classes();
+    expect(root).toContain("h-full");
+    expect(root).toContain("relative");
+    expect(root).not.toContain("absolute");
+    // And the scroll container inside it is what a wheel turns, which is the chain the height is for.
+    expect(wrapper.get('[aria-label="Diff contents"]').classes()).toContain("overflow-auto");
+    wrapper.unmount();
+  });
+
+  it("reads a file for the lines the diff reaches, and reads it once however often it reloads", async () => {
+    // Reading a file is a pass over all of it on the thread that answers the wheel, and git reports
+    // every write in the workdir, so a file being worked on is re-read over and over.
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -40,2 +40,2 @@ fn tail\n-old\n+new\n",
+      oldContent: "const before = 1;\n",
+      newContent: "const after = 2;\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 5,
+      hunks: [{ startLine: 0, endLine: 5, title: "@@ -40,2 +40,2 @@ fn tail" }],
+    });
+    const gitSnapshot = snapshot();
+    let releaseFirst = () => {};
+    mocks.held.set(
+      "const after = 2;\n",
+      new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      }),
+    );
+    const wrapper = mountDiff({ gitSnapshot });
+    await vi.waitFor(() => expect(mocks.prepared).toHaveLength(1));
+    // The header says where the hunk ends, which is as far into the file as the diff paints, so a
+    // change at line 40 of a long file is read as the first 42 lines of it and not as the whole file.
+    expect(mocks.prepared[0]).toEqual({
+      language: "typescript",
+      contents: { old: "const before = 1;\n", new: "const after = 2;\n" },
+      lines: 42,
+    });
+
+    // Three reloads of a file that keeps changing are one reading in flight and one more after it,
+    // not four: reading a file is a pass over all of it on the thread that answers the wheel, and the
+    // only reading of a burst worth keeping is the last.
+    for (const [index, text] of ["newer", "newest", "latest"].entries()) {
+      mocks.getGitDiff.mockResolvedValue({
+        path: "src/app.ts",
+        patch: `diff --git a/src/app.ts b/src/app.ts\n@@ -40,2 +40,2 @@ fn tail\n-old\n+${text}\n`,
+        oldContent: "const before = 1;\n",
+        newContent: `const after = ${text.length};\n`,
+        isBinary: false,
+        large: false,
+        tooLarge: false,
+        totalLines: 5,
+        hunks: [{ startLine: 0, endLine: 5, title: "@@ -40,2 +40,2 @@ fn tail" }],
+      });
+      gitSnapshot.statusRevision += 1;
+      await vi.waitFor(() => expect(mocks.getGitDiff).toHaveBeenCalledTimes(index + 2));
+    }
+    expect(mocks.prepared).toHaveLength(1);
+
+    // The reading in flight is answered at last, and the one that was owed behind it is the newest.
+    releaseFirst();
+    await vi.waitFor(() => expect(mocks.prepared).toHaveLength(2));
+    expect(mocks.prepared[1].contents.new).toBe("const after = 6;\n");
+    expect(wrapper.get('[data-testid="diff-highlighter"]').attributes("data-name")).toBe("read:const after = 6;\n");
+    wrapper.unmount();
+  });
+
+  it("reads at the editor's size, and paints the rows the window measures", async () => {
+    const row = diffRowHeight(20);
+    const wrapper = mountDiff({ editorSettings: { ...DEFAULT_SETTINGS.editor, fontSize: 20 } });
+    await flushPromises();
+    // The row height is handed to the stylesheet and the arithmetic from the same number, so a row
+    // cannot end up taller than the padding that stands in for the rows that are not on screen.
+    expect(wrapper.get('[aria-label="Diff contents"]').attributes("style")).toContain(
+      `--marvis-diff-row-height: ${row}px`,
+    );
+    expect(wrapper.get('[data-testid="diff-font-size"]').text()).toBe("20");
+    wrapper.unmount();
+
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: 40,
+      hunks: [{ startLine: 0, endLine: 40, title: "@@ -1 +1,40 @@" }],
+    });
+    mocks.getGitDiffPage.mockResolvedValue({
+      path: "src/app.ts",
+      startLine: 0,
+      totalLines: 40,
+      lines: [{ index: 1, kind: "added", text: "+new", oldLineNumber: null, newLineNumber: 1 }],
+    });
+    const large = mountDiff({ editorSettings: { ...DEFAULT_SETTINGS.editor, fontSize: 20 } });
+    await flushPromises();
+    expect(large.get('[data-testid="large-diff-row"]').attributes("style")).toContain(`height: ${row}px`);
+    // Only a diff long enough to be windowed scrolls on its own: a short file in the change-set stack
+    // is read off the stack's one scrollbar, and two for one file is one too many.
+    expect(large.get('[aria-label="Diff contents"]').classes()).toContain("diff-viewport-windowed");
+    large.unmount();
+  });
+
+  it("paints the whole change set without a second scrollbar of its own", async () => {
+    const all = mountDiff({ path: null });
+    await flushPromises();
+    // How a range is picked is a fact about the diff, not about each file of it: repeated down the
+    // stack it is a line of chrome per open file saying the same thing.
+    expect(all.text()).not.toContain("Drag across line numbers");
+    all.unmount();
+
+    const short = mountDiff({});
+    await flushPromises();
+    // Only a diff long enough to be windowed scrolls on its own, so a file in the stack is read off
+    // the stack's one scrollbar and two scrollbars for one file is one too many.
+    expect(short.get('[aria-label="Diff contents"]').classes()).not.toContain("diff-viewport-windowed");
+    short.unmount();
   });
 
   it("names the file, or the change set and its branch", async () => {
@@ -303,6 +654,222 @@ describe("FileDiff", () => {
     expect(all.get("header").text()).toContain("All changes");
     expect(all.get("header").text()).toContain("bug/1310-timeline");
     all.unmount();
+  });
+
+  it("tells the library what language to read each hunk of a file as", async () => {
+    // The library decides by taking everything after the last dot, which names no language at all
+    // for a `Dockerfile`, so being told is the only way those files get highlighted. It is told the
+    // same name the editor reads the file as, which is what makes one file one file's colors.
+    const cases: Array<[string, string]> = [
+      ["apps/web/src/App.vue", "vue"],
+      ["Dockerfile", "docker"],
+      ["Makefile", "make"],
+      [".prettierrc", "json"],
+      ["scripts/build.sh", "shellscript"],
+      ["Sources/main.m", "objective-c"],
+      ["README.md", "markdown"],
+      ["src/app.ts", "typescript"],
+      ["src/App.svelte", "svelte"],
+    ];
+    for (const [path, expected] of cases) {
+      mocks.diffFiles.length = 0;
+      mocks.getGitDiff.mockResolvedValue({
+        path,
+        patch: `diff --git a/${path} b/${path}\n@@ -1 +1 @@\n-old\n+new\n`,
+        isBinary: false,
+        large: false,
+        tooLarge: false,
+        totalLines: 3,
+        hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
+      });
+      const wrapper = mountDiff({ path });
+      await flushPromises();
+      // Both sides of the same file, on every hunk: a hunk has no name of its own to be read by.
+      expect(mocks.diffFiles, path).not.toHaveLength(0);
+      for (const file of mocks.diffFiles) {
+        expect(file.oldLang, path).toBe(expected);
+        expect(file.newLang, path).toBe(expected);
+      }
+      wrapper.unmount();
+    }
+  });
+
+  it("hands the library the two texts of the file, which is what its grammar reads", async () => {
+    // A grammar reads a file, not a hunk of one: the lines inside `<script setup lang="ts">` of a
+    // `.vue` file are markup to a grammar that was never shown the tag that opened them. So what
+    // arrives with the patch is the whole of each side, under the name Marvis calls the language.
+    const wrapper = mountDiff({});
+    await vi.waitFor(() => expect(mocks.prepared).toHaveLength(1));
+    expect(mocks.prepared[0]).toEqual({
+      language: "typescript",
+      contents: { old: "const before = 1;\n", new: "const after = 2;\n" },
+      // As far as this diff reaches, which for a change on the first line is the first two.
+      lines: 2,
+    });
+    wrapper.unmount();
+  });
+
+  it("gives each set of hunks an identity, which is what tells two checkouts' windows apart", async () => {
+    // The library caches what it read about a window by the text of that window, and two checkouts
+    // hold the same path and often the very same lines — so without an identity of its own, the
+    // second diff would be drawn with the first one's syntax. It is scoped to the checkout and the
+    // path as well as to the reading, because those are what make two files two files.
+    const wrapper = mountDiff({});
+    await flushPromises();
+    expect(mocks.diffFiles).toHaveLength(1);
+    // Scoped to the checkout and the path as well as to the reading, because those are what make two
+    // files two files, and per hunk because the key it replaces is a hunk's own window.
+    for (const file of mocks.diffFiles) expect(file.uuid).toBe(`${checkout.id}:src/app.ts:1:0`);
+
+    // The same file read again is a different reading, and gets an identity of its own rather than
+    // reusing the one whose cache the library already holds. The checkout is what moves to have it read
+    // again, which is also what scopes the identity to the checkout it belongs to.
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+newer\n",
+      oldContent: "const before = 1;\n",
+      newContent: "const after = 3;\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
+    });
+    openedCheckout.value = { ...checkout, id: "checkout:two" };
+    await wrapper.setProps({});
+    await flushPromises();
+    expect(mocks.diffFiles[mocks.diffFiles.length - 1].uuid).toBe("checkout:two:src/app.ts:2:0");
+    wrapper.unmount();
+  });
+
+  it("asks for nothing for a file whose diff carries no text to read", async () => {
+    // A binary diff, a symlink, a diff too large to hold: there is no text, and asking for a reading
+    // of what is not there would only hand the library a highlighter that has nothing to say.
+    mocks.getGitDiff.mockResolvedValue({
+      path: "assets/logo.png",
+      patch: "diff --git a/assets/logo.png b/assets/logo.png\n@@ -1 +1 @@\n-old\n+new\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
+    });
+    const wrapper = mountDiff({ path: "assets/logo.png" });
+    await flushPromises();
+    expect(mocks.prepared).toEqual([]);
+    wrapper.unmount();
+  });
+
+  it("hands the library a highlighter, which is the only way it highlights with Marvis' grammars", async () => {
+    // The diff is highlighted by the same grammars the editor reads with, and the library takes a
+    // replacement only through this prop. It arrives a moment after the diff does, because a grammar
+    // is a dynamic import and a file is read in one, and holding the text back for either would cost
+    // more than the flash is worth.
+    const wrapper = mountDiff({});
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="diff-highlighter"]').attributes("data-name")).toBe("read:const after = 2;\n"),
+    );
+    wrapper.unmount();
+  });
+
+  it("gives the diff on screen the reading of its own file, not one that arrived late", async () => {
+    // What the component waits for is a dynamic import and a read of the file, so one file's answer can
+    // land after the user has opened another. A highlighter handed over for the file that was left
+    // behind is worse than none: the library would be told a highlighter that reads a file which is
+    // not the one it is about to be given, and this diff would be drawn with the wrong syntax.
+    let releaseFirst = () => {};
+    mocks.held.set(
+      "const after = 2;\n",
+      new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      }),
+    );
+    const wrapper = mountDiff({});
+    await vi.waitFor(() => expect(mocks.prepared).toHaveLength(1));
+    expect(wrapper.find('[data-testid="diff-highlighter"]').attributes("data-name")).toBe("");
+
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/other.ts",
+      patch: "diff --git a/src/other.ts b/src/other.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      oldContent: "const other = 1;\n",
+      newContent: "const other = 2;\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
+    });
+    openedPath.value = "src/other.ts";
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="diff-highlighter"]').attributes("data-name")).toBe("read:const other = 2;\n"),
+    );
+
+    // The file the user left behind is answered at last, and the diff on screen keeps what it has.
+    releaseFirst();
+    await flushPromises();
+    expect(wrapper.find('[data-testid="diff-highlighter"]').attributes("data-name")).toBe("read:const other = 2;\n");
+    wrapper.unmount();
+  });
+
+  it("gives a diff read again the reading of that reading, not the one before it", async () => {
+    // The same file, read twice, is two answers. The one already on screen is not handed the second
+    // reading's highlighter: a diff is drawn from the diff object it was read for, and any other
+    // reading is of text the patch it was drawn from never saw.
+    const wrapper = mountDiff({});
+    await vi.waitFor(() =>
+      expect(wrapper.find('[data-testid="diff-highlighter"]').attributes("data-name")).toBe("read:const after = 2;\n"),
+    );
+
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+newer\n",
+      oldContent: "const before = 1;\n",
+      newContent: "const after = 3;\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
+    });
+    let releaseSecond = () => {};
+    mocks.held.set(
+      "const after = 3;\n",
+      new Promise<void>((resolve) => {
+        releaseSecond = resolve;
+      }),
+    );
+    openedCheckout.value = { ...checkout, id: "checkout:two" };
+    await wrapper.setProps({});
+    await vi.waitFor(() => expect(mocks.prepared).toHaveLength(2));
+    // The reading of the new diff has not landed, so the diff on screen is drawn without one rather
+    // than with the previous diff's.
+    expect(wrapper.find('[data-testid="diff-highlighter"]').attributes("data-name")).toBe("");
+
+    releaseSecond();
+    await flushPromises();
+    expect(wrapper.find('[data-testid="diff-highlighter"]').attributes("data-name")).toBe("read:const after = 3;\n");
+    wrapper.unmount();
+  });
+
+  it("leaves the library to guess for a file no grammar is detected for", async () => {
+    mocks.getGitDiff.mockResolvedValue({
+      path: "assets/logo.svg",
+      patch: "diff --git a/assets/logo.svg b/assets/logo.svg\n@@ -1 +1 @@\n-old\n+new\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 3,
+      hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
+    });
+    const wrapper = mountDiff({ path: "assets/logo.svg" });
+    await flushPromises();
+    // Undefined, not a guess: the library falls back to detecting the language, which is the same
+    // as never having been told one.
+    for (const file of mocks.diffFiles) {
+      expect(file.oldLang).toBeUndefined();
+      expect(file.newLang).toBeUndefined();
+    }
+    wrapper.unmount();
   });
 
   it("paints what is open in the theme in effect, and repaints it when the theme changes", async () => {

@@ -32,6 +32,12 @@ export interface GitStatus {
 export interface GitFileDiff {
   path: string;
   patch: string;
+  /** The whole text of each side of the diff, which is what a grammar reads rather than the
+   *  patch's hunks: a hunk inside `<script setup lang="ts">` is markup to a grammar that never saw
+   *  the opening tag. Absent when the side has no text: a binary or symlink diff, a diff too large
+   *  to hold, an added file's old side, a removed file's new one, or a file past the backend's cap. */
+  oldContent?: string;
+  newContent?: string;
   isBinary: boolean;
   large: boolean;
   tooLarge: boolean;

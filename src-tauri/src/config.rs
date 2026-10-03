@@ -106,6 +106,7 @@ impl Default for TerminalSettings {
 pub struct EditorSettings {
     pub font_size: f64,
     pub ligatures: bool,
+    pub cursor_blink: bool,
     pub indentation: IndentationSettings,
 }
 
@@ -114,6 +115,7 @@ impl Default for EditorSettings {
         Self {
             font_size: 13.0,
             ligatures: true,
+            cursor_blink: true,
             indentation: IndentationSettings::default(),
         }
     }
@@ -330,6 +332,7 @@ mod tests {
             editor: EditorSettings {
                 font_size: 15.0,
                 ligatures: false,
+                cursor_blink: false,
                 indentation: IndentationSettings {
                     use_spaces: false,
                     size: 4,
