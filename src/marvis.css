@@ -702,8 +702,14 @@
    and the faint colour the panel gives it. Its space is a margin rather than a gap on the crumb
    because the control is shared with the toolbar's grammar picker, which has no icon to space
    from, and because the file crumb wears the same one inside a row of its own. It does not
-   shrink: the name beside it is what gives way. */
+   shrink: the name beside it is what gives way.
+
+   It stands on the text's baseline rather than in the middle of the line box. The crumb line is
+   24px tall and the type in it only inks 15.5 of them, so a glyph centred in the box hangs
+   below the words instead of beside them; on the baseline its top meets the ascenders and its
+   bottom meets the line they sit on, which is where a glyph belongs. */
 .crumb-icon {
+  align-self: baseline;
   color: var(--marvis-text-faint);
   margin-right: 4px;
   flex-shrink: 0;
