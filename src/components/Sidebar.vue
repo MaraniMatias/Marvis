@@ -664,7 +664,7 @@ const agentTitle = computed(() =>
           <!-- Hangs below the header rather than pushing the rows, like the move menu. -->
           <ul
             v-if="group.hasMenu && groupMenuFor === group.id"
-            class="marvis-menu group-menu"
+            class="surface-popover marvis-menu group-menu"
             role="menu"
             :aria-label="`Actions for ${group.label}`"
           >
@@ -1054,11 +1054,9 @@ const agentTitle = computed(() =>
   margin: 0;
   padding: 4px 0;
   list-style: none;
-  /* The surface is declared here rather than borrowed from `marvis-menu`, which on this panel
-     turned out to draw no background: without one, the rows behind the list show through it. */
-  background: var(--marvis-control-bg);
-  border: 1px solid var(--marvis-control-hover);
-  box-shadow: 0 6px 18px rgb(0 0 0 / 40%);
+  /* The surface itself (background, border, shadow) comes from `surface-popover`, the same class
+     the titlebar menus use, so the two kinds of menu cannot drift apart. `marvis-menu` alone
+     draws none, which is why the rows behind this list used to show through it. */
 }
 
 .group-menu .menu-item {
