@@ -917,7 +917,7 @@ const agentTitle = computed(() =>
       </p>
     </div>
 
-    <div class="workdir-item workdir-child shrink-0">
+    <div class="workdir-item workdir-child shrink-0 border-t-gray-700 border-t">
       <div class="workdir-row">
         <button
           type="button"
