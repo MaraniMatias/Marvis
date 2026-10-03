@@ -2,23 +2,38 @@
    depend on which fonts happened to be installed; bundling this face makes the terminal and editor
    use the same font on every machine and ensures xterm can load it before measuring its grid.
 
-   FiraCode Nerd Font Mono because it is the face this app was already asking for first, and
-   because it carries the ligatures and the icon range in one file. The two weights are separate
-   faces, each naming one weight, because `font-synthesis: none` (style.css) means the browser will
-   not invent a bold: a bold request has to find a face that claims to be one, or it comes back at
-   400 with the metrics unchanged — the whole of the agent's and Neovim's TUI, drawn regular, which
-   reads as "another font" rather than as a missing weight. There is no italic face because this
-   font ships none, so SGR 3 and CodeMirror's emphasis stay flat instead of borrowing a slope from a
-   face that has nothing to do with the document.
+   Fira Code, because it is the face this app was already asking for first and because it carries
+   the ligatures. The two weights are separate faces, each naming one weight, because
+   `font-synthesis: none` (style.css) means the browser will not invent a bold: a bold request has
+   to find a face that claims to be one, or it comes back at 400 with the metrics unchanged — the
+   whole of the agent's and Neovim's TUI, drawn regular, which reads as "another font" rather than
+   as a missing weight. There is no italic face because this font ships none, so SGR 3 and
+   CodeMirror's emphasis stay flat instead of borrowing a slope from a face that has nothing to do
+   with the document.
+
+   The icons are a second family rather than a third weight here, which is the whole point of the
+   split. They used to ship inside both text faces, so a face nobody could read was downloaded
+   twice and parsed twice for the privilege of drawing a folder; the app paid 4.6MB of TTF to say
+   it once. They are cut from the same patched font these two came from, so every icon keeps the
+   outlines and the single-cell advance it had before — a Nerd Font's standalone symbols file
+   cannot be used here instead, because it draws its icons on a 1em grid while this cell is
+   0.6154em, and xterm would measure every one of them as nearly two cells wide. It is a fallback
+   in the family list rather than a face the text one points at, so a character in the private use
+   range resolves to it and nothing else in the app can.
+
+   `400 700` on that one file because the icons have no weight, and a request for the bold has to
+   land on it rather than next to it: xterm draws its glyph atlas on a canvas, where
+   `font-synthesis: none` does not reach, so a face that claimed only 400 would come back
+   synthetically emboldened and a statusline's separators would thicken under bold text.
 
    `block` because a fallback-face swap would redraw the interface and force the terminal grid to
-   be measured again. The file ships with the app, so loading it is local. */
+   be measured again. The files ship with the app, so loading them is local. */
 @font-face {
   font-family: "Marvis Nerd Mono";
   font-style: normal;
   font-weight: 400;
   font-display: block;
-  src: url("./assets/fonts/FiraCodeNerdFontMono-Regular.ttf") format("truetype");
+  src: url("./assets/fonts/FiraCode-Regular.woff2") format("woff2");
 }
 
 @font-face {
@@ -26,7 +41,15 @@
   font-style: normal;
   font-weight: 700;
   font-display: block;
-  src: url("./assets/fonts/FiraCodeNerdFontMono-Bold.ttf") format("truetype");
+  src: url("./assets/fonts/FiraCode-Bold.woff2") format("woff2");
+}
+
+@font-face {
+  font-family: "Marvis Nerd Icons";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: block;
+  src: url("./assets/fonts/NerdSymbols.woff2") format("woff2");
 }
 
 /* Marvis design tokens. Custom properties resolve globally, so they cannot live
@@ -34,9 +57,10 @@
    below win over tailwind's `utilities` layer. */
 :root {
   --marvis-radius: 0;
-  /* The terminal and editor use one family; system monospace faces are fallbacks if the bundled
-     webfont cannot be loaded. */
-  --marvis-font: "Marvis Nerd Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+  /* The terminal and editor use one family, and the icons behind it: a document or a tab named
+     with a glyph from the private use range is drawn by the icon face rather than by a tofu box.
+     System monospace faces are fallbacks if the bundled webfonts cannot be loaded. */
+  --marvis-font: "Marvis Nerd Mono", "Marvis Nerd Icons", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
   color-scheme: dark;
 }
 

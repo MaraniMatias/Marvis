@@ -20,7 +20,7 @@ const stylesheet = readFileSync(join(dirname(fileURLToPath(import.meta.url)), ".
 
 const stubs = vi.hoisted(() => ({
   loaded: [] as string[],
-  fontLoads: [] as string[],
+  fontLoads: [] as [string, string | undefined][],
   webglFails: false,
   disposed: 0,
   loseContext: null as (() => void) | null,
@@ -149,7 +149,9 @@ describe("createMarvisTerminal", () => {
       cursorBlink: true,
       // A block is what a terminal looks like when it is not asking you to wait for it.
       cursorStyle: "block",
-      fontFamily: '"Marvis Nerd Mono", monospace',
+      // Icons behind the text face: the atlas is rasterized per glyph from this string, so a
+      // family that is not in it draws a statusline's separators as tofu.
+      fontFamily: '"Marvis Nerd Mono", "Marvis Nerd Icons", monospace',
       fontSize: 16,
       lineHeight: 1.2,
       scrollback: 10000,
@@ -377,8 +379,8 @@ describe("preloadTerminalFonts", () => {
     stubs.fontLoads = [];
     Object.defineProperty(document, "fonts", {
       value: {
-        load: vi.fn((font: string) => {
-          stubs.fontLoads.push(font);
+        load: vi.fn((font: string, text?: string) => {
+          stubs.fontLoads.push([font, text]);
           return load(font);
         }),
       },
@@ -389,19 +391,25 @@ describe("preloadTerminalFonts", () => {
   }
 
   // The whole point of preloading is that the second caller pays nothing, which only holds if
-  // the answer is kept. Without this, every panel re-parses 4.8MB of TTF on its own mount.
-  it("asks for both weights once and hands every later caller the same promise", async () => {
+  // the answer is kept. Without this, every panel re-parses 1.1MB of woff2 on its own mount.
+  it("asks for every bundled face once and hands every later caller the same promise", async () => {
     await freshPreload(() => Promise.resolve([]));
     const { preloadTerminalFonts } = await import("./marvis-terminal");
     const first = preloadTerminalFonts();
     const second = preloadTerminalFonts();
 
     expect(second).toBe(first);
-    expect(stubs.fontLoads).toEqual(['16px "Marvis Nerd Mono", monospace', '700 16px "Marvis Nerd Mono", monospace']);
-    await expect(first).resolves.toHaveLength(2);
+    // The icon face is asked for by name and with a character it has, because a family list is
+    // where to look rather than a request, and a face holding only icons covers no space.
+    expect(stubs.fontLoads).toEqual([
+      ['16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace', undefined],
+      ['700 16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace', undefined],
+      ['16px "Marvis Nerd Icons"', "\uE0B0"],
+    ]);
+    await expect(first).resolves.toHaveLength(3);
   });
 
   it("resolves rather than rejects when a face is missing, so a panel still opens", async () => {
-    await expect(freshPreload(() => Promise.reject(new Error("no such face")))).resolves.toHaveLength(2);
+    await expect(freshPreload(() => Promise.reject(new Error("no such face")))).resolves.toHaveLength(3);
   });
 });
