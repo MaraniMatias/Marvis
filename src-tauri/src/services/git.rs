@@ -393,6 +393,16 @@ fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<Wat
     let mut worktrees: BTreeSet<String> = BTreeSet::new();
     let mut repo_wide = false;
     for path in &event.paths {
+        // Git writes a ref, the index and the configuration by creating `<name>.lock`, filling it
+        // and renaming it over `<name>`. The lock is where the write begins, never what it leaves
+        // behind: the rename that follows is the change, and a lock cleaned up afterwards
+        // describes nothing. Skipping the path rather than the event is what keeps the rename,
+        // which arrives as a second path in the same event or the next one, answering for the
+        // change. Only Git's own metadata is filtered this way: a file in a checkout that happens
+        // to be called `notes.lock` is a file the user edited.
+        if is_git_lock_file(path) && is_git_metadata_path(plan, path) {
+            continue;
+        }
         // Check registration before a known worktree's Git directory: its `gitdir` file is
         // inside that directory, but removing it means the row's membership changed, not just
         // that checkout's status did.
@@ -534,6 +544,26 @@ fn is_pending_worktree_git_dir(path: &Path, common_dir: &Path) -> bool {
     ) && components.next().is_some()
 }
 
+/// Whether a path is one of Git's lock files: the scratch name it writes a ref, the index or the
+/// configuration under before renaming it into place.
+fn is_git_lock_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".lock"))
+}
+
+/// Whether a path belongs to Git's own bookkeeping rather than to a checkout's files: the Git
+/// directory of one linked worktree, or the directory they all share. A lock in either is a write
+/// in flight, and that includes a lock under a ref in the shared directory, which is why this is
+/// asked separately from the lock itself.
+fn is_git_metadata_path(plan: &RepoWatchPlan, path: &Path) -> bool {
+    plan.git_dirs.keys().any(|dir| path.starts_with(dir))
+        || plan
+            .common_dir
+            .as_deref()
+            .is_some_and(|common| path.starts_with(common))
+}
+
 impl GitSnapshotCache {
     fn fresh(&self, checkout_id: &str, default_branch: Option<&str>) -> Option<CachedGitSnapshot> {
         self.entries
@@ -632,9 +662,11 @@ fn should_refresh_path(path: &Path) -> bool {
         |name: &str| matches!(metadata.last(), Some(Component::Normal(value)) if *value == name);
     // A linked worktree's HEAD is private to that checkout, not a repo-wide ref. Known worktree
     // Git directories are matched before this helper; an unregistered one is not a reason to
-    // refresh every existing checkout while the membership signal adds its row.
+    // refresh every existing checkout while the membership signal adds its row. The scratch name
+    // a lock is written under is answered by the rename that follows it, which arrives separately
+    // and does not match anything here: `HEAD.lock` is not a HEAD that moved.
     let head_changed = metadata.len() == 1 && ends_with("HEAD");
-    let index_changed = ends_with("index") || ends_with("index.lock");
+    let index_changed = ends_with("index");
     let packed_refs_changed = metadata.len() == 1 && ends_with("packed-refs");
     head_changed
         || index_changed
@@ -1159,6 +1191,7 @@ fn scan_git_diff(
     let mut child = Command::new("git")
         .args(args)
         .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -1903,10 +1936,19 @@ fn checked_git<const N: usize>(
     Ok(output)
 }
 
+/// Runs Git to read, never to write, and with the optional locks off so the read leaves nothing
+/// behind.
+///
+/// `git status` takes the index lock to refresh stat data, and the index of a linked worktree
+/// lives inside the very directory the watcher is watching. A refresh would then announce itself,
+/// the announcement would ask for the refresh that wrote it, and the repository would spend the
+/// rest of its life re-reading itself. Git answers the same question without the lock, and the
+/// index stays exactly where the last command that meant to change it left it.
 fn run_git(root: &Path, args: Vec<OsString>) -> Result<Output, IpcError> {
     Command::new("git")
         .args(args)
         .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .map_err(|error| {
             IpcError::new(
@@ -1953,11 +1995,11 @@ mod tests {
     };
 
     use super::{
-        affected_checkouts, diff, diff_page, parse_diff_display_line, parse_name_status,
-        parse_numstat, parse_porcelain_v2, receive_debounced_change, resolve_default_ref,
-        should_refresh_path, status, untracked_line_count, CachedGitSnapshot, GitCounts,
-        GitDiffStats, GitSnapshotCache, GitStatus, GitWatcherManager, PathBuf, RepoWatchPlan,
-        WatchMessage, WatchUpdate, WatchWakeup,
+        affected_checkouts, checked_git, diff, diff_page, parse_diff_display_line,
+        parse_name_status, parse_numstat, parse_porcelain_v2, receive_debounced_change,
+        resolve_default_ref, should_refresh_path, status, untracked_line_count, CachedGitSnapshot,
+        GitCounts, GitDiffStats, GitSnapshotCache, GitStatus, GitWatcherManager, PathBuf,
+        RepoWatchPlan, WatchMessage, WatchUpdate, WatchWakeup,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -2577,13 +2619,205 @@ line.txt";
                     paths: vec![PathBuf::from(path)],
                     attrs: Default::default(),
                 };
+                // The lock is filtered before anything is attributed, so it produces no update at
+                // all. The other three still speak for the checkout that owns them, and say
+                // nothing about the repository's worktrees.
+                let expected = if path.ends_with(".lock") {
+                    None
+                } else {
+                    Some(Vec::new())
+                };
                 assert_eq!(
                     affected_checkouts(&plan, &event).map(|update| update.worktrees),
-                    Some(Vec::new()),
+                    expected,
                     "{path}"
                 );
             }
         }
+    }
+
+    /// The self-inflicted loop: reading a checkout refreshed the index of a linked worktree, and
+    /// the index is inside the directory the watcher watches, so every read announced itself and
+    /// the next read was already on its way. A lock is a write in flight, and reading must not
+    /// be one, so no lock in Git's own metadata speaks for anything.
+    #[test]
+    fn a_lock_in_git_metadata_is_not_a_change_while_the_rename_that_finishes_it_is() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [
+                (PathBuf::from("/repo"), "main".to_owned()),
+                (PathBuf::from("/repo-task"), "task".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            // The primary's own Git directory is the shared one, so it is not here: what is written
+            // under it is the repository's change, not the primary checkout's.
+            git_dirs: BTreeMap::from([(
+                PathBuf::from("/repo/.git/worktrees/task"),
+                "task".to_owned(),
+            )]),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned(), "task".to_owned()],
+        };
+        let kinds = [
+            notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            notify::EventKind::Create(notify::event::CreateKind::File),
+            notify::EventKind::Remove(notify::event::RemoveKind::File),
+        ];
+        for path in [
+            // A linked worktree's own index, which is the one a `git status` there would lock.
+            "/repo/.git/worktrees/task/index.lock",
+            "/repo/.git/worktrees/task/HEAD.lock",
+            // The primary checkout's index, which reaches the shared directory instead and is the
+            // one that would re-read every worktree in the repository.
+            "/repo/.git/index.lock",
+            "/repo/.git/HEAD.lock",
+            // A ref is written the same way, and a lock under one would move the merge base
+            // every sibling counts its lines against.
+            "/repo/.git/refs/heads/trunk.lock",
+            "/repo/.git/packed-refs.lock",
+        ] {
+            for kind in kinds {
+                let event = notify::Event {
+                    kind,
+                    paths: vec![PathBuf::from(path)],
+                    attrs: Default::default(),
+                };
+                assert_eq!(affected_checkouts(&plan, &event), None, "{path}");
+            }
+        }
+
+        // The rename that lands the write is the change, and it is the path that has to speak.
+        // Both the checkout's own index and the repository's are asked here, because the first
+        // names one worktree and the second names all of them.
+        let staged = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/repo/.git/worktrees/task/index")],
+            attrs: Default::default(),
+        };
+        assert_eq!(
+            affected_checkouts(&plan, &staged).map(|update| update.status),
+            Some(vec!["task".to_owned()])
+        );
+        let shared = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/repo/.git/index")],
+            attrs: Default::default(),
+        };
+        assert_eq!(
+            affected_checkouts(&plan, &shared).map(|update| update.status),
+            Some(vec!["main".to_owned(), "task".to_owned()])
+        );
+    }
+
+    /// A backend that does not batch reports the rename of a lock over the file it replaces as
+    /// one event carrying both paths. Dropping the event because one of its paths is a lock would
+    /// lose the change, so the lock is skipped and the destination still answers.
+    #[test]
+    fn a_rename_onto_a_git_file_answers_with_the_file_it_landed_on() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            git_dirs: BTreeMap::from([(
+                PathBuf::from("/repo/.git/worktrees/task"),
+                "task".to_owned(),
+            )]),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned(), "task".to_owned()],
+        };
+        let rename = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::Both,
+            )),
+            paths: vec![
+                PathBuf::from("/repo/.git/worktrees/task/index.lock"),
+                PathBuf::from("/repo/.git/worktrees/task/index"),
+            ],
+            attrs: Default::default(),
+        };
+
+        assert_eq!(
+            affected_checkouts(&plan, &rename).map(|update| update.status),
+            Some(vec!["task".to_owned()])
+        );
+    }
+
+    /// The filter is about where Git writes, not about the shape of a name. A file in a checkout
+    /// that ends in `.lock` is a file the user saved, and treating it as bookkeeping would leave
+    /// the row describing an older version of the worktree than the one on disk.
+    #[test]
+    fn a_file_the_user_named_like_a_lock_is_still_a_change_to_their_checkout() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            git_dirs: BTreeMap::new(),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned()],
+        };
+        let saved = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/repo/notes.lock")],
+            attrs: Default::default(),
+        };
+
+        let update = affected_checkouts(&plan, &saved).unwrap();
+        assert_eq!(update.status, ["main"]);
+        assert_eq!(update.activity, ["main"]);
+    }
+
+    /// The half of the loop that does not depend on the watcher: a read that takes the optional
+    /// index lock writes into the directory being watched, which is enough to keep the repository
+    /// re-reading itself forever. Reading has to answer the same question from what is already on
+    /// disk and leave the index alone.
+    #[test]
+    fn reading_the_status_leaves_the_index_exactly_as_git_wrote_it() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        init_repo(root);
+        fs::write(root.join("edited.txt"), "first\n").unwrap();
+        git(root, &["add", "edited.txt"]);
+        git(root, &["commit", "-m", "second"]);
+
+        // A file saved with the content it already had, and a timestamp Git has not seen: the
+        // answer is that nothing changed, and getting there means comparing the file, because the
+        // index on disk still describes the old timestamp. Recording the new one is the write the
+        // optional lock exists for, and it is a write into the directory being watched.
+        fs::write(root.join("base.txt"), "base\n").unwrap();
+        Command::new("touch")
+            .args(["-t", "202001010000", "base.txt"])
+            .current_dir(root)
+            .output()
+            .expect("touch is installed");
+        // Something genuinely edited, so the read has to be live and not merely quiet.
+        fs::write(root.join("edited.txt"), "second\n").unwrap();
+
+        let index = root.join(".git").join("index");
+        let before = fs::read(&index).unwrap();
+        let output = checked_git(
+            root,
+            ["status", "--porcelain=v2"],
+            "could not read Git status",
+        )
+        .expect("Git status");
+        let reported = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            reported.contains("edited.txt"),
+            "the edit was not reported: {reported}"
+        );
+        assert!(
+            !reported.contains("base.txt"),
+            "a file saved unchanged is still unchanged: {reported}"
+        );
+        assert_eq!(
+            before,
+            fs::read(&index).unwrap(),
+            "reading the status rewrote the index it was reading"
+        );
     }
 
     #[test]
