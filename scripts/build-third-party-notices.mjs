@@ -321,7 +321,7 @@ function buildNotices() {
     "A small set of crate archives omits license texts. Exact-revision sidecars are included only when their upstream source revision is recorded and the local SHA-256 matches; builds do not fetch them.",
     "Packages without installed or pinned license text are listed by declared metadata and marked. For verified OR-licensed sidecars, the MIT option is included; the package inventory keeps the full declared expression.",
     "This crate inventory does not enumerate Linux GTK/WebKit or other dynamically linked system libraries, C/C++ libraries, or framework/FFI obligations; those require review against each target's actual runtime dependencies.",
-    "The bundled FiraCode Nerd Font files contain Nerd Fonts glyph patches. This source tree contains the Fira Code OFL text but no verified upstream glyph-set license inventory; no additional glyph license is claimed by this notice.",
+    "The bundled text faces are FiraCode-Regular.woff2 and FiraCode-Bold.woff2; NerdSymbols.woff2 is a subset of a FiraCode Nerd Font glyph-patched file. This source tree contains the Fira Code OFL text but no verified upstream glyph-set license inventory; that OFL text does not establish separate glyph licensing, and no additional glyph license is claimed by this notice.",
     "",
     "JavaScript production dependencies",
     "-------------------------------",

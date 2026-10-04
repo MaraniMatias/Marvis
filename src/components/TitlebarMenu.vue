@@ -1,9 +1,12 @@
 <script setup lang="ts">
+import type { Component } from "vue";
 import { computed, ref } from "vue";
 import {
   DropdownMenuContent,
   DropdownMenuFilter,
+  DropdownMenuGroup,
   DropdownMenuItem,
+  DropdownMenuLabel,
   DropdownMenuPortal,
   DropdownMenuRoot,
   DropdownMenuSeparator,
@@ -26,12 +29,19 @@ const props = withDefaults(
     /** When set, the menu opens on a search field over the rows. */
     searchPlaceholder?: string;
     align?: "start" | "end";
+    /**
+     * The glyph that stands for what the crumb names, drawn ahead of the name.
+     *
+     * It is the one the sidebar gives the same row, so the line reads as that panel sideways
+     * instead of as a row of text that happens to have one icon in it.
+     */
+    icon?: Component;
     /** Where this crumb sits in the line, which is what says how bright it reads and what it
      *  gives up when the line runs out of room. */
     crumb?: "workdir" | "branch" | "item";
     testid?: string;
   }>(),
-  { searchPlaceholder: undefined, align: "start", crumb: "item", testid: undefined },
+  { searchPlaceholder: undefined, align: "start", icon: undefined, crumb: "item", testid: undefined },
 );
 
 const emit = defineEmits<{ "update:open": [boolean] }>();
@@ -52,6 +62,15 @@ function rows(section: TitlebarMenuSection): TitlebarMenuItem[] {
   return section.kind === "separator" ? [] : section.items;
 }
 
+/**
+ * A key that survives the filter. While the user types, sections appear and disappear, so an
+ * index would hand one section's DOM node (and its focus and highlight) to another's content.
+ * A group is named by its label; a separator has nothing to be named by and keeps its position.
+ */
+function sectionKey(section: TitlebarMenuSection, index: number): string {
+  return section.kind === "group" ? `group-${section.label}` : `${section.kind}-${index}`;
+}
+
 /** Closing forgets what was typed, so the menu opens on the whole list again. */
 function onOpenChange(open: boolean) {
   if (!open) query.value = "";
@@ -63,10 +82,11 @@ function onOpenChange(open: boolean) {
   <DropdownMenuRoot :open="open" @update:open="onOpenChange">
     <DropdownMenuTrigger
       class="text-menu-control select-none"
-      :class="`crumb-${crumb}`"
+      :class="[`crumb-${crumb}`, crumb === 'item' && 'crumb-terminal']"
       :data-testid="testid"
       :title="label"
     >
+      <component :is="icon" v-if="icon" class="icon-xs crumb-icon" aria-hidden="true" />
       <span class="truncate">{{ label }}</span>
     </DropdownMenuTrigger>
     <DropdownMenuPortal>
@@ -83,17 +103,21 @@ function onOpenChange(open: boolean) {
           :auto-focus="true"
           class="marvis-menu-search"
         />
-        <template v-for="(section, index) in sections" :key="index">
+        <template v-for="(section, index) in sections" :key="sectionKey(section, index)">
           <DropdownMenuSeparator v-if="section.kind === 'separator'" class="menu-separator" />
-          <div v-else>
-            <p v-if="section.kind === 'group'" class="group-header" :title="section.label">{{ section.label }}</p>
+          <!-- A group is a real group: its label names it for a screen reader, which would
+               otherwise walk the rows without knowing which set they belong to. -->
+          <DropdownMenuGroup v-else>
+            <DropdownMenuLabel v-if="section.kind === 'group'" class="group-header" :title="section.label">
+              {{ section.label }}
+            </DropdownMenuLabel>
             <DropdownMenuItem
               v-for="item in rows(section)"
               :key="item.id"
               class="menu-item select-none"
               :class="{ 'is-pinned': item.pinned }"
               :disabled="item.disabled"
-              :title="item.title"
+              :title="item.title ?? item.label"
               :data-testid="`menu-item-${item.id}`"
               :role="item.choice ? 'menuitemradio' : undefined"
               :aria-checked="item.choice ? item.checked === true : undefined"
@@ -109,9 +133,10 @@ function onOpenChange(open: boolean) {
               <CheckIcon v-if="item.checked" class="icon-xxs menu-check" aria-hidden="true" />
               <span v-if="item.hint" class="menu-item-hint">{{ item.hint }}</span>
             </DropdownMenuItem>
-          </div>
+          </DropdownMenuGroup>
         </template>
-        <p v-if="nothingMatched" class="menu-note">No matches</p>
+        <!-- A status, so that a filter which empties the list is announced and not only drawn. -->
+        <p v-if="nothingMatched" class="menu-note" role="status">No matches</p>
       </DropdownMenuContent>
     </DropdownMenuPortal>
   </DropdownMenuRoot>

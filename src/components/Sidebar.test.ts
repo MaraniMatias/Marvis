@@ -48,6 +48,20 @@ function session(id: string, name: string, checkoutId = "checkout:primary"): Ses
   return { id, type: "shell", checkoutId, name, createdAt: "now", status: "inactive" };
 }
 
+// reka hands the list to the body, so a repo's menu is read off the document and not off the panel.
+function menuItems(): string[] {
+  return [...document.querySelectorAll(".group-menu .menu-item")].map((item) => item.textContent?.trim() ?? "");
+}
+
+async function clickMenuItem(label: string) {
+  const item = [...document.querySelectorAll<HTMLElement>(".group-menu .menu-item")].find((row) =>
+    row.textContent?.includes(label),
+  );
+  if (!item) throw new Error(`no menu item "${label}" in [${menuItems().join(", ")}]`);
+  item.click();
+  await flushPromises();
+}
+
 describe("Sidebar workdir rows", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -67,7 +81,7 @@ describe("Sidebar workdir rows", () => {
 
     expect(wrapper.find("h2").exists()).toBe(false);
     expect(wrapper.find('input[aria-label="Search repositories"]').exists()).toBe(false);
-    expect(wrapper.find(".group-header").exists()).toBe(false);
+    expect(wrapper.find(".group-heading").exists()).toBe(false);
     expect(wrapper.text()).toContain("Your opened folders will appear here.");
     const openDirectory = wrapper.get('button[aria-label="Open directory"]');
     expect(openDirectory.attributes("title")).toBe("Open directory");
@@ -114,7 +128,10 @@ describe("Sidebar workdir rows", () => {
       },
     });
 
-    expect(wrapper.get(".group-header").text()).toBe("test");
+    // The repo is a group: its name and where it lives are the header, and the three dots
+    // there are everything done to the repo as a whole.
+    expect(wrapper.get(".group-name").text()).toBe("test");
+    expect(wrapper.get(".group-path").text()).toBe("/test");
     // The repo root is named by the branch it is on, like a worktree is, and the branch is
     // never repeated beside it.
     expect(wrapper.get(".workdir-item .workdir-name").text()).toBe("main");
@@ -122,7 +139,9 @@ describe("Sidebar workdir rows", () => {
     // Hover says the whole name, which the row cannot fit, and where the checkout lives.
     expect(wrapper.get(".workdir-item.active .workdir-select").attributes("title")).toBe("feature — /test-feature");
 
-    expect(wrapper.find('button[aria-label="Add worktree from main"]').exists()).toBe(true);
+    // The root row carries no action of its own: it is the repo's business, so it lives in
+    // the header's menu, and only a worktree row has an action beside it.
+    expect(wrapper.get('[data-workdir-checkout="checkout:primary"]').find(".workdir-action").exists()).toBe(false);
     expect(wrapper.find('button[aria-label="Remove or archive worktree main"]').exists()).toBe(false);
     expect(wrapper.find('button[aria-label="Remove or archive worktree feature"]').exists()).toBe(true);
     // A workdir with nothing open still offers a terminal: picking a workdir no longer opens
@@ -132,7 +151,9 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.text()).not.toContain("Plain");
 
     await wrapper.get(".workdir-item.active .workdir-select").trigger("click");
-    await wrapper.get('button[aria-label="Add worktree from main"]').trigger("click");
+    await wrapper.get('button[aria-label="Actions for test"]').trigger("click");
+    await flushPromises();
+    await clickMenuItem("New worktree");
     await wrapper.get('button[aria-label="Remove or archive worktree feature"]').trigger("click");
     await wrapper.get('button[aria-label="New terminal for main"]').trigger("click");
 
@@ -159,7 +180,7 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
   });
 
-  it("gives a plain folder neither worktree action", () => {
+  it("gives a plain folder neither worktree action", async () => {
     const wrapper = mount(Sidebar, {
       props: {
         repos: [
@@ -189,14 +210,23 @@ describe("Sidebar workdir rows", () => {
     });
 
     // A plain folder is one checkout of its own, so it can be taken off the panel; what it
-    // never has is a worktree action, which belongs to Git alone.
-    expect(wrapper.get(".workdir-actions button").attributes("aria-label")).toBe("Remove from list: notes");
+    // never has is a worktree action, which belongs to Git alone, and so its row carries none
+    // at all. Its one way out is the group menu, and nothing else is in that menu.
+    expect(wrapper.find(".workdir-item .workdir-actions").exists()).toBe(false);
     expect(wrapper.find("button[aria-label^='Add worktree']").exists()).toBe(false);
     expect(wrapper.find("button[aria-label^='Remove or archive']").exists()).toBe(false);
     expect(wrapper.find("button[aria-label='New terminal for notes']").exists()).toBe(true);
+
+    await wrapper.get('button[aria-label="Actions for notes"]').trigger("click");
+    await flushPromises();
+    expect(menuItems()).toEqual(["Remove from panel"]);
+
+    await clickMenuItem("Remove from panel");
+    expect(wrapper.emitted("closeWorkdir")).toEqual([["checkout:notes"]]);
+    wrapper.unmount();
   });
 
-  it("protects Home by checkout identity rather than folder name", () => {
+  it("protects Home by checkout identity rather than folder name", async () => {
     const home = repo({
       id: "repo:/home",
       kind: "plain",
@@ -240,9 +270,22 @@ describe("Sidebar workdir rows", () => {
     const homeRow = wrapper.get('[data-workdir-checkout="checkout:/home"]');
     const namedHomeRow = wrapper.get('[data-workdir-checkout="checkout:/other"]');
     expect(homeRow.get(".workdir-name").text()).toBe("Home");
+    // The home checkout is the one folder that is never taken off the panel, so neither its
+    // row nor its group is given a way to do it.
     expect(homeRow.find(".workdir-action").exists()).toBe(false);
-    expect(namedHomeRow.get(".workdir-action").attributes("aria-label")).toBe("Remove from list: Home");
+    expect(homeRow.element.closest(".workdir-group")?.querySelector("button.group-more")).toBe(null);
+    // Two groups are both called "Home", and only the one that is not the home checkout has a
+    // menu, so the folder name alone never says which one can be closed.
+    const more = namedHomeRow.element.closest(".workdir-group")?.querySelector<HTMLElement>("button.group-more");
+    expect(wrapper.findAll("button.group-more")).toHaveLength(1);
+    expect(more?.getAttribute("aria-label")).toBe("Actions for Home");
     expect(wrapper.find('button[aria-label="New terminal for Home"]').exists()).toBe(true);
+
+    more?.click();
+    await flushPromises();
+    await clickMenuItem("Remove from panel");
+    expect(wrapper.emitted("closeWorkdir")).toEqual([["checkout:/other"]]);
+    wrapper.unmount();
   });
 
   it("offers a terminal on every workdir that has a directory, and on none that does not", () => {
@@ -890,14 +933,22 @@ describe("Sidebar workdir rows", () => {
     });
 
     const name = wrapper.get(".workdir-name");
-    expect(name.text()).toBe("bug/13104984920-timeline-element-boundaries");
+    // The ticket is the half every branch of the repo shares, so the ellipsis falls on it and
+    // the slug is the part the row spends its room on.
+    expect(name.text()).toBe("bug/…-timeline-element-boundaries");
+    expect(wrapper.get(".workdir-name-head").text()).toBe("bug/…");
+    expect(wrapper.get(".workdir-name-tail").text()).toBe("-timeline-element-boundaries");
+    // The name the row cannot fit whole is the one the hover says.
+    expect(wrapper.get(".workdir-select").attributes("title")).toBe(
+      "bug/13104984920-timeline-element-boundaries — /test-feature",
+    );
     expect(name.element.className).toBe("workdir-name");
     expect(wrapper.get(".workdir-title").element.className).toBe("workdir-title");
     expect(wrapper.get(".workdir-item .workdir-select").element.className).toBe("workdir-select");
     expect(wrapper.find(".workdir-meta").exists()).toBe(true);
   });
 
-  it("cuts a branch name at the ticket, so the part that tells branches apart survives", () => {
+  it("spends the row on the slug, not on the ticket every branch of the repo shares", () => {
     const wrapper = mount(Sidebar, {
       props: {
         repos: [
@@ -919,11 +970,11 @@ describe("Sidebar workdir rows", () => {
     });
 
     // The ticket prefix is the half every branch of the repo shares, so it is the half the
-    // ellipsis is allowed to reach.
-    expect(wrapper.get(".workdir-name-head").text()).toBe("feat/12529440962-");
-    expect(wrapper.get(".workdir-name-tail").text()).toBe("titan-hero-homepage-banner-imagen");
+    // ellipsis is allowed to reach, and the slug is the half that tells branches apart.
+    expect(wrapper.get(".workdir-name-head").text()).toBe("feat/…");
+    expect(wrapper.get(".workdir-name-tail").text()).toBe("-titan-hero-homepage-banner-imagen");
     // The name is still one name: the halves are a way to draw it, and nothing sits between them.
-    expect(wrapper.get(".workdir-name").text()).toBe("feat/12529440962-titan-hero-homepage-banner-imagen");
+    expect(wrapper.get(".workdir-name").text()).toBe("feat/…-titan-hero-homepage-banner-imagen");
   });
 
   it("draws a name with no ticket in it whole, and says the same on hover", () => {
@@ -1124,6 +1175,71 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
   });
 
+  it("puts the actions of a repo in one menu, and says which one is open", async () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              { ...checkout({ id: "checkout:primary" }), branch: "main" },
+              { ...checkout({ id: "checkout:feature", isPrimary: false }), branch: "feature" },
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+        archivedWorktrees: [{ id: "checkout:gone", repoId: "repo:test", path: "/test-gone", branch: "temporary" }],
+      },
+    });
+
+    const more = wrapper.get('button[aria-label="Actions for test"]');
+    // reka hands the list to the body, so the menu is read off the document and not off the panel.
+    const menu = () => document.querySelector(".group-menu");
+    expect(menu()).toBe(null);
+
+    // The button is the way in, and what it opens is the repo's three actions in one list.
+    await more.trigger("click");
+    await flushPromises();
+    expect(menu()?.getAttribute("role")).toBe("menu");
+    expect(menu()?.textContent).toContain("New worktree");
+    expect(menu()?.textContent).toContain("Restore archived worktrees");
+    expect(menu()?.textContent).toContain("Remove from panel");
+    // The count says how much there is to bring back, and nothing is offered for nothing.
+    expect(menu()?.textContent).toContain("1");
+
+    const restore = document.querySelector('[aria-label="Restore 1 archived worktree"]') as HTMLElement;
+    restore.click();
+    await flushPromises();
+    expect(wrapper.emitted("restoreArchived")).toEqual([["repo:test"]]);
+    // A row that was chosen closes the list behind it.
+    expect(menu()).toBe(null);
+    wrapper.unmount();
+  });
+
+  it("opens the repo menu from a right click on the header, and closes it on Escape", async () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [repo({ checkouts: [{ ...checkout({ id: "checkout:primary" }), branch: "main" }] })],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    const menu = () => document.querySelector(".group-menu");
+
+    // A right click anywhere on the header is the way in that the button is not part of.
+    await wrapper.get(".group-heading").trigger("contextmenu");
+    await flushPromises();
+    expect(menu()).not.toBe(null);
+
+    // The list answers the Escape, which the panel used to answer with a listener of its own.
+    window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
+    await flushPromises();
+    expect(menu()).toBe(null);
+    wrapper.unmount();
+  });
+
   it("hangs the restore action on the repo root, and only while it has something to restore", async () => {
     const gitdir = { ...checkout({ id: "checkout:primary" }), branch: "main" };
     const worktree = {
@@ -1146,26 +1262,30 @@ describe("Sidebar workdir rows", () => {
         },
       });
 
-    // Nothing archived, nothing to offer: a button that can only answer "nothing archived"
-    // is a button that teaches the row it sits on means nothing.
+    // Nothing archived, nothing to offer: a menu row that can only answer "nothing archived"
+    // is a row that teaches the repo it sits on means nothing.
     const empty = mounted([]);
-    expect(empty.find('button[aria-label^="Restore"]').exists()).toBe(false);
+    await empty.get('button[aria-label="Actions for test"]').trigger("click");
+    await flushPromises();
+    expect(menuItems()).toEqual(["New worktree", "Remove from panel"]);
     empty.unmount();
 
     const wrapper = mounted([{ id: "checkout:gone", repoId: "repo:test", path: "/test-gone", branch: "temporary" }]);
-    const restore = wrapper.get('button[aria-label="Restore 1 archived worktree from main"]');
-    expect(restore.attributes("title")).toBe("Restore archived worktrees");
-    // The root reserves room for its own two actions plus the third it only sometimes has,
-    // so a long branch name cannot end up underneath them.
-    expect(wrapper.get(".workdir-item").classes()).toContain("has-three-actions");
+    // The restore belongs to the repo, so it is nowhere in the rows, and the row's long branch
+    // name is left the whole row to itself.
+    expect(wrapper.find('button[aria-label^="Restore"]').exists()).toBe(false);
 
-    await restore.trigger("click");
+    await wrapper.get('button[aria-label="Actions for test"]').trigger("click");
+    await flushPromises();
+    const restore = document.querySelector('[aria-label="Restore 1 archived worktree"]') as HTMLElement;
+    restore.click();
+    await flushPromises();
 
     expect(wrapper.emitted("restoreArchived")).toEqual([["repo:test"]]);
     wrapper.unmount();
   });
 
-  it("counts the plural in what it says, so the row never promises one of many", () => {
+  it("counts the plural in what it says, so the row never promises one of many", async () => {
     const wrapper = mount(Sidebar, {
       props: {
         repos: [repo({ checkouts: [checkout({ id: "checkout:primary", branch: "main" })] })],
@@ -1179,7 +1299,11 @@ describe("Sidebar workdir rows", () => {
       },
     });
 
-    expect(wrapper.find('button[aria-label="Restore 2 archived worktrees from main"]').exists()).toBe(true);
+    await wrapper.get('button[aria-label="Actions for test"]').trigger("click");
+    await flushPromises();
+    expect(document.querySelector('[aria-label="Restore 2 archived worktrees"]')).not.toBe(null);
+    // And it is the plural that is said, never the singular about a pair.
+    expect(document.querySelector('[aria-label="Restore 1 archived worktree"]')).toBe(null);
     wrapper.unmount();
   });
 });

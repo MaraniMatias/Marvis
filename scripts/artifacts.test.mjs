@@ -8,6 +8,11 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = resolve(ROOT, "dist");
 const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
+const EXPECTED_FONT_SHA256 = {
+  "FiraCode-Bold.woff2": "d778c19803c672d294663e9283c7b752cc125ab266f0ddb8e53b039da92caf67",
+  "FiraCode-Regular.woff2": "a6ce59520b90e15d7062ffef214f94c8add5a4085c0bbb1683602ef227a4d1fe",
+  "NerdSymbols.woff2": "884f36993b24d91233b7da36a4994ce6d2dc23520469a13f60a0d537aee843a2",
+};
 
 test("production dist preserves third-party notices and shipped font binaries", () => {
   const catppuccin = readFileSync(resolve(DIST, "assets/Catppuccin-MIT.txt"), "utf8");
@@ -32,13 +37,21 @@ test("production dist preserves third-party notices and shipped font binaries", 
     readFileSync(resolve(ROOT, "LICENSE"), "utf8"),
   );
 
-  const sourceFonts = readdirSync(resolve(ROOT, "src/assets/fonts"))
-    .filter((name) => name.endsWith(".ttf"))
-    .map((name) => sha256(resolve(ROOT, "src/assets/fonts", name)))
+  const fontDirectory = resolve(ROOT, "src/assets/fonts");
+  const fontNames = Object.keys(EXPECTED_FONT_SHA256).sort();
+  assert.deepEqual(
+    readdirSync(fontDirectory).filter((name) => name.endsWith(".woff2")).sort(),
+    fontNames,
+  );
+  const sourceFonts = fontNames
+    .map((name) => {
+      const digest = sha256(resolve(fontDirectory, name));
+      assert.equal(digest, EXPECTED_FONT_SHA256[name], name);
+      return digest;
+    })
     .sort();
-  assert.ok(sourceFonts.length > 0, "source fonts must exist");
   const bundledFonts = readdirSync(resolve(DIST, "assets"))
-    .filter((name) => name.endsWith(".ttf"))
+    .filter((name) => /\.(?:ttf|woff2)$/.test(name))
     .map((name) => sha256(resolve(DIST, "assets", name)))
     .sort();
   assert.deepEqual(bundledFonts, sourceFonts);
@@ -49,6 +62,8 @@ test("production dist preserves third-party notices and shipped font binaries", 
   assert.match(thirdParty, /target-conditional crates are included, but not every crate appears in every artifact/);
   assert.match(thirdParty, /Linux GTK\/WebKit or other dynamically linked system libraries/);
   assert.match(thirdParty, /Packages without installed or pinned license text are listed by declared metadata/);
+  assert.match(thirdParty, /FiraCode-Regular\.woff2 and FiraCode-Bold\.woff2/);
+  assert.match(thirdParty, /NerdSymbols\.woff2/);
   assert.match(thirdParty, /no verified upstream glyph-set license inventory/);
   assert.match(thirdParty, /@tauri-apps\/api@/);
   assert.match(thirdParty, /serde@/);

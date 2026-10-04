@@ -13,8 +13,10 @@ import type { AppSettings } from "./domain/settings";
 import type { ReviewNote } from "./domain/review";
 import { REVIEW_SENDER } from "./presentation/review-notes";
 import { useToasts } from "./presentation/toasts";
+import { WORKDIR_ICONS } from "./presentation/workdir-icons";
 import type { ReviewSender } from "./presentation/review-notes";
 import type { Checkout, Repo, Session, WorkspaceState } from "./domain/workspace";
+import FileIcon from "./components/FileIcon.vue";
 
 const mocks = vi.hoisted(() => ({
   initialWorkspace: null as WorkspaceState | null,
@@ -223,6 +225,10 @@ vi.mock("reka-ui", async () => {
     DropdownMenuSeparator: passThrough("DropdownMenuSeparator"),
     DropdownMenuFilter: menuFilter,
     DropdownMenuItem: menuRow,
+    // A group and its label only wrap the rows: the stub always renders their content, which is
+    // what lets a grouped menu be reached without driving the open state, the same as the rest.
+    DropdownMenuGroup: passThrough("DropdownMenuGroup"),
+    DropdownMenuLabel: passThrough("DropdownMenuLabel"),
   };
 });
 
@@ -417,6 +423,7 @@ const SidebarStub = defineComponent({
 
 const SessionPaneStub = defineComponent({
   name: "SessionPane",
+  emits: ["sessionStatusChanged"],
   setup(_, { expose }) {
     onMounted(() => (mocks.sessionPaneMounts += 1));
     expose({ focusActiveTerminal: vi.fn() });
@@ -774,6 +781,48 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
+    it("wears the icon the sidebar gives the row each crumb names", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
+
+      // The line is the sidebar read sideways, so a worktree and a terminal wear the two glyphs
+      // their rows wear over there. The workdir wears nothing: it is the one name that is always
+      // there, and a glyph on it would only repeat a word that never changes.
+      expect(wrapper.get('[data-testid="repo-crumb"]').find(".crumb-icon").exists()).toBe(false);
+      expect(wrapper.get('[data-testid="worktree-crumb"]').findComponent(WORKDIR_ICONS.worktree).exists()).toBe(true);
+      expect(wrapper.get('[data-testid="item-crumb"]').findComponent(WORKDIR_ICONS.terminal).exists()).toBe(true);
+      wrapper.unmount();
+    });
+
+    it("wears the file's own icon on the step that names it, and on the probe that weighs the path", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      await wrapper.get('[data-testid="open-nested-file"]').trigger("click");
+      await flushPromises();
+
+      // The one icon in the crumb, and it is the last thing before the file it names: an icon at
+      // the head of the path would name the first directory rather than what is open.
+      const crumb = wrapper.get('[data-testid="item-crumb"]');
+      expect(crumb.findAll(".crumb-icon")).toHaveLength(1);
+      // The glyph stands immediately before the name it belongs to, and after the separator.
+      expect(crumb.element.querySelector(".crumb-icon-slot")?.nextSibling?.textContent).toBe("one.ts");
+      expect(crumb.text()).toBe("src/lib/one.ts");
+      // The probe is the crumb at the width it wants, glyph included: a path measured without it
+      // would run past the line before it was told to give anything up.
+      expect(wrapper.get('[data-testid="path-probe"]').findComponent(FileIcon).exists()).toBe(true);
+      wrapper.unmount();
+    });
+
+    it("leaves the last crumb bare when what it names is not a file", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+      await wrapper.get('[data-testid="open-all-changes"]').trigger("click");
+      await flushPromises();
+
+      // The whole change set is not one file, so there is no file's icon to wear.
+      const crumb = wrapper.get('[data-testid="item-crumb"]');
+      expect(crumb.text()).toBe("All changes");
+      expect(crumb.find("svg").exists()).toBe(false);
+      wrapper.unmount();
+    });
+
     it("opens every open workdir from the first crumb, and takes the one that is picked", async () => {
       const wrapper = await mountApp(
         workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")]), {
@@ -890,6 +939,36 @@ describe("App UI integration", () => {
       await wrapper.get('[data-testid="menu-item-new-terminal"]').trigger("click");
       await flushPromises();
       expect(mocks.selectCheckout).toHaveBeenCalledWith("checkout:one");
+      wrapper.unmount();
+    });
+
+    it("names the open terminal the way the sidebar row names it", async () => {
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one", [session("session:one", "zsh"), session("session:two", "Neovim")])),
+      );
+
+      await wrapper.get('[data-testid="menu-item-session:one"]').trigger("click");
+      await flushPromises();
+
+      // Nothing is in front of the shell yet, so the crumb is on the name the database holds.
+      expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("zsh");
+
+      wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", "session:one", {
+        state: "running",
+        foregroundProcess: true,
+        foregroundApp: "opencode",
+        terminalTitle: "OpenCode: review task",
+      });
+      await flushPromises();
+
+      // The crumb and the row that opens it are one list read twice, so the title the program set
+      // is what the header says as well — and the menu offers the names the sidebar is showing.
+      expect(wrapper.get('[data-testid="item-crumb"]').text()).toBe("OpenCode: review task");
+      expect(wrapper.get('[data-testid="item-crumb"]').attributes("title")).toBe("OpenCode: review task");
+      expect(wrapper.findAll('[data-testid^="menu-item-session:"]').map((row) => row.text())).toEqual([
+        "OpenCode: review task",
+        "Neovim",
+      ]);
       wrapper.unmount();
     });
 
@@ -1080,12 +1159,12 @@ describe("App UI integration", () => {
       expect(wrapper.get('[data-testid="worktree-crumb"]').classes()).toContain("crumb-branch");
       expect(wrapper.get('[data-testid="item-crumb"]').classes()).toContain("crumb-item");
 
-      // The fork is the one icon the line keeps, and it stands between the separators rather
-      // than inside a crumb.
-      for (const testid of ["repo-crumb", "worktree-crumb", "item-crumb"]) {
-        expect(wrapper.get(`[data-testid="${testid}"]`).find("svg").exists()).toBe(false);
-      }
-      expect(wrapper.get("nav").find("svg").exists()).toBe(true);
+      // The glyph each crumb wears is the one its row wears in the sidebar, and it is the only
+      // thing on the crumb but the name: no chip, no chevron, and nothing drawn between two
+      // crumbs that belongs to neither of them.
+      expect(wrapper.get('[data-testid="worktree-crumb"]').findAll(".crumb-icon")).toHaveLength(1);
+      expect(wrapper.get('[data-testid="item-crumb"]').findAll(".crumb-icon")).toHaveLength(1);
+      expect(wrapper.get('[data-testid="repo-crumb"]').findAll(".crumb-icon")).toHaveLength(0);
       wrapper.unmount();
     });
 

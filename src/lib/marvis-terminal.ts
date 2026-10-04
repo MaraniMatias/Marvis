@@ -3,10 +3,28 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import type { ITheme, IDisposable } from "@xterm/xterm";
+import type { TerminalCursorStyle } from "../domain/settings";
 import { ligatureRanges } from "./ligature-joiner";
 
-/** The face shared by the terminal and editor and bundled in `src/assets/fonts`. */
-export const TERMINAL_FONT_FAMILY = '"Marvis Nerd Mono", monospace';
+/**
+ * The faces shared by the terminal and editor and bundled in `src/assets/fonts`, icons included.
+ *
+ * The icon face is in the list rather than behind the terminal's back because the atlas is
+ * rasterized per glyph from this string: a face that is not in it gets a tofu box or a borrowed
+ * face drawn at the cell width, and a statusline is mostly separators.
+ */
+export const TERMINAL_FONT_FAMILY = '"Marvis Nerd Mono", "Marvis Nerd Icons", monospace';
+
+/**
+ * A character from the icon face, asked for by name.
+ *
+ * The face carries nothing but icons, so the load has to say which one or it is never fetched:
+ * `document.fonts.load` asks the browser whether a face covers the given text, and with no text it
+ * asks about a space, which this face does not have. U+E0B0 is the powerline separator, the glyph
+ * drawn on more lines of a terminal than any other icon, and it is the character to keep when the
+ * icon set is ever trimmed.
+ */
+const ICON_PROBE = "\uE0B0";
 
 /**
  * The cell size the terminal draws at, which is the size it is drawn at whether or not the
@@ -37,7 +55,7 @@ export function terminalFontSize(fontSize: number, zoom: number): number {
 const TERMINAL_THEME_TOKENS = {
   background: "--marvis-content-bg-0",
   foreground: "--marvis-content-text",
-  cursor: "--marvis-content-accent",
+  cursor: "--marvis-cursor",
   cursorAccent: "--marvis-content-bg-0",
   selectionBackground: "--marvis-selection",
   black: "--marvis-ansi-black",
@@ -93,15 +111,28 @@ export type RendererLevel = "webgl" | "dom";
  * preferences from `~/.marvis/config.yml`, read here for the same reason; the ligatures are not,
  * because the joiner only exists once the terminal is on the page.
  *
- * The cursor is a block because that is what a terminal that is not telling you it is waiting for
- * you looks like; whether it blinks is a preference, and a program that asks for another shape
- * through DECSCUSR is answered out of this one rather than fought with it.
+ * The cursor's shape is a preference from the same file, and the shape it opens on is a block: a
+ * cell filled with the theme's `--marvis-cursor` and the glyph under it in the background, so the
+ * caret is the one thing on the page drawn the other way round. Whether it blinks is the other
+ * half of that choice, and a program that asks for another shape through DECSCUSR is answered out
+ * of this one rather than fought with it.
+ *
+ * It is two colors and not one per cell — a cell that arrives with a color of its own does not
+ * hand it to the block — and the panel that is not holding the keyboard draws a frame rather than
+ * the focused shape, which says so in shape rather than in a color that has to differ from the
+ * focused one.
  */
-export function createMarvisTerminal(fontSize = 16, cursorBlink = true, zoom = 1): Terminal {
+export function createMarvisTerminal(
+  fontSize = 16,
+  cursorBlink = true,
+  cursorStyle: TerminalCursorStyle = "block",
+  zoom = 1,
+): Terminal {
   const terminal = new Terminal({
     allowProposedApi: true,
     cursorBlink,
-    cursorStyle: "block",
+    cursorStyle,
+    cursorInactiveStyle: "outline",
     fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: terminalFontSize(fontSize, zoom),
     lineHeight: 1.2,
@@ -122,13 +153,16 @@ export function createMarvisTerminal(fontSize = 16, cursorBlink = true, zoom = 1
 let terminalFonts: Promise<unknown> | undefined;
 
 /**
- * Both bundled weights, and the one thing on the path to a drawn terminal that is not the
+ * All three bundled faces, and the one thing on the path to a drawn terminal that is not the
  * terminal's own work.
  *
  * xterm.js cannot measure its grid against a face it does not have, so a panel that opens
  * before these land draws its first frame from the fallback and lays the columns out wrong.
  * The files are local, but they are not small, and parsing them is the part of opening a
- * terminal a person waits on without being able to see why.
+ * terminal a person waits on without being able to see why. The icon face is asked for on its
+ * own rather than through the family list above, because a list is not a request: it says where
+ * to look once a glyph turns up, and a glyph from the private use range only turns up in a
+ * session that has already drawn its first frame at the width the fallback gave it.
  *
  * The request goes out when the app starts rather than when a panel mounts, and the answer is
  * kept: a panel that mounts later awaits a promise that is already settled, so the wait is a
@@ -139,6 +173,7 @@ export function preloadTerminalFonts(): Promise<unknown> {
   terminalFonts ??= Promise.allSettled([
     document.fonts.load(`16px ${TERMINAL_FONT_FAMILY}`),
     document.fonts.load(`700 16px ${TERMINAL_FONT_FAMILY}`),
+    document.fonts.load(`16px "Marvis Nerd Icons"`, ICON_PROBE),
   ]);
   return terminalFonts;
 }

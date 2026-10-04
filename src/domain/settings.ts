@@ -21,6 +21,11 @@ export const THEME_PREFERENCES = ["system", "light", "dark"] as const;
 
 export type ThemePreference = (typeof THEME_PREFERENCES)[number];
 
+/** The shapes xterm.js draws, named the way it names them: a cell, a line, or a line under the text. */
+export const TERMINAL_CURSOR_STYLES = ["block", "bar", "underline"] as const;
+
+export type TerminalCursorStyle = (typeof TERMINAL_CURSOR_STYLES)[number];
+
 export interface UiSettings {
   /** CSS pixels. The whole interface's type scale is a ratio of this one number. */
   fontSize: number;
@@ -32,6 +37,13 @@ export interface TerminalSettings {
   fontSize: number;
   ligatures: boolean;
   cursorBlink: boolean;
+  /**
+   * The shape of the cursor. A block by default: it is filled with the theme's `--marvis-cursor`
+   * and the glyph under it is the surface, so a caret is the one thing on the page drawn the other
+   * way round, and a bar is the quieter answer for a person who would rather not have a cell of
+   * their screen filled in.
+   */
+  cursorStyle: TerminalCursorStyle;
   scrollbar: TerminalScrollbarMode;
   /**
    * Whether moving a terminal to another worktree also makes its shell change directory.
@@ -52,6 +64,8 @@ export interface IndentationSettings {
 export interface EditorSettings {
   fontSize: number;
   ligatures: boolean;
+  /** The same answer the terminal's own `cursorBlink` is, for the same reason: the caret is a block and a block that blinks is a distraction. */
+  cursorBlink: boolean;
   indentation: IndentationSettings;
 }
 
@@ -73,16 +87,28 @@ export const INDENTATION_SIZE_LIMITS = { min: 1, max: 8 };
 
 export const DEFAULT_SETTINGS: AppSettings = {
   ui: { fontSize: 14, zoom: 1, theme: "system" },
-  terminal: { fontSize: 16, ligatures: true, cursorBlink: true, scrollbar: "hidden", changeDirectoryOnMove: false },
+  terminal: {
+    fontSize: 16,
+    ligatures: true,
+    cursorBlink: true,
+    cursorStyle: "block",
+    scrollbar: "hidden",
+    changeDirectoryOnMove: false,
+  },
   editor: {
     fontSize: 13,
     ligatures: true,
+    cursorBlink: true,
     indentation: { useSpaces: true, size: 2 },
   },
 };
 
 export function isTerminalScrollbarMode(value: unknown): value is TerminalScrollbarMode {
   return TERMINAL_SCROLLBAR_MODES.some((mode) => mode === value);
+}
+
+export function isTerminalCursorStyle(value: unknown): value is TerminalCursorStyle {
+  return TERMINAL_CURSOR_STYLES.some((style) => style === value);
 }
 
 export function isThemePreference(value: unknown): value is ThemePreference {
@@ -126,12 +152,16 @@ export function normalizeSettings(value: unknown): AppSettings {
       fontSize: boundedNumber(terminal.fontSize, TERMINAL_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.terminal.fontSize),
       ligatures: flag(terminal.ligatures, DEFAULT_SETTINGS.terminal.ligatures),
       cursorBlink: flag(terminal.cursorBlink, DEFAULT_SETTINGS.terminal.cursorBlink),
+      cursorStyle: isTerminalCursorStyle(terminal.cursorStyle)
+        ? terminal.cursorStyle
+        : DEFAULT_SETTINGS.terminal.cursorStyle,
       scrollbar: isTerminalScrollbarMode(terminal.scrollbar) ? terminal.scrollbar : DEFAULT_SETTINGS.terminal.scrollbar,
       changeDirectoryOnMove: flag(terminal.changeDirectoryOnMove, DEFAULT_SETTINGS.terminal.changeDirectoryOnMove),
     },
     editor: {
       fontSize: boundedNumber(editor.fontSize, EDITOR_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.editor.fontSize),
       ligatures: flag(editor.ligatures, DEFAULT_SETTINGS.editor.ligatures),
+      cursorBlink: flag(editor.cursorBlink, DEFAULT_SETTINGS.editor.cursorBlink),
       indentation: {
         useSpaces: flag(indentation.useSpaces, DEFAULT_SETTINGS.editor.indentation.useSpaces),
         size: boundedInteger(indentation.size, INDENTATION_SIZE_LIMITS, DEFAULT_SETTINGS.editor.indentation.size),
@@ -153,10 +183,12 @@ export type SettingsPath =
   | "terminal.fontSize"
   | "terminal.ligatures"
   | "terminal.cursorBlink"
+  | "terminal.cursorStyle"
   | "terminal.scrollbar"
   | "terminal.changeDirectoryOnMove"
   | "editor.fontSize"
   | "editor.ligatures"
+  | "editor.cursorBlink"
   | "editor.indentation.useSpaces"
   | "editor.indentation.size";
 
@@ -257,6 +289,18 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         label: "Ligatures",
         description: "Joins the sequences the font draws as one glyph, such as => or !=.",
       },
+      {
+        kind: "select",
+        path: "terminal.cursorStyle",
+        label: "Cursor",
+        description: "The cell it fills, a line beside it, or a line under it.",
+        options: [
+          { value: "block", label: "Block" },
+          { value: "bar", label: "Bar" },
+          { value: "underline", label: "Underline" },
+        ],
+        parse: IDENTIFIER,
+      },
       { kind: "toggle", path: "terminal.cursorBlink", label: "Blink cursor" },
       {
         kind: "select",
@@ -290,6 +334,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         unit: "px",
       },
       { kind: "toggle", path: "editor.ligatures", label: "Ligatures" },
+      { kind: "toggle", path: "editor.cursorBlink", label: "Blink cursor" },
       {
         kind: "select",
         path: "editor.indentation.useSpaces",

@@ -18,8 +18,15 @@ describe("the settings file", () => {
   it("names the three surfaces and everything they carry", () => {
     expect(DEFAULT_SETTINGS).toEqual({
       ui: { fontSize: 14, zoom: 1, theme: "system" },
-      terminal: { fontSize: 16, ligatures: true, cursorBlink: true, scrollbar: "hidden", changeDirectoryOnMove: false },
-      editor: { fontSize: 13, ligatures: true, indentation: { useSpaces: true, size: 2 } },
+      terminal: {
+        fontSize: 16,
+        ligatures: true,
+        cursorBlink: true,
+        cursorStyle: "block",
+        scrollbar: "hidden",
+        changeDirectoryOnMove: false,
+      },
+      editor: { fontSize: 13, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
     });
   });
 
@@ -30,10 +37,11 @@ describe("the settings file", () => {
         fontSize: 18,
         ligatures: false,
         cursorBlink: false,
+        cursorStyle: "bar" as const,
         scrollbar: "always" as const,
         changeDirectoryOnMove: true,
       },
-      editor: { fontSize: 15, ligatures: false, indentation: { useSpaces: false, size: 4 } },
+      editor: { fontSize: 15, ligatures: false, cursorBlink: false, indentation: { useSpaces: false, size: 4 } },
     };
     expect(normalizeSettings(JSON.parse(JSON.stringify(written)))).toEqual(written);
     // A file somebody edited by hand is allowed to be partial: a line they deleted is a preference
@@ -80,6 +88,12 @@ describe("the settings file", () => {
       DEFAULT_SETTINGS.terminal.ligatures,
     );
     expect(normalizeSettings({ terminal: { ligatures: false } }).terminal.ligatures).toBe(false);
+  });
+
+  it("keeps a cursor shape it knows and falls back to the block for one it does not", () => {
+    expect(normalizeSettings({ terminal: { cursorStyle: "underline" } }).terminal.cursorStyle).toBe("underline");
+    // A shape xterm.js cannot draw is a word somebody typed, and the block is what this build opens on.
+    expect(normalizeSettings({ terminal: { cursorStyle: "beam" } }).terminal.cursorStyle).toBe("block");
   });
 
   it("scales the interface against the size the design is drawn at", () => {

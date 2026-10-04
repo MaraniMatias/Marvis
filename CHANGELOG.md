@@ -6,7 +6,24 @@ the part a reader should read and the generated list is the part they can skip. 
 under `Unreleased` and rename that heading to the version when you tag it; a version with no section
 here still gets its generated notes.
 
-## Unreleased
+## 0.13.2
+
+- **A Git command no longer makes every checkout be read again.** Marvis watches each repository to
+  know when the files of a checkout moved, and on Linux the watcher reports every _read_ of a
+  watched file as an event of its own. Git reads `.git/HEAD` before it does anything, so any command
+  run inside a watched repository — a `git status` in a terminal, an agent asking what changed — was
+  answered as though a branch had moved: the numbers on every checkout were dropped and recomputed,
+  and the sidebar refreshed, for a repository nothing had changed in. A read is no longer taken for a
+  change, so only a real write says anything now.
+
+- **The terminal cursor is a block you can change.** It is drawn in a color of its own: a lavender on
+  the dark palette and the page's own ink on the light one, which is the ink a cell has to be
+  filled with there for the caret to stand off a near-white surface. The glyph under the block is
+  the surface, so a cell is drawn inverted, and the editor's caret is the same block in the same
+  color. Shape (`Block`, `Bar`, `Underline`) and blinking are preferences in the terminal section of
+  Settings, defaulting to a blinking block. `terminal.cursorStyle` in `~/.marvis/config.yml` says
+  the same thing. A shape a program asks for through DECSCUSR still wins over the preference, as
+  it always did.
 
 - **Home is always the first workdir.** Marvis opens a shell there on launch, keeps it running when
   you switch workdirs, and lets you close it like any other terminal. The Home row cannot be removed;
@@ -35,11 +52,13 @@ here still gets its generated notes.
   and an entry in the sidebar that looks alive. Closing a terminal whose process is still running
   still asks first.
 
-- **The terminal and editor share a bundled typeface.** Fira Code Nerd Font Mono is no longer
-  dependent on fonts installed on the machine; both surfaces use the same regular and bold faces.
-  The terminal waits for them before opening xterm, so the initial grid and glyph atlas are created
-  with the bundled font. This also addresses the reported selection-rendering inconsistency; visual
-  verification on the affected macOS setup is still needed.
+- **The terminal and editor share a bundled typeface, and its icons are a second family.** Neither
+  surface depends on fonts installed on the machine; both use the same regular and bold faces, and
+  a glyph from the private use range resolves to an icon family beside them. The terminal waits for
+  all three before opening xterm, so the initial grid and glyph atlas are created with the bundled
+  fonts. The icons used to be inside both text faces, which meant a face nobody reads was downloaded
+  and parsed twice: 4.6MB of TTF for what is now 1.1MB of woff2. This also addresses the reported
+  selection-rendering inconsistency; visual verification on the affected macOS setup is still needed.
 
 - **The terminal scrollbar is a choice.** It is hidden by default, which is what the terminal has
   always done; `Auto` shows it while you scroll and takes it away when you stop, and `Always` keeps
@@ -54,6 +73,16 @@ here still gets its generated notes.
   or leaving a repository is read again and the panel agrees with the disk. An archived worktree
   stays archived, and a worktree removed elsewhere becomes a row that says its directory is gone,
   which is what closing it from the panel has always done.
+
+- **The file editor has a block caret, in the terminal's colors.** It was a thin blue bar while the
+  terminal next to it drew a block, and the two were the same window. The caret is now a cell wide
+  in the palette's bright white — the same two tokens xterm.js is handed for `cursor` and
+  `cursorAccent` — so the editor and the terminal are painted from one palette in both themes. The
+  cell covers the character under it rather than inverting it, which is what a block drawn as a
+  rectangle can be; a selection still shows the characters it covers, because that band is what is
+  painted over them. Blinking is a preference in the Editor section, the same toggle the terminal
+  already had, and turning it off does not touch the open document: CodeMirror blinks the caret
+  itself, so the answer is one declaration.
 
 ## 0.6.0
 

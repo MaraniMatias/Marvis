@@ -58,7 +58,7 @@ vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
 }));
 
 vi.mock("reka-ui", async () => {
-  const { h: createElement } = await import("vue");
+  const { h: createElement, defineComponent, inject, provide } = await import("vue");
   // The document toolbar's popover always renders here, so a grammar can be picked without
   // driving the open state, the way App.test.ts stubs the titlebar's own popover. Plain options
   // objects rather than defineComponent, which would be one more component in a file that already
@@ -73,6 +73,32 @@ vi.mock("reka-ui", async () => {
       () =>
         createElement("div", context.attrs, context.slots.default?.() as never),
   });
+  // The note composer's line picker is the same select as the destination menu, stubbed with its
+  // wiring intact so a range's first line can be chosen here the way the keyboard would choose it.
+  const select = Symbol("select");
+  const selectRoot = defineComponent({
+    name: "SelectRoot",
+    props: { modelValue: { type: String, default: "" } },
+    emits: ["update:modelValue"],
+    setup(props, { emit, slots }) {
+      provide(select, (value: string) => emit("update:modelValue", value));
+      return () => createElement("div", slots.default?.());
+    },
+  });
+  const selectItem = defineComponent({
+    name: "SelectItem",
+    inheritAttrs: false,
+    props: { value: { type: String, default: "" } },
+    setup(props, { attrs, slots }) {
+      const pick = inject<((value: string) => void) | undefined>(select);
+      return () =>
+        createElement(
+          "button",
+          { role: "option", ...attrs, onClick: () => pick?.(props.value ?? "") },
+          slots.default?.(),
+        );
+    },
+  });
   return {
     PopoverRoot: passThrough("PopoverRoot"),
     PopoverTrigger: passThrough("PopoverTrigger"),
@@ -81,6 +107,15 @@ vi.mock("reka-ui", async () => {
     // a pass-through stands in for it, and where the content lands is not this file's business.
     PopoverPortal: passThrough("PopoverPortal"),
     PopoverContent: passThrough("PopoverContent"),
+    SelectRoot: selectRoot,
+    SelectTrigger: passThrough("SelectTrigger"),
+    SelectValue: passThrough("SelectValue"),
+    SelectPortal: passThrough("SelectPortal"),
+    SelectContent: passThrough("SelectContent"),
+    SelectViewport: passThrough("SelectViewport"),
+    SelectItem: selectItem,
+    SelectItemText: passThrough("SelectItemText"),
+    SelectItemIndicator: passThrough("SelectItemIndicator"),
   };
 });
 
@@ -608,7 +643,12 @@ describe("DocumentPane", () => {
     const wrapper = mount(DocumentPane, {
       props: {
         ...documentPaneProps("src/example.ts", "code"),
-        editorSettings: { fontSize: 17, ligatures: false, indentation: { useSpaces: true, size: 2 } },
+        editorSettings: {
+          fontSize: 17,
+          ligatures: false,
+          cursorBlink: true,
+          indentation: { useSpaces: true, size: 2 },
+        },
       },
     });
     await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
@@ -622,10 +662,41 @@ describe("DocumentPane", () => {
     expect(host.style.getPropertyValue("--marvis-editor-ligatures")).toBe("none");
 
     await wrapper.setProps({
-      editorSettings: { fontSize: 20, ligatures: true, indentation: { useSpaces: true, size: 2 } },
+      editorSettings: { fontSize: 20, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
     });
     expect(host.style.getPropertyValue("--marvis-editor-font-size")).toBe("20px");
     expect(host.style.getPropertyValue("--marvis-editor-ligatures")).toBe("normal");
+    wrapper.unmount();
+  });
+
+  it("leaves the caret blinking or still without touching the editor", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/example.ts", content: "const a = 1;" });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("src/example.ts", "code"),
+        editorSettings: {
+          fontSize: 13,
+          ligatures: true,
+          cursorBlink: false,
+          indentation: { useSpaces: true, size: 2 },
+        },
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    // CodeMirror blinks the cursor layer itself, so this is a declaration on the host and not a
+    // setting reconfigured into the editor: a preference that rebuilt the editor would take the
+    // document, the undo history and the caret with it to stop a light blinking.
+    const host = wrapper.get<HTMLElement>(".code-editor-host").element;
+    expect(host.style.getPropertyValue("--marvis-editor-cursor-blink")).toBe("paused");
+    expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
+
+    await wrapper.setProps({
+      editorSettings: { fontSize: 13, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
+    });
+    expect(host.style.getPropertyValue("--marvis-editor-cursor-blink")).toBe("running");
+    // The same editor, still: `cm-content` is not rebuilt, so the text it holds is the one above.
+    expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
     wrapper.unmount();
   });
 
@@ -1152,7 +1223,7 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
-  it("extends an open draft into a range and captures every line inside it", async () => {
+  it("writes a range the way GitLab does: the note ends on the line its + was on", async () => {
     const checkoutId = "checkout:range-note";
     const gitSnapshot = snapshot(checkoutId, [{ path: "large.txt", status: "M" }]);
     mocks.getGitDiff.mockResolvedValue({
@@ -1187,9 +1258,10 @@ describe("DocumentPane", () => {
     });
     await vi.waitFor(() => expect(wrapper.text()).toContain("+first line"));
 
-    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
-    // A second click on the same side widens the range instead of starting a new note.
+    // The + fixes where the note ends, so it goes on line 3 first; the + on line 1 then says
+    // where the range starts, which is the one thing a note cannot say by growing downwards.
     await wrapper.get('[aria-label="Add review note on line 3"]').trigger("click");
+    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
     expect(wrapper.get("form[aria-label='New review note']").text()).toContain("new lines 1-3");
 
     await wrapper.get('textarea[aria-label="Review note"]').setValue("these three lines belong together");
@@ -1204,6 +1276,175 @@ describe("DocumentPane", () => {
       content: "these three lines belong together",
       code: "first line\nsecond line\nthird line",
     });
+    wrapper.unmount();
+  });
+
+  it("widens a one-line note from the composer itself, without going back to the diff", async () => {
+    const checkoutId = "checkout:composer-range";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "large.txt", status: "M" }]);
+    mocks.getGitDiff.mockResolvedValue({
+      path: "large.txt",
+      patch: "@@ -0,0 +1,3 @@\n+first line\n+second line\n+third line\n",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: 4,
+      hunks: [{ startLine: 0, endLine: 4, title: "@@ -0,0 +1,3 @@" }],
+    });
+    mocks.getGitDiffPage.mockResolvedValue({
+      path: "large.txt",
+      startLine: 0,
+      totalLines: 4,
+      lines: [
+        { index: 0, kind: "hunk", text: "@@ -0,0 +1,3 @@", oldLineNumber: null, newLineNumber: null },
+        { index: 1, kind: "added", text: "+first line", oldLineNumber: null, newLineNumber: 1 },
+        { index: 2, kind: "added", text: "+second line", oldLineNumber: null, newLineNumber: 2 },
+        { index: 3, kind: "added", text: "+third line", oldLineNumber: null, newLineNumber: 3 },
+      ],
+    });
+    const review = reviewApi();
+    const wrapper = mount(FileDiff, {
+      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "large.txt", scrollTop: 0 },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+first line"));
+
+    // One + and the note is on that line, but the composer already says where it starts and ends:
+    // the + fixed the end, and the top of the range is a decision the composer takes, not the diff.
+    await wrapper.get('[aria-label="Add review note on line 3"]').trigger("click");
+    const form = wrapper.get('form[aria-label="New review note"]');
+    expect(form.text()).toContain("new line 3");
+    // Every line of the run the note could start on, marked as the gutter marks it. The mark is read
+    // off the markup rather than off the trimmed text, because a line the diff left alone is a
+    // space and that is the whole of what tells it from the others.
+    const options = () => form.findAll('[role="option"]').map((row) => row.element.textContent);
+    expect(options()).toEqual(["+1", "+2", "+3"]);
+
+    await form.get('textarea[aria-label="Review note"]').setValue("the last two lines");
+    await form.findAll('[role="option"]')[options().indexOf("+2") as number].trigger("click");
+    // Widening the range is not a new note, so what was written stays written.
+    expect(form.text()).toContain("new lines 2-3");
+    expect((form.get('textarea[aria-label="Review note"]').element as HTMLTextAreaElement).value).toBe(
+      "the last two lines",
+    );
+    await form.trigger("submit");
+    await flushPromises();
+
+    expect(review.addNote).toHaveBeenCalledWith({
+      path: "large.txt",
+      side: "new",
+      lineStart: 2,
+      lineEnd: 3,
+      content: "the last two lines",
+      code: "second line\nthird line",
+    });
+    wrapper.unmount();
+  });
+
+  it("offers a range over the lines the diff removed, on the numbering they were removed from", async () => {
+    const checkoutId = "checkout:removed-range";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "large.txt", status: "M" }]);
+    mocks.getGitDiff.mockResolvedValue({
+      path: "large.txt",
+      patch: "@@ -1,3 +1,2 @@\n first\n-second\n-third\n+two thirds\n",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: 5,
+      hunks: [{ startLine: 0, endLine: 5, title: "@@ -1,3 +1,2 @@" }],
+    });
+    mocks.getGitDiffPage.mockResolvedValue({
+      path: "large.txt",
+      startLine: 0,
+      totalLines: 5,
+      lines: [
+        { index: 0, kind: "hunk", text: "@@ -1,3 +1,2 @@", oldLineNumber: null, newLineNumber: null },
+        { index: 1, kind: "context", text: " first", oldLineNumber: 1, newLineNumber: 1 },
+        { index: 2, kind: "removed", text: "-second", oldLineNumber: 2, newLineNumber: null },
+        { index: 3, kind: "removed", text: "-third", oldLineNumber: 3, newLineNumber: null },
+        { index: 4, kind: "added", text: "+two thirds", oldLineNumber: null, newLineNumber: 2 },
+      ],
+    });
+    const review = reviewApi();
+    const wrapper = mount(FileDiff, {
+      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "large.txt", scrollTop: 0 },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("-second"));
+
+    // A line the diff removed only ever had a number on the old side, so a note on one is walked
+    // there: the picker offers the old numbers, each marked the way the gutter marks it, and never
+    // a new-side line that happens to sit at the same distance from the end.
+    await wrapper.get('[aria-label="Add review note on line 3"]').trigger("click");
+    const form = wrapper.get('form[aria-label="New review note"]');
+    expect(form.text()).toContain("old line 3");
+    const options = () => form.findAll('[role="option"]').map((row) => row.element.textContent);
+    expect(options()).toEqual([" 1", "-2", "-3"]);
+
+    await form.findAll('[role="option"]')[options().indexOf("-2") as number].trigger("click");
+    await form.get('textarea[aria-label="Review note"]').setValue("both of these go");
+    await form.trigger("submit");
+    await flushPromises();
+
+    expect(review.addNote).toHaveBeenCalledWith({
+      path: "large.txt",
+      side: "old",
+      lineStart: 2,
+      lineEnd: 3,
+      content: "both of these go",
+      code: "second\nthird",
+    });
+    wrapper.unmount();
+  });
+
+  it("starts a second note when the + is not above the one already open", async () => {
+    const checkoutId = "checkout:second-note";
+    const gitSnapshot = snapshot(checkoutId, [{ path: "large.txt", status: "M" }]);
+    mocks.getGitDiff.mockResolvedValue({
+      path: "large.txt",
+      patch: "@@ -0,0 +1,3 @@\n+first line\n+second line\n+third line\n",
+      isBinary: false,
+      large: true,
+      tooLarge: false,
+      totalLines: 4,
+      hunks: [{ startLine: 0, endLine: 4, title: "@@ -0,0 +1,3 @@" }],
+    });
+    mocks.getGitDiffPage.mockResolvedValue({
+      path: "large.txt",
+      startLine: 0,
+      totalLines: 4,
+      lines: [
+        { index: 0, kind: "hunk", text: "@@ -0,0 +1,3 @@", oldLineNumber: null, newLineNumber: null },
+        { index: 1, kind: "added", text: "+first line", oldLineNumber: null, newLineNumber: 1 },
+        { index: 2, kind: "added", text: "+second line", oldLineNumber: null, newLineNumber: 2 },
+        { index: 3, kind: "added", text: "+third line", oldLineNumber: null, newLineNumber: 3 },
+      ],
+    });
+    const review = reviewApi();
+    const wrapper = mount(FileDiff, {
+      props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "large.txt", scrollTop: 0 },
+    });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+first line"));
+
+    // A range only grows upwards, so a + on the same line or below the open one is not part of
+    // the note being written: it is a second note, and the first one was never a range at all.
+    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
+    await wrapper.get("textarea[aria-label='Review note']").setValue("about line 1");
+    await wrapper.get('[aria-label="Add review note on line 3"]').trigger("click");
+    expect(wrapper.get("form[aria-label='New review note']").text()).toContain("new line 3");
+
+    // The text of the note that was open is gone with it, rather than carried into a range.
+    expect((wrapper.get('textarea[aria-label="Review note"]').element as HTMLTextAreaElement).value).toBe("");
+    await wrapper.get('textarea[aria-label="Review note"]').setValue("about line 3");
+    await wrapper.get('form[aria-label="New review note"]').trigger("submit");
+    await flushPromises();
+
+    expect(review.addNote).toHaveBeenCalledWith({
+      path: "large.txt",
+      side: "new",
+      lineStart: 3,
+      content: "about line 3",
+      code: "third line",
+    });
+    expect(review.addNote).not.toHaveBeenCalledWith(expect.objectContaining({ content: "about line 1" }));
     wrapper.unmount();
   });
 
@@ -1240,15 +1481,23 @@ describe("DocumentPane", () => {
     const wrapper = mount(FileDiff, {
       props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "large.ts", scrollTop: 0 },
     });
-    await vi.waitFor(() => expect(wrapper.text()).toContain("+line 70"));
+    // The window holds the rows on screen and the overscan either side of them, so the far end of a
+    // 70-row diff is in the DOM only once the user has scrolled to it. Both ends have to be loaded
+    // for the range's code to be whole, and the composer is held by the panel rather than by its row
+    // so it is still there when the scroll that finishes the range has left its own line behind.
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+line 1"));
 
-    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
+    // The note ends on line 70, so the + goes there; line 1 is the top of the range and is picked
+    // on the way back, which is the scroll the composer has to survive.
     const viewport = wrapper.get('[aria-label="Diff contents"]');
-    (viewport.element as HTMLElement).scrollTop = 40 * 22;
+    (viewport.element as HTMLElement).scrollTop = 70 * 22;
     await viewport.trigger("scroll");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+line 70"));
     await wrapper.get('[aria-label="Add review note on line 70"]').trigger("click");
     (viewport.element as HTMLElement).scrollTop = 0;
     await viewport.trigger("scroll");
+    await vi.waitFor(() => expect(wrapper.text()).toContain("+line 1"));
+    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
 
     await vi.waitFor(() =>
       expect(wrapper.get('form[aria-label="New review note"]').text()).toContain("new lines 1-70"),
@@ -1306,7 +1555,6 @@ describe("DocumentPane", () => {
       props: { checkout: checkout(checkoutId), gitSnapshot, review, path: "large.ts", scrollTop: 0 },
     });
     await vi.waitFor(() => expect(wrapper.text()).toContain("+line 1"));
-    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
 
     const viewport = wrapper.get('[aria-label="Diff contents"]');
     (viewport.element as HTMLElement).scrollTop = 500 * 22;
@@ -1315,6 +1563,7 @@ describe("DocumentPane", () => {
     await wrapper.get('[aria-label="Add review note on line 500"]').trigger("click");
     (viewport.element as HTMLElement).scrollTop = 0;
     await viewport.trigger("scroll");
+    await wrapper.get('[aria-label="Add review note on line 1"]').trigger("click");
 
     const form = wrapper.get('form[aria-label="New review note"]');
     await form.get('textarea[aria-label="Review note"]').setValue("review this range");

@@ -1,10 +1,9 @@
 import { describe, expect, it } from "vitest";
 import {
   anchorOutcome,
-  buildDiffLineTexts,
+  readDiffLines,
   buildReviewMarkdown,
   localReviewTimestamp,
-  diffLineText,
   reviewFenceLanguage,
   reviewLineRange,
   isReviewableNote,
@@ -169,7 +168,7 @@ describe("Review markdown export", () => {
   });
 
   it("indexes the code behind every side of a unified patch", () => {
-    const texts = buildDiffLineTexts(
+    const lines = readDiffLines(
       [
         "diff --git a/src/foo.js b/src/foo.js",
         "--- a/src/foo.js",
@@ -181,11 +180,19 @@ describe("Review markdown export", () => {
         " const last = 4;",
       ].join("\n"),
     );
+    const text = (side: "old" | "new", line: number) => lines.get(`${side}:${line}`)?.text ?? "";
 
-    expect(diffLineText(texts, "new", 8)).toBe("const before = 1;");
-    expect(diffLineText(texts, "old", 9)).toBe("const after = 2;");
-    expect(diffLineText(texts, "new", 9)).toBe("const after = 3;");
-    expect(diffLineText(texts, "new", 10)).toBe("const last = 4;");
-    expect(diffLineText(texts, "new", 99)).toBe("");
+    expect(text("new", 8)).toBe("const before = 1;");
+    expect(text("old", 9)).toBe("const after = 2;");
+    expect(text("new", 9)).toBe("const after = 3;");
+    expect(text("new", 10)).toBe("const last = 4;");
+    expect(text("new", 99)).toBe("");
+
+    // Old 9 and new 9 are two different lines that happen to share a number, so the sign cannot be
+    // read off which sides have it: only the patch knows which of the two was added.
+    expect(lines.get("old:9")?.mark).toBe("-");
+    expect(lines.get("new:9")?.mark).toBe("+");
+    expect(lines.get("old:8")?.mark).toBe(" ");
+    expect(lines.get("new:8")?.mark).toBe(" ");
   });
 });

@@ -8,7 +8,6 @@ import {
   Columns2 as Columns2Icon,
   Columns3 as Columns3Icon,
   Copy as CopyIcon,
-  GitFork as GitForkIcon,
   Minus as MinusIcon,
   Settings as SettingsIcon,
   Square as SquareIcon,
@@ -16,10 +15,12 @@ import {
 } from "@lucide/vue";
 import type { Checkout, Repo } from "./domain/workspace";
 import type { ReviewTarget } from "./domain/review";
+import { sessionTitle } from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
 import type { TitlebarMenuItem, TitlebarMenuSection } from "./domain/titlebar-menu";
 import InspectorPane from "./components/InspectorPane.vue";
+import FileIcon from "./components/FileIcon.vue";
 import MainPane from "./components/MainPane.vue";
 import Sidebar from "./components/Sidebar.vue";
 import TitlebarMenu from "./components/TitlebarMenu.vue";
@@ -49,6 +50,7 @@ import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
 import type { ReviewSender } from "./presentation/review-notes";
 import { useAgentSessions } from "./presentation/agent-sessions";
 import { useToasts } from "./presentation/toasts";
+import { WORKDIR_ICONS } from "./presentation/workdir-icons";
 import { theme } from "./presentation/theme";
 import type { Theme } from "./presentation/theme";
 import { defaultAgentSession } from "./domain/agent";
@@ -237,8 +239,19 @@ const activeSession = computed(() => {
     null
   );
 });
+/**
+ * The open session under the name the sidebar row gives it.
+ *
+ * The crumb and the row list the same terminals, so both ask `sessionTitle` for the name: what the
+ * PTY last set, the program in front of the shell, or the name it was opened with. A crumb reading
+ * the stored name alone said `zsh` over a terminal running something else.
+ */
+const activeSessionTitle = computed(() => {
+  const session = activeSession.value;
+  return session ? sessionTitle(session, sessionRuntimeStatuses.value[session.id]) : null;
+});
 /** What the last crumb names. A file or a change set is not a session, so it is named as itself. */
-const activeViewLabel = computed(() => mainViewLabel(activeMainView.value, activeSession.value?.name ?? null));
+const activeViewLabel = computed(() => mainViewLabel(activeMainView.value, activeSessionTitle.value));
 /**
  * Whether there is a last crumb at all.
  *
@@ -278,10 +291,10 @@ const drawnSteps = computed(() => {
  * Whether the whole path fits in the room the line still has for it.
  *
  * The line is bounded by a share of the window, so the room is that share minus everything the
- * path does not get to keep: the workdir, the branch, the fork and the separators. The probe is
- * the path at its natural width and it is always mounted, so this weighs two numbers that do not
- * move when the shape on screen does — otherwise an elided path would measure itself as the one
- * that fitted and the line could never come back.
+ * path does not get to keep: the workdir, the branch, their glyphs and the separators. The probe
+ * is the path at its natural width and it is always mounted, so this weighs two numbers that do
+ * not move when the shape on screen does — otherwise an elided path would measure itself as the
+ * one that fitted and the line could never come back.
  *
  * Only a path with something in the middle can lose it, and the two ends are what stay: the
  * first directory says where you are, the file name is what you came to see.
@@ -384,13 +397,18 @@ const worktreeMenu = computed<TitlebarMenuSection[]>(() => {
 const terminalMenu = computed<TitlebarMenuSection[]>(() => {
   const checkout = activeCheckout.value;
   if (!checkout) return [];
-  const sessions: TitlebarMenuItem[] = checkout.sessions.map((session) => ({
-    id: session.id,
-    label: session.name,
-    title: session.name,
-    checked: session.id === workspace.value.activeSessionId,
-    run: () => void activateTerminalSession(session.id),
-  }));
+  const sessions: TitlebarMenuItem[] = checkout.sessions.map((session) => {
+    // The rows are named the way the sidebar names them, so the menu of the open terminal and the
+    // row that opened it cannot say two different things about the same session.
+    const name = sessionTitle(session, sessionRuntimeStatuses.value[session.id]);
+    return {
+      id: session.id,
+      label: name,
+      title: name,
+      checked: session.id === workspace.value.activeSessionId,
+      run: () => void activateTerminalSession(session.id),
+    };
+  });
   return [
     { kind: "group", label: "Terminals", items: sessions },
     { kind: "separator" },
@@ -403,6 +421,21 @@ const terminalMenu = computed<TitlebarMenuSection[]>(() => {
 
 /** What the workdir crumb says: the repo, or the folder when there is no repo to name. */
 const workdirLabel = computed(() => activeRepo.value?.name ?? activeCheckout.value?.path.split(/[\\/]/).at(-1) ?? "");
+
+/**
+ * The file the last crumb names, when what is open is a file or a change.
+ *
+ * Its glyph is the one the inspector's file rows give it, so the crumb and the row that opened it
+ * cannot say two different things about the same file, and it sits on the step that names the
+ * file rather than at the head of the path, which names directories. The whole change set names
+ * no file, and a terminal names none either, so the crumb wears no icon in either case.
+ */
+const itemCrumbFile = computed(() => {
+  const view = activeMainView.value;
+  if (view.kind === "terminal") return null;
+  const name = view.path?.split(/[\\/]/).at(-1);
+  return name ? { name, kind: "file" as const } : null;
+});
 
 /** One crumb menu at a time: the name it reports becomes the one that is open. */
 function setCrumbOpen(name: string, open: boolean) {
@@ -1330,7 +1363,9 @@ function reportWarning(message: string) {
           <!-- Each crumb is text that opens the list of the level it names, and nothing looks
                like a button until it is pointed at: the workdir, its branch or worktree, and
                the item open inside it. They share one open name, so opening one closes the
-               others instead of stacking them. -->
+               others instead of stacking them. The workdir is the one that wears nothing: it is
+               the end of the line that is always there, and a name that never changes is one a
+               glyph would only repeat. -->
           <TitlebarMenu
             testid="repo-crumb"
             crumb="workdir"
@@ -1342,11 +1377,11 @@ function reportWarning(message: string) {
           />
           <template v-if="activeRepo?.kind === 'git'">
             <span aria-hidden="true" class="text-(--marvis-text-faint)">/</span>
-            <GitForkIcon class="icon-xs shrink-0" aria-hidden="true" />
             <TitlebarMenu
               testid="worktree-crumb"
               crumb="branch"
               :label="activeCheckout.branch || 'Detached'"
+              :icon="WORKDIR_ICONS.worktree"
               :sections="worktreeMenu"
               :open="openCrumb === 'worktree'"
               search-placeholder="Search worktrees…"
@@ -1364,6 +1399,7 @@ function reportWarning(message: string) {
               crumb="item"
               align="end"
               :label="activeViewLabel"
+              :icon="WORKDIR_ICONS.terminal"
               :sections="terminalMenu"
               :open="openCrumb === 'terminal'"
               @update:open="setCrumbOpen('terminal', $event)"
@@ -1376,20 +1412,34 @@ function reportWarning(message: string) {
               :title="activeViewLabel"
             >
               <template v-for="(step, index) in drawnSteps" :key="`${index}-${step}`">
-                <span v-if="index > 0" aria-hidden="true" class="crumb-sep">/</span>{{ step }}
+                <span v-if="index > 0" aria-hidden="true" class="crumb-sep">/</span>
+                <!-- The last step is the file, so that is the one wearing its icon: the rest of
+                     the path is directories, and an icon at the head of the line would name the
+                     first of them rather than the thing that is open.
+
+                     The glyph is a box of its own beside the name rather than inside it, because
+                     a box holding both would be a flex row, and a flex row takes its baseline
+                     from its first item: the step would sit a line below the steps around it. -->
+                <span v-if="index === drawnSteps.length - 1 && itemCrumbFile" class="crumb-icon-slot"
+                  ><FileIcon class="icon-xs crumb-icon" :name="itemCrumbFile.name" kind="file" /></span
+                >{{ step }}
               </template>
             </span>
-            <!-- The path at the width it wants. It sits beside the crumb rather than inside it
-                 so it never joins the text the crumb reads as, and it is always mounted so the
-                 crumb can be weighed against the room the line has left. -->
+            <!-- The path at the width it wants, glyph and all: the crumb weighs this probe against
+                 the room the line has left, and a path that does not count its own icon would
+                 overflow the line before it was told to give anything up. It sits beside the crumb
+                 rather than inside it so it never joins the text the crumb reads as, and it is
+                 always mounted so the crumb can be weighed against the room the line has left. -->
             <span
               v-if="activeMainView.kind !== 'terminal' && pathSteps.length > 2"
               ref="pathProbeEl"
               data-testid="path-probe"
               aria-hidden="true"
               class="path-probe"
-              >{{ activeViewLabel }}</span
-            >
+              >{{ activeViewLabel
+              }}<span v-if="itemCrumbFile" class="crumb-icon-slot"
+                ><FileIcon class="icon-xs crumb-icon" :name="itemCrumbFile.name" kind="file" /></span
+            ></span>
           </template>
         </template>
       </nav>

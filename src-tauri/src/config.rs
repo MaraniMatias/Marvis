@@ -74,6 +74,8 @@ pub struct TerminalSettings {
     pub font_size: f64,
     pub ligatures: bool,
     pub cursor_blink: bool,
+    /// The shape of the cursor: `block`, `bar` or `underline`.
+    pub cursor_style: String,
     pub scrollbar: String,
     /// Whether moving a terminal to another worktree also moves the shell's working directory.
     pub change_directory_on_move: bool,
@@ -85,6 +87,7 @@ impl Default for TerminalSettings {
             font_size: 16.0,
             ligatures: true,
             cursor_blink: true,
+            cursor_style: "block".into(),
             scrollbar: "hidden".into(),
             change_directory_on_move: false,
         }
@@ -96,6 +99,7 @@ impl Default for TerminalSettings {
 pub struct EditorSettings {
     pub font_size: f64,
     pub ligatures: bool,
+    pub cursor_blink: bool,
     pub indentation: IndentationSettings,
 }
 
@@ -104,6 +108,7 @@ impl Default for EditorSettings {
         Self {
             font_size: 13.0,
             ligatures: true,
+            cursor_blink: true,
             indentation: IndentationSettings::default(),
         }
     }
@@ -141,6 +146,12 @@ impl AppSettings {
             TERMINAL_FONT_SIZE_MAX,
             16.0,
         );
+        if !matches!(
+            self.terminal.cursor_style.as_str(),
+            "block" | "bar" | "underline"
+        ) {
+            self.terminal.cursor_style = "block".into();
+        }
         if !matches!(
             self.terminal.scrollbar.as_str(),
             "hidden" | "auto" | "always"
@@ -314,12 +325,14 @@ mod tests {
                 font_size: 18.0,
                 ligatures: false,
                 cursor_blink: false,
+                cursor_style: "bar".into(),
                 scrollbar: "always".into(),
                 change_directory_on_move: true,
             },
             editor: EditorSettings {
                 font_size: 15.0,
                 ligatures: false,
+                cursor_blink: false,
                 indentation: IndentationSettings {
                     use_spaces: false,
                     size: 4,
@@ -402,14 +415,14 @@ mod tests {
     }
 
     #[test]
-    fn sizes_outside_the_range_and_scrollbar_modes_that_are_not_modes_come_back_bounded() {
+    fn sizes_outside_the_range_and_names_that_are_not_modes_come_back_bounded() {
         let home = settings_dir();
         let path = config_path_in(&home);
         std::fs::write(
             &path,
             concat!(
                 "ui:\n  fontSize: .nan\n  zoom: 99\n  theme: solarized\n",
-                "terminal:\n  fontSize: 2\n  scrollbar: sometimes\n",
+                "terminal:\n  fontSize: 2\n  cursorStyle: beam\n  scrollbar: sometimes\n",
                 "editor:\n  fontSize: 400\n  indentation:\n    size: 0\n",
             ),
         )
@@ -419,6 +432,7 @@ mod tests {
         assert_eq!(loaded.ui.zoom, ZOOM_MAX);
         assert_eq!(loaded.ui.theme, "system");
         assert_eq!(loaded.terminal.font_size, TERMINAL_FONT_SIZE_MIN);
+        assert_eq!(loaded.terminal.cursor_style, "block");
         assert_eq!(loaded.terminal.scrollbar, "hidden");
         assert_eq!(loaded.editor.font_size, EDITOR_FONT_SIZE_MAX);
         assert_eq!(loaded.editor.indentation.size, INDENTATION_SIZE_MIN);

@@ -237,7 +237,9 @@ jobs:
             if [[ -n "$curated" ]]; then notes=(--notes "$curated"); fi
           fi
 
-          # A draft, so the artifacts and their checksums can be checked before anyone can
-          # download them: a published release cannot be taken back once a tag exists.
+          # Published rather than a draft: a draft never appears in the releases list, so a tag
+          # whose draft is left alone keeps the previous release as the latest one. What could make
+          # these artifacts wrong is already settled above: the tag still resolves to the validated
+          # commit, and every platform in the matrix built them.
           gh release create --repo "$GITHUB_REPOSITORY" "$RELEASE_TAG" "${files[@]}" \
-            --verify-tag --draft --title "Marvis $RELEASE_TAG" --generate-notes "${notes[@]}"
+            --verify-tag --title "Marvis $RELEASE_TAG" --generate-notes "${notes[@]}"

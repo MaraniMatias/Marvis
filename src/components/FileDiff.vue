@@ -1,7 +1,8 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-indent, vue/html-closing-bracket-newline, vue/html-self-closing */
 import { Check as CheckIcon, ChevronDown as ChevronDownIcon } from "@lucide/vue";
-import { DiffFile, DiffModeEnum, DiffViewWithMultiSelect } from "@git-diff-view/vue";
+import { DiffFile, DiffModeEnum, DiffViewWithMultiSelect, updateSelectionVisual_Unified } from "@git-diff-view/vue";
+import type { DiffFileHighlighter, LineRange } from "@git-diff-view/vue";
 import "@git-diff-view/vue/styles/diff-view-pure.css";
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui";
 import { computed, inject, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
@@ -9,16 +10,19 @@ import type { GitFileDiff, GitDiffPageLine } from "../domain/git";
 import { ALL_CHANGES_LABEL } from "../domain/main-document";
 import { isIpcError } from "../domain/ipc";
 import { agentAttention, sortAgentSessions } from "../domain/agent";
-import { buildDiffLineTexts, isReviewableNote, reviewRangeCode } from "../domain/review";
-import type { AnchorOutcome, ReviewNote, ReviewSide } from "../domain/review";
+import { isReviewableNote, readDiffLines, reviewRangeCode } from "../domain/review";
+import type { AnchorOutcome, DiffLine, ReviewNote, ReviewSide } from "../domain/review";
 import type { Checkout } from "../domain/workspace";
+import type { EditorSettings } from "../domain/settings";
+import { DEFAULT_SETTINGS } from "../domain/settings";
+import { detectedLanguageName } from "../lib/source-languages";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
 import { REVIEW_SENDER } from "../presentation/review-notes";
 import type { ReviewAnchorCheck } from "../domain/review";
 import { getGitDiff } from "../lib/ipc";
 import { theme } from "../presentation/theme";
-import { DIFF_ROW_HEIGHT, useLargeDiff } from "./use-large-diff";
+import { diffRowHeight, useLargeDiff } from "./use-large-diff";
 import ReviewComposer from "./ReviewComposer.vue";
 import ReviewNoteList from "./ReviewNoteList.vue";
 import SelectControl from "./ui/select/SelectControl.vue";
@@ -36,8 +40,10 @@ const props = withDefaults(
     scrollTop: number;
     /** Nested in the change-set stack, where the row above already names the file. */
     embedded?: boolean;
+    /** The diff reads at the editor's size, so the file it opens and the diff of it are one size. */
+    editorSettings?: EditorSettings;
   }>(),
-  { embedded: false },
+  { embedded: false, editorSettings: () => DEFAULT_SETTINGS.editor },
 );
 const emit = defineEmits<{
   ready: [path: string];
@@ -48,6 +54,12 @@ const diff = shallowRef<GitFileDiff | null>(null);
 const diffHunks = shallowRef<Array<{ title: string; file: DiffFile }>>([]);
 const collapsedHunks = ref<number[]>([]);
 const diffState = ref<"idle" | "loading" | "ready" | "error">("idle");
+/**
+ * The reading the file on screen is highlighted with, once it has arrived, and the diff it was read
+ * for. Keyed on that diff because a path is not an identity: two checkouts hold their own
+ * `src/App.vue`, and two versions of one file are two readings of it. See `loadHighlighter`.
+ */
+const loadedHighlighter = shallowRef<{ source: GitFileDiff; highlighter: DiffFileHighlighter }>();
 /** Why the diff is not on screen. It is the panel's whole content, so it is drawn here. */
 const diffError = ref("");
 const hasTextHunks = computed(() => Boolean(diff.value?.patch.includes("@@") || diff.value?.totalLines));
@@ -62,27 +74,70 @@ const showNoTextHunks = computed(
 const diffViewport = ref<HTMLElement | null>(null);
 const diffScrollTop = ref(props.scrollTop);
 const selectedPath = ref<string | null>(null);
+/**
+ * The highlighter handed to the library, and only while it is the one read for the diff on screen: a
+ * reading that arrives after the user has moved on is worth nothing, and handing the library one that
+ * cannot read the language it is about to be given sends the file through the wrong grammar.
+ */
+const diffHighlighter = computed(() =>
+  loadedHighlighter.value?.source === diff.value ? loadedHighlighter.value.highlighter : undefined,
+);
 /** The files of the whole change set the user has opened. */
 const expandedPaths = ref<string[]>([]);
 const changedFiles = computed(() => props.gitSnapshot.status?.files ?? []);
 const title = computed(() => props.path ?? ALL_CHANGES_LABEL);
 const branch = computed(() => props.gitSnapshot.status?.branch ?? props.gitSnapshot.status?.head ?? "");
-const largeDiff = useLargeDiff(() => props.checkout.id, selectedPath, diff, collapsedHunks, diffScrollTop);
-const { diffPages, largeDiffLineCount, loadVisiblePages, visibleLargeDiffWindow } = largeDiff;
-const draft = ref<{ side: ReviewSide; lineStart: number; lineEnd: number } | null>(null);
+const diffFontSize = computed(() => props.editorSettings.fontSize);
+/**
+ * The height one diff row paints at, which the markup and the window's arithmetic both have to be
+ * told separately: the stylesheet sets the row, and the composable counts rows of that height.
+ */
+const diffRowPx = computed(() => diffRowHeight(diffFontSize.value));
+const largeDiff = useLargeDiff(
+  () => props.checkout.id,
+  selectedPath,
+  diff,
+  collapsedHunks,
+  diffScrollTop,
+  diffViewport,
+  () => diffRowPx.value,
+);
+const { diffPages, loadVisiblePages, visibleLargeDiffWindow } = largeDiff;
+/** A note being written. `end` is the line its `+` was on and `start` the top of its range. */
+const draft = ref<{ side: ReviewSide; start: number; end: number } | null>(null);
 const draftError = ref("");
-/** Diff texts keyed by `${side}:${line}`, for the whole file or all retained virtual pages. */
-const lineTexts = computed(() => {
-  if (!diff.value?.large || diff.value.tooLarge) return buildDiffLineTexts(diff.value?.patch ?? "");
-  const texts = new Map<string, string>();
+/**
+ * The range a small diff's note covers, once its composer has moved it.
+ *
+ * On a large diff the note is written in Marvis' own rows and `draft` is all of it. On a small one
+ * the library draws the rows and holds the selection that opened the note, so until the composer
+ * changes something the library's own band is already the truth and there is nothing to keep.
+ */
+const libraryDraft = ref<{ side: ReviewSide; start: number; end: number } | null>(null);
+/** Each hunk's own element, which is where the library's selection band is painted. */
+const hunkSections = ref<Array<HTMLElement | null>>([]);
+/** Every line of the diff on screen, keyed by `${side}:${line}`, with the sign it carries. */
+const diffLines = computed(() => {
+  if (!diff.value?.large || diff.value.tooLarge) return readDiffLines(diff.value?.patch ?? "");
+  const lines = new Map<string, DiffLine>();
   for (const page of Object.values(diffPages.value)) {
     for (const line of page.lines) {
       const anchor = rowAnchor(line);
-      if (anchor) texts.set(`${anchor.side}:${anchor.line}`, line.text.slice(1));
+      if (!anchor) continue;
+      const mark = line.text[0];
+      const entry: DiffLine = { text: line.text.slice(1), mark: mark === "+" || mark === "-" ? mark : " " };
+      lines.set(`${anchor.side}:${anchor.line}`, entry);
+      // A line the diff left alone is on both sides. `rowAnchor` names the one a row is clicked by,
+      // and a range is walked by numbering, so a note on the old side has to reach over one.
+      if (line.kind === "context") {
+        if (line.oldLineNumber) lines.set(`old:${line.oldLineNumber}`, entry);
+        if (line.newLineNumber) lines.set(`new:${line.newLineNumber}`, entry);
+      }
     }
   }
-  return texts;
+  return lines;
 });
+const lineTexts = computed(() => new Map([...diffLines.value].map(([key, line]) => [key, line.text])));
 const fileNotes = computed(() => props.review.notes.filter((note) => note.path === props.path));
 /** Notes per line, shaped for the diff view's `extendData` slot. */
 const extendData = computed(() => {
@@ -238,21 +293,28 @@ function chooseActiveTarget() {
 }
 
 let diffGeneration = 0;
+/** The reading of a file in flight, so the one that answers is the one the diff on screen asked for. */
+let highlighterRequest = 0;
+/** Names each set of hunks, which is what tells two checkouts' identical windows apart. */
+let diffIdentity = 0;
 let mounted = true;
 
 /**
- * Opens a draft, or extends the open one when the click lands on the same side.
- * Extending keeps the range as the span between the first and last clicked line; the
- * composer shows it, and Cancel is the way back to a single-line note.
+ * Opens a draft on the line the `+` was on, which is the last line of its range.
+ *
+ * A range is written the way GitLab writes one: the `+` fixes where the note ends, and a `+`
+ * clicked on a line above it says where it starts. So a click above an open draft moves the top
+ * of the range and leaves the line the note is anchored to alone, and a click at or below it opens
+ * a new note instead of stretching one backwards.
  */
 function openDraft(side: ReviewSide, line: number) {
   draftError.value = "";
   const open = draft.value;
-  if (open && open.side === side) {
-    draft.value = { ...open, lineStart: Math.min(open.lineStart, line), lineEnd: Math.max(open.lineEnd, line) };
+  if (open && open.side === side && line < open.end) {
+    draft.value = { ...open, start: line };
     return;
   }
-  draft.value = { side, lineStart: line, lineEnd: line };
+  draft.value = { side, start: line, end: line };
 }
 
 function cancelDraft() {
@@ -260,9 +322,68 @@ function cancelDraft() {
   draftError.value = "";
 }
 
+/** A saved or cancelled note leaves no range behind, on either kind of diff. */
+function closeLibraryDraft(onClose: () => void) {
+  libraryDraft.value = null;
+  onClose();
+}
+
 function sideName(side: number): ReviewSide {
   return side === 1 ? "old" : "new";
 }
+
+/**
+ * The sign a line carries in the diff gutter, which is what tells an added line from a removed one
+ * at a glance: the two are different lines that can share a number across the sides.
+ */
+function lineMarker(side: ReviewSide, line: number): string {
+  return diffLines.value.get(`${side}:${line}`)?.mark ?? " ";
+}
+
+/**
+ * The lines a note may start on, named by the sign they carry and their number.
+ *
+ * The walk stops at the first line that is not there, which is what keeps a range inside one hunk
+ * and inside the pages a large diff has loaded: two hunks are never adjacent in numbering, so the
+ * line above the top of one is never on the diff at all. A range over lines the diff removed is
+ * walked on the old side, which is where their numbers live.
+ */
+function startCandidates(side: ReviewSide, end: number) {
+  const texts = lineTexts.value;
+  const candidates: number[] = [];
+  for (let line = end; line >= 1 && texts.has(`${side}:${line}`); line -= 1) candidates.push(line);
+  // Walked up from the line the note ends on, then listed the way the diff reads: top of the file
+  // first, so the picker is scrolled to the one that matters.
+  return candidates.reverse().map((line) => ({
+    value: String(line),
+    label: `${lineMarker(side, line)}${line}`,
+  }));
+}
+
+/**
+ * Repaints the library's selection band from the note being written.
+ *
+ * The band is the library's own state and it cannot be set from outside: the component it is drawn
+ * by exposes only events, and no prop. What it does export is the function that paints the band,
+ * so the range the composer chose is drawn with the same class the library's own drag uses, and
+ * clearing it is the same call with no range.
+ */
+function paintLibrarySelection() {
+  const range = libraryDraft.value;
+  diffHunks.value.forEach((hunk, index) => {
+    const container = hunkSections.value[index]?.querySelector<HTMLElement>(".diff-multiselect-wrapper");
+    if (!container) return;
+    const painted: LineRange | null = range
+      ? { side: range.side, startLineNumber: range.start, endLineNumber: range.end }
+      : null;
+    updateSelectionVisual_Unified(container, painted, hunk.file);
+  });
+}
+
+watch([draft, libraryDraft, diffHunks], () => nextTick(paintLibrarySelection), { flush: "post" });
+onUnmounted(() => {
+  libraryDraft.value = null;
+});
 
 async function saveNoteAt(
   side: ReviewSide,
@@ -282,12 +403,13 @@ async function saveNoteAt(
   });
 }
 
-async function saveDraft(content: string): Promise<boolean> {
+async function saveDraft(content: string, lineStart: number): Promise<boolean> {
   const target = draft.value;
   if (!target) return false;
   draftError.value = "";
+  const first = Math.min(lineStart, target.end);
   if (diff.value?.large) {
-    for (let line = target.lineStart; line <= target.lineEnd; line += 1) {
+    for (let line = first; line <= target.end; line += 1) {
       if (!lineTexts.value.has(`${target.side}:${line}`)) {
         draftError.value =
           "Some selected lines are unavailable in the loaded diff pages. Choose a shorter range to include all its code.";
@@ -295,7 +417,7 @@ async function saveDraft(content: string): Promise<boolean> {
       }
     }
   }
-  const created = await saveNoteAt(target.side, target.lineStart, target.lineEnd, content);
+  const created = await saveNoteAt(target.side, first, target.end, content);
   if (created) cancelDraft();
   return created;
 }
@@ -308,11 +430,6 @@ function rowAnchor(line: GitDiffPageLine): { side: ReviewSide; line: number } | 
   return null;
 }
 
-function isDraftRow(line: GitDiffPageLine): boolean {
-  const anchor = rowAnchor(line);
-  return Boolean(anchor && draft.value && anchor.side === draft.value.side && anchor.line === draft.value.lineStart);
-}
-
 function isDraftSelection(line: GitDiffPageLine | undefined): boolean {
   if (!line) return false;
   const anchor = rowAnchor(line);
@@ -320,15 +437,15 @@ function isDraftSelection(line: GitDiffPageLine | undefined): boolean {
     anchor &&
     draft.value &&
     anchor.side === draft.value.side &&
-    anchor.line >= draft.value.lineStart &&
-    anchor.line <= draft.value.lineEnd,
+    anchor.line >= draft.value.start &&
+    anchor.line <= draft.value.end,
   );
 }
 
 function notesForRow(line: GitDiffPageLine): ReviewNote[] {
   const anchor = rowAnchor(line);
   if (!anchor) return [];
-  // A range is listed on its first line, which is where the composer opens too.
+  // A range is listed on its first line, and its composer opens on its last, where the + was.
   return fileNotes.value.filter((note) => note.side === anchor.side && note.lineStart === anchor.line);
 }
 
@@ -336,7 +453,25 @@ function errorText(error: unknown): string {
   return isIpcError(error) ? error.message : error instanceof Error ? error.message : String(error);
 }
 
+/**
+ * One `DiffFile` per hunk, which is why a hunk is handed the file's language on both sides: a hunk
+ * has no name of its own to be read by.
+ *
+ * The library decides a language by taking everything after the last dot of the path, which names
+ * one for a `src/app.vue` and nothing at all for a `Dockerfile` or a `.prettierrc`. Told the
+ * language, it highlights those too. A path no grammar is detected for leaves the library to guess,
+ * rather than claiming a language that does not exist.
+ *
+ * Each is given an identity of its own, which the library keys its own reading of a window by instead
+ * of by the text of that window. Two diffs of two checkouts hold the same path and often the very same
+ * lines — the same run of placeholder newlines and the same hunk — and one cache would hand the
+ * second whatever it read for the first, which for the two of them is a different file's syntax. It is
+ * an identity per hunk rather than per file because the key it replaces is the window's text, and two
+ * hunks of one file are two different windows.
+ */
 function createHunks(path: string, patch: string) {
+  const lang = detectedLanguageName(path);
+  const identity = `${props.checkout.id}:${path}:${++diffIdentity}`;
   const preamble: string[] = [];
   const sections: Array<{ title: string; patch: string }> = [];
   let current: string[] | null = null;
@@ -350,13 +485,106 @@ function createHunks(path: string, patch: string) {
     else preamble.push(line);
   }
   if (current) sections.push({ title, patch: [...preamble, ...current].join("\n") });
-  return sections.map((section) => {
-    const file = new DiffFile(`a/${path}`, "", `b/${path}`, "", [section.patch]);
+  return sections.map((section, index) => {
+    const file = new DiffFile(`a/${path}`, "", `b/${path}`, "", [section.patch], lang, lang, `${identity}:${index}`);
     file.initTheme(theme.value);
     file.init();
     file.buildUnifiedDiffLines();
     return { title: section.title, file };
   });
+}
+
+/** What one `@@` header says: where each side of the change starts, and how many lines it covers. */
+const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
+
+/**
+ * The last line of the file that any hunk of this diff reaches, or nothing when a header says
+ * something this cannot read.
+ *
+ * The library builds each hunk's window out of the file's own lines, from the first to the one that
+ * hunk ends on, filling in the lines the change does not touch, so those are the only lines of the
+ * file a grammar is ever asked about. A header that cannot be read leaves the answer unknown, and an
+ * unknown answer is no limit at all: the whole file is read, which is what it always was.
+ */
+function lastLineShown(hunks: GitFileDiff["hunks"]): number | undefined {
+  let last = 0;
+  for (const hunk of hunks) {
+    const header = HUNK_HEADER.exec(hunk.title);
+    if (!header) return undefined;
+    // A count git leaves off is one line, which is what `@@ -7 +7 @@` says.
+    const count = (at: string | undefined) => (at === undefined ? 1 : Number(at));
+    last = Math.max(last, Number(header[1]) + count(header[2]), Number(header[3]) + count(header[4]));
+  }
+  return last;
+}
+
+/**
+ * One reading of one file at a time, and the reading of that same file that was asked for while
+ * another was running as soon as the running one lands.
+ *
+ * Reading a file is a pass over all of it on the thread that also answers the wheel, and git reports
+ * every write in the workdir, so a file being worked on is asked for over and over. A second pass
+ * over the same file nobody is reading yet costs as much as the first and answers nothing sooner,
+ * and the only one of such a burst worth keeping is the last. Another file is a different matter: the
+ * user has moved to it and is waiting, and the reading of the file they left is one whose answer is
+ * already worth nothing, so that one goes ahead rather than behind.
+ */
+let highlighterReading: string | null = null;
+let highlighterQueued: { checkoutId: string; source: GitFileDiff } | null = null;
+
+/**
+ * Reads the grammar the file on screen is highlighted with, and the file itself for that grammar to
+ * read, once the diff it is drawn from has arrived.
+ *
+ * Deliberately not awaited before the hunks are built: a grammar is a dynamic import and reading a
+ * file is a pass over it, and waiting on either would hold back the diff text the user opened the
+ * file for. Until they land the library highlights the way it always has, and `diffHighlighter`
+ * changing is what makes it repaint in the same colors the editor reads the same file in. A file
+ * whose language no grammar is loaded for, or whose text came back too large or not at all, simply
+ * keeps the library's own highlighter, which is what it does today.
+ *
+ * The two sides are the whole of the file rather than the hunks of the diff, which is the only thing
+ * a grammar can read: a hunk is a fragment, and the lines inside `<script setup lang="ts">` of a
+ * `.vue` file are markup to a grammar that was never shown the tag that opened them. As far as the
+ * diff reaches, though: a grammar is only asked about the lines the library builds a window out of,
+ * which run from the first line of the file to the one the last hunk ends on, so a change near the
+ * top of a large file is read as the top of that file and not as all of it.
+ *
+ * What comes back belongs to this diff and to nothing else, and it is published only after the guard
+ * below: a reading that lands after the user has opened another file, or after this one has been read
+ * again, is dropped rather than handed to a diff it is not of.
+ */
+async function loadHighlighter(checkoutId: string, source: GitFileDiff) {
+  const language = detectedLanguageName(source.path);
+  if (language === undefined) return;
+  if (highlighterReading === source.path) {
+    highlighterQueued = { checkoutId, source };
+    return;
+  }
+  const request = ++highlighterRequest;
+  highlighterReading = source.path;
+  try {
+    const { prepareDiffHighlighting } = await import("../lib/diff-highlighter");
+    const highlighter = await prepareDiffHighlighting(
+      language,
+      { old: source.oldContent, new: source.newContent },
+      lastLineShown(source.hunks),
+    );
+    // What this waits for is a dynamic import and a read of the file, either of which can land
+    // after the user has opened another file or after this one has been read again, and either of
+    // which is worth nothing to a diff that is no longer the one on screen.
+    if (!highlighter || !mounted || request !== highlighterRequest) return;
+    if (props.checkout.id !== checkoutId || diff.value !== source) return;
+    loadedHighlighter.value = { source, highlighter };
+  } catch {
+    // A grammar that is not there, or one that fails to load, leaves the library to highlight the
+    // file its own way. Neither is worth a toast: the diff is already on screen without them.
+  } finally {
+    highlighterReading = null;
+    const queued = highlighterQueued;
+    highlighterQueued = null;
+    if (queued) void loadHighlighter(queued.checkoutId, queued.source);
+  }
 }
 
 async function loadDiff(path: string, preservePosition = false) {
@@ -402,6 +630,7 @@ async function loadDiff(path: string, preservePosition = false) {
       collapsedHunks.value = [];
       if (!result.isBinary && !result.symlinkTarget && result.patch.includes("@@")) {
         diffHunks.value = createHunks(path, result.patch);
+        void loadHighlighter(checkoutId, result);
       }
     }
     diffState.value = "ready";
@@ -511,32 +740,51 @@ function onDiffScroll(event: Event) {
   if (diff.value?.large) loadVisiblePages();
 }
 
+function isHunkCollapsed(index: number): boolean {
+  return collapsedHunks.value.includes(index);
+}
+
 function toggleHunk(index: number) {
   collapsedHunks.value = collapsedHunks.value.includes(index)
     ? collapsedHunks.value.filter((collapsed) => collapsed !== index)
     : [...collapsedHunks.value, index];
   if (diff.value?.large) {
     void nextTick(() => {
-      const viewport = diffViewport.value;
-      if (!viewport) return;
-      const maximum = Math.max(0, largeDiffLineCount.value * DIFF_ROW_HEIGHT - viewport.clientHeight);
-      if (viewport.scrollTop > maximum) viewport.scrollTop = maximum;
-      diffScrollTop.value = viewport.scrollTop;
+      // Collapsing a hunk shortens the diff, and a scroll position past the new end is one the
+      // browser pulls back on its own; it also moves the window, so the pages it needs are asked
+      // for again from wherever it ended up.
+      diffScrollTop.value = diffViewport.value?.scrollTop ?? 0;
       loadVisiblePages();
     });
   }
 }
 
+/**
+ * Collapses a hunk from the header the library draws for it.
+ *
+ * The library already renders a row per `@@` header, styled by the properties above, so a header of
+ * our own above each hunk is the same header twice and a row of the diff spent on saying it. The click
+ * is delegated to the hunk's own section because that is what knows which hunk it is, and the
+ * library's expand buttons live inside that same row and are left to do their own job.
+ */
+function toggleHunkFromLibrary(event: MouseEvent, index: number) {
+  const target = event.target as HTMLElement | null;
+  if (!target?.closest("tr[data-line$='-hunk']") || target.closest(".diff-widget-tooltip")) return;
+  toggleHunk(index);
+}
+
 onUnmounted(() => {
   mounted = false;
   diffGeneration += 1;
+  // A reading queued for a file nobody is looking at any more is a whole pass over it for nothing.
+  highlighterQueued = null;
 });
 </script>
 
 <template>
-  <section class="flex min-h-0 flex-1 flex-col" aria-label="File diff">
+  <section class="relative flex min-h-0 flex-1 flex-col" aria-label="File diff">
     <!-- A file of the change-set stack is headed by its own row, so it needs no header here. -->
-    <header v-if="!embedded" class="document-toolbar shrink-0 border-b px-3 py-2">
+    <header v-if="!embedded" class="document-toolbar shrink-0 border-b px-3 py-1.5">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
           <p class="truncate text-[0.6875rem] text-(--marvis-text-dim)" :title="title">{{ title }}</p>
@@ -545,7 +793,7 @@ onUnmounted(() => {
           </p>
         </div>
       </div>
-      <div v-if="sender" class="mt-2 flex flex-col items-end gap-1">
+      <div v-if="sender" class="mt-1.5 flex flex-col items-end gap-1">
         <div class="flex flex-wrap items-center justify-end gap-1.5">
           <button
             type="button"
@@ -691,7 +939,8 @@ onUnmounted(() => {
               <span v-if="file.deletions" class="diff-del">-{{ file.deletions }}</span>
             </button>
             <!-- Git pages one path at a time, so the whole change set is a stack of single-file
-                 diffs rather than one merged patch. Each file is diffed when it is opened. -->
+                 diffs rather than one merged patch. Each file is diffed when it is opened, and each
+                 of those reads at the same size as the diff this one is drawn in. -->
             <FileDiff
               v-if="expandedPaths.includes(file.path)"
               :checkout="checkout"
@@ -699,6 +948,7 @@ onUnmounted(() => {
               :review="review"
               :path="file.path"
               :scroll-top="0"
+              :editor-settings="editorSettings"
               embedded
             />
           </section>
@@ -730,12 +980,19 @@ onUnmounted(() => {
           {{ diff.totalLines.toLocaleString() }} diff rows · virtualized view · click + note on two lines to comment on
           a range
         </p>
-        <p v-else class="shrink-0 px-3 py-1 text-[0.625rem] text-(--marvis-text-faint)">
+        <!-- How a range is picked is a fact about the diff, not about the file it is of, so the
+             change-set stack is told once by the diff it is showing and not once per file in it. -->
+        <p v-else-if="!embedded" class="shrink-0 px-3 py-1 text-[0.625rem] text-(--marvis-text-faint)">
           Drag across line numbers to select a range, then click + note on its last line.
         </p>
         <div
           ref="diffViewport"
-          class="diff-viewport min-h-0 flex-1 overflow-auto font-mono text-[0.75rem]"
+          class="diff-viewport min-h-0 flex-1 overflow-auto font-mono"
+          :class="{ 'diff-viewport-windowed': diff.large && !diff.tooLarge }"
+          :style="{
+            '--marvis-diff-row-height': `${diffRowPx}px`,
+            '--marvis-diff-font-size': `${diffFontSize}px`,
+          }"
           aria-label="Diff contents"
           @scroll="onDiffScroll"
         >
@@ -747,9 +1004,13 @@ onUnmounted(() => {
               }"
             >
               <template v-for="row in visibleLargeDiffWindow.rows" :key="row.visualIndex">
+                <!-- The row is exactly one row height tall, and that is what the window above
+                     measures: a row taller than the arithmetic says puts every line under it
+                     somewhere the padding did not, and the diff drifts as the user scrolls. -->
                 <div
                   data-testid="large-diff-row"
-                  class="group flex h-6 min-w-max items-center overflow-hidden whitespace-pre text-[0.75rem]"
+                  class="group flex min-w-max items-center overflow-hidden whitespace-pre"
+                  :style="{ height: `${diffRowPx}px`, fontSize: 'var(--marvis-diff-font-size)' }"
                   :class="{ 'review-range-selected': isDraftSelection(row.line) }"
                 >
                   <button
@@ -805,71 +1066,89 @@ onUnmounted(() => {
                     row.error || "Loading diff page…"
                   }}</span>
                 </div>
-                <template v-if="row.line">
-                  <ReviewComposer
-                    v-if="isDraftRow(row.line)"
-                    :side="rowAnchor(row.line)!.side"
-                    :line="rowAnchor(row.line)!.line"
-                    :line-end="draft?.lineEnd && draft.lineEnd !== draft.lineStart ? draft.lineEnd : null"
-                    :code="
-                      reviewRangeCode(
-                        lineTexts,
-                        rowAnchor(row.line)!.side,
-                        rowAnchor(row.line)!.line,
-                        draft?.lineEnd ?? null,
-                      )
-                    "
-                    :error="draftError"
-                    @submit="saveDraft"
-                    @cancel="cancelDraft"
-                  />
-                  <ReviewNoteList
-                    v-if="notesForRow(row.line).length > 0"
-                    :notes="notesForRow(row.line)"
-                    :outcomes="anchorOutcomes"
-                    @update-note="review.updateNote"
-                    @delete-note="review.deleteNote"
-                    @clear-outdated="review.clearOutdated"
-                    @resolve-note="review.resolveNote"
-                  />
-                </template>
+                <!-- The note cards stay in the flow, which is what leaves the arithmetic above
+                     approximate on an annotated row. The composer does not, and is held by the
+                     panel below instead; see there for why. -->
+                <ReviewNoteList
+                  v-if="row.line && notesForRow(row.line).length > 0"
+                  :notes="notesForRow(row.line)"
+                  :outcomes="anchorOutcomes"
+                  @update-note="review.updateNote"
+                  @delete-note="review.deleteNote"
+                  @clear-outdated="review.clearOutdated"
+                  @resolve-note="review.resolveNote"
+                />
               </template>
             </div>
           </template>
-          <div v-else class="min-w-max space-y-1 p-1">
-            <section v-for="(hunk, index) in diffHunks" :key="`${path}-${index}`" class="min-w-0">
+          <div v-else class="min-w-max p-1">
+            <section
+              v-for="(hunk, index) in diffHunks"
+              :key="`${path}-${index}`"
+              :ref="(el) => (hunkSections[index] = (el as HTMLElement | null) ?? null)"
+              class="relative min-w-0 [&_.diff-line-hunk]:cursor-pointer"
+              @click="toggleHunkFromLibrary($event, index)"
+            >
+              <!-- One control per hunk, and the same one in both of its states.
+                   The library draws the `@@` header itself and a click on it collapses the hunk, but
+                   a table row is not a control: there is nothing on it for the keyboard to reach and
+                   nothing for a screen reader to name. So the row keeps the click and this is the
+                   same action as a control next to it — out of the flow and out of sight while the
+                   hunk is open, because a header drawn here while the library draws one is the header
+                   twice and a row of the diff spent on it. It is drawn over that header row only once
+                   the keyboard has brought it there, which is the one state where a control of ours
+                   belongs on the header. It is one element either way, so the focus that collapsed
+                   the hunk is still on it when the hunk comes back, and a collapsed hunk gets the
+                   visible header row it needs to be reopened from. -->
               <button
                 type="button"
-                class="diff-hunk mb-1 w-full truncate border-b border-(--marvis-content-border) px-2 py-1 text-left font-mono text-[0.625rem] text-(--marvis-content-text-muted)"
-                :aria-expanded="!collapsedHunks.includes(index)"
+                data-testid="hunk-toggle"
+                class="diff-hunk diff-hunk-toggle"
+                :class="
+                  isHunkCollapsed(index)
+                    ? 'w-full truncate border-b border-(--marvis-content-border) px-2 py-1 text-left font-mono text-[0.625rem]'
+                    : 'sr-only'
+                "
+                :aria-expanded="!isHunkCollapsed(index)"
+                :aria-label="`${isHunkCollapsed(index) ? 'Expand' : 'Collapse'} hunk ${hunk.title}`"
                 :title="hunk.title"
                 @click="toggleHunk(index)"
               >
-                {{ collapsedHunks.includes(index) ? "▸" : "▾" }} {{ hunk.title }}
+                {{ isHunkCollapsed(index) ? `▸ ${hunk.title}` : "" }}
               </button>
               <DiffViewWithMultiSelect
-                v-if="!collapsedHunks.includes(index)"
+                v-if="!isHunkCollapsed(index)"
                 :diff-file="hunk.file"
                 :diff-view-mode="DiffModeEnum.Unified"
                 :diff-view-theme="theme"
                 :diff-view-add-widget="true"
                 :extend-data="extendData"
                 :diff-view-highlight="true"
-                :diff-view-font-size="13"
+                :diff-view-font-size="diffFontSize"
+                :register-highlighter="diffHighlighter"
                 class="min-w-0"
               >
                 <template #widget="{ lineNumber, fromLineNumber, side, onClose }">
+                  <!-- The library's own selection says where the range starts and ends, which is
+                       already the shape a range is stored in. The composer may still move the top of
+                       it, so what it emits is what gets saved rather than what the library chose. -->
                   <ReviewComposer
                     :side="sideName(side)"
-                    :line="fromLineNumber"
-                    :line-end="lineNumber !== fromLineNumber ? lineNumber : null"
-                    :code="reviewRangeCode(lineTexts, sideName(side), fromLineNumber, lineNumber)"
-                    @submit="
-                      async (content: string) => {
-                        if (await saveNoteAt(sideName(side), fromLineNumber, lineNumber, content)) onClose();
+                    :line-start="fromLineNumber"
+                    :line-end="lineNumber"
+                    :start-options="startCandidates(sideName(side), lineNumber)"
+                    @update:line-start="
+                      (start: number) => {
+                        libraryDraft = { side: sideName(side), start, end: lineNumber };
                       }
                     "
-                    @cancel="onClose"
+                    @submit="
+                      async (content: string, lineStart: number) => {
+                        if (await saveNoteAt(sideName(side), lineStart, lineNumber, content))
+                          closeLibraryDraft(onClose);
+                      }
+                    "
+                    @cancel="closeLibraryDraft(onClose)"
                   />
                 </template>
                 <template #extend="{ data }">
@@ -900,6 +1179,22 @@ onUnmounted(() => {
             @resolve-note="review.resolveNote"
           />
         </div>
+        <!-- The composer is a layer over the diff and not another row of it. Two reasons, and the
+             second is the one that decides where it goes: a composer in the flow makes its row
+             taller than the window's arithmetic counts, and a composer anchored to a row is gone
+             the moment that row scrolls out — which is what a range spanning more than a screen
+             does. Held here it survives the scroll that finishes the range. -->
+        <ReviewComposer
+          v-if="diff.large && !diff.tooLarge && draft"
+          v-model:line-start="draft.start"
+          class="absolute inset-x-0 bottom-0 z-10"
+          :side="draft.side"
+          :line-end="draft.end"
+          :start-options="startCandidates(draft.side, draft.end)"
+          :error="draftError"
+          @submit="saveDraft"
+          @cancel="cancelDraft"
+        />
       </template>
     </template>
   </section>
@@ -1085,6 +1380,83 @@ onUnmounted(() => {
   background-color: transparent;
 }
 
+/* These rules paint the library's own highlight.js tokens, which is what a diff is highlighted with
+   when `diff-highlighter.ts` has no grammar for its language: the library falls back to its own
+   highlighter for those, and these are the rules that give that output Marvis' palette rather than
+   the GitHub one highlight.js ships. A diff whose grammar Marvis does have is highlighted by Shiki
+   instead and needs none of this — its tokens already name the CSS variables.
+   The seven added here are the classes those grammars emit that no rule above named, and which were
+   therefore being painted in whatever the library's palette said. `hljs-function` is what wraps a
+   call's parentheses and its callback's arrow together, so it takes the function color the call
+   above it already has; `hljs-subst` is the `${…}` of a template literal and `hljs-class` the class
+   a Scala or Elixir declaration is named by, both as the editor paints them. The rest are a list
+   marker, emphasis, bold and strike-through, the last three styled as `marvisHighlightStyle` already
+   styles them. What stays plain here is what highlight.js never classifies at all — the name a line
+   declares, `=`, `!`, `||` — because it hands those back as text with no class to match. That is the
+   fallback's own granularity, and the reason it is the fallback. */
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      :is(.hljs-function, .hljs-title.function_)
+  ) {
+  color: var(--marvis-syntax-token-function);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      .hljs-class
+  ) {
+  color: var(--marvis-syntax-token-string-expression);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      .hljs-subst
+  ) {
+  color: var(--marvis-syntax-token-string);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      .hljs-bullet
+  ) {
+  color: var(--marvis-syntax-token-punctuation);
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      .hljs-emphasis
+  ) {
+  font-style: italic;
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      .hljs-strong
+  ) {
+  font-weight: bold;
+}
+
+.diff-viewport
+  :deep(
+    :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"])
+      .diff-line-syntax-raw
+      .hljs-strikethrough
+  ) {
+  text-decoration: line-through;
+}
+
 /* Hunk headers sit on the change's own surface, as the mockup's group rows do. */
 .diff-hunk {
   background: var(--marvis-content-bg-1);
@@ -1094,6 +1466,42 @@ onUnmounted(() => {
 .diff-hunk:hover {
   background: var(--marvis-content-bg-2);
   color: var(--marvis-content-text);
+}
+
+/**
+ * The control that collapses an open hunk, out of sight for as long as the hunk is open.
+ *
+ * It is clipped rather than hidden, so it stays in the tab order and a screen reader still names it
+ * while the eye does not see it, and it takes itself out of the pointer's way so the one pixel it
+ * collapses to cannot swallow the click on the header row beside it. Nothing here depends on which
+ * stylesheet came first: the rule carries a pseudo-class, so it outranks the `sr-only` it undoes,
+ * which is why it clears the clip by hand — both the `clip` and the `clip-path` it may be hiding
+ * behind, since which of the two a given version of the utility uses is not ours to know.
+ */
+.diff-hunk-toggle.sr-only {
+  pointer-events: none;
+}
+
+.diff-hunk-toggle.sr-only:focus {
+  position: absolute;
+  top: 0;
+  right: 4px;
+  z-index: 1;
+  width: auto;
+  height: var(--marvis-diff-row-height);
+  padding: 0 6px;
+  margin: 0;
+  overflow: visible;
+  clip: auto;
+  clip-path: none;
+  white-space: nowrap;
+  pointer-events: auto;
+  border: 1px solid var(--marvis-content-border);
+  border-radius: 3px;
+  background: var(--marvis-content-bg-2);
+  color: var(--marvis-text);
+  font-family: inherit;
+  font-size: 0.625rem;
 }
 
 /* One row per changed file in the whole change set, and its diff under it. */
@@ -1106,13 +1514,13 @@ onUnmounted(() => {
   align-items: center;
   gap: 6px;
   width: 100%;
-  min-height: 24px;
-  padding: 4px 6px;
+  min-height: 22px;
+  padding: 2px 6px;
   border: none;
   background: transparent;
   color: var(--marvis-text);
   font-family: inherit;
-  font-size: 0.75rem;
+  font-size: 0.6875rem;
   text-align: left;
   white-space: nowrap;
   overflow: hidden;
@@ -1123,8 +1531,15 @@ onUnmounted(() => {
   background: var(--marvis-control-hover);
 }
 
+/**
+ * The range the note being written covers, as a band rather than a set of tinted rows: a rule down
+ * the leading edge is what makes a block of lines read as one thing, and it stays continuous
+ * however many rows the range spans.
+ */
 .review-range-selected {
-  background: color-mix(in srgb, var(--marvis-content-accent) 16%, var(--marvis-content-bg-0));
+  position: relative;
+  background: color-mix(in srgb, var(--marvis-content-accent) 12%, var(--marvis-content-bg-0));
+  box-shadow: inset 3px 0 0 var(--marvis-content-accent);
 }
 
 .diff-status {
@@ -1149,9 +1564,21 @@ onUnmounted(() => {
   color: var(--marvis-text);
 }
 
-/* A file inside the change-set stack scrolls on its own, so the virtual window of a large
-   diff has a container to follow. */
-.diff-file :deep(.diff-viewport) {
-  max-height: 60vh;
+/* A file inside the change-set stack scrolls on its own, so the virtual window of a large diff has
+   a container to follow, and only a large diff gets one: a short file drawn at its own height is
+   read off the stack's one scrollbar, and two scrollbars for one file is one too many. The cap is a
+   count of diff rows rather than a share of the window, because what a diff is allowed to be tall
+   has nothing to do with how tall the window is, and `vh` made the same file twice as tall on a
+   large display as on a small one. */
+.diff-file :deep(.diff-viewport-windowed) {
+  max-height: calc(var(--marvis-diff-row-height) * 24);
+}
+
+/* The row height the virtual window's arithmetic is in, which is the whole reason the library's own
+   `leading-[1.6]` is overridden: at that leading its rows are taller than the rows the arithmetic
+   counts, so a virtualized diff drifts away from the line the user is looking at as they scroll.
+   The selector is one class longer than the library's for the reason the rules above explain. */
+.diff-viewport :deep(.diff-tailwindcss-wrapper .diff-table-body) {
+  line-height: var(--marvis-diff-row-height);
 }
 </style>

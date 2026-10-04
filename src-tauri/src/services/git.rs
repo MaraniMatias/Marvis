@@ -2,7 +2,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
-    io::{self, BufRead, BufReader},
+    io::{self, BufRead, BufReader, Read},
+    os::unix::fs::OpenOptionsExt,
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
     sync::{
@@ -40,6 +41,15 @@ const MAX_DIFF_LINE_BYTES: usize = 64 * 1024;
 const MAX_DIFF_HUNKS: usize = 10_000;
 /// How much of a file is read looking for the NUL byte that makes Git call it binary.
 const BINARY_SNIFF_BYTES: usize = 8_000;
+/// How much of a file's own text a diff carries so its syntax can be read in context.
+///
+/// A grammar reads a file, not a hunk: the lines inside `<script setup lang="ts">` are markup to a
+/// grammar that never saw the opening tag, so a patch on its own highlights the wrong language or
+/// none at all. The text is what the grammar reads and not what the diff draws — the patch still
+/// draws every line — so the cap is a cap on the reading of one file, and past it the file is read
+/// the way this app read every file before any of this. `SMALL_DIFF_BYTES` is the same size a patch
+/// is allowed to be, so a file that small in this repository is carried whole.
+const MAX_SYNTAX_CONTEXT_BYTES: usize = SMALL_DIFF_BYTES;
 /// How many checkouts are read at once when the sidebar names all of them. Each reading is a
 /// handful of `git` processes, so a workspace with many worktrees would otherwise fork all of
 /// them into the machine in the same moment. The point is to overlap the work, not to let the
@@ -93,6 +103,14 @@ pub struct GitStatus {
 pub struct GitFileDiff {
     pub path: String,
     pub patch: String,
+    /// The text of each side of the diff, whole, which is what a grammar reads rather than the
+    /// patch's hunks. Absent rather than empty when there is no text to read: a binary or symlink
+    /// diff, a diff too large to hold, a side that does not exist (an added file's old side, a
+    /// removed file's new one), and a file past `MAX_SYNTAX_CONTEXT_BYTES`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub old_content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub new_content: Option<String>,
     pub is_binary: bool,
     pub large: bool,
     pub too_large: bool,
@@ -449,7 +467,10 @@ impl GitWatcherManager {
 /// checkout can speak for: it is answered by naming the repository, and the workspace is read
 /// again to find the worktree that joined or the one that left.
 fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<WatchUpdate> {
-    // Linux inotify also reports opens and closes; these access events are not file changes.
+    // Reading a path is not a change to it, and on Linux it is reported as an event of its own
+    // for every open of every watched file. Git commands read .git/HEAD before acting, so treating
+    // those reads as ref writes would refresh the whole repository on every command. Only Linux
+    // reports these read events.
     if matches!(event.kind, notify::EventKind::Access(_)) {
         return None;
     }
@@ -458,6 +479,16 @@ fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<Wat
     let mut worktrees: BTreeSet<String> = BTreeSet::new();
     let mut repo_wide = false;
     for path in &event.paths {
+        // Git writes a ref, the index and the configuration by creating `<name>.lock`, filling it
+        // and renaming it over `<name>`. The lock is where the write begins, never what it leaves
+        // behind: the rename that follows is the change, and a lock cleaned up afterwards
+        // describes nothing. Skipping the path rather than the event is what keeps the rename,
+        // which arrives as a second path in the same event or the next one, answering for the
+        // change. Only Git's own metadata is filtered this way: a file in a checkout that happens
+        // to be called `notes.lock` is a file the user edited.
+        if is_git_lock_file(path) && is_git_metadata_path(plan, path) {
+            continue;
+        }
         // Check registration before a known worktree's Git directory: its `gitdir` file is
         // inside that directory, but removing it means the row's membership changed, not just
         // that checkout's status did.
@@ -597,6 +628,26 @@ fn is_pending_worktree_git_dir(path: &Path, common_dir: &Path) -> bool {
         components.next(),
         Some(Component::Normal(name)) if name.to_str() == Some("worktrees")
     ) && components.next().is_some()
+}
+
+/// Whether a path is one of Git's lock files: the scratch name it writes a ref, the index or the
+/// configuration under before renaming it into place.
+fn is_git_lock_file(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.ends_with(".lock"))
+}
+
+/// Whether a path belongs to Git's own bookkeeping rather than to a checkout's files: the Git
+/// directory of one linked worktree, or the directory they all share. A lock in either is a write
+/// in flight, and that includes a lock under a ref in the shared directory, which is why this is
+/// asked separately from the lock itself.
+fn is_git_metadata_path(plan: &RepoWatchPlan, path: &Path) -> bool {
+    plan.git_dirs.keys().any(|dir| path.starts_with(dir))
+        || plan
+            .common_dir
+            .as_deref()
+            .is_some_and(|common| path.starts_with(common))
 }
 
 impl GitSnapshotCache {
@@ -834,9 +885,11 @@ fn should_refresh_path(path: &Path) -> bool {
         |name: &str| matches!(metadata.last(), Some(Component::Normal(value)) if *value == name);
     // A linked worktree's HEAD is private to that checkout, not a repo-wide ref. Known worktree
     // Git directories are matched before this helper; an unregistered one is not a reason to
-    // refresh every existing checkout while the membership signal adds its row.
+    // refresh every existing checkout while the membership signal adds its row. The scratch name
+    // a lock is written under is answered by the rename that follows it, which arrives separately
+    // and does not match anything here: `HEAD.lock` is not a HEAD that moved.
     let head_changed = metadata.len() == 1 && ends_with("HEAD");
-    let index_changed = ends_with("index") || ends_with("index.lock");
+    let index_changed = ends_with("index");
     let packed_refs_changed = metadata.len() == 1 && ends_with("packed-refs");
     head_changed
         || index_changed
@@ -1199,6 +1252,8 @@ pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFil
         return Ok(GitFileDiff {
             path: path.to_owned(),
             patch: String::new(),
+            old_content: None,
+            new_content: None,
             is_binary: false,
             large: false,
             too_large: false,
@@ -1214,13 +1269,32 @@ pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFil
         None,
     )?;
     ensure_diff_succeeded(&scan.output, changed_file.status == "??", scan.too_large)?;
+    let patch = if scan.large || scan.too_large || scan.is_binary {
+        String::new()
+    } else {
+        String::from_utf8_lossy(&scan.patch).into_owned()
+    };
+    // Only for a diff that is drawn: a patch nothing shows is not worth two more reads of the file.
+    // Each side is the text `diff_args` diffed, read the way it was diffed — the merge base's blob
+    // and the file as it is on disk — rather than the head's or the index's, which the patch of this
+    // diff never saw.
+    let (old_content, new_content) = if patch.is_empty() {
+        (None, None)
+    } else {
+        (
+            merge_base_content(
+                &context.root,
+                &snapshot.merge_base,
+                changed_file.old_path.as_deref().unwrap_or(path),
+            ),
+            worktree_content(&working_path),
+        )
+    };
     Ok(GitFileDiff {
         path: path.to_owned(),
-        patch: if scan.large || scan.too_large || scan.is_binary {
-            String::new()
-        } else {
-            String::from_utf8_lossy(&scan.patch).into_owned()
-        },
+        patch,
+        old_content,
+        new_content,
         is_binary: scan.is_binary,
         large: scan.large,
         too_large: scan.too_large,
@@ -1228,6 +1302,67 @@ pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFil
         hunks: scan.hunks,
         symlink_target: None,
     })
+}
+
+/// The text of the file as it is on disk, or nothing when there is none to read within the cap.
+///
+/// The path is one `validate_diff_target` has resolved inside the checkout and that has already been
+/// turned away if it is a symlink, so this reads a file the checkout owns. `O_NOFOLLOW` is what keeps
+/// that true by the time the file is actually opened: a checkout is writable by whatever is editing
+/// it, and between the check above and the open below the path could have become a link out of the
+/// checkout, which is the one thing `validate_diff_target` exists to prevent. `is_file` on the open
+/// handle is then a statement about the file that was read rather than about the path it was reached
+/// by, which is what keeps this from being a read of a directory, or of a pipe that would never end.
+/// Bytes that are not text are not carried at all, where the patch carries them lossy: text the two
+/// cannot be compared line for line is text no grammar could be handed.
+fn worktree_content(path: &Path) -> Option<String> {
+    let file = fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    if !file.metadata().is_ok_and(|metadata| metadata.is_file()) {
+        return None;
+    }
+    let mut bytes = Vec::new();
+    file.take(MAX_SYNTAX_CONTEXT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() > MAX_SYNTAX_CONTEXT_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
+}
+
+/// The text of the blob `spec` names, or nothing when there is none to read within the cap.
+///
+/// Read through a pipe under a cap rather than through `run_git`, which buffers all of whatever Git
+/// prints: a blob is the size of a file, and this one is read to color a diff rather than to show
+/// it. A merge base with no such path — an added file, an untracked one — fails here, which is the
+/// same answer as an old side with no lines to draw; the exit status is what says so, because a
+/// failure prints nothing on the pipe it would have been read from.
+fn merge_base_content(root: &Path, merge_base: &str, path: &str) -> Option<String> {
+    let mut child = Command::new("git")
+        .args(["cat-file", "blob", &format!("{merge_base}:{path}")])
+        .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
+        // Nothing is read of Git's own account of a failure, so its pipe is never the reason a read
+        // stops: a blob past the cap ends the read and Git's complaint has nowhere to go.
+        .stderr(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .ok()?;
+    let mut bytes = Vec::new();
+    BufReader::new(child.stdout.take()?)
+        .take(MAX_SYNTAX_CONTEXT_BYTES as u64 + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    // A blob past the cap ends the read early and Git never finishes writing, which is one of the
+    // two ways this is nothing rather than the text of a file.
+    if !child.wait().ok()?.success() || bytes.len() > MAX_SYNTAX_CONTEXT_BYTES {
+        return None;
+    }
+    String::from_utf8(bytes).ok()
 }
 
 pub fn diff_page(
@@ -1365,6 +1500,7 @@ fn scan_git_diff(
     let mut child = Command::new("git")
         .args(args)
         .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -2129,10 +2265,19 @@ fn checked_git<const N: usize>(
     Ok(output)
 }
 
+/// Runs Git to read, never to write, and with the optional locks off so the read leaves nothing
+/// behind.
+///
+/// `git status` takes the index lock to refresh stat data, and the index of a linked worktree
+/// lives inside the very directory the watcher is watching. A refresh would then announce itself,
+/// the announcement would ask for the refresh that wrote it, and the repository would spend the
+/// rest of its life re-reading itself. Git answers the same question without the lock, and the
+/// index stays exactly where the last command that meant to change it left it.
 fn run_git(root: &Path, args: Vec<OsString>) -> Result<Output, IpcError> {
     Command::new("git")
         .args(args)
         .current_dir(root)
+        .env("GIT_OPTIONAL_LOCKS", "0")
         .output()
         .map_err(|error| {
             IpcError::new(
@@ -2183,13 +2328,13 @@ mod tests {
     };
 
     use super::{
-        affected_checkouts, diff, diff_page, failed_watch_update, forward_watch_result,
-        invalidate_failed_watch, parse_diff_display_line, parse_name_status, parse_numstat,
-        parse_porcelain_v2, receive_debounced_change, receive_debounced_updates,
+        affected_checkouts, checked_git, diff, diff_page, failed_watch_update,
+        forward_watch_result, invalidate_failed_watch, parse_diff_display_line, parse_name_status,
+        parse_numstat, parse_porcelain_v2, receive_debounced_change, receive_debounced_updates,
         requested_watch_ids, resolve_default_ref, should_refresh_path, status,
         untracked_line_count, watch_failure, watch_plan_matches_request, CachedGitSnapshot,
         GitCounts, GitDiffStats, GitSnapshotCache, GitStatus, GitWatcherManager, PathBuf,
-        RepoWatchPlan, WatchMessage, WatchUpdate, WatchWakeup,
+        RepoWatchPlan, WatchMessage, WatchUpdate, WatchWakeup, MAX_SYNTAX_CONTEXT_BYTES,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -2414,6 +2559,105 @@ line.txt";
         let result = diff(&database, &checkout_id, "nested/removed.txt").unwrap();
 
         assert!(result.patch.contains("-remove me"));
+    }
+
+    #[test]
+    fn a_diff_carries_the_whole_text_of_each_of_its_sides() {
+        // A grammar reads a file, not the hunks of a diff: the lines inside the `<script>` of a Vue
+        // file are markup to a grammar that was never shown the tag that opened them. So each side
+        // travels whole, and each is read the way `diff_args` diffed it — the merge base's blob and
+        // the file as it is on disk.
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        let before = "<template>\n  <p>one</p>\n</template>\n\n<script setup lang=\"ts\">\nconst n = 1;\n</script>\n";
+        let after = "<template>\n  <p>two</p>\n</template>\n\n<script setup lang=\"ts\">\nconst n = 2;\n</script>\n";
+        fs::write(root.join("Widget.vue"), before).unwrap();
+        git(&root, &["add", "Widget.vue"]);
+        git(&root, &["commit", "-m", "widget"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        fs::write(root.join("Widget.vue"), after).unwrap();
+
+        let result = diff(&database, &checkout_id, "Widget.vue").unwrap();
+
+        assert_eq!(result.old_content.as_deref(), Some(before));
+        assert_eq!(result.new_content.as_deref(), Some(after));
+    }
+
+    #[test]
+    fn an_added_file_carries_no_old_text_and_a_removed_one_no_new() {
+        // Each side the diff does not have is absent rather than empty: an added file has no old side
+        // and a removed one no new side, and text that is not there is not something to read.
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        let gone = "const removed = 1;\n";
+        fs::write(root.join("gone.ts"), gone).unwrap();
+        git(&root, &["add", "gone.ts"]);
+        git(&root, &["commit", "-m", "gone"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        fs::write(root.join("added.ts"), "const added = 1;\n").unwrap();
+        fs::remove_file(root.join("gone.ts")).unwrap();
+
+        let added = diff(&database, &checkout_id, "added.ts").unwrap();
+        let removed = diff(&database, &checkout_id, "gone.ts").unwrap();
+
+        assert_eq!(added.old_content, None);
+        assert_eq!(added.new_content.as_deref(), Some("const added = 1;\n"));
+        assert_eq!(removed.old_content.as_deref(), Some(gone));
+        assert_eq!(removed.new_content, None);
+    }
+
+    #[test]
+    fn a_renamed_files_old_text_is_the_path_the_rename_came_from() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::create_dir_all(root.join("before")).unwrap();
+        let original = (0..40)
+            .map(|line| format!("const value{line} = {line};\n"))
+            .collect::<String>();
+        fs::write(root.join("before/View.ts"), &original).unwrap();
+        git(&root, &["add", "before/View.ts"]);
+        git(&root, &["commit", "-m", "view"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        fs::create_dir_all(root.join("after")).unwrap();
+        git(&root, &["mv", "before/View.ts", "after/View.ts"]);
+        let renamed = original.replace("const value20 = 20;\n", "const value20 = 21;\n");
+        fs::write(root.join("after/View.ts"), &renamed).unwrap();
+
+        let result = diff(&database, &checkout_id, "after/View.ts").unwrap();
+
+        assert_eq!(result.old_content.as_deref(), Some(original.as_str()));
+        assert_eq!(result.new_content.as_deref(), Some(renamed.as_str()));
+    }
+
+    #[test]
+    fn no_text_travels_with_a_binary_diff_or_with_a_file_past_the_cap() {
+        // There is nothing to read in the first case, and in the second there is more of it than a
+        // diff is worth carrying: both are absent, which is what leaves the diff to draw itself.
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join("bytes.dat"), [0, 1, 2]).unwrap();
+        git(&root, &["add", "bytes.dat"]);
+        git(&root, &["commit", "-m", "bytes"]);
+        let big = "line\n".repeat(MAX_SYNTAX_CONTEXT_BYTES / 5 + 1);
+        fs::write(root.join("big.txt"), &big).unwrap();
+        git(&root, &["add", "big.txt"]);
+        git(&root, &["commit", "-m", "big"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        fs::write(root.join("bytes.dat"), [0, 2, 3]).unwrap();
+        fs::write(root.join("big.txt"), big.replacen("line\n", "LINE\n", 1)).unwrap();
+
+        let binary = diff(&database, &checkout_id, "bytes.dat").unwrap();
+        let large = diff(&database, &checkout_id, "big.txt").unwrap();
+
+        assert_eq!((binary.old_content, binary.new_content), (None, None));
+        assert!(!binary.is_binary || binary.patch.is_empty());
+        // The change is small, so the patch is still drawn: it is the file's text that does not fit.
+        assert!(!large.patch.is_empty());
+        assert_eq!((large.old_content, large.new_content), (None, None));
     }
 
     #[test]
@@ -2913,6 +3157,39 @@ line.txt";
     }
 
     #[test]
+    fn reading_a_ref_or_an_index_is_not_a_change_in_one() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned()],
+            ..RepoWatchPlan::default()
+        };
+        // A path alone cannot tell a read from a write, and Linux reports every open of a watched
+        // path as an event of its own. Every Git command opens the HEAD and the refs it reads
+        // before it changes anything, so answering those as the writes they resemble refreshed the
+        // whole repository on every command run inside it.
+        for path in [
+            "/repo/.git/HEAD",
+            "/repo/.git/index",
+            "/repo/.git/refs/heads/trunk",
+            "/repo/base.txt",
+        ] {
+            let read = notify::Event {
+                kind: notify::EventKind::Access(notify::event::AccessKind::Open(
+                    notify::event::AccessMode::Any,
+                )),
+                paths: vec![PathBuf::from(path)],
+                attrs: Default::default(),
+            };
+
+            assert_eq!(affected_checkouts(&plan, &read), None, "{path}");
+        }
+    }
+
+    #[test]
     fn a_worktree_under_the_reserved_container_is_not_counted_as_primary_checkout_activity() {
         let mut plan = RepoWatchPlan {
             repo_id: "repo".to_owned(),
@@ -2978,13 +3255,208 @@ line.txt";
                     paths: vec![PathBuf::from(path)],
                     attrs: Default::default(),
                 };
+                // The lock is filtered before anything is attributed, so it produces no update at
+                // all. The other three still speak for the checkout that owns them, and say
+                // nothing about the repository's worktrees.
+                let expected = if path.ends_with(".lock") {
+                    None
+                } else {
+                    Some(Vec::new())
+                };
                 assert_eq!(
                     affected_checkouts(&plan, &event).map(|update| update.worktrees),
-                    Some(Vec::new()),
+                    expected,
                     "{path}"
                 );
             }
         }
+    }
+
+    /// The self-inflicted loop: reading a checkout refreshed the index of a linked worktree, and
+    /// the index is inside the directory the watcher watches, so every read announced itself and
+    /// the next read was already on its way. A lock is a write in flight, and reading must not
+    /// be one, so no lock in Git's own metadata speaks for anything.
+    #[test]
+    fn a_lock_in_git_metadata_is_not_a_change_while_the_rename_that_finishes_it_is() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [
+                (PathBuf::from("/repo"), "main".to_owned()),
+                (PathBuf::from("/repo-task"), "task".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            // The primary's own Git directory is the shared one, so it is not here: what is written
+            // under it is the repository's change, not the primary checkout's.
+            git_dirs: BTreeMap::from([(
+                PathBuf::from("/repo/.git/worktrees/task"),
+                "task".to_owned(),
+            )]),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned(), "task".to_owned()],
+            requested: vec!["main".to_owned(), "task".to_owned()],
+        };
+        let kinds = [
+            notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            notify::EventKind::Create(notify::event::CreateKind::File),
+            notify::EventKind::Remove(notify::event::RemoveKind::File),
+        ];
+        for path in [
+            // A linked worktree's own index, which is the one a `git status` there would lock.
+            "/repo/.git/worktrees/task/index.lock",
+            "/repo/.git/worktrees/task/HEAD.lock",
+            // The primary checkout's index, which reaches the shared directory instead and is the
+            // one that would re-read every worktree in the repository.
+            "/repo/.git/index.lock",
+            "/repo/.git/HEAD.lock",
+            // A ref is written the same way, and a lock under one would move the merge base
+            // every sibling counts its lines against.
+            "/repo/.git/refs/heads/trunk.lock",
+            "/repo/.git/packed-refs.lock",
+        ] {
+            for kind in kinds {
+                let event = notify::Event {
+                    kind,
+                    paths: vec![PathBuf::from(path)],
+                    attrs: Default::default(),
+                };
+                assert_eq!(affected_checkouts(&plan, &event), None, "{path}");
+            }
+        }
+
+        // The rename that lands the write is the change, and it is the path that has to speak.
+        // Both the checkout's own index and the repository's are asked here, because the first
+        // names one worktree and the second names all of them.
+        let staged = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/repo/.git/worktrees/task/index")],
+            attrs: Default::default(),
+        };
+        assert_eq!(
+            affected_checkouts(&plan, &staged).map(|update| update.status),
+            Some(vec!["task".to_owned()])
+        );
+        let shared = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/repo/.git/index")],
+            attrs: Default::default(),
+        };
+        assert_eq!(
+            affected_checkouts(&plan, &shared).map(|update| update.status),
+            Some(vec!["main".to_owned(), "task".to_owned()])
+        );
+    }
+
+    /// A backend that does not batch reports the rename of a lock over the file it replaces as
+    /// one event carrying both paths. Dropping the event because one of its paths is a lock would
+    /// lose the change, so the lock is skipped and the destination still answers.
+    #[test]
+    fn a_rename_onto_a_git_file_answers_with_the_file_it_landed_on() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            git_dirs: BTreeMap::from([(
+                PathBuf::from("/repo/.git/worktrees/task"),
+                "task".to_owned(),
+            )]),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned(), "task".to_owned()],
+            requested: vec!["main".to_owned(), "task".to_owned()],
+        };
+        let rename = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Name(
+                notify::event::RenameMode::Both,
+            )),
+            paths: vec![
+                PathBuf::from("/repo/.git/worktrees/task/index.lock"),
+                PathBuf::from("/repo/.git/worktrees/task/index"),
+            ],
+            attrs: Default::default(),
+        };
+
+        assert_eq!(
+            affected_checkouts(&plan, &rename).map(|update| update.status),
+            Some(vec!["task".to_owned()])
+        );
+    }
+
+    /// The filter is about where Git writes, not about the shape of a name. A file in a checkout
+    /// that ends in `.lock` is a file the user saved, and treating it as bookkeeping would leave
+    /// the row describing an older version of the worktree than the one on disk.
+    #[test]
+    fn a_file_the_user_named_like_a_lock_is_still_a_change_to_their_checkout() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            git_dirs: BTreeMap::new(),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned()],
+            requested: vec!["main".to_owned()],
+        };
+        let saved = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from("/repo/notes.lock")],
+            attrs: Default::default(),
+        };
+
+        let update = affected_checkouts(&plan, &saved).unwrap();
+        assert_eq!(update.status, ["main"]);
+        assert_eq!(update.activity, ["main"]);
+    }
+
+    /// The half of the loop that does not depend on the watcher: a read that takes the optional
+    /// index lock writes into the directory being watched, which is enough to keep the repository
+    /// re-reading itself forever. Reading has to answer the same question from what is already on
+    /// disk and leave the index alone.
+    #[test]
+    fn reading_the_status_leaves_the_index_exactly_as_git_wrote_it() {
+        let temp = tempdir().unwrap();
+        let root = temp.path();
+        init_repo(root);
+        fs::write(root.join("edited.txt"), "first\n").unwrap();
+        git(root, &["add", "edited.txt"]);
+        git(root, &["commit", "-m", "second"]);
+
+        // A file saved with the content it already had, and a timestamp Git has not seen: the
+        // answer is that nothing changed, and getting there means comparing the file, because the
+        // index on disk still describes the old timestamp. Recording the new one is the write the
+        // optional lock exists for, and it is a write into the directory being watched.
+        fs::write(root.join("base.txt"), "base\n").unwrap();
+        Command::new("touch")
+            .args(["-t", "202001010000", "base.txt"])
+            .current_dir(root)
+            .output()
+            .expect("touch is installed");
+        // Something genuinely edited, so the read has to be live and not merely quiet.
+        fs::write(root.join("edited.txt"), "second\n").unwrap();
+
+        let index = root.join(".git").join("index");
+        let before = fs::read(&index).unwrap();
+        let output = checked_git(
+            root,
+            ["status", "--porcelain=v2"],
+            "could not read Git status",
+        )
+        .expect("Git status");
+        let reported = String::from_utf8_lossy(&output.stdout);
+
+        assert!(
+            reported.contains("edited.txt"),
+            "the edit was not reported: {reported}"
+        );
+        assert!(
+            !reported.contains("base.txt"),
+            "a file saved unchanged is still unchanged: {reported}"
+        );
+        assert_eq!(
+            before,
+            fs::read(&index).unwrap(),
+            "reading the status rewrote the index it was reading"
+        );
     }
 
     #[test]

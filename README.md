@@ -92,7 +92,7 @@ Marvis stores repository registrations, review notes and rounds, and workspace s
 
 Missing folders remain registered and are marked missing. If the original path returns, Marvis restores that registration and its attached metadata. If a directory was moved or renamed, the Sidebar offers no relocation action: opening the new path creates a separate checkout identity and does not merge the missing checkout's history. Keep the old missing registration if you need that history. **Close missing** removes the Marvis registration and associated metadata (including notes and rounds); its confirmation that no files are deleted refers to repository/worktree files. Marvis does not back up the database for you: quit the app and make a separate backup before confirming that action or manually deleting the database.
 
-This `v0.11.0` build expects database schema 13 and refuses older nonzero schemas, including 11 and 12. Pre-1.0 releases do not migrate older schemas: deleting the database starts an empty Marvis workspace, without deleting repository files or automatically recovering workspace metadata. Details and source setup: [docs/development.md](docs/development.md).
+This `v0.14.0` build expects database schema 13 and refuses older nonzero schemas, including 11 and 12. Pre-1.0 releases do not migrate older schemas: deleting the database starts an empty Marvis workspace, without deleting repository files or automatically recovering workspace metadata. Details and source setup: [docs/development.md](docs/development.md).
 
 ## Building
 
