@@ -29,6 +29,7 @@ const mocks = vi.hoisted(() => ({
   loadSettings: vi.fn(),
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
+  prepareAppExit: vi.fn(),
   loadReviewTarget: vi.fn(),
   saveReviewTarget: vi.fn(),
   exportReviewMarkdown: vi.fn(),
@@ -262,6 +263,7 @@ vi.mock("./lib/ipc", () => ({
   loadSettings: mocks.loadSettings,
   saveSettings: mocks.saveSettings,
   saveCheckoutUiState: mocks.saveCheckoutUiState,
+  prepareAppExit: mocks.prepareAppExit,
   saveReviewTarget: mocks.saveReviewTarget,
   // The real command returns the refreshed workspace; App assigns it straight back,
   // so returning undefined here crashed the next render. Only the shell and Neovim requests
@@ -626,6 +628,7 @@ describe("App UI integration", () => {
     mocks.saveAppLayout.mockResolvedValue(undefined);
     mocks.saveSettings.mockResolvedValue(undefined);
     mocks.saveCheckoutUiState.mockResolvedValue(undefined);
+    mocks.prepareAppExit.mockResolvedValue(undefined);
     mocks.loadReviewTarget.mockResolvedValue("markdown");
     mocks.saveReviewTarget.mockResolvedValue(undefined);
     mocks.exportReviewMarkdown.mockResolvedValue("2026-03-14-1532.md");
@@ -764,6 +767,80 @@ describe("App UI integration", () => {
       resolveWrite();
       await flushPromises();
       expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
+      wrapper.unmount();
+    });
+
+    it("ends the processes the app started before the window goes", async () => {
+      mocks.isDecorated.mockResolvedValue(false);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      const order: string[] = [];
+      mocks.prepareAppExit.mockImplementation(async () => {
+        order.push("sweep");
+      });
+      mocks.currentWindow!.close = vi.fn(async () => {
+        order.push("close");
+      });
+
+      await wrapper.get('[data-testid="window-close"]').trigger("click");
+      await flushPromises();
+
+      // The sweep has to happen while the window is still up to ask for it: no exit event reaches
+      // the app on this path, so nothing else ends the servers the app started.
+      expect(order).toEqual(["sweep", "close"]);
+      wrapper.unmount();
+    });
+
+    it("closes even when the sweep before it fails", async () => {
+      mocks.isDecorated.mockResolvedValue(false);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      mocks.prepareAppExit.mockRejectedValue(new Error("the sweep did not finish"));
+
+      await wrapper.get('[data-testid="window-close"]').trigger("click");
+      await flushPromises();
+
+      // A sweep that failed is a server left running, not a window the user cannot close.
+      expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
+      wrapper.unmount();
+    });
+
+    it("closes anyway when a queued write never finishes", async () => {
+      mocks.isDecorated.mockResolvedValue(false);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      // A write that answers nothing is what a stuck bridge looks like from here, and a window
+      // that waits on it forever is a window the user cannot close.
+      mocks.saveAppLayout.mockImplementation(() => new Promise<void>(() => {}));
+      wrapper.getComponent(SplitterGroup).vm.$emit("layout", [320, 700, 300]);
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+
+      await wrapper.get('[data-testid="window-close"]').trigger("click");
+      await flushPromises();
+      expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
+
+      await vi.advanceTimersByTimeAsync(5000);
+      await flushPromises();
+      expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
+      wrapper.unmount();
+    });
+
+    it("asks again when the last close did not go through", async () => {
+      mocks.isDecorated.mockResolvedValue(false);
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      const refused = vi.fn(async () => {
+        throw new Error("the window would not close");
+      });
+      mocks.currentWindow!.close = refused;
+
+      await wrapper.get('[data-testid="window-close"]').trigger("click");
+      await flushPromises();
+      expect(refused).toHaveBeenCalledOnce();
+
+      // A close that failed cannot keep the window from being asked to close again.
+      const accepted = vi.fn(async () => undefined);
+      mocks.currentWindow!.close = accepted;
+      await wrapper.get('[data-testid="window-close"]').trigger("click");
+      await flushPromises();
+      expect(accepted).toHaveBeenCalledOnce();
       wrapper.unmount();
     });
 

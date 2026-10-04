@@ -75,6 +75,7 @@ import {
   loadAppLayout,
   loadCheckoutUiState,
   loadSettings,
+  prepareAppExit,
   saveAppLayout,
   saveCheckoutUiState,
   saveSettings,
@@ -1036,11 +1037,25 @@ function requestWindowClose(currentWindow: ReturnType<typeof getCurrentWindow>):
   if (allowWindowClose) return Promise.resolve();
   if (windowClosePromise) return windowClosePromise;
   windowClosePromise = (async () => {
-    await flushUiStateWrites();
-    allowWindowClose = true;
     try {
+      // The window waits for the queued writes, but only for as long as that can reasonably
+      // take. A window that cannot be closed is worse than a layout that is one launch stale, and
+      // the write is on the other side of the bridge: it goes on after this stops waiting for it.
+      await withinDeadline(
+        flushUiStateWrites(),
+        CLOSE_BUDGET,
+        `The window closed before its queued writes finished (${CLOSE_BUDGET}ms).`,
+      );
+      // The sweep runs while the window is still here to ask for it: an exit event the app could
+      // clean up from is never delivered on this path, and a server left running holds its port.
+      // Failing to sweep is not a reason to keep the window open, so it is not one.
+      await sweepBeforeExit();
+      allowWindowClose = true;
       await currentWindow.close();
     } catch (cause) {
+      // Whatever the close did is undone together, so a failed one leaves the window open and
+      // the next request tries again. The only failure here with no way back is one that keeps
+      // the window from ever being asked again.
       allowWindowClose = false;
       showWindowError(cause);
     } finally {
@@ -1048,6 +1063,49 @@ function requestWindowClose(currentWindow: ReturnType<typeof getCurrentWindow>):
     }
   })();
   return windowClosePromise;
+}
+
+/** How long a close waits for each thing it waits for before it stops waiting for it. */
+const CLOSE_BUDGET = 5000;
+
+/** Asks the backend to end the processes it started, and says so when it cannot. */
+async function sweepBeforeExit(): Promise<void> {
+  try {
+    // Bounded for the same reason the writes are. A sweep that never answers is not a reason to keep
+    // the window open: what it did not manage is swept on the next launch.
+    await withinDeadline(
+      prepareAppExit(),
+      CLOSE_BUDGET,
+      `The window closed before the app's own processes were ended (${CLOSE_BUDGET}ms).`,
+    );
+  } catch (cause) {
+    reportCause(cause);
+  }
+}
+
+/**
+ * Waits for `work`, or for the deadline, whichever lands first.
+ *
+ * The deadline resolves rather than rejects: the caller asked to close the window, and a write
+ * that arrives late still arrives, so all that is left to say is that it was late.
+ */
+function withinDeadline(work: Promise<void>, milliseconds: number, late: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    const deadline = window.setTimeout(() => {
+      reportCause(new Error(late));
+      resolve();
+    }, milliseconds);
+    work.then(
+      () => {
+        window.clearTimeout(deadline);
+        resolve();
+      },
+      (cause: unknown) => {
+        window.clearTimeout(deadline);
+        reject(cause);
+      },
+    );
+  });
 }
 
 /**

@@ -101,8 +101,6 @@ fn main() {
                 }
                 let tracked_window = window.clone();
                 let window_database = database.clone();
-                #[cfg(target_os = "macos")]
-                let app_handle = app.handle().clone();
                 window.on_window_event(move |event| {
                     if !matches!(event, tauri::WindowEvent::CloseRequested { .. }) {
                         return;
@@ -130,8 +128,11 @@ fn main() {
                     if let Err(error) = window_database.set_window_maximized(maximized) {
                         log::warn!("the window's maximized state was not saved: {error}");
                     }
-                    #[cfg(target_os = "macos")]
-                    app_handle.exit(0);
+                    // The window is not closed from here. The frontend is holding this request
+                    // open to land its queued writes, and ending the app from under it would
+                    // abandon the layout and the settings the user last chose. Closing the window
+                    // is the frontend's own `close()` once those writes land, and the last window
+                    // going away ends the app on every platform.
                 });
             }
             app.manage(database);
@@ -163,6 +164,7 @@ fn main() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
+            commands::app::app_prepare_exit,
             commands::agent::agent_sessions,
             commands::agent::agent_agents,
             commands::agent::agent_session_create,
@@ -238,26 +240,29 @@ fn main() {
         .expect("failed to build Marvis");
     app.run(|handle, event| {
         // Nothing below runs on its own: the loop ends with `std::process::exit`, so a `Drop` in
-        // the managed state is never reached. This is the last callback the runtime makes.
-        if matches!(event, tauri::RunEvent::Exit) {
-            stop_child_processes(handle);
+        // the managed state is never reached.
+        //
+        // A window close asks for the sweep itself, over the bridge, while the window is still
+        // there to ask. This is the backstop for an exit that arrives without one, and it is not
+        // the main path: an exit that does not come through the window is announced by
+        // `ExitRequested`, and `Exit` is what is left when even that is skipped.
+        if matches!(
+            event,
+            tauri::RunEvent::ExitRequested { .. } | tauri::RunEvent::Exit
+        ) {
+            static STOPPED: std::sync::Once = std::sync::Once::new();
+            STOPPED.call_once(|| {
+                // The states are read rather than taken: an exit that arrives before `setup`
+                // finished has neither of them managed, and panicking on the way out is worse
+                // than leaving them be.
+                let agents = handle.try_state::<std::sync::Arc<services::agent::AgentService>>();
+                let terminal = handle.try_state::<std::sync::Arc<terminal::TerminalBackend>>();
+                if let (Some(agents), Some(terminal)) = (agents, terminal) {
+                    commands::app::stop_children(&agents, &terminal);
+                }
+            });
         }
     });
-}
-
-/// Ends the processes the app started, before the process itself ends.
-///
-/// Every agent server and every terminal is a child of this one, and both are meant to last as
-/// long as the window does. Leaving them behind is not a slow leak: an `opencode serve` with no
-/// parent holds its port for as long as it runs, and `Drop` cannot stop it because the event loop
-/// leaves through `std::process::exit` rather than by unwinding.
-fn stop_child_processes(handle: &tauri::AppHandle) {
-    if let Some(agents) = handle.try_state::<std::sync::Arc<services::agent::AgentService>>() {
-        agents.stop_all();
-    }
-    if let Some(terminal) = handle.try_state::<std::sync::Arc<terminal::TerminalBackend>>() {
-        terminal.shutdown();
-    }
 }
 
 #[cfg(test)]
@@ -556,26 +561,32 @@ mod startup_tests {
             "`App::run` leaves through `std::process::exit`, so nothing is unwound and the \
              children are stopped by nothing at all"
         );
+        // The window is what ends the app, so the window is what asks for the sweep. Neither exit
+        // event reaches the app on that path, which is measured, not assumed: a marker written by
+        // the hook is absent after the window closes while the process ends with status 0.
         assert!(
-            registered.contains("tauri::RunEvent::Exit"),
-            "the children are stopped from something the runtime no longer hands out"
+            registered.contains("commands::app::app_prepare_exit"),
+            "the command the window asks for the sweep with is not registered"
         );
-        let hook = registered
-            .split("fn stop_child_processes(")
-            .nth(1)
-            .and_then(|body| body.split("\n}").next())
-            .expect("the app has no function that stops its children any more");
+        assert!(
+            registered.contains("tauri::RunEvent::ExitRequested"),
+            "an exit that does not come through the window is announced by `ExitRequested`, and \
+             nothing sweeps when only `Exit` is watched"
+        );
+        assert!(
+            !registered.contains("exit(0)"),
+            "ending the app while the close request is being handled takes the webview away from \
+             the write the window is still waiting for, and skips the sweep entirely"
+        );
+        let command = include_str!("commands/app.rs");
         for call in ["agents.stop_all()", "terminal.shutdown()"] {
-            assert!(
-                hook.contains(call),
-                "the exit hook stopped calling `{call}`"
-            );
+            assert!(command.contains(call), "the sweep stopped calling `{call}`");
         }
         // The states are read rather than taken: an exit that arrives before `setup` finished has
         // neither of them managed, and panicking on the way out is worse than leaving it be.
         assert!(
-            hook.matches("try_state").count() == 2,
-            "the exit hook reads the managed state instead of unwrapping it"
+            registered.matches("try_state").count() == 2,
+            "the backstop reads the managed state instead of unwrapping it"
         );
     }
 

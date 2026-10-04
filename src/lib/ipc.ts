@@ -346,6 +346,11 @@ export function saveCheckoutUiState(checkoutId: string, state: CheckoutUiState):
   return invoke<void>("checkout_ui_state_save", { checkoutId, state });
 }
 
+/** Ends the agent servers and the terminals the app started, before the window closes. */
+export function prepareAppExit(): Promise<void> {
+  return invoke<void>("app_prepare_exit");
+}
+
 export function getWorktreeDefaults(checkoutId: string): Promise<WorktreeDefaults> {
   return invoke<WorktreeDefaults>("worktree_defaults", { checkoutId });
 }
