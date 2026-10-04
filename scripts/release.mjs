@@ -3,14 +3,16 @@
  *
  * The app version lives in three manifests because three toolchains read it: pnpm from
  * `package.json`, Cargo from `src-tauri/Cargo.toml`, and the bundler from `src-tauri/tauri.conf.json`.
+ * Cargo also records the crate version in `src-tauri/Cargo.lock`.
  * A release tag that disagrees with any of them publishes a binary whose name and contents claim
- * different versions, so this reads all three, writes all three, and refuses to move on a mismatch.
+ * different versions, so this checks and writes all four version records as one release.
  * Bumping by hand is what put that risk in place; the tag is still a deliberate act, and this does
  * the bookkeeping around it.
  *
  * Usage:
- *   node scripts/release.mjs --check [<tag>]        the three manifests agree, and match the tag
+ *   node scripts/release.mjs --check [<tag>]        all versions agree, and match the tag
  *   node scripts/release.mjs --bump <version>       write them, commit, tag and push
+ *   node scripts/release.mjs --bump <version> --write-only   write them without Git operations
  *   node scripts/release.mjs --bump <version> --dry-run   report the writes, change nothing
  *
  * `--check` takes no tag in CI, where the clone is shallow and has no tags to read; the release
@@ -26,6 +28,7 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 /** The first `version = "..."` under `[package]`, which is the crate's own and not a dependency's. */
 const CARGO_VERSION = /^version\s*=\s*"([^"]+)"/m;
 const CARGO_PACKAGE = /^\[package\][\s\S]*?^version\s*=\s*"[^"]+"/m;
+const CARGO_LOCK_VERSION = /^(\[\[package\]\]\nname = "marvis"\nversion = ")([^"]+)(")/m;
 const JSON_VERSION = /^(\s*"version":\s*")[^"]+(")/m;
 
 /** Reads and writes one version field, touching nothing else in the file. */
@@ -40,6 +43,29 @@ function jsonManifest(path, readVersion) {
         throw new Error(`${path} has ${matches?.length ?? 0} version fields, expected exactly one`);
       }
       writeFileSync(path, content.replace(JSON_VERSION, `$1${version}$2`));
+    },
+  };
+}
+
+function cargoLockManifest(path) {
+  function matches(content) {
+    return [...content.matchAll(new RegExp(CARGO_LOCK_VERSION.source, "gm"))];
+  }
+  return {
+    path,
+    read() {
+      const versions = matches(readFileSync(path, "utf8"));
+      if (versions.length !== 1) {
+        throw new Error(`${path} has ${versions.length} marvis package entries, expected exactly one`);
+      }
+      return versions[0][2];
+    },
+    write(version) {
+      const content = readFileSync(path, "utf8");
+      if (matches(content).length !== 1) {
+        throw new Error(`${path} does not contain exactly one marvis package entry`);
+      }
+      writeFileSync(path, content.replace(CARGO_LOCK_VERSION, `$1${version}$3`));
     },
   };
 }
@@ -60,6 +86,7 @@ const MANIFESTS = [
       );
     },
   },
+  cargoLockManifest(join("src-tauri", "Cargo.lock")),
 ];
 
 function git(args) {
@@ -78,7 +105,7 @@ function check(tag) {
   const [path, version] = versions.entries().next().value;
   for (const [otherPath, otherVersion] of versions) {
     if (otherVersion !== version) {
-      fail(`${otherPath} is ${otherVersion}, ${path} is ${version}: the manifests disagree`);
+      fail(`${otherPath} is ${otherVersion}, ${path} is ${version}: the version files disagree`);
     }
   }
   if (tag !== undefined) {
@@ -87,17 +114,25 @@ function check(tag) {
       fail(`tag ${tag} does not match the ${version} in ${path}`);
     }
   }
-  console.log(`every manifest is ${version}${tag ? `, matching ${tag}` : ""}`);
+  console.log(`every version file is ${version}${tag ? `, matching ${tag}` : ""}`);
 }
 
-function bump(version, { dryRun, push }) {
+function bump(version, { dryRun, push, writeOnly }) {
   // The tag is `v<version>` and the manifests hold the version bare, so both spellings are accepted.
   const bare = version.replace(/^v/, "");
   if (!SEMVER.test(bare)) {
     fail(`"${version}" is not a semantic version`);
   }
   version = bare;
-  const [path, current] = MANIFESTS.map((manifest) => [manifest.path, manifest.read()])[0];
+  const versions = MANIFESTS.map((manifest) => [manifest.path, manifest.read()]);
+  const [path, current] = versions[0];
+  if (writeOnly) {
+    for (const [otherPath, otherVersion] of versions) {
+      if (otherVersion !== current) {
+        fail(`${otherPath} is ${otherVersion}, ${path} is ${current}: the version files disagree`);
+      }
+    }
+  }
   // Compared on the numeric core alone, so `0.2.0` may follow `0.2.0-rc.1` but not `0.3.0`.
   const core = (value) => value.split(/[-+]/)[0].split(".").map(Number);
   const [currentCore, nextCore] = [core(current), core(version)];
@@ -109,11 +144,13 @@ function bump(version, { dryRun, push }) {
     fail(`${path} is already ${current}: ${version} does not move the version forward`);
   }
   const tag = `v${version}`;
-  try {
-    git(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`]);
-    fail(`tag ${tag} already exists`);
-  } catch {
-    // No such tag, which is the only way to get here.
+  if (!writeOnly) {
+    try {
+      git(["rev-parse", "--verify", "--quiet", `refs/tags/${tag}`]);
+      fail(`tag ${tag} already exists`);
+    } catch {
+      // No such tag, which is the only way to get here.
+    }
   }
   if (dryRun) {
     // A dry run changes nothing, so it is worth running against a working tree that has changes.
@@ -121,10 +158,17 @@ function bump(version, { dryRun, push }) {
       console.log(`${manifest.path}: ${manifest.read()} -> ${version}`);
     }
     console.log(
-      dryRun
-        ? `dry run: would commit and tag ${tag}, and push nothing`
-        : `would commit, tag ${tag} and push${push ? "" : " nothing (--no-push)"}`,
+      writeOnly
+        ? "dry run: would write only; no commit, tag or push"
+        : `dry run: would commit and tag ${tag}, and push nothing`,
     );
+    return;
+  }
+  if (writeOnly) {
+    for (const manifest of MANIFESTS) {
+      manifest.write(version);
+    }
+    console.log(`wrote version ${version} to all four version files; no commit, tag or push`);
     return;
   }
   if (git(["status", "--porcelain"])) {
@@ -156,7 +200,11 @@ if (args.includes("--check")) {
   if (!version) {
     fail("--bump needs a version, for example: node scripts/release.mjs --bump 0.2.0");
   }
-  bump(version, { dryRun: args.includes("--dry-run"), push: !args.includes("--no-push") });
+  bump(version, {
+    dryRun: args.includes("--dry-run"),
+    push: !args.includes("--no-push"),
+    writeOnly: args.includes("--write-only"),
+  });
 } else {
   fail(
     "usage: node scripts/release.mjs --check [<tag>]\n" +

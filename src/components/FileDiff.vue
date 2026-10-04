@@ -15,7 +15,7 @@ import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
 import { REVIEW_SENDER } from "../presentation/review-notes";
-import type { ReviewAnchorCheck } from "../lib/ipc";
+import type { ReviewAnchorCheck } from "../domain/review";
 import { getGitDiff } from "../lib/ipc";
 import { theme } from "../presentation/theme";
 import { DIFF_ROW_HEIGHT, useLargeDiff } from "./use-large-diff";

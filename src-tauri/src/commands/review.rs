@@ -6,7 +6,7 @@ use crate::{
     domain::{ipc::IpcError, review::ReviewRound},
     persistence::Database,
     services::{
-        agent::AgentService,
+        agent::{self, AgentService},
         review::{self, NewReviewNote, NoteAnchorCheck},
         review_round,
     },
@@ -204,6 +204,9 @@ pub async fn review_round_dispatch(
     agents: State<'_, Arc<AgentService>>,
     request: ReviewRoundDispatchRequest,
 ) -> Result<ReviewRound, IpcError> {
+    let generation = agents
+        .checkout_generation(&request.checkout_id)
+        .map_err(agent::map_error)?;
     let database = database.inner().clone();
     let agents: Arc<AgentService> = Arc::clone(agents.inner());
     tauri::async_runtime::spawn_blocking(move || {
@@ -227,11 +230,17 @@ pub async fn review_round_dispatch(
             return Ok(round);
         }
         let prompt = review_round::build_round_prompt(&request.markdown, &round.marker);
-        match agents.prompt(
+        match agents.prompt_at_generation(
             &request.checkout_id,
             &directory,
             &request.session_id,
             &prompt,
+            generation,
+            || {
+                database
+                    .terminal_checkout_path(&request.checkout_id)
+                    .is_ok_and(|current| current == directory)
+            },
         ) {
             Ok(_) => review_round::confirm_round(&database, &request.checkout_id, &round.id),
             // Left as `dispatching` on purpose: the marker is what lets reconciliation learn
@@ -254,11 +263,20 @@ pub async fn review_round_flush(
     agents: State<'_, Arc<AgentService>>,
     checkout_id: String,
 ) -> Result<usize, IpcError> {
+    let generation = agents
+        .checkout_generation(&checkout_id)
+        .map_err(agent::map_error)?;
     let database = database.inner().clone();
     let agents: Arc<AgentService> = Arc::clone(agents.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let directory = super::agent::checkout_directory(&database, &checkout_id)?;
-        review_round::flush_rounds(&database, &agents, &checkout_id, &directory)
+        review_round::flush_rounds(
+            &database,
+            &agents,
+            &checkout_id,
+            &directory,
+            Some(generation),
+        )
     })
     .await
     .map_err(operation_error)?
@@ -284,11 +302,21 @@ pub async fn review_round_reconcile(
     checkout_id: String,
     round_id: String,
 ) -> Result<ReviewRound, IpcError> {
+    let generation = agents
+        .checkout_generation(&checkout_id)
+        .map_err(agent::map_error)?;
     let database = database.inner().clone();
     let agents: Arc<AgentService> = Arc::clone(agents.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let directory = super::agent::checkout_directory(&database, &checkout_id)?;
-        review_round::reconcile_round(&database, &agents, &checkout_id, &directory, &round_id)
+        review_round::reconcile_round(
+            &database,
+            &agents,
+            &checkout_id,
+            &directory,
+            &round_id,
+            Some(generation),
+        )
     })
     .await
     .map_err(operation_error)?

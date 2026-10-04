@@ -26,7 +26,7 @@ let terminal: Headless;
 let provider: ILinkProvider | null;
 let decorations: { x: number; width: number; foregroundColor?: string }[] = [];
 let markerOffsets: number[] = [];
-let open: ReturnType<typeof vi.fn>;
+let open: ReturnType<typeof vi.fn<(path: string) => void>>;
 
 async function write(text: string) {
   await new Promise<void>((resolve) => terminal.write(text, resolve));
@@ -37,7 +37,7 @@ function mount() {
   provider = null;
   decorations = [];
   markerOffsets = [];
-  open = vi.fn();
+  open = vi.fn<(path: string) => void>();
   const real = terminal as unknown as Record<string, unknown>;
   real.registerLinkProvider = (registered: ILinkProvider) => {
     provider = registered;

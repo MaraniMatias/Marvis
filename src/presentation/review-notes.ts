@@ -2,7 +2,7 @@ import { reactive, watch } from "vue";
 import type { ComputedRef, InjectionKey } from "vue";
 import { isIpcError } from "../domain/ipc";
 import type { AgentSession } from "../domain/agent";
-import type { ReviewNote, ReviewRound, ReviewSide } from "../domain/review";
+import type { ReviewAnchorCheck, ReviewNote, ReviewRound, ReviewSide, ReviewTarget } from "../domain/review";
 import type { Checkout, Repo } from "../domain/workspace";
 import { createReviewNote, deleteReviewNote, listReviewNotes, updateReviewNote } from "../lib/ipc";
 import {
@@ -16,7 +16,6 @@ import {
   resolveReviewNote,
   verifyReviewNoteAnchors,
 } from "../lib/ipc";
-import type { ReviewAnchorCheck } from "../lib/ipc";
 
 export interface NewReviewNoteInput {
   path: string;
@@ -79,8 +78,6 @@ export interface ActiveReviewNotes {
  * The three reads are getters, so a consumer tracks them by reading them the way it tracks any
  * other reactive source.
  */
-export type ReviewTarget = "markdown" | "opencode";
-
 export interface ReviewSender {
   /** The checkout's delivery destination. No saved choice means Markdown. */
   readonly target: ReviewTarget;
@@ -234,7 +231,7 @@ export function useReviewNotes(
     if (!checkoutId) return 0;
     try {
       const requeued = await requeueReviewRounds(checkoutId);
-      const pending = state.rounds.filter((round) => round.status !== "acked");
+      const pending = state.rounds.filter((round) => round.status === "queued" || round.status === "dispatching");
       let settled = 0;
       for (const round of pending) {
         try {

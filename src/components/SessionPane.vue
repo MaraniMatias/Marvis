@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { isIpcError } from "../domain/ipc";
 import { Plus as PlusIcon } from "@lucide/vue";
 import type { Checkout, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { TerminalSettings } from "../domain/settings";
@@ -90,7 +91,7 @@ const isStarting = computed(
  * output out of the panel for a message that is gone six seconds later.
  */
 function reportTerminalError(cause: unknown) {
-  const message = cause instanceof Error ? cause.message : String(cause);
+  const message = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
   if (/^(?:saved terminal layout is invalid|terminal layout\b)/.test(message)) return;
   pushToast(message);
 }
@@ -204,7 +205,8 @@ async function moveSession(sessionId: string, targetCheckoutId: string) {
   await nextTick();
   const changed = await terminalRefs.get(view.key)?.changeDirectory(target.path);
   if (changed === false) {
-    pushToast(`${target.path}: the terminal is busy, so its directory was left alone.`);
+    // False also covers a rejected PTY write, whose actual error remains in the terminal alert.
+    pushToast(`${target.path}: the terminal moved, but its directory was not changed.`);
   }
 }
 

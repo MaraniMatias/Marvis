@@ -3,14 +3,13 @@ import type { Channel } from "@tauri-apps/api/core";
 import type { OpenedFolder } from "../domain/folder";
 import type { CheckoutImage, FileContent, FileProbe, FileSearchResult, FileTree } from "../domain/files";
 import type { GitCheckoutDiffStats, GitDiffPage, GitFileDiff, GitFileDiffStats, GitStatus } from "../domain/git";
-import type { ReviewNote, ReviewRound, ReviewSide } from "../domain/review";
+import type { ReviewAnchorCheck, ReviewNote, ReviewRound, ReviewSide, ReviewTarget } from "../domain/review";
 import type { RecentPath, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalInfo } from "../domain/worktree";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { AppLayoutState, CheckoutUiState } from "../domain/ui-state";
 import type { AppSettings } from "../domain/settings";
 import type { AgentAgent, AgentSession } from "../domain/agent";
-import type { ReviewTarget } from "../presentation/review-notes";
 import type { DocumentOrigin } from "../domain/main-document";
 
 export interface CreatedTerminal {
@@ -96,10 +95,10 @@ export function getGitDiffPage(checkoutId: string, path: string, offset: number,
   return invoke<GitDiffPage>("git_diff_page", { checkoutId, path, offset, limit });
 }
 
-/** Watches a whole repository rather than one checkout. Its worktrees share a Git directory, so
- *  a commit in one of them moves the merge base every sibling counts its lines against. */
-export function watchGitRepo(repoId: string): Promise<void> {
-  return invoke<void>("git_watch_repo", { repoId });
+/** Watches a whole repository rather than one checkout. `registrationId` distinguishes this
+ *  request from stale failures of an earlier registration of the same plan. */
+export function watchGitRepo(repoId: string, registrationId: string, expectedCheckoutIds: string[]): Promise<void> {
+  return invoke<void>("git_watch_repo", { repoId, registrationId, expectedCheckoutIds });
 }
 
 export function listReviewNotes(checkoutId: string): Promise<ReviewNote[]> {
@@ -136,11 +135,6 @@ export function updateReviewNote(checkoutId: string, id: string, content: string
 
 export function deleteReviewNote(checkoutId: string, id: string): Promise<void> {
   return invoke<void>("review_note_delete", { checkoutId, id });
-}
-
-export interface ReviewAnchorCheck {
-  id: string;
-  currentCode: string;
 }
 
 export function verifyReviewNoteAnchors(

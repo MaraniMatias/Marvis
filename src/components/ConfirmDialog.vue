@@ -2,7 +2,7 @@
 /* The overlay and the surface are the ones `WorktreeDialog` draws, so a question asked here
    looks like the rest of the app rather than like the browser's own dialog. */
 import { computed } from "vue";
-import { trapDialogTab } from "../lib/dialog-focus";
+import { handleDialogKeydown } from "../lib/dialog-focus";
 
 const props = withDefaults(
   defineProps<{
@@ -24,13 +24,7 @@ const emit = defineEmits<{ confirm: []; close: [] }>();
 const titleId = computed(() => `confirm-${props.title.replace(/\W+/g, "-").toLowerCase()}`);
 
 function onDialogKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") {
-    event.stopPropagation();
-    event.preventDefault();
-    emit("close");
-    return;
-  }
-  trapDialogTab(event, event.currentTarget as HTMLElement);
+  handleDialogKeydown(event, () => emit("close"));
 }
 </script>
 

@@ -14,8 +14,8 @@ use crate::{
         ipc::{IpcError, IpcErrorCode},
         workspace::{Checkout, Repo, Session, SessionStatus, SessionType, WorkspaceState},
     },
-    persistence::Database,
-    services::{checkout::resolve_checkout_path, git, workspace},
+    persistence::{timestamp, Database},
+    services::{checkout::resolve_checkout_path, folder, git},
     terminal::TerminalBackend,
 };
 
@@ -136,6 +136,25 @@ pub fn create(
             "worktrees must be created in the repository's .worktrees directory",
         ));
     }
+    let requested_destination = destination_parent.join(&task_name);
+    let requested_checkout_id = crate::domain::workspace::checkout_id_for_path(
+        &requested_destination.display().to_string(),
+    );
+    let registration_snapshot = database
+        .git_repo_registration_snapshot(&context.repo.id)
+        .map_err(operation_error)?
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "repository registration changed; refresh and retry creating this worktree",
+            )
+        })?;
+    if registration_snapshot.is_archived_checkout(&requested_checkout_id) {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "an archived worktree already uses this location; restore or close it before creating another worktree here",
+        ));
+    }
     ensure_worktrees_ignored(Path::new(&context.repo.root))?;
     fs::create_dir_all(&destination_parent).map_err(|error| {
         IpcError::new(
@@ -187,25 +206,34 @@ pub fn create(
         return Err(git_error("could not create worktree", &result));
     }
 
-    let registered = match workspace::register_folder(database, &destination) {
-        Ok(workspace) => workspace,
-        Err(error) => {
-            let _ = git_output(
-                &context.root,
-                vec![
-                    "worktree".into(),
-                    "remove".into(),
-                    "--force".into(),
-                    destination.clone().into_os_string(),
-                ],
-            );
-            let _ = git_output(
-                &context.root,
-                vec!["branch".into(), "-D".into(), "--".into(), branch.into()],
-            );
-            return Err(error);
-        }
-    };
+    let registered = folder::open_folder(&destination)
+        .and_then(|opened| {
+        let (repo, focus_checkout_id) =
+            crate::git::resolve_repository(Path::new(&opened.path), &timestamp())?.ok_or_else(
+                || {
+                    IpcError::new(
+                        IpcErrorCode::NotRepository,
+                        "created worktree is not a Git checkout",
+                    )
+                },
+            )?;
+        register_created_worktree(
+            database,
+            &repo,
+            &focus_checkout_id,
+            &registration_snapshot,
+        )
+    })
+        .map_err(|error| {
+            IpcError::new(
+                error.code,
+                format!(
+                    "Git created the worktree at {} but workspace registration failed: {}. The worktree and branch were left untouched.",
+                    destination.display(),
+                    error.message
+                ),
+            )
+        })?;
     let created = registered
         .repos
         .iter()
@@ -223,8 +251,36 @@ pub fn create(
     })
 }
 
+fn register_created_worktree(
+    database: &Database,
+    repo: &Repo,
+    focus_checkout_id: &str,
+    snapshot: &crate::persistence::GitRepoRegistrationSnapshot,
+) -> Result<WorkspaceState, IpcError> {
+    database
+        .register_git_repo_if_unchanged(repo, focus_checkout_id, Some(snapshot))
+        .map_err(operation_error)?
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "workspace registrations changed during worktree creation; refresh and retry",
+            )
+        })
+}
+
 pub fn removal_info(
     database: &Database,
+    agents: &crate::services::agent::AgentService,
+    checkout_id: &str,
+) -> Result<WorktreeRemovalInfo, IpcError> {
+    agents.with_checkout_operation(checkout_id, || {
+        removal_info_locked(database, agents, checkout_id)
+    })
+}
+
+fn removal_info_locked(
+    database: &Database,
+    agents: &crate::services::agent::AgentService,
     checkout_id: &str,
 ) -> Result<WorktreeRemovalInfo, IpcError> {
     let context = context(database, checkout_id)?;
@@ -284,19 +340,25 @@ pub fn removal_info(
         0
     };
 
-    let mut active_sessions = Vec::new();
-    let mut active_agent_sessions = Vec::new();
-    for session in &context.checkout.sessions {
-        if session.status != SessionStatus::Active {
-            continue;
-        }
-        let active = ActiveWorktreeSession::from(session);
-        if session.session_type == SessionType::Agent {
-            active_agent_sessions.push(active);
-        } else {
-            active_sessions.push(active);
-        }
-    }
+    let active_sessions = context
+        .checkout
+        .sessions
+        .iter()
+        .filter(|session| {
+            session.status == SessionStatus::Active && session.session_type == SessionType::Shell
+        })
+        .map(ActiveWorktreeSession::from)
+        .collect();
+    let active_agent_sessions = agents
+        .active_worktree_agent_sessions(&context.checkout.id)
+        .map_err(crate::services::agent::map_error)?
+        .into_iter()
+        .map(|session| ActiveWorktreeSession {
+            id: session.id,
+            session_type: SessionType::Agent,
+            name: session.title,
+        })
+        .collect();
     Ok(WorktreeRemovalInfo {
         checkout_id: context.checkout.id,
         is_primary: context.checkout.is_primary,
@@ -312,13 +374,29 @@ pub fn removal_info(
 pub fn remove(
     database: &Database,
     backend: &TerminalBackend,
+    agents: &crate::services::agent::AgentService,
+    checkout_id: &str,
+    confirmation: &WorktreeRemovalConfirmation,
+) -> Result<RemovedWorktree, IpcError> {
+    agents.with_checkout_operation(checkout_id, || {
+        remove_locked(database, backend, agents, checkout_id, confirmation)
+    })
+}
+
+fn remove_locked(
+    database: &Database,
+    backend: &TerminalBackend,
+    agents: &crate::services::agent::AgentService,
     checkout_id: &str,
     confirmation: &WorktreeRemovalConfirmation,
 ) -> Result<RemovedWorktree, IpcError> {
     database
         .ensure_not_home_checkout(checkout_id)
         .map_err(operation_error)?;
-    let info = removal_info(database, checkout_id)?;
+    let _removal = agents
+        .reserve_worktree_removal(checkout_id)
+        .map_err(crate::services::agent::map_error)?;
+    let info = removal_info_locked(database, agents, checkout_id)?;
     if info.is_primary {
         return Err(IpcError::new(
             IpcErrorCode::InvalidCheckout,
@@ -391,6 +469,8 @@ pub fn remove(
             .map_err(operation_error)?;
     }
 
+    agents.stop_for_worktree_removal(checkout_id);
+
     if info.is_missing {
         let pruned = git_output(
             &management_root,
@@ -434,6 +514,7 @@ pub fn remove(
     let workspace = database
         .remove_checkout(&context.repo.id, checkout_id)
         .map_err(operation_error)?;
+    _removal.commit();
     Ok(RemovedWorktree {
         workspace,
         warning: branch_error.map(|error| error.message),
@@ -451,12 +532,15 @@ impl From<&Session> for ActiveWorktreeSession {
 }
 
 fn context(database: &Database, checkout_id: &str) -> Result<Context, IpcError> {
-    let workspace = database.load_workspace().map_err(operation_error)?;
-    let (repo, checkout) = crate::services::checkout::registered_checkout(
-        &workspace.repos,
-        checkout_id,
-        "checkout ID is not registered",
-    )?;
+    let (repo, checkout) = database
+        .load_registered_checkout(checkout_id)
+        .map_err(operation_error)?
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "checkout ID is not registered",
+            )
+        })?;
     if repo.kind != crate::domain::workspace::RepoKind::Git {
         return Err(IpcError::new(
             IpcErrorCode::InvalidCheckout,
@@ -480,7 +564,7 @@ fn context(database: &Database, checkout_id: &str) -> Result<Context, IpcError> 
             )
         })?
     } else {
-        resolve_checkout_path(repo, checkout_id, Path::new("."))?
+        resolve_checkout_path(&repo, checkout_id, Path::new("."))?
     };
     Ok(Context {
         repo: repo.clone(),
@@ -864,21 +948,31 @@ fn operation_error(error: String) -> IpcError {
 mod tests {
     use std::{
         fs,
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpListener,
         path::{Path, PathBuf},
         process::Command,
+        sync::{
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc, Arc,
+        },
+        thread,
+        time::Duration,
     };
 
+    use rusqlite::Connection;
     use tempfile::tempdir;
 
     use crate::{
         domain::workspace::{Session, SessionStatus, SessionType},
         persistence::Database,
-        services::workspace,
+        services::{agent::AgentService, workspace},
         terminal::{SpawnOptions, TerminalBackend},
     };
 
     use super::{
-        create, defaults, removal_info, remove, WorktreeRemovalConfirmation, WorktreeRemovalInfo,
+        create, defaults, register_created_worktree, removal_info, remove,
+        WorktreeRemovalConfirmation, WorktreeRemovalInfo,
     };
 
     fn git(cwd: &Path, args: &[&str]) -> String {
@@ -910,6 +1004,15 @@ mod tests {
         (database, root, checkout_id)
     }
 
+    fn plain_fixture(base: &Path) -> (Database, PathBuf, String) {
+        let root = base.join("plain checkout");
+        fs::create_dir_all(&root).unwrap();
+        let database = Database::open(base.join("workspace.sqlite3")).unwrap();
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = state.repos[0].checkouts[0].id.clone();
+        (database, root, checkout_id)
+    }
+
     fn add_worktree(database: &Database, root: &Path, base: &Path, branch: &str) -> String {
         let path = base.join(format!("checkout-{branch}"));
         git(
@@ -926,6 +1029,13 @@ mod tests {
             .unwrap()
             .id
             .clone()
+    }
+
+    fn repo_with_sibling(base: &Path) -> (Database, PathBuf, String, String, PathBuf) {
+        let (database, root, primary_id) = fixture(base);
+        let sibling_id = add_worktree(&database, &root, base, "agent-sibling");
+        let sibling_directory = base.join("checkout-agent-sibling");
+        (database, root, primary_id, sibling_id, sibling_directory)
     }
 
     fn branch_exists(root: &Path, branch: &str) -> bool {
@@ -957,6 +1067,813 @@ mod tests {
             expected_unmerged_commits: info.unmerged_commits,
             delete_branch,
         }
+    }
+
+    struct MockAgentApi {
+        port: u16,
+        prompt_started: mpsc::Receiver<()>,
+        release_prompt: Option<mpsc::Sender<()>>,
+        session_lists: Arc<AtomicUsize>,
+        stopped: Arc<AtomicBool>,
+        server: Option<thread::JoinHandle<()>>,
+    }
+
+    impl MockAgentApi {
+        fn release_prompt(&mut self) {
+            if let Some(release) = self.release_prompt.take() {
+                let _ = release.send(());
+            }
+        }
+    }
+
+    impl Drop for MockAgentApi {
+        fn drop(&mut self) {
+            self.release_prompt();
+            self.stopped.store(true, Ordering::SeqCst);
+            if let Some(server) = self.server.take() {
+                let _ = server.join();
+            }
+        }
+    }
+
+    fn mock_agent_api(directory: String) -> MockAgentApi {
+        mock_agent_api_with_session_list_status(directory, 200)
+    }
+
+    fn mock_agent_api_with_session_list_status(
+        directory: String,
+        session_list_status: u16,
+    ) -> MockAgentApi {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        listener.set_nonblocking(true).unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let server_stopped = Arc::clone(&stopped);
+        let session_lists = Arc::new(AtomicUsize::new(0));
+        let server_session_lists = Arc::clone(&session_lists);
+        let (prompt_started_tx, prompt_started) = mpsc::channel();
+        let (release_prompt, prompt_released) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let session = serde_json::json!({
+                "id": "ses_integrated",
+                "title": "coding agent",
+                "time": { "created": 1, "updated": 2, "idle": null },
+                "location": { "directory": directory },
+            });
+            while !server_stopped.load(Ordering::SeqCst) {
+                let (stream, _) = match listener.accept() {
+                    Ok(connection) => connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(_) => break,
+                };
+                stream.set_nonblocking(false).unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut request = String::new();
+                reader.read_line(&mut request).unwrap();
+                let mut parts = request.split_whitespace();
+                let method = parts.next().unwrap_or_default();
+                let path = parts.next().unwrap_or_default().to_string();
+                let mut content_length = 0;
+                loop {
+                    let mut header = String::new();
+                    reader.read_line(&mut header).unwrap();
+                    if header == "\r\n" || header.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = header.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                let mut body = vec![0; content_length];
+                reader.read_exact(&mut body).unwrap();
+                let data = match (method, path.as_str()) {
+                    ("POST", "/api/session") => session.clone(),
+                    ("GET", "/api/session") => {
+                        server_session_lists.fetch_add(1, Ordering::SeqCst);
+                        serde_json::json!([session.clone()])
+                    }
+                    ("GET", "/api/session/ses_integrated") => session.clone(),
+                    ("POST", "/api/session/ses_integrated/prompt") => {
+                        let _ = prompt_started_tx.send(());
+                        let _ = prompt_released.recv();
+                        serde_json::json!({})
+                    }
+                    _ => serde_json::json!({}),
+                };
+                let payload = serde_json::json!({ "data": data }).to_string();
+                let status = if method == "GET" && path == "/api/session" {
+                    session_list_status
+                } else {
+                    200
+                };
+                let response = format!(
+                    "HTTP/1.1 {status} Test Response\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    payload.len(),
+                    payload
+                );
+                let _ = reader.get_mut().write_all(response.as_bytes());
+            }
+        });
+        MockAgentApi {
+            port,
+            prompt_started,
+            release_prompt: Some(release_prompt),
+            session_lists,
+            stopped,
+            server: Some(server),
+        }
+    }
+
+    fn prompt_agent(
+        agents: Arc<AgentService>,
+        checkout_id: String,
+        directory: PathBuf,
+        session_id: String,
+        server: &mut MockAgentApi,
+    ) {
+        let prompt = thread::spawn(move || {
+            agents.prompt(&checkout_id, &directory, &session_id, "start work")
+        });
+        server
+            .prompt_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the real AgentService prompt reached the mock OpenCode route");
+        server.release_prompt();
+        prompt
+            .join()
+            .unwrap()
+            .expect("the prompt should be accepted");
+    }
+
+    #[test]
+    fn integrated_agent_activity_guards_removal_and_serializes_prompt_races() {
+        let temp = tempdir().unwrap();
+        let (database, root, _) = fixture(temp.path());
+        let checkout_id = add_worktree(&database, &root, temp.path(), "integrated-agent");
+        let state = database.load_workspace().unwrap();
+        let checkout = state.repos[0]
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.id == checkout_id)
+            .unwrap();
+        let directory = PathBuf::from(&checkout.canonical_path);
+        let mut server = mock_agent_api(directory.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        let created = agents
+            .create_session(&checkout_id, &directory, "coding agent")
+            .unwrap();
+
+        // A fresh conversation has no turn-start event and must not look busy just because
+        // OpenCode also reports no idle timestamp for it.
+        let idle_info = removal_info(&database, &agents, &checkout_id).unwrap();
+        assert!(idle_info.active_agent_sessions.is_empty());
+        let idle_confirmation = confirmation(&idle_info, false, vec![], vec![], false);
+
+        let prompt_agents = Arc::clone(&agents);
+        let prompt_checkout = checkout_id.clone();
+        let prompt_directory = directory.clone();
+        let prompt = thread::spawn(move || {
+            prompt_agents.prompt(
+                &prompt_checkout,
+                &prompt_directory,
+                &created.id,
+                "start work",
+            )
+        });
+        server
+            .prompt_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the real AgentService prompt reached the mock OpenCode route");
+
+        let remove_agents = Arc::clone(&agents);
+        let remove_database = database.clone();
+        let remove_checkout = checkout_id.clone();
+        let (attempted_tx, attempted_rx) = mpsc::channel();
+        let removal = thread::spawn(move || {
+            let _ = attempted_tx.send(());
+            remove(
+                &remove_database,
+                &TerminalBackend::default(),
+                &remove_agents,
+                &remove_checkout,
+                &idle_confirmation,
+            )
+        });
+        attempted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(
+            !removal.is_finished(),
+            "removal raced past an in-flight prompt"
+        );
+        server.release_prompt();
+        prompt
+            .join()
+            .unwrap()
+            .expect("the prompt should be accepted");
+        let blocked = removal.join().unwrap().unwrap_err();
+        assert!(
+            blocked.message.contains("active agent"),
+            "{}",
+            blocked.message
+        );
+        assert!(
+            directory.is_dir(),
+            "the active agent's checkout was removed"
+        );
+
+        let active = removal_info(&database, &agents, &checkout_id).unwrap();
+        assert_eq!(active.active_agent_sessions[0].name, "coding agent");
+        agents.stop(&checkout_id);
+        let idle = removal_info(&database, &agents, &checkout_id).unwrap();
+        assert!(idle.active_agent_sessions.is_empty());
+        remove(
+            &database,
+            &TerminalBackend::default(),
+            &agents,
+            &checkout_id,
+            &confirmation(&idle, false, vec![], vec![], false),
+        )
+        .unwrap();
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn removal_stops_an_idle_integrated_agent_bridge() {
+        let temp = tempdir().unwrap();
+        let (database, root, _) = fixture(temp.path());
+        let checkout_id = add_worktree(&database, &root, temp.path(), "idle-agent");
+        let state = database.load_workspace().unwrap();
+        let checkout = state.repos[0]
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.id == checkout_id)
+            .unwrap();
+        let directory = PathBuf::from(&checkout.canonical_path);
+        let server = mock_agent_api(directory.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        agents
+            .create_session(&checkout_id, &directory, "coding agent")
+            .unwrap();
+
+        let info = removal_info(&database, &agents, &checkout_id).unwrap();
+        assert!(info.active_agent_sessions.is_empty());
+        let confirmation = confirmation(&info, false, vec![], vec![], false);
+        let lists_before_remove = server.session_lists.load(Ordering::SeqCst);
+
+        remove(
+            &database,
+            &TerminalBackend::default(),
+            &agents,
+            &checkout_id,
+            &confirmation,
+        )
+        .unwrap();
+
+        let lists_after_remove = server.session_lists.load(Ordering::SeqCst);
+        assert_eq!(lists_after_remove, lists_before_remove + 1);
+        assert!(agents
+            .active_worktree_agent_sessions(&checkout_id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            server.session_lists.load(Ordering::SeqCst),
+            lists_after_remove,
+            "removal should stop the idle bridge before deleting its checkout"
+        );
+        assert!(!directory.exists());
+    }
+
+    #[test]
+    fn closing_missing_primary_waits_for_prompt_and_refuses_busy_agent() {
+        let temp = tempdir().unwrap();
+        let (database, root, primary_id, _, _) = repo_with_sibling(temp.path());
+        let mut server = mock_agent_api(root.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        let created = agents
+            .create_session(&primary_id, &root, "primary agent")
+            .unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let prompt_agents = Arc::clone(&agents);
+        let prompt_checkout = primary_id.clone();
+        let prompt_directory = root.clone();
+        let prompt_session = created.id;
+        let prompt = thread::spawn(move || {
+            prompt_agents.prompt(
+                &prompt_checkout,
+                &prompt_directory,
+                &prompt_session,
+                "start work",
+            )
+        });
+        server
+            .prompt_started
+            .recv_timeout(Duration::from_secs(2))
+            .expect("the prompt should reach the mock OpenCode route");
+
+        let close_agents = Arc::clone(&agents);
+        let close_database = database.clone();
+        let close_checkout = primary_id.clone();
+        let (attempted_tx, attempted_rx) = mpsc::channel();
+        let close = thread::spawn(move || {
+            let _ = attempted_tx.send(());
+            workspace::close_missing_checkout(
+                &close_database,
+                &TerminalBackend::default(),
+                &close_agents,
+                &close_checkout,
+            )
+        });
+        attempted_rx.recv_timeout(Duration::from_secs(1)).unwrap();
+        assert!(!close.is_finished(), "close raced past an in-flight prompt");
+
+        server.release_prompt();
+        prompt
+            .join()
+            .unwrap()
+            .expect("the prompt should be accepted");
+        let error = close.join().unwrap().unwrap_err();
+        assert!(error.message.contains("active agent"), "{}", error.message);
+        assert_eq!(
+            database.load_workspace().unwrap().repos[0].checkouts.len(),
+            2
+        );
+    }
+
+    #[test]
+    fn closing_missing_primary_stops_idle_agent_before_cascading_repo_delete() {
+        let temp = tempdir().unwrap();
+        let (database, root, primary_id, _, _) = repo_with_sibling(temp.path());
+        let server = mock_agent_api(root.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        let stale_generation = agents.checkout_generation(&primary_id).unwrap();
+        agents
+            .create_session(&primary_id, &root, "idle primary agent")
+            .unwrap();
+        let stale_directory = root.clone();
+        fs::remove_dir_all(&root).unwrap();
+
+        let closed = workspace::close_missing_checkout(
+            &database,
+            &TerminalBackend::default(),
+            &agents,
+            &primary_id,
+        )
+        .unwrap();
+
+        assert!(closed.repos.is_empty());
+        let list_count = server.session_lists.load(Ordering::SeqCst);
+        assert_eq!(list_count, 1);
+        assert!(agents
+            .active_worktree_agent_sessions(&primary_id)
+            .unwrap()
+            .is_empty());
+        assert_eq!(server.session_lists.load(Ordering::SeqCst), list_count);
+        let error = agents
+            .create_session_at_generation(
+                &primary_id,
+                &stale_directory,
+                "stale path",
+                stale_generation,
+                || database.terminal_checkout_path(&primary_id).is_ok(),
+            )
+            .unwrap_err();
+        assert!(format!("{error:?}").contains("changed"));
+        assert_eq!(server.session_lists.load(Ordering::SeqCst), list_count);
+    }
+
+    #[test]
+    fn workspace_read_failure_rolls_back_close_and_preserves_the_bridge() {
+        let temp = tempdir().unwrap();
+        let (database, _, _, checkout_id, directory) = repo_with_sibling(temp.path());
+        let server = mock_agent_api(directory.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        let generation = agents.checkout_generation(&checkout_id).unwrap();
+        agents
+            .create_session(&checkout_id, &directory, "idle agent")
+            .unwrap();
+        let bridge = agents.bridge(&checkout_id, &directory).unwrap();
+
+        Connection::open(temp.path().join("workspace.sqlite3"))
+            .unwrap()
+            .execute_batch(
+                "CREATE TRIGGER fail_workspace_read_after_close
+                 AFTER DELETE ON checkouts WHEN OLD.is_primary = 0
+                 BEGIN
+                     UPDATE checkouts SET ahead_of_default = -1
+                     WHERE repo_id = OLD.repo_id AND is_primary = 1;
+                 END;",
+            )
+            .unwrap();
+
+        assert!(workspace::close_checkout(
+            &database,
+            &TerminalBackend::default(),
+            &agents,
+            &checkout_id,
+        )
+        .is_err());
+        assert_eq!(
+            agents.checkout_generation(&checkout_id).unwrap(),
+            generation
+        );
+        let current_bridge = agents.bridge(&checkout_id, &directory).unwrap();
+        assert!(Arc::ptr_eq(&bridge, &current_bridge));
+        assert!(database.load_workspace().unwrap().repos[0]
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.id == checkout_id));
+    }
+
+    #[test]
+    fn stale_agent_request_cannot_cross_close_and_reopen_but_new_generation_can() {
+        let temp = tempdir().unwrap();
+        let (database, root, primary_id) = fixture(temp.path());
+        let mut server = mock_agent_api(root.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        let stale_directory = root.clone();
+        let stale_generation = agents.checkout_generation(&primary_id).unwrap();
+        let session = agents
+            .create_session(&primary_id, &root, "pre-close session")
+            .unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        workspace::close_missing_checkout(
+            &database,
+            &TerminalBackend::default(),
+            &agents,
+            &primary_id,
+        )
+        .unwrap();
+        assert_ne!(
+            agents.checkout_generation(&primary_id).unwrap(),
+            stale_generation
+        );
+
+        fs::create_dir_all(&root).unwrap();
+        git(&root, &["init", "-b", "main"]);
+        git(&root, &["config", "user.name", "Marvis test"]);
+        git(&root, &["config", "user.email", "marvis@example.invalid"]);
+        fs::write(root.join("base.txt"), "base\n").unwrap();
+        git(&root, &["add", "base.txt"]);
+        git(&root, &["commit", "-m", "base"]);
+        let reopened = workspace::register_folder(&database, &root).unwrap();
+        assert_eq!(reopened.repos[0].checkouts[0].id, primary_id);
+
+        server.release_prompt();
+        assert!(agents
+            .prompt_at_generation(
+                &primary_id,
+                &stale_directory,
+                &session.id,
+                "stale IPC prompt",
+                stale_generation,
+                || database.terminal_checkout_path(&primary_id).is_ok(),
+            )
+            .is_err());
+        assert!(server.prompt_started.try_recv().is_err());
+
+        let current_generation = agents.checkout_generation(&primary_id).unwrap();
+        agents
+            .prompt_at_generation(
+                &primary_id,
+                &root,
+                &session.id,
+                "new IPC prompt",
+                current_generation,
+                || database.terminal_checkout_path(&primary_id).is_ok(),
+            )
+            .expect("a new request for the registered checkout is accepted");
+        server
+            .prompt_started
+            .recv_timeout(Duration::from_secs(1))
+            .expect("the current generation reaches the server");
+    }
+
+    #[test]
+    fn failed_worktree_retarget_keeps_the_registered_bridge_alive() {
+        let temp = tempdir().unwrap();
+        let (database, root, _, checkout_id, old_directory) = repo_with_sibling(temp.path());
+        let server = mock_agent_api(old_directory.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        let generation = agents.checkout_generation(&checkout_id).unwrap();
+        agents
+            .create_session(&checkout_id, &old_directory, "idle agent")
+            .unwrap();
+        let bridge = agents.bridge(&checkout_id, &old_directory).unwrap();
+        let moved_directory = temp.path().join("unrepaired worktree");
+        fs::rename(&old_directory, &moved_directory).unwrap();
+        drop(database);
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+
+        let error = workspace::locate_missing_checkout(&database, &agents, &checkout_id, &root)
+            .unwrap_err();
+
+        assert!(error.message.contains("identity"), "{}", error.message);
+        assert_eq!(
+            agents.checkout_generation(&checkout_id).unwrap(),
+            generation
+        );
+        let current_bridge = agents.bridge(&checkout_id, &old_directory).unwrap();
+        assert!(Arc::ptr_eq(&bridge, &current_bridge));
+        assert!(database.load_workspace().unwrap().repos[0]
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.id == checkout_id));
+    }
+
+    #[test]
+    fn concurrent_registration_during_git_locate_keeps_the_old_bridge_alive() {
+        let temp = tempdir().unwrap();
+        let (database, root, _, checkout_id, directory) = repo_with_sibling(temp.path());
+        let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
+        let snapshot = database
+            .git_repo_registration_snapshot(&repo_id)
+            .unwrap()
+            .expect("the Git repository registration snapshot");
+        let (resolved, focus_id) =
+            crate::git::resolve_repository(&root, &crate::persistence::timestamp())
+                .unwrap()
+                .expect("the repository resolves before a late worktree is registered");
+        let server = mock_agent_api(directory.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        let generation = agents.checkout_generation(&checkout_id).unwrap();
+        agents
+            .create_session(&checkout_id, &directory, "idle agent")
+            .unwrap();
+        let bridge = agents.bridge(&checkout_id, &directory).unwrap();
+        let removal = agents.reserve_worktree_removal(&checkout_id).unwrap();
+        add_worktree(&database, &root, temp.path(), "late-locate");
+
+        let error = workspace::finish_git_checkout_location(
+            &database,
+            &agents,
+            &checkout_id,
+            &resolved,
+            &focus_id,
+            &snapshot,
+            removal,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("registration changed"));
+        assert_eq!(
+            agents.checkout_generation(&checkout_id).unwrap(),
+            generation
+        );
+        let current_bridge = agents.bridge(&checkout_id, &directory).unwrap();
+        assert!(Arc::ptr_eq(&bridge, &current_bridge));
+    }
+
+    #[test]
+    fn locating_a_moved_worktree_invalidates_old_agent_path_and_keeps_checkout_history() {
+        let temp = tempdir().unwrap();
+        let (database, _root, _, checkout_id, old_directory) = repo_with_sibling(temp.path());
+        database
+            .mark_file_viewed(&checkout_id, "README.md")
+            .unwrap();
+        drop(database);
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        let moved_directory = temp.path().join("moved worktree");
+        let _server = mock_agent_api(old_directory.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(_server.port));
+        let stale_generation = agents.checkout_generation(&checkout_id).unwrap();
+        let session = agents
+            .create_session(&checkout_id, &old_directory, "old checkout agent")
+            .unwrap();
+        let old_bridge = agents.bridge(&checkout_id, &old_directory).unwrap();
+        fs::rename(&old_directory, &moved_directory).unwrap();
+
+        let located =
+            workspace::locate_missing_checkout(&database, &agents, &checkout_id, &moved_directory)
+                .unwrap();
+        let new_id = crate::domain::workspace::checkout_id_for_path(
+            &moved_directory
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string(),
+        );
+        let moved = located.repos[0]
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.id == new_id)
+            .expect("the moved checkout is registered under its new path");
+        assert_eq!(database.viewed_files(&new_id).unwrap(), ["README.md"]);
+        assert!(located.repos[0]
+            .checkouts
+            .iter()
+            .all(|checkout| checkout.id != checkout_id));
+
+        let stale = agents
+            .prompt_at_generation(
+                &checkout_id,
+                &old_directory,
+                &session.id,
+                "stale path prompt",
+                stale_generation,
+                || database.terminal_checkout_path(&checkout_id).is_ok(),
+            )
+            .unwrap_err();
+        assert!(format!("{stale:?}").contains("changed"));
+        assert_eq!(
+            moved.canonical_path,
+            moved_directory
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
+        );
+
+        fs::create_dir(&old_directory).unwrap();
+        let reopened = workspace::register_folder(&database, &old_directory).unwrap();
+        assert!(reopened.repos.iter().any(|repo| repo
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.id == checkout_id)));
+        let current_generation = agents.checkout_generation(&checkout_id).unwrap();
+        agents
+            .create_session_at_generation(
+                &checkout_id,
+                &old_directory,
+                "reopened checkout agent",
+                current_generation,
+                || database.terminal_checkout_path(&checkout_id).is_ok(),
+            )
+            .unwrap();
+        let new_bridge = agents.bridge(&checkout_id, &old_directory).unwrap();
+        assert!(!Arc::ptr_eq(&old_bridge, &new_bridge));
+        assert_eq!(new_bridge.directory(), old_directory);
+    }
+
+    #[test]
+    fn closing_missing_primary_checks_archived_checkout_agents_before_cascading() {
+        let temp = tempdir().unwrap();
+        let (database, root, primary_id, sibling_id, sibling_directory) =
+            repo_with_sibling(temp.path());
+        let mut server = mock_agent_api(sibling_directory.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        let created = agents
+            .create_session(&sibling_id, &sibling_directory, "sibling agent")
+            .unwrap();
+        prompt_agent(
+            Arc::clone(&agents),
+            sibling_id.clone(),
+            sibling_directory,
+            created.id,
+            &mut server,
+        );
+        database.archive_checkout(&sibling_id).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let error = workspace::close_missing_checkout(
+            &database,
+            &TerminalBackend::default(),
+            &agents,
+            &primary_id,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("active agent"), "{}", error.message);
+        let retained = database.load_workspace().unwrap();
+        assert_eq!(retained.repos[0].checkouts.len(), 1);
+        assert!(retained
+            .archived_worktrees
+            .iter()
+            .any(|checkout| checkout.id == sibling_id));
+    }
+
+    #[test]
+    fn closing_missing_primary_fails_closed_when_agent_activity_cannot_be_queried() {
+        let temp = tempdir().unwrap();
+        let (database, root, primary_id, _, _) = repo_with_sibling(temp.path());
+        let server = mock_agent_api_with_session_list_status(root.display().to_string(), 503);
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        agents
+            .create_session(&primary_id, &root, "agent with unavailable status")
+            .unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let error = workspace::close_missing_checkout(
+            &database,
+            &TerminalBackend::default(),
+            &agents,
+            &primary_id,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("503"), "{}", error.message);
+        assert_eq!(database.load_workspace().unwrap().repos.len(), 1);
+        assert!(agents.active_worktree_agent_sessions(&primary_id).is_err());
+        assert_eq!(server.session_lists.load(Ordering::SeqCst), 2);
+    }
+
+    #[test]
+    fn closing_missing_plain_checkout_refuses_busy_agent_activity() {
+        let temp = tempdir().unwrap();
+        let (database, root, checkout_id) = plain_fixture(temp.path());
+        let mut server = mock_agent_api(root.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        let session = agents
+            .create_session(&checkout_id, &root, "plain agent")
+            .unwrap();
+        prompt_agent(
+            Arc::clone(&agents),
+            checkout_id.clone(),
+            root.clone(),
+            session.id,
+            &mut server,
+        );
+        fs::remove_dir_all(&root).unwrap();
+
+        let error = workspace::close_missing_checkout(
+            &database,
+            &TerminalBackend::default(),
+            &agents,
+            &checkout_id,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("active agent"), "{}", error.message);
+        assert_eq!(database.load_workspace().unwrap().repos.len(), 1);
+    }
+
+    #[test]
+    fn closing_missing_plain_checkout_fails_closed_when_activity_query_fails() {
+        let temp = tempdir().unwrap();
+        let (database, root, checkout_id) = plain_fixture(temp.path());
+        let server = mock_agent_api_with_session_list_status(root.display().to_string(), 503);
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        agents
+            .create_session(&checkout_id, &root, "plain agent")
+            .unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        let error = workspace::close_missing_checkout(
+            &database,
+            &TerminalBackend::default(),
+            &agents,
+            &checkout_id,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("503"), "{}", error.message);
+        assert_eq!(database.load_workspace().unwrap().repos.len(), 1);
+    }
+
+    #[test]
+    fn closing_and_reopening_missing_plain_checkout_invalidates_stale_agent_generation() {
+        let temp = tempdir().unwrap();
+        let (database, root, checkout_id) = plain_fixture(temp.path());
+        let server = mock_agent_api(root.display().to_string());
+        let agents = Arc::new(AgentService::with_test_server(server.port));
+        let stale_generation = agents.checkout_generation(&checkout_id).unwrap();
+        let session = agents
+            .create_session(&checkout_id, &root, "old plain agent")
+            .unwrap();
+        let old_bridge = agents.bridge(&checkout_id, &root).unwrap();
+        fs::remove_dir_all(&root).unwrap();
+
+        workspace::close_missing_checkout(
+            &database,
+            &TerminalBackend::default(),
+            &agents,
+            &checkout_id,
+        )
+        .unwrap();
+        fs::create_dir_all(&root).unwrap();
+        let reopened = workspace::register_folder(&database, &root).unwrap();
+        assert_eq!(reopened.repos[0].checkouts[0].id, checkout_id);
+
+        let stale = agents
+            .prompt_at_generation(
+                &checkout_id,
+                &root,
+                &session.id,
+                "stale plain prompt",
+                stale_generation,
+                || database.terminal_checkout_path(&checkout_id).is_ok(),
+            )
+            .unwrap_err();
+        assert!(format!("{stale:?}").contains("changed"));
+
+        let current_generation = agents.checkout_generation(&checkout_id).unwrap();
+        agents
+            .create_session_at_generation(
+                &checkout_id,
+                &root,
+                "new plain agent",
+                current_generation,
+                || database.terminal_checkout_path(&checkout_id).is_ok(),
+            )
+            .expect("the reopened plain checkout starts a fresh bridge");
+        let new_bridge = agents.bridge(&checkout_id, &root).unwrap();
+        assert!(!Arc::ptr_eq(&old_bridge, &new_bridge));
+        assert_eq!(new_bridge.directory(), root);
     }
 
     #[test]
@@ -1017,6 +1934,156 @@ mod tests {
         assert_eq!(
             defaults(&database, &primary_id).unwrap().location,
             location.display().to_string()
+        );
+    }
+
+    #[test]
+    fn stale_creation_snapshot_keeps_a_concurrently_registered_sibling_and_created_work() {
+        let temp = tempdir().unwrap();
+        let (database, root, _) = fixture(temp.path());
+        let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
+        let snapshot = database
+            .git_repo_registration_snapshot(&repo_id)
+            .unwrap()
+            .unwrap();
+        let location = root.canonicalize().unwrap().join(".worktrees");
+        fs::create_dir_all(&location).unwrap();
+        let created_path = location.join("created-before-sibling");
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "feature/created-before-sibling",
+                created_path.to_str().unwrap(),
+                "main",
+            ],
+        );
+        let (resolved, focus_checkout_id) =
+            crate::git::resolve_repository(&created_path, &crate::persistence::timestamp())
+                .unwrap()
+                .unwrap();
+        fs::write(created_path.join("user-work.txt"), "keep this work\n").unwrap();
+
+        let sibling_id = add_worktree(&database, &root, temp.path(), "registered-after-resolve");
+        let error = register_created_worktree(&database, &resolved, &focus_checkout_id, &snapshot)
+            .unwrap_err();
+
+        assert!(error.message.contains("registrations changed"));
+        let current = database.load_workspace().unwrap();
+        let sibling = current.repos[0]
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.id == sibling_id)
+            .unwrap();
+        assert!(!sibling.is_missing);
+        assert_eq!(
+            fs::read_to_string(created_path.join("user-work.txt")).unwrap(),
+            "keep this work\n"
+        );
+        assert!(branch_exists(&root, "feature/created-before-sibling"));
+    }
+
+    #[test]
+    fn create_refuses_to_reuse_a_pruned_archived_worktree_identity() {
+        let temp = tempdir().unwrap();
+        let (database, root, primary_id) = fixture(temp.path());
+        let location = root.canonicalize().unwrap().join(".worktrees");
+        let archived = create(
+            &database,
+            &primary_id,
+            "archived-task",
+            "feature/archived-task",
+            &location,
+        )
+        .unwrap();
+        let archived_path = location.join("archived-task");
+        database.archive_checkout(&archived.checkout_id).unwrap();
+        fs::remove_dir_all(&archived_path).unwrap();
+        git(&root, &["worktree", "prune", "--expire", "now"]);
+        let (resolved, _) = crate::git::resolve_repository(&root, &crate::persistence::timestamp())
+            .unwrap()
+            .unwrap();
+        database.reconcile_git_repo(&resolved).unwrap();
+
+        let error = create(
+            &database,
+            &primary_id,
+            "archived-task",
+            "feature/recreated-task",
+            &location,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("archived worktree"));
+        assert!(error.message.contains("restore or close"));
+        assert!(!archived_path.exists());
+        assert!(!branch_exists(&root, "feature/recreated-task"));
+        assert!(branch_exists(&root, "feature/archived-task"));
+        let current = database.load_workspace().unwrap();
+        assert_eq!(current.archived_worktrees.len(), 1);
+        assert_eq!(current.archived_worktrees[0].id, archived.checkout_id);
+
+        git(
+            &root,
+            &[
+                "worktree",
+                "add",
+                archived_path.to_str().unwrap(),
+                "feature/archived-task",
+            ],
+        );
+        let open_error = workspace::register_folder(&database, &archived_path).unwrap_err();
+        assert!(open_error.message.contains("worktree is archived"));
+        let current = database.load_workspace().unwrap();
+        assert_eq!(current.repos[0].checkouts.len(), 1);
+        assert_eq!(current.archived_worktrees.len(), 1);
+    }
+
+    #[test]
+    fn creation_keeps_git_worktree_when_workspace_load_fails_after_commit() {
+        let temp = tempdir().unwrap();
+        let (database, root, checkout_id) = fixture(temp.path());
+        let location = root.canonicalize().unwrap().join(".worktrees");
+        let destination = location.join("failed-workspace-read");
+        let database_path = temp.path().join("workspace.sqlite3");
+        let escaped_destination = destination.to_string_lossy().replace('\'', "''");
+        Connection::open(&database_path)
+            .unwrap()
+            .execute_batch(&format!(
+                "CREATE TRIGGER fail_created_workspace_read
+                 AFTER INSERT ON checkouts
+                 WHEN NEW.canonical_path = '{escaped_destination}'
+                 BEGIN
+                   UPDATE checkouts SET is_missing = 'invalid' WHERE id = NEW.id;
+                 END;"
+            ))
+            .unwrap();
+
+        let error = create(
+            &database,
+            &checkout_id,
+            "failed-workspace-read",
+            "feature/failed-workspace-read",
+            &location,
+        )
+        .unwrap_err();
+
+        assert!(error.message.contains("left untouched"));
+        assert!(destination.is_dir());
+        assert!(branch_exists(&root, "feature/failed-workspace-read"));
+        let registered_id: String = Connection::open(database_path)
+            .unwrap()
+            .query_row(
+                "SELECT id FROM checkouts WHERE canonical_path = ?1",
+                [destination.display().to_string()],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            registered_id,
+            crate::domain::workspace::checkout_id_for_path(&destination.display().to_string())
         );
     }
 
@@ -1135,23 +2202,44 @@ mod tests {
             "dirty",
         )
         .unwrap();
-        let info = removal_info(&database, &checkout_id).unwrap();
+        let info = removal_info(&database, &AgentService::default(), &checkout_id).unwrap();
         assert_eq!(info.dirty_files, ["untracked.txt"]);
 
         let backend = TerminalBackend::default();
         let unconfirmed = confirmation(&info, false, info.dirty_files.clone(), vec![], false);
-        assert!(remove(&database, &backend, &checkout_id, &unconfirmed).is_err());
+        assert!(remove(
+            &database,
+            &backend,
+            &AgentService::default(),
+            &checkout_id,
+            &unconfirmed
+        )
+        .is_err());
         fs::write(
             Path::new(&checkout.canonical_path).join("another-change.txt"),
             "changed after confirmation",
         )
         .unwrap();
         let stale_confirmation = confirmation(&info, true, info.dirty_files.clone(), vec![], false);
-        let stale = remove(&database, &backend, &checkout_id, &stale_confirmation).unwrap_err();
+        let stale = remove(
+            &database,
+            &backend,
+            &AgentService::default(),
+            &checkout_id,
+            &stale_confirmation,
+        )
+        .unwrap_err();
         assert!(stale.message.contains("changes changed"));
-        let info = removal_info(&database, &checkout_id).unwrap();
+        let info = removal_info(&database, &AgentService::default(), &checkout_id).unwrap();
         let confirmed = confirmation(&info, true, info.dirty_files.clone(), vec![], false);
-        let result = remove(&database, &backend, &checkout_id, &confirmed).unwrap();
+        let result = remove(
+            &database,
+            &backend,
+            &AgentService::default(),
+            &checkout_id,
+            &confirmed,
+        )
+        .unwrap();
 
         assert!(branch_exists(&root, "dirty-feature"));
         assert!(!result.workspace.repos[0]
@@ -1176,13 +2264,14 @@ mod tests {
         fs::write(path.join("ahead.txt"), "ahead\n").unwrap();
         git(path, &["add", "ahead.txt"]);
         git(path, &["commit", "-m", "ahead"]);
-        let info = removal_info(&database, &checkout_id).unwrap();
+        let info = removal_info(&database, &AgentService::default(), &checkout_id).unwrap();
         assert_eq!(info.unmerged_commits, 1);
 
         let confirmed = confirmation(&info, false, vec![], vec![], true);
         remove(
             &database,
             &TerminalBackend::default(),
+            &AgentService::default(),
             &checkout_id,
             &confirmed,
         )
@@ -1192,39 +2281,23 @@ mod tests {
     }
 
     #[test]
-    fn primary_is_denied_and_active_agent_is_a_hard_block() {
+    fn primary_is_denied() {
         let temp = tempdir().unwrap();
-        let (database, root, primary_id) = fixture(temp.path());
+        let (database, _, primary_id) = fixture(temp.path());
         let backend = TerminalBackend::default();
-        let primary_info = removal_info(&database, &primary_id).unwrap();
-        let primary_confirmation = confirmation(&primary_info, true, vec![], vec![], false);
-        assert!(
-            remove(&database, &backend, &primary_id, &primary_confirmation)
-                .unwrap_err()
-                .message
-                .contains("primary")
-        );
+        let info = removal_info(&database, &AgentService::default(), &primary_id).unwrap();
+        let confirmation = confirmation(&info, true, vec![], vec![], false);
 
-        let checkout_id = add_worktree(&database, &root, temp.path(), "agent-feature");
-        database
-            .add_active_session(&Session {
-                id: "session:agent-active".into(),
-                session_type: SessionType::Agent,
-                checkout_id: checkout_id.clone(),
-                name: "coding agent".into(),
-                created_at: "now".into(),
-                status: SessionStatus::Active,
-            })
-            .unwrap();
-        let info = removal_info(&database, &checkout_id).unwrap();
-        assert_eq!(info.active_agent_sessions[0].name, "coding agent");
-        let agent_confirmation = confirmation(&info, false, vec![], vec![], false);
-        assert!(
-            remove(&database, &backend, &checkout_id, &agent_confirmation)
-                .unwrap_err()
-                .message
-                .contains("active agent")
-        );
+        assert!(remove(
+            &database,
+            &backend,
+            &AgentService::default(),
+            &primary_id,
+            &confirmation
+        )
+        .unwrap_err()
+        .message
+        .contains("primary"));
     }
 
     #[test]
@@ -1264,12 +2337,26 @@ mod tests {
             })
             .unwrap();
 
-        let info = removal_info(&database, &checkout_id).unwrap();
+        let info = removal_info(&database, &AgentService::default(), &checkout_id).unwrap();
         assert_eq!(info.active_sessions[0].id, session_id);
         let no_session_confirmation = confirmation(&info, false, vec![], vec![], false);
-        assert!(remove(&database, &backend, &checkout_id, &no_session_confirmation).is_err());
+        assert!(remove(
+            &database,
+            &backend,
+            &AgentService::default(),
+            &checkout_id,
+            &no_session_confirmation
+        )
+        .is_err());
         let confirmed = confirmation(&info, false, vec![], vec![session_id.into()], false);
-        let result = remove(&database, &backend, &checkout_id, &confirmed).unwrap();
+        let result = remove(
+            &database,
+            &backend,
+            &AgentService::default(),
+            &checkout_id,
+            &confirmed,
+        )
+        .unwrap();
 
         assert!(!result.workspace.repos[0]
             .checkouts
@@ -1295,13 +2382,14 @@ mod tests {
         git(&root, &["worktree", "prune", "--expire", "now"]);
         git(&root, &["branch", "-D", "--", "missing-feature"]);
 
-        let info = removal_info(&database, &checkout_id).unwrap();
+        let info = removal_info(&database, &AgentService::default(), &checkout_id).unwrap();
         assert!(info.is_missing);
         assert_eq!(info.branch, None);
         let confirmed = confirmation(&info, false, vec![], vec![], false);
         let result = remove(
             &database,
             &TerminalBackend::default(),
+            &AgentService::default(),
             &checkout_id,
             &confirmed,
         )

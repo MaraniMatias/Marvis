@@ -1,5 +1,11 @@
 export type ReviewSide = "old" | "new";
+export type ReviewTarget = "markdown" | "opencode";
 export type ReviewNoteStatus = "draft" | "sent" | "resolved";
+
+export interface ReviewAnchorCheck {
+  id: string;
+  currentCode: string;
+}
 
 /**
  * What the diff says about a note's anchor now.
@@ -31,7 +37,7 @@ export interface ReviewNote {
 }
 
 /** One batch of notes delivered to an agent as a single message. */
-export type ReviewRoundStatus = "queued" | "dispatching" | "dispatched" | "acked";
+export type ReviewRoundStatus = "queued" | "dispatching" | "dispatched" | "acked" | "relocated";
 
 export interface ReviewRound {
   id: string;

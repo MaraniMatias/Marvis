@@ -1,8 +1,7 @@
 import type { OpenedFolder } from "./folder";
 
 export type RepoKind = "git" | "plain";
-/** `nvim` is still readable from a workspace persisted before that launch entry point existed. */
-export type SessionType = "shell" | "nvim" | "server" | "custom" | "agent";
+export type SessionType = "shell" | "agent";
 export type SessionStatus = "active" | "inactive";
 export type TerminalProcessState = "running" | "exited";
 

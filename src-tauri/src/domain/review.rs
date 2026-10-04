@@ -40,9 +40,10 @@ pub struct ReviewNote {
 pub struct ReviewRound {
     pub id: String,
     pub checkout_id: String,
-    /// The OpenCode session this round went to; null while it is still queued.
+    /// The OpenCode session this round targeted; retained after relocation for history.
     pub session_id: Option<String>,
-    /// "queued", "dispatching", "dispatched" or "acked".
+    /// "queued", "dispatching", "dispatched", "acked" or "relocated".
+    /// A relocated round is historical and is never retried against a different session.
     pub status: String,
     /// Embedded in the prompt so a reconnect can recognize this exact send.
     pub marker: String,

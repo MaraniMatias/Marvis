@@ -419,6 +419,40 @@ describe("SessionPane terminal UI", () => {
     wrapper.unmount();
   });
 
+  it("shows a structured IPC message when a terminal move fails", async () => {
+    terminalMock.autoCreate = true;
+    const target: Checkout = { ...checkout, id: "checkout:/work/repo-wt", path: "/work/repo-wt" };
+    vi.mocked(moveTerminal).mockRejectedValueOnce({
+      code: "terminal_ownership_mismatch",
+      message: "terminal session does not belong to the requested checkout",
+    });
+    const wrapper = mount(SessionPane, {
+      props: {
+        checkout,
+        checkouts: [checkout, target],
+        activeSessionId: null,
+        isOpening: true,
+        shellRequest: null,
+        terminalSettings: { ...DEFAULT_SETTINGS.terminal },
+      },
+    });
+    await wrapper.setProps({
+      isOpening: false,
+      shellRequest: { checkoutId: checkout.id, token: 1 },
+      activeSessionId: "session:live",
+      registeredSessionIds: ["session:live"],
+    });
+    await flushPromises();
+
+    await wrapper.vm.moveSession("session:live", target.id);
+
+    expect(toasts.value.map((toast) => toast.message)).toContain(
+      "terminal session does not belong to the requested checkout",
+    );
+    expect(toasts.value.map((toast) => toast.message)).not.toContain("[object Object]");
+    wrapper.unmount();
+  });
+
   it("changes the directory after a move only when asked, and only for an idle shell", async () => {
     terminalMock.autoCreate = true;
     const target: Checkout = { ...checkout, id: "checkout:/work/repo-wt", path: "/work/repo-wt" };
@@ -449,12 +483,11 @@ describe("SessionPane terminal UI", () => {
     await wrapper.vm.moveSession("session:live", target.id);
     await flushPromises();
 
-    // The session moved either way; what a busy shell refuses is the `cd`, and that is said out
-    // loud rather than passed over in silence.
+    // A busy shell still gets a notice that the move succeeded but its directory stayed put.
     expect(moveTerminal).toHaveBeenCalledTimes(1);
     expect(terminalMock.directoryChanges).toEqual([]);
     expect(toasts.value.map((toast) => toast.message)).toEqual([
-      `${target.path}: the terminal is busy, so its directory was left alone.`,
+      `${target.path}: the terminal moved, but its directory was not changed.`,
     ]);
     wrapper.unmount();
   });

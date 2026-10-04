@@ -1,14 +1,14 @@
 {
   "name": "marvis",
   "private": true,
-  "version": "0.10.0",
+  "version": "0.11.0",
   "license": "MIT",
   "type": "module",
   "packageManager": "pnpm@12.5.1",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
-    "build": "vue-tsc --noEmit && vite build",
-    "build:app": "tauri build",
+    "build": "vue-tsc --noEmit && vite build && node scripts/build-third-party-notices.mjs",
+    "build:app": "node scripts/build-app.mjs",
     "preview": "vite preview",
     "tauri": "tauri",
     "dev:app": "tauri dev --features dev-bridge --config src-tauri/tauri.dev-bridge.conf.json",
@@ -18,12 +18,19 @@
     "fmt": "prettier --write \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml",
     "fmt:check": "prettier --check \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "lint": "eslint src vite.config.ts",
-    "lint:rust": "cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
+    "lint:rust": "cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings",
     "typecheck": "vue-tsc --noEmit",
     "test:frontend": "vitest run",
-    "test:security": "vitest run -t SEC- && cargo test --manifest-path src-tauri/Cargo.toml sec_",
-    "test:rust": "cargo test --manifest-path src-tauri/Cargo.toml",
-    "test": "pnpm test:frontend && pnpm test:rust"
+    "test:coverage": "vitest run --coverage",
+    "test:security": "vitest run -t SEC- && cargo test --locked --manifest-path src-tauri/Cargo.toml sec_",
+    "test:audit": "node --test scripts/audit-rust.test.mjs",
+    "test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml",
+    "test:release": "node --test scripts/release.test.mjs",
+    "test:artifacts": "pnpm build && node --test scripts/artifacts.test.mjs scripts/build-third-party-notices.test.mjs scripts/build-app.test.mjs scripts/xterm-debug-log-plugin.test.mjs",
+    "test": "pnpm test:frontend && pnpm test:release && pnpm test:audit && pnpm test:rust && pnpm test:artifacts",
+    "audit:js": "pnpm audit --audit-level moderate",
+    "audit:rust": "node scripts/audit-rust.mjs",
+    "audit:security": "pnpm audit:js && pnpm audit:rust"
   },
   "dependencies": {
     "@codemirror/autocomplete": "^6.20.3",
@@ -68,6 +75,7 @@
     "@tauri-apps/cli": "^2.12.0",
     "@types/markdown-it": "^14.2.0",
     "@vitejs/plugin-vue": "^6.0.1",
+    "@vitest/coverage-v8": "4.1.11",
     "@vue/test-utils": "^2.5.1",
     "@xterm/headless": "^6.0.0",
     "eslint": "^9.36.0",
@@ -80,7 +88,7 @@
     "typescript": "^5.9.3",
     "typescript-eslint": "^8.44.1",
     "vite": "^7.1.7",
-    "vitest": "^3.2.4",
+    "vitest": "^4.1.11",
     "vue-eslint-parser": "^10.4.1",
     "vue-tsc": "^3.0.8"
   }

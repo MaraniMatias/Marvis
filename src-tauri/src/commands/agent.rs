@@ -23,19 +23,49 @@ pub fn checkout_directory(database: &Database, checkout_id: &str) -> Result<Path
         .map_err(|error| IpcError::new(IpcErrorCode::InvalidCheckout, error))
 }
 
+fn with_current_checkout<T>(
+    database: &Database,
+    agents: &AgentService,
+    checkout_id: &str,
+    directory: &std::path::Path,
+    generation: u64,
+    operation: impl FnOnce() -> Result<T, agent::BridgeError>,
+) -> Result<T, IpcError> {
+    agents
+        .with_checkout_generation(
+            checkout_id,
+            generation,
+            || {
+                database
+                    .terminal_checkout_path(checkout_id)
+                    .is_ok_and(|current| current == directory)
+            },
+            operation,
+        )
+        .map_err(agent::map_error)
+}
+
 #[tauri::command]
 pub async fn agent_sessions(
     checkout_id: String,
     database: State<'_, Database>,
     agents: State<'_, Arc<AgentService>>,
 ) -> Result<Vec<AgentSession>, IpcError> {
+    let generation = agents
+        .checkout_generation(&checkout_id)
+        .map_err(agent::map_error)?;
     let database = database.inner().clone();
     let agents: Arc<AgentService> = Arc::clone(agents.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let directory = checkout_directory(&database, &checkout_id)?;
-        agents
-            .sessions(&checkout_id, &directory)
-            .map_err(agent::map_error)
+        with_current_checkout(
+            &database,
+            &agents,
+            &checkout_id,
+            &directory,
+            generation,
+            || agents.sessions(&checkout_id, &directory),
+        )
     })
     .await
     .map_err(operation_error)?
@@ -47,13 +77,21 @@ pub async fn agent_agents(
     database: State<'_, Database>,
     agents: State<'_, Arc<AgentService>>,
 ) -> Result<Vec<AgentAgent>, IpcError> {
+    let generation = agents
+        .checkout_generation(&checkout_id)
+        .map_err(agent::map_error)?;
     let database = database.inner().clone();
     let agents: Arc<AgentService> = Arc::clone(agents.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let directory = checkout_directory(&database, &checkout_id)?;
-        agents
-            .agents(&checkout_id, &directory)
-            .map_err(agent::map_error)
+        with_current_checkout(
+            &database,
+            &agents,
+            &checkout_id,
+            &directory,
+            generation,
+            || agents.agents(&checkout_id, &directory),
+        )
     })
     .await
     .map_err(operation_error)?
@@ -66,12 +104,19 @@ pub async fn agent_session_create(
     database: State<'_, Database>,
     agents: State<'_, Arc<AgentService>>,
 ) -> Result<AgentSession, IpcError> {
+    let generation = agents
+        .checkout_generation(&checkout_id)
+        .map_err(agent::map_error)?;
     let database = database.inner().clone();
     let agents: Arc<AgentService> = Arc::clone(agents.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let directory = checkout_directory(&database, &checkout_id)?;
         agents
-            .create_session(&checkout_id, &directory, &title)
+            .create_session_at_generation(&checkout_id, &directory, &title, generation, || {
+                database
+                    .terminal_checkout_path(&checkout_id)
+                    .is_ok_and(|current| current == directory)
+            })
             .map_err(agent::map_error)
     })
     .await
@@ -86,12 +131,26 @@ pub async fn agent_prompt(
     database: State<'_, Database>,
     agents: State<'_, Arc<AgentService>>,
 ) -> Result<AgentSession, IpcError> {
+    let generation = agents
+        .checkout_generation(&checkout_id)
+        .map_err(agent::map_error)?;
     let database = database.inner().clone();
     let agents: Arc<AgentService> = Arc::clone(agents.inner());
     tauri::async_runtime::spawn_blocking(move || {
         let directory = checkout_directory(&database, &checkout_id)?;
         agents
-            .prompt(&checkout_id, &directory, &session_id, &text)
+            .prompt_at_generation(
+                &checkout_id,
+                &directory,
+                &session_id,
+                &text,
+                generation,
+                || {
+                    database
+                        .terminal_checkout_path(&checkout_id)
+                        .is_ok_and(|current| current == directory)
+                },
+            )
             .map_err(agent::map_error)
     })
     .await
@@ -101,10 +160,21 @@ pub async fn agent_prompt(
 #[tauri::command]
 pub async fn agent_stop(
     checkout_id: String,
+    database: State<'_, Database>,
     agents: State<'_, Arc<AgentService>>,
 ) -> Result<(), IpcError> {
+    let generation = agents
+        .checkout_generation(&checkout_id)
+        .map_err(agent::map_error)?;
+    let database = database.inner().clone();
     let agents: Arc<AgentService> = Arc::clone(agents.inner());
-    tauri::async_runtime::spawn_blocking(move || agents.stop(&checkout_id))
-        .await
-        .map_err(operation_error)
+    tauri::async_runtime::spawn_blocking(move || {
+        agents
+            .stop_at_generation(&checkout_id, generation, || {
+                database.terminal_checkout_path(&checkout_id).is_ok()
+            })
+            .map_err(agent::map_error)
+    })
+    .await
+    .map_err(operation_error)?
 }

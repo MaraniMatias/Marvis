@@ -15,6 +15,7 @@ import {
   X as XIcon,
 } from "@lucide/vue";
 import type { Checkout, Repo } from "./domain/workspace";
+import type { ReviewTarget } from "./domain/review";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
 import type { TitlebarMenuItem, TitlebarMenuSection } from "./domain/titlebar-menu";
@@ -45,7 +46,7 @@ import { useActiveGitSnapshot } from "./presentation/active-git-snapshot";
 import { useGitWatchers } from "./presentation/git-watchers";
 import { useWorktreeSync } from "./presentation/worktree-sync";
 import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
-import type { ReviewSender, ReviewTarget } from "./presentation/review-notes";
+import type { ReviewSender } from "./presentation/review-notes";
 import { useAgentSessions } from "./presentation/agent-sessions";
 import { useToasts } from "./presentation/toasts";
 import { theme } from "./presentation/theme";
@@ -1242,7 +1243,7 @@ const reviewSender: ReviewSender = {
     return agent.targetId;
   },
   get unfinishedRounds() {
-    return review.rounds.filter((round) => round.status !== "acked").length;
+    return review.rounds.filter((round) => round.status !== "acked" && round.status !== "relocated").length;
   },
   selectTarget: (sessionId) => agent.selectTarget(sessionId),
   selectReviewTarget,

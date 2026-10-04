@@ -54,6 +54,7 @@ describe("openFolder IPC client", () => {
 
   it("recognizes only errors using the typed IPC error contract", () => {
     expect(isIpcError({ code: "folder_missing", message: "Folder not found" })).toBe(true);
+    expect(isIpcError({ code: "terminal_ownership_mismatch", message: "Wrong checkout" })).toBe(true);
     expect(isIpcError({ code: "arbitrary", message: "No" })).toBe(false);
   });
 });

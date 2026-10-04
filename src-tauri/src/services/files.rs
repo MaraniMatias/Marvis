@@ -853,15 +853,15 @@ fn registered_checkout(
     database: &Database,
     checkout_id: &str,
 ) -> Result<(Repo, Checkout), IpcError> {
-    let workspace = database
-        .load_workspace()
-        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?;
-    let (repo, checkout) = crate::services::checkout::registered_checkout(
-        &workspace.repos,
-        checkout_id,
-        "checkout ID is not registered",
-    )?;
-    Ok((repo.clone(), checkout.clone()))
+    database
+        .load_registered_checkout(checkout_id)
+        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "checkout ID is not registered",
+            )
+        })
 }
 
 fn parse_relative_path(path: &str) -> Result<PathBuf, IpcError> {

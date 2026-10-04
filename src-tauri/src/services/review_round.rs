@@ -164,6 +164,7 @@ pub fn reconcile_round(
     checkout_id: &str,
     directory: &std::path::Path,
     round_id: &str,
+    generation: Option<u64>,
 ) -> Result<ReviewRound, IpcError> {
     let round = database
         .review_rounds(checkout_id)
@@ -178,9 +179,22 @@ pub fn reconcile_round(
         // Never had a target: nothing to check, so it waits for one.
         return requeue(database, checkout_id, &round);
     };
-    let landed = agents
-        .session_mentions(checkout_id, directory, &session_id, &round.marker)
-        .map_err(agent_error)?;
+    let landed = match generation {
+        Some(generation) => agents.session_mentions_at_generation(
+            checkout_id,
+            directory,
+            &session_id,
+            &round.marker,
+            generation,
+            || {
+                database
+                    .terminal_checkout_path(checkout_id)
+                    .is_ok_and(|current| current.as_path() == directory)
+            },
+        ),
+        None => agents.session_mentions(checkout_id, directory, &session_id, &round.marker),
+    }
+    .map_err(agent_error)?;
     if landed {
         database
             .set_review_round_status(round_id, checkout_id, "dispatching", "dispatched")
@@ -221,6 +235,7 @@ pub fn flush_rounds(
     agents: &AgentService,
     checkout_id: &str,
     directory: &std::path::Path,
+    generation: Option<u64>,
 ) -> Result<usize, IpcError> {
     // Oldest first: a batch of queued reviews should reach the agent in the order they were
     // written, not in the order the list happens to return them.
@@ -246,9 +261,22 @@ pub fn flush_rounds(
             // notes alone: the Markdown belongs to the UI. It waits rather than guessing.
             continue;
         };
-        let landed = agents
-            .session_mentions(checkout_id, directory, &session_id, &round.marker)
-            .map_err(agent_error)?;
+        let landed = match generation {
+            Some(generation) => agents.session_mentions_at_generation(
+                checkout_id,
+                directory,
+                &session_id,
+                &round.marker,
+                generation,
+                || {
+                    database
+                        .terminal_checkout_path(checkout_id)
+                        .is_ok_and(|current| current.as_path() == directory)
+                },
+            ),
+            None => agents.session_mentions(checkout_id, directory, &session_id, &round.marker),
+        }
+        .map_err(agent_error)?;
         if landed {
             database
                 .set_review_round_status(&round.id, checkout_id, "queued", "dispatched")
@@ -259,7 +287,22 @@ pub fn flush_rounds(
         database
             .set_review_round_status(&round.id, checkout_id, "queued", "dispatching")
             .map_err(|error| foreign(&error))?;
-        match agents.prompt(checkout_id, directory, &session_id, &prompt) {
+        let result = match generation {
+            Some(generation) => agents.prompt_at_generation(
+                checkout_id,
+                directory,
+                &session_id,
+                &prompt,
+                generation,
+                || {
+                    database
+                        .terminal_checkout_path(checkout_id)
+                        .is_ok_and(|current| current.as_path() == directory)
+                },
+            ),
+            None => agents.prompt(checkout_id, directory, &session_id, &prompt),
+        };
+        match result {
             Ok(_) => {
                 database
                     .set_review_round_status(&round.id, checkout_id, "dispatching", "dispatched")
@@ -312,7 +355,12 @@ pub fn agent_error(error: crate::services::agent::BridgeError) -> IpcError {
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        io::{BufRead, BufReader, Write},
+        net::TcpListener,
+        path::{Path, PathBuf},
+        thread,
+    };
 
     use tempfile::{tempdir, TempDir};
 
@@ -324,8 +372,47 @@ mod tests {
 
     use super::{
         ack_round, begin_round, build_round_prompt, check_prompt_size, confirm_round, flush_rounds,
-        queue_round, requeue_all, resolve_note, rounds,
+        queue_round, reconcile_round, requeue_all, resolve_note, rounds,
     };
+
+    fn mock_json_responses(
+        responses: Vec<serde_json::Value>,
+    ) -> (u16, thread::JoinHandle<Vec<String>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock server should bind");
+        let port = listener.local_addr().unwrap().port();
+        let server = thread::spawn(move || {
+            responses
+                .into_iter()
+                .map(|response| {
+                    let (mut stream, _) = listener.accept().expect("request should connect");
+                    let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                    let mut request_line = String::new();
+                    reader
+                        .read_line(&mut request_line)
+                        .expect("request line should be readable");
+                    loop {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).expect("headers should be readable");
+                        if line == "\r\n" || line.is_empty() {
+                            break;
+                        }
+                    }
+                    let response = serde_json::to_vec(&response).expect("response should encode");
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response.len()
+                    )
+                    .expect("response headers should be writable");
+                    stream
+                        .write_all(&response)
+                        .expect("response body should be writable");
+                    request_line.trim().to_string()
+                })
+                .collect()
+        });
+        (port, server)
+    }
 
     fn note(overrides: &ReviewNote) -> ReviewNote {
         ReviewNote {
@@ -442,6 +529,109 @@ mod tests {
     }
 
     #[test]
+    fn reconciliation_confirms_a_present_marker_and_requeues_an_absent_one() {
+        let temp = tempdir().unwrap();
+        let (database, checkout_id, _) = database_with_two_checkouts(&temp);
+        add_note(&database, &checkout_id, "landed");
+        add_note(&database, &checkout_id, "missing");
+        let landed = begin_round(
+            &database,
+            &checkout_id,
+            "ses_target",
+            &["note:landed".to_string()],
+            "# Landed",
+        )
+        .unwrap();
+        let missing = begin_round(
+            &database,
+            &checkout_id,
+            "ses_target",
+            &["note:missing".to_string()],
+            "# Missing",
+        )
+        .unwrap();
+        let directory = temp.path().join("first");
+        let session = serde_json::json!({
+            "id": "ses_target",
+            "location": {"directory": directory.to_string_lossy()}
+        });
+        let (port, server) = mock_json_responses(vec![
+            serde_json::json!({"data": session.clone()}),
+            serde_json::json!({"data": [{"text": landed.marker}]}),
+            serde_json::json!({"data": session}),
+            serde_json::json!({"data": [{"text": "unrelated transcript"}]}),
+        ]);
+        let agents = AgentService::with_test_server(port);
+
+        let confirmed = reconcile_round(
+            &database,
+            &agents,
+            &checkout_id,
+            &directory,
+            &landed.id,
+            None,
+        )
+        .unwrap();
+        assert_eq!(confirmed.status, "dispatched");
+        let retried = reconcile_round(
+            &database,
+            &agents,
+            &checkout_id,
+            &directory,
+            &missing.id,
+            None,
+        )
+        .unwrap();
+        assert_eq!(retried.status, "queued");
+        assert_eq!(
+            server.join().expect("mock server should finish"),
+            [
+                "GET /api/session/ses_target HTTP/1.1",
+                "GET /api/session/ses_target/message HTTP/1.1",
+                "GET /api/session/ses_target HTTP/1.1",
+                "GET /api/session/ses_target/message HTTP/1.1",
+            ]
+        );
+    }
+
+    #[test]
+    fn a_relocated_round_is_not_reconciled_against_its_old_session() {
+        let temp = tempdir().unwrap();
+        let (database, checkout_id, _) = database_with_two_checkouts(&temp);
+        add_note(&database, &checkout_id, "relocated");
+        let round = queue_round(
+            &database,
+            &checkout_id,
+            "ses_old_checkout",
+            &["note:relocated".to_string()],
+            "# Review",
+        )
+        .unwrap();
+        let relocated = database
+            .set_review_round_status(&round.id, &checkout_id, "queued", "relocated")
+            .unwrap();
+        // Any marker lookup would fail against this closed local test port; no provider is started.
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        let agents = AgentService::with_test_server(port);
+        let directory = temp.path().join("first");
+
+        let reconciled = reconcile_round(
+            &database,
+            &agents,
+            &checkout_id,
+            &directory,
+            &round.id,
+            None,
+        )
+        .unwrap();
+
+        assert_eq!(reconciled, relocated);
+        assert_eq!(reconciled.status, "relocated");
+    }
+
+    #[test]
     fn a_queued_round_stores_the_message_it_will_be_sent_with() {
         let temp = tempdir().unwrap();
         let (database, checkout_id, _) = database_with_two_checkouts(&temp);
@@ -501,8 +691,14 @@ mod tests {
 
         let agents = AgentService::new();
         // The directory does not exist, so reaching a server would fail loudly if tried.
-        let sent = flush_rounds(&database, &agents, &checkout_id, Path::new("/nonexistent"))
-            .expect("a round with no message is skipped without touching a server");
+        let sent = flush_rounds(
+            &database,
+            &agents,
+            &checkout_id,
+            Path::new("/nonexistent"),
+            None,
+        )
+        .expect("a round with no message is skipped without touching a server");
         assert_eq!(sent, 0);
         assert_eq!(rounds(&database, &checkout_id).unwrap()[0].status, "queued");
     }
@@ -562,7 +758,8 @@ mod tests {
             &agents,
             &other_checkout_id,
             Path::new("/nonexistent"),
-            &round.id
+            &round.id,
+            None,
         )
         .is_err());
     }
@@ -623,7 +820,7 @@ mod tests {
         );
 
         assert_eq!(
-            flush_rounds(&database, &agents, &checkout_id, &directory).expect("flush"),
+            flush_rounds(&database, &agents, &checkout_id, &directory, None).expect("flush"),
             1
         );
         assert_eq!(
@@ -639,7 +836,7 @@ mod tests {
 
         // Nothing is queued any more, so flushing again sends nothing.
         assert_eq!(
-            flush_rounds(&database, &agents, &checkout_id, &directory).expect("flush again"),
+            flush_rounds(&database, &agents, &checkout_id, &directory, None).expect("flush again"),
             0
         );
         agents.stop(&checkout_id);

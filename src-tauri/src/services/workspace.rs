@@ -24,12 +24,47 @@ pub fn register_folder(
     path: &Path,
 ) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
     let opened = folder::open_folder(path)?;
+    let registration_snapshots = database
+        .load_workspace()
+        .map_err(operation_error)?
+        .repos
+        .into_iter()
+        .filter(|repo| repo.kind == RepoKind::Git)
+        .map(|repo| {
+            database
+                .git_repo_registration_snapshot(&repo.id)
+                .map_err(operation_error)?
+                .map(|snapshot| (repo.id, snapshot))
+                .ok_or_else(|| {
+                    IpcError::new(
+                        IpcErrorCode::InvalidCheckout,
+                        "workspace registrations changed; refresh and retry opening this folder",
+                    )
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     let now = timestamp();
     if let Some((repo, focus_checkout_id)) = git::resolve_repository(Path::new(&opened.path), &now)?
     {
+        let expected = registration_snapshots
+            .iter()
+            .find(|(repo_id, _)| repo_id == &repo.id)
+            .map(|(_, snapshot)| snapshot);
+        if expected.is_some_and(|snapshot| snapshot.is_archived_checkout(&focus_checkout_id)) {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "this worktree is archived; restore it from Archived Worktrees before opening it",
+            ));
+        }
         database
-            .register_git_repo(repo, &focus_checkout_id)
-            .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
+            .register_git_repo_if_unchanged(&repo, &focus_checkout_id, expected)
+            .map_err(operation_error)?
+            .ok_or_else(|| {
+                IpcError::new(
+                    IpcErrorCode::InvalidCheckout,
+                    "workspace registrations changed while opening this folder; refresh and retry",
+                )
+            })
     } else {
         let repo = Repo::plain(Path::new(&opened.path), now)
             .map_err(|error| IpcError::new(IpcErrorCode::InvalidPath, error))?;
@@ -45,21 +80,144 @@ pub fn list_recent_paths(database: &Database) -> Result<Vec<RecentPath>, IpcErro
 
 pub fn locate_missing_checkout(
     database: &Database,
+    agents: &crate::services::agent::AgentService,
     checkout_id: &str,
     selected_path: &Path,
 ) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
-    let state = database.load_workspace().map_err(operation_error)?;
-    let (repo, checkout) = crate::services::checkout::registered_checkout(
-        &state.repos,
-        checkout_id,
-        "checkout ID is not registered",
-    )?;
     let selected_path = fs::canonicalize(selected_path).map_err(|error| {
         IpcError::new(
             IpcErrorCode::FolderMissing,
             format!("located directory is unavailable: {error}"),
         )
     })?;
+    if !selected_path.is_dir() {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidPath,
+            "located path is not a directory",
+        ));
+    }
+    let initial = database.load_workspace().map_err(operation_error)?;
+    let (repo, _) = crate::services::checkout::registered_checkout(
+        &initial.repos,
+        checkout_id,
+        "checkout ID is not registered",
+    )?;
+    let repo_id = repo.id.clone();
+    let checkout_ids = repo_agent_checkout_ids(&initial, &repo_id);
+    let target_id =
+        crate::domain::workspace::checkout_id_for_path(&selected_path.display().to_string());
+    let mut operation_ids = checkout_ids.clone();
+    operation_ids.push(target_id);
+    operation_ids.sort();
+    operation_ids.dedup();
+
+    let Some((snapshot_repo, snapshot_checkout, registration_snapshot, generations)) =
+        with_agent_checkout_operations(agents, &checkout_ids, || {
+            let current = database.load_workspace().map_err(operation_error)?;
+            let (repo, checkout) = crate::services::checkout::registered_checkout(
+                &current.repos,
+                checkout_id,
+                "checkout ID is not registered",
+            )?;
+            if repo.id != repo_id || repo_agent_checkout_ids(&current, &repo_id) != checkout_ids {
+                return Ok(None);
+            }
+            let registration_snapshot = if repo.kind == RepoKind::Git {
+                let Some(snapshot) = database
+                    .git_repo_registration_snapshot(&repo_id)
+                    .map_err(operation_error)?
+                else {
+                    return Ok(None);
+                };
+                if snapshot.checkout_ids() != checkout_ids {
+                    return Ok(None);
+                }
+                Some(snapshot)
+            } else {
+                None
+            };
+            let generations = checkout_ids
+                .iter()
+                .map(|id| {
+                    agents
+                        .checkout_generation(id)
+                        .map(|generation| (id.clone(), generation))
+                        .map_err(crate::services::agent::map_error)
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(Some((
+                repo.clone(),
+                checkout.clone(),
+                registration_snapshot,
+                generations,
+            )))
+        })?
+    else {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "checkout registrations changed; refresh and retry locating this directory",
+        ));
+    };
+    let retargets_id = snapshot_checkout.is_missing
+        && selected_path != Path::new(&snapshot_checkout.canonical_path)
+        && !(snapshot_repo.kind == RepoKind::Git && snapshot_checkout.is_primary);
+    let mut removal = if retargets_id {
+        Some(reserve_idle_agent_checkout(agents, checkout_id)?)
+    } else {
+        None
+    };
+
+    with_agent_checkout_operations(agents, &operation_ids, || {
+        let current = database.load_workspace().map_err(operation_error)?;
+        let (repo, checkout) = crate::services::checkout::registered_checkout(
+            &current.repos,
+            checkout_id,
+            "checkout ID is not registered",
+        )?;
+        if repo.root != snapshot_repo.root
+            || repo.kind != snapshot_repo.kind
+            || checkout.canonical_path != snapshot_checkout.canonical_path
+            || checkout.is_missing != snapshot_checkout.is_missing
+            || repo_agent_checkout_ids(&current, &repo_id) != checkout_ids
+        {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "checkout registrations changed; refresh and retry locating this directory",
+            ));
+        }
+        for (id, generation) in &generations {
+            if agents
+                .checkout_epoch(id)
+                .map_err(crate::services::agent::map_error)?
+                != *generation
+            {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidCheckout,
+                    "checkout changed; refresh and retry locating this directory",
+                ));
+            }
+        }
+        locate_missing_checkout_locked(
+            database,
+            agents,
+            repo,
+            checkout,
+            &selected_path,
+            registration_snapshot.as_ref(),
+            &mut removal,
+        )
+    })
+}
+
+fn locate_missing_checkout_locked(
+    database: &Database,
+    agents: &crate::services::agent::AgentService,
+    repo: &Repo,
+    checkout: &crate::domain::workspace::Checkout,
+    selected_path: &Path,
+    registration_snapshot: Option<&crate::persistence::GitRepoRegistrationSnapshot>,
+    removal: &mut Option<crate::services::agent::WorktreeRemovalGuard>,
+) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
     if !selected_path.is_dir() {
         return Err(IpcError::new(
             IpcErrorCode::InvalidPath,
@@ -73,7 +231,7 @@ pub fn locate_missing_checkout(
                 "only a missing checkout can be located",
             ));
         }
-        return register_folder(database, &selected_path);
+        return register_folder(database, selected_path);
     }
     if checkout
         .sessions
@@ -87,36 +245,60 @@ pub fn locate_missing_checkout(
     }
 
     if repo.kind == RepoKind::Plain {
-        if git::resolve_repository(&selected_path, &timestamp())?.is_some() {
+        if selected_path == Path::new(&checkout.canonical_path) {
+            return register_folder(database, selected_path);
+        }
+        if git::resolve_repository(selected_path, &timestamp())?.is_some() {
             return Err(IpcError::new(
                 IpcErrorCode::InvalidCheckout,
                 "located directory is a Git checkout, not the missing plain directory",
             ));
         }
-        let relocated = Repo::plain(&selected_path, timestamp())
+        let relocated = Repo::plain(selected_path, timestamp())
             .map_err(|error| IpcError::new(IpcErrorCode::InvalidPath, error))?;
-        return database
-            .relocate_plain_checkout(&repo.id, checkout_id, &relocated)
-            .map_err(operation_error);
+        let Some(removal) = removal.take() else {
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "checkout relocation reservation is missing; retry locating this directory",
+            ));
+        };
+        let state = database
+            .relocate_plain_checkout(&repo.id, &checkout.id, &relocated)
+            .map_err(operation_error)?;
+        agents.stop_for_worktree_removal(&checkout.id);
+        removal.commit();
+        return Ok(state);
     }
 
     if selected_path == Path::new(&checkout.canonical_path) {
-        let (resolved, focus_id) = git::resolve_repository(&selected_path, &timestamp())?
+        let (resolved, focus_id) = git::resolve_repository(selected_path, &timestamp())?
             .ok_or_else(|| {
                 IpcError::new(
                     IpcErrorCode::NotRepository,
                     "located directory is not a Git checkout",
                 )
             })?;
-        if resolved.id != repo.id || focus_id != checkout_id {
+        if resolved.id != repo.id || focus_id != checkout.id {
             return Err(IpcError::new(
                 IpcErrorCode::InvalidCheckout,
                 "located directory does not match the missing checkout",
             ));
         }
+        let snapshot = registration_snapshot.ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "Git checkout registration changed; refresh and retry locating it",
+            )
+        })?;
         return database
-            .register_git_repo(resolved, &focus_id)
-            .map_err(operation_error);
+            .register_git_repo_if_unchanged(&resolved, &focus_id, Some(snapshot))
+            .map_err(operation_error)?
+            .ok_or_else(|| {
+                IpcError::new(
+                    IpcErrorCode::InvalidCheckout,
+                    "Git checkout registration changed; refresh and retry locating it",
+                )
+            });
     }
 
     if checkout.is_primary {
@@ -134,7 +316,7 @@ pub fn locate_missing_checkout(
                 "no available checkout exists to verify this worktree",
             )
         })?;
-    if git_common_dir(&management_root)? != git_common_dir(&selected_path)? {
+    if git_common_dir(&management_root)? != git_common_dir(selected_path)? {
         return Err(IpcError::new(
             IpcErrorCode::InvalidCheckout,
             "located directory belongs to a different Git repository",
@@ -142,7 +324,7 @@ pub fn locate_missing_checkout(
     }
     let repair = Command::new("git")
         .args(["worktree", "repair"])
-        .arg(&selected_path)
+        .arg(selected_path)
         .current_dir(&management_root)
         .output()
         .map_err(|error| {
@@ -161,7 +343,7 @@ pub fn locate_missing_checkout(
         ));
     }
     let (resolved, focus_id) =
-        git::resolve_repository(&selected_path, &timestamp())?.ok_or_else(|| {
+        git::resolve_repository(selected_path, &timestamp())?.ok_or_else(|| {
             IpcError::new(
                 IpcErrorCode::NotRepository,
                 "located directory is not a Git checkout",
@@ -173,9 +355,76 @@ pub fn locate_missing_checkout(
             "located directory does not resolve to the repository containing this missing worktree",
         ));
     }
-    database
-        .locate_git_checkout(&resolved, checkout_id, &focus_id)
-        .map_err(operation_error)
+    let Some(removal) = removal.take() else {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "checkout relocation reservation is missing; retry locating this directory",
+        ));
+    };
+    let snapshot = registration_snapshot.ok_or_else(|| {
+        IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "Git checkout registration changed; refresh and retry locating it",
+        )
+    })?;
+    finish_git_checkout_location(
+        database,
+        agents,
+        &checkout.id,
+        &resolved,
+        &focus_id,
+        snapshot,
+        removal,
+    )
+}
+
+pub(crate) fn finish_git_checkout_location(
+    database: &Database,
+    agents: &crate::services::agent::AgentService,
+    checkout_id: &str,
+    resolved: &Repo,
+    focus_checkout_id: &str,
+    snapshot: &crate::persistence::GitRepoRegistrationSnapshot,
+    removal: crate::services::agent::WorktreeRemovalGuard,
+) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
+    if !database
+        .locate_git_checkout_if_unchanged(resolved, checkout_id, focus_checkout_id, snapshot)
+        .map_err(operation_error)?
+    {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "Git checkout registration changed; refresh and retry locating it",
+        ));
+    }
+    agents.stop_for_worktree_removal(checkout_id);
+    removal.commit();
+    database.load_workspace().map_err(operation_error)
+}
+
+fn reserve_idle_agent_checkout(
+    agents: &crate::services::agent::AgentService,
+    checkout_id: &str,
+) -> Result<crate::services::agent::WorktreeRemovalGuard, IpcError> {
+    let removal = agents.with_checkout_operation(checkout_id, || {
+        agents
+            .reserve_worktree_removal(checkout_id)
+            .map_err(crate::services::agent::map_error)
+    })?;
+    let active = agents
+        .active_worktree_agent_sessions(checkout_id)
+        .map_err(crate::services::agent::map_error)?;
+    if !active.is_empty() {
+        let names = active
+            .iter()
+            .map(|session| session.title.as_str())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            format!("stop active agent session(s) before relocating this checkout: {names}"),
+        ));
+    }
+    Ok(removal)
 }
 
 fn git_common_dir(path: &Path) -> Result<std::path::PathBuf, IpcError> {
@@ -214,26 +463,48 @@ fn git_common_dir(path: &Path) -> Result<std::path::PathBuf, IpcError> {
 ///
 /// A workdir that is still there loses its registration and nothing else: the branch, the
 /// commits and the files are untouched, so opening the folder again brings it back. A workdir
-/// whose directory is gone has nothing left to keep, so it goes through
-/// [`close_missing_checkout`], which also prunes the Git worktree that pointed at the
-/// directory that is no longer there.
+/// whose directory is unavailable can still be registered; it is forgotten only when the user
+/// explicitly closes it through [`close_missing_checkout`].
 pub fn close_checkout(
     database: &Database,
     backend: &crate::terminal::TerminalBackend,
+    agents: &crate::services::agent::AgentService,
     checkout_id: &str,
 ) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
     let state = database.load_workspace().map_err(operation_error)?;
-    let (_, checkout) = crate::services::checkout::registered_checkout(
+    let (repo, checkout) = crate::services::checkout::registered_checkout(
         &state.repos,
         checkout_id,
         "checkout ID is not registered",
     )?;
     if checkout.is_missing {
-        return close_missing_checkout(database, backend, checkout_id);
+        return close_missing_checkout(database, backend, agents, checkout_id);
     }
-    database
-        .close_checkout(checkout_id)
-        .map_err(operation_error)
+    let checkout_ids = checkout_agent_ids(&state, repo, checkout);
+    with_agent_checkout_guards(
+        agents,
+        &checkout_ids,
+        || {
+            let current = database.load_workspace().map_err(operation_error)?;
+            let (repo, checkout) = crate::services::checkout::registered_checkout(
+                &current.repos,
+                checkout_id,
+                "checkout ID is not registered",
+            )?;
+            if checkout_agent_ids(&current, repo, checkout) != checkout_ids {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidCheckout,
+                    "checkout registrations changed; refresh and retry closing this location",
+                ));
+            }
+            Ok(())
+        },
+        || {
+            database
+                .close_checkout(checkout_id)
+                .map_err(operation_error)
+        },
+    )
 }
 
 /// Takes a worktree off the panel and keeps it, so the repo root can offer it back.
@@ -243,23 +514,47 @@ pub fn close_checkout(
 /// other half and forgets the checkout entirely.
 pub fn archive_checkout(
     database: &Database,
+    agents: &crate::services::agent::AgentService,
     checkout_id: &str,
 ) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
     let state = database.load_workspace().map_err(operation_error)?;
-    crate::services::checkout::registered_checkout(
+    let (repo, checkout) = crate::services::checkout::registered_checkout(
         &state.repos,
         checkout_id,
         "checkout ID is not registered",
     )?;
-    database
-        .archive_checkout(checkout_id)
-        .map_err(operation_error)
+    let checkout_ids = checkout_agent_ids(&state, repo, checkout);
+    with_agent_checkout_guards(
+        agents,
+        &checkout_ids,
+        || {
+            let current = database.load_workspace().map_err(operation_error)?;
+            let (repo, checkout) = crate::services::checkout::registered_checkout(
+                &current.repos,
+                checkout_id,
+                "checkout ID is not registered",
+            )?;
+            if checkout_agent_ids(&current, repo, checkout) != checkout_ids {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidCheckout,
+                    "checkout registrations changed; refresh and retry archiving",
+                ));
+            }
+            Ok(())
+        },
+        || {
+            database
+                .archive_checkout(checkout_id)
+                .map_err(operation_error)
+        },
+    )
 }
 
 /// Puts back every worktree this repository archived, so one action brings the whole set
 /// to the panel rather than making the user walk them one at a time.
 pub fn restore_archived_worktrees(
     database: &Database,
+    agents: &crate::services::agent::AgentService,
     repo_id: &str,
 ) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
     let state = database.load_workspace().map_err(operation_error)?;
@@ -269,14 +564,37 @@ pub fn restore_archived_worktrees(
             "repository ID is not registered",
         ));
     }
-    database
-        .restore_archived_worktrees(repo_id)
-        .map_err(operation_error)
+    let checkout_ids = archived_checkout_ids(&state, repo_id);
+    if checkout_ids.is_empty() {
+        return database
+            .restore_archived_worktrees(repo_id)
+            .map_err(operation_error);
+    }
+    with_agent_checkout_guards(
+        agents,
+        &checkout_ids,
+        || {
+            let current = database.load_workspace().map_err(operation_error)?;
+            if archived_checkout_ids(&current, repo_id) != checkout_ids {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidCheckout,
+                    "archived worktrees changed; refresh and retry restoring them",
+                ));
+            }
+            Ok(())
+        },
+        || {
+            database
+                .restore_archived_worktrees(repo_id)
+                .map_err(operation_error)
+        },
+    )
 }
 
 pub fn close_missing_checkout(
     database: &Database,
     backend: &crate::terminal::TerminalBackend,
+    agents: &crate::services::agent::AgentService,
     checkout_id: &str,
 ) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
     let state = database.load_workspace().map_err(operation_error)?;
@@ -302,7 +620,7 @@ pub fn close_missing_checkout(
                 "close active terminal sessions before closing this missing worktree",
             ));
         }
-        let info = worktree::removal_info(database, checkout_id)?;
+        let info = worktree::removal_info(database, agents, checkout_id)?;
         let confirmation = worktree::WorktreeRemovalConfirmation {
             confirm_dirty: false,
             confirmed_dirty_files: info.dirty_files,
@@ -311,12 +629,203 @@ pub fn close_missing_checkout(
             expected_unmerged_commits: info.unmerged_commits,
             delete_branch: false,
         };
-        return worktree::remove(database, backend, checkout_id, &confirmation)
+        return worktree::remove(database, backend, agents, checkout_id, &confirmation)
             .map(|removed| removed.workspace);
     }
-    database
-        .close_missing_checkout(checkout_id)
-        .map_err(operation_error)
+    if repo.kind == RepoKind::Git && checkout.is_primary {
+        let checkout_ids = repo_agent_checkout_ids(&state, &repo.id);
+        return close_missing_primary_git_repo(database, agents, checkout_id, &checkout_ids);
+    }
+    let checkout_ids = checkout_agent_ids(&state, repo, checkout);
+    with_agent_checkout_guards(
+        agents,
+        &checkout_ids,
+        || {
+            let current = database.load_workspace().map_err(operation_error)?;
+            let (current_repo, current_checkout) = crate::services::checkout::registered_checkout(
+                &current.repos,
+                checkout_id,
+                "checkout ID is not registered",
+            )?;
+            if !current_checkout.is_missing
+                || checkout_agent_ids(&current, current_repo, current_checkout) != checkout_ids
+            {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidCheckout,
+                    "checkout registrations changed; refresh and retry closing this location",
+                ));
+            }
+            Ok(())
+        },
+        || {
+            database
+                .close_missing_checkout(checkout_id)
+                .map_err(operation_error)
+        },
+    )
+}
+
+fn close_missing_primary_git_repo(
+    database: &Database,
+    agents: &crate::services::agent::AgentService,
+    checkout_id: &str,
+    checkout_ids: &[String],
+) -> Result<crate::domain::workspace::WorkspaceState, IpcError> {
+    with_agent_checkout_guards(
+        agents,
+        checkout_ids,
+        || {
+            database
+                .ensure_not_home_checkout(checkout_id)
+                .map_err(operation_error)?;
+            let state = database.load_workspace().map_err(operation_error)?;
+            let (repo, checkout) = crate::services::checkout::registered_checkout(
+                &state.repos,
+                checkout_id,
+                "checkout ID is not registered",
+            )?;
+            if repo.kind != RepoKind::Git || !checkout.is_primary || !checkout.is_missing {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidCheckout,
+                    "repository changed; refresh and retry closing the missing checkout",
+                ));
+            }
+            if repo_agent_checkout_ids(&state, &repo.id) != checkout_ids {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidCheckout,
+                    "repository checkouts changed; refresh and retry closing the missing checkout",
+                ));
+            }
+            if repo.checkouts.iter().any(|checkout| {
+                checkout.sessions.iter().any(|session| {
+                    session.status == crate::domain::workspace::SessionStatus::Active
+                })
+            }) {
+                return Err(IpcError::new(
+                    IpcErrorCode::InvalidCheckout,
+                    "close active terminal sessions before closing this missing location",
+                ));
+            }
+            Ok(())
+        },
+        || {
+            database
+                .close_missing_checkout(checkout_id)
+                .map_err(operation_error)
+        },
+    )
+}
+
+fn checkout_agent_ids(
+    state: &crate::domain::workspace::WorkspaceState,
+    repo: &crate::domain::workspace::Repo,
+    checkout: &crate::domain::workspace::Checkout,
+) -> Vec<String> {
+    if repo.kind == RepoKind::Plain || checkout.is_primary {
+        repo_agent_checkout_ids(state, &repo.id)
+    } else {
+        vec![checkout.id.clone()]
+    }
+}
+
+fn archived_checkout_ids(
+    state: &crate::domain::workspace::WorkspaceState,
+    repo_id: &str,
+) -> Vec<String> {
+    let mut ids: Vec<_> = state
+        .archived_worktrees
+        .iter()
+        .filter(|checkout| checkout.repo_id == repo_id)
+        .map(|checkout| checkout.id.clone())
+        .collect();
+    ids.sort();
+    ids
+}
+
+fn repo_agent_checkout_ids(
+    state: &crate::domain::workspace::WorkspaceState,
+    repo_id: &str,
+) -> Vec<String> {
+    let mut ids: Vec<_> = state
+        .repos
+        .iter()
+        .find(|repo| repo.id == repo_id)
+        .into_iter()
+        .flat_map(|repo| repo.checkouts.iter().map(|checkout| checkout.id.clone()))
+        .chain(
+            state
+                .archived_worktrees
+                .iter()
+                .filter(|checkout| checkout.repo_id == repo_id)
+                .map(|checkout| checkout.id.clone()),
+        )
+        .collect();
+    ids.sort();
+    ids.dedup();
+    ids
+}
+
+fn with_agent_checkout_operations<T>(
+    agents: &crate::services::agent::AgentService,
+    checkout_ids: &[String],
+    operation: impl FnOnce() -> T,
+) -> T {
+    match checkout_ids.split_first() {
+        Some((checkout_id, remaining)) => agents.with_checkout_operation(checkout_id, || {
+            with_agent_checkout_operations(agents, remaining, operation)
+        }),
+        None => operation(),
+    }
+}
+
+fn with_agent_checkout_guards<T>(
+    agents: &crate::services::agent::AgentService,
+    checkout_ids: &[String],
+    validate: impl FnOnce() -> Result<(), IpcError>,
+    operation: impl FnOnce() -> Result<T, IpcError>,
+) -> Result<T, IpcError> {
+    let mut checkout_ids = checkout_ids.to_vec();
+    checkout_ids.sort();
+    checkout_ids.dedup();
+    with_agent_checkout_operations(agents, &checkout_ids, || {
+        let removals = checkout_ids
+            .iter()
+            .map(|id| {
+                agents
+                    .reserve_worktree_removal(id)
+                    .map_err(crate::services::agent::map_error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        validate()?;
+
+        let mut active = Vec::new();
+        for id in &checkout_ids {
+            active.extend(
+                agents
+                    .active_worktree_agent_sessions(id)
+                    .map_err(crate::services::agent::map_error)?,
+            );
+        }
+        if !active.is_empty() {
+            let names = active
+                .iter()
+                .map(|session| session.title.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                format!("stop active agent session(s) before changing this checkout: {names}"),
+            ));
+        }
+        let result = operation()?;
+        for id in &checkout_ids {
+            agents.stop_for_worktree_removal(id);
+        }
+        for removal in removals {
+            removal.commit();
+        }
+        Ok(result)
+    })
 }
 
 fn operation_error(error: String) -> IpcError {
@@ -345,11 +854,8 @@ pub fn restore(
             }
         }
     }
-    // Reconciliation re-inserts the checkouts Git still lists, including the ones whose
-    // directory is gone, so the prune runs last: what comes back is what is on disk.
-    database
-        .prune_missing_checkouts()
-        .map_err(operation_error)?;
+    // Keep registered checkouts whose directories are temporarily unavailable; load_workspace
+    // marks them missing and reconciliation clears that state when their paths return.
     let mut home_repo = Repo::plain(&home.0, timestamp())
         .map_err(|error| IpcError::new(IpcErrorCode::InvalidPath, error))?;
     home_repo.name = "Home".into();
@@ -374,27 +880,20 @@ pub fn restore(
 /// brought back by another hand adding a sibling.
 pub fn sync_repo(
     database: &Database,
+    agents: &crate::services::agent::AgentService,
     repo_id: &str,
 ) -> Result<Option<crate::domain::workspace::WorkspaceState>, IpcError> {
-    let state = database
-        .load_workspace()
-        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?;
-    let repo = state
-        .repos
-        .iter()
-        .find(|repo| repo.id == repo_id && repo.kind == RepoKind::Git)
-        .ok_or_else(|| {
-            IpcError::new(
-                IpcErrorCode::InvalidCheckout,
-                "Git repository is not registered",
-            )
-        })?;
-    let Some(path) = repo
+    let Some(snapshot) = git_repo_sync_snapshot(database, agents, repo_id)? else {
+        return Ok(None);
+    };
+    let Some(path) = snapshot
+        .repo
         .checkouts
         .iter()
         .map(|checkout| PathBuf::from(&checkout.canonical_path))
         .chain(
-            state
+            snapshot
+                .state
                 .archived_worktrees
                 .iter()
                 .filter(|checkout| checkout.repo_id == repo_id)
@@ -409,12 +908,14 @@ pub fn sync_repo(
     // the panel and the archive shelf. Compare just their paths first: most filesystem events
     // near `.git/worktrees` are not a membership change, and one `worktree list` is cheaper than
     // resolving every checkout, updating the database and returning the workspace again.
-    let registered: BTreeSet<PathBuf> = repo
+    let registered: BTreeSet<PathBuf> = snapshot
+        .repo
         .checkouts
         .iter()
         .map(|checkout| PathBuf::from(&checkout.canonical_path))
         .chain(
-            state
+            snapshot
+                .state
                 .archived_worktrees
                 .iter()
                 .filter(|checkout| checkout.repo_id == repo_id)
@@ -427,16 +928,115 @@ pub fn sync_repo(
 
     // A membership change is a reason to reconcile, not a reason to ignore Git errors. Unlike
     // startup's best-effort scan, this is a live request with a panel waiting for its answer.
-    let Some(resolved) = resolve_repo(database, repo_id)? else {
+    let Some(resolved) = resolve_repo(database, &snapshot.repo.id)? else {
         return Ok(None);
     };
-    database
-        .reconcile_git_repo(&resolved)
-        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?;
-    database
-        .load_workspace()
-        .map(Some)
-        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
+    reconcile_git_repo_if_current(database, agents, &snapshot, &resolved)
+}
+
+struct GitRepoSyncSnapshot {
+    state: crate::domain::workspace::WorkspaceState,
+    repo: Repo,
+    checkout_ids: Vec<String>,
+    registration_snapshot: crate::persistence::GitRepoRegistrationSnapshot,
+    generations: Vec<(String, u64)>,
+}
+
+fn git_repo_sync_snapshot(
+    database: &Database,
+    agents: &crate::services::agent::AgentService,
+    repo_id: &str,
+) -> Result<Option<GitRepoSyncSnapshot>, IpcError> {
+    let initial = database.load_workspace().map_err(operation_error)?;
+    if !initial
+        .repos
+        .iter()
+        .any(|repo| repo.id == repo_id && repo.kind == RepoKind::Git)
+    {
+        return Err(IpcError::new(
+            IpcErrorCode::InvalidCheckout,
+            "Git repository is not registered",
+        ));
+    }
+    let checkout_ids = repo_agent_checkout_ids(&initial, repo_id);
+    with_agent_checkout_operations(agents, &checkout_ids, || {
+        let state = database.load_workspace().map_err(operation_error)?;
+        let Some(repo) = state
+            .repos
+            .iter()
+            .find(|repo| repo.id == repo_id && repo.kind == RepoKind::Git)
+        else {
+            return Ok(None);
+        };
+        if repo_agent_checkout_ids(&state, repo_id) != checkout_ids {
+            return Ok(None);
+        }
+        let repo = repo.clone();
+        let Some(registration_snapshot) = database
+            .git_repo_registration_snapshot(repo_id)
+            .map_err(operation_error)?
+        else {
+            return Ok(None);
+        };
+        if registration_snapshot.checkout_ids() != checkout_ids {
+            return Ok(None);
+        }
+        let generations = checkout_ids
+            .iter()
+            .map(|checkout_id| {
+                agents
+                    .checkout_generation(checkout_id)
+                    .map(|generation| (checkout_id.clone(), generation))
+                    .map_err(crate::services::agent::map_error)
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(Some(GitRepoSyncSnapshot {
+            state,
+            repo,
+            checkout_ids: checkout_ids.clone(),
+            registration_snapshot,
+            generations,
+        }))
+    })
+}
+
+fn reconcile_git_repo_if_current(
+    database: &Database,
+    agents: &crate::services::agent::AgentService,
+    snapshot: &GitRepoSyncSnapshot,
+    resolved: &Repo,
+) -> Result<Option<crate::domain::workspace::WorkspaceState>, IpcError> {
+    with_agent_checkout_operations(agents, &snapshot.checkout_ids, || {
+        let state = database.load_workspace().map_err(operation_error)?;
+        let Some(repo) = state
+            .repos
+            .iter()
+            .find(|repo| repo.id == snapshot.repo.id && repo.kind == RepoKind::Git)
+        else {
+            return Ok(None);
+        };
+        if repo.root != snapshot.repo.root
+            || repo_agent_checkout_ids(&state, &snapshot.repo.id) != snapshot.checkout_ids
+        {
+            return Ok(None);
+        }
+        for (checkout_id, generation) in &snapshot.generations {
+            if agents
+                .checkout_generation(checkout_id)
+                .map_err(crate::services::agent::map_error)?
+                != *generation
+            {
+                return Ok(None);
+            }
+        }
+        if !database
+            .reconcile_git_repo_if_unchanged(resolved, &snapshot.registration_snapshot)
+            .map_err(operation_error)?
+        {
+            return Ok(None);
+        }
+        database.load_workspace().map(Some).map_err(operation_error)
+    })
 }
 
 /// Re-resolves one registered repository from any checkout that still exists.
@@ -530,6 +1130,7 @@ mod tests {
 
     use crate::{
         domain::{
+            review::{ReviewNote, ReviewRound},
             terminal_layout::{CheckoutTerminalLayout, TerminalLayoutNode, TerminalLayoutTab},
             workspace::{RepoKind, Session, SessionStatus, SessionType},
         },
@@ -775,7 +1376,7 @@ mod tests {
     }
 
     #[test]
-    fn restore_prunes_a_worktree_removed_while_the_app_was_closed() {
+    fn restore_keeps_a_worktree_missing_while_the_app_was_closed() {
         let temp = tempdir().unwrap();
         let primary = temp.path().join("repo");
         let linked = temp.path().join("gone");
@@ -802,18 +1403,20 @@ mod tests {
 
         let state = restore(&db, &home_directory(temp.path())).unwrap();
 
-        // Git still lists the deleted worktree, so reconciliation re-inserts it first. The
-        // prune is what runs last, and the worktree is gone from the reopened list.
+        // Git still lists the worktree, but its unavailable directory is not proof that it
+        // was intentionally removed.
         let repo = state
             .repos
             .iter()
             .find(|repo| repo.kind == RepoKind::Git)
             .unwrap();
-        assert!(repo
+        let missing = repo
             .checkouts
             .iter()
-            .all(|checkout| checkout.canonical_path != linked_canonical));
-        assert_eq!(repo.checkouts.len(), 1);
+            .find(|checkout| checkout.canonical_path == linked_canonical)
+            .expect("temporarily unavailable worktree remains registered");
+        assert!(missing.is_missing);
+        assert_eq!(repo.checkouts.len(), 2);
         assert!(repo.checkouts[0].is_primary);
         assert_eq!(state.active_checkout_id, state.home_checkout_id);
         assert_ne!(
@@ -823,19 +1426,108 @@ mod tests {
     }
 
     #[test]
-    fn restore_removes_a_repository_whose_root_is_gone() {
+    fn restore_keeps_a_repository_whose_root_is_temporarily_gone() {
         let temp = tempdir().unwrap();
         let primary = temp.path().join("repo");
         init_repo(&primary);
         let db = database(temp.path());
-        register_folder(&db, &primary).unwrap();
+        let repo_id = register_folder(&db, &primary).unwrap().repos[0].id.clone();
         fs::remove_dir_all(&primary).unwrap();
 
         let state = restore(&db, &home_directory(temp.path())).unwrap();
 
-        assert_eq!(state.repos.len(), 1);
-        assert_eq!(state.repos[0].name, "Home");
+        assert_eq!(state.repos.len(), 2);
+        let repo = state.repos.iter().find(|repo| repo.id == repo_id).unwrap();
+        assert!(repo.checkouts[0].is_missing);
         assert_eq!(state.active_checkout_id, state.home_checkout_id);
+    }
+
+    #[test]
+    fn restore_preserves_review_history_while_a_worktree_is_unavailable_and_recovers_it() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let linked = temp.path().join("worktree");
+        let unavailable = temp.path().join("unavailable");
+        init_repo(&primary);
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "temporary",
+                linked.to_str().unwrap(),
+            ],
+        );
+        let db = database(temp.path());
+        register_folder(&db, &primary).unwrap();
+        let registered = register_folder(&db, &linked).unwrap();
+        let checkout_id = registered.active_checkout_id.unwrap();
+        let note_id = "review-note:temporary".to_owned();
+        let note = ReviewNote {
+            id: note_id.clone(),
+            checkout_id: checkout_id.clone(),
+            path: "tracked.txt".into(),
+            side: "new".into(),
+            line_start: 1,
+            line_end: None,
+            content: "Keep this review note".into(),
+            code: "initial".into(),
+            status: "draft".into(),
+            code_hash: "test-hash".into(),
+            outdated: false,
+            round_id: None,
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        };
+        db.add_review_note(&note).unwrap();
+        let round = ReviewRound {
+            id: "review-round:temporary".into(),
+            checkout_id: checkout_id.clone(),
+            session_id: None,
+            status: "queued".into(),
+            marker: "marvis-review:review-round:temporary".into(),
+            note_ids: vec![note_id.clone()],
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        };
+        db.add_review_round(&round, &[note_id], None).unwrap();
+        let saved_note = db.review_notes(&checkout_id).unwrap().remove(0);
+        let saved_round = db.review_rounds(&checkout_id).unwrap().remove(0);
+
+        fs::rename(&linked, &unavailable).unwrap();
+        let missing = restore(&db, &home_directory(temp.path())).unwrap();
+        let repo = missing
+            .repos
+            .iter()
+            .find(|repo| repo.kind == RepoKind::Git)
+            .unwrap();
+        assert!(repo
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.id == checkout_id && checkout.is_missing));
+        assert_eq!(
+            db.review_notes(&checkout_id).unwrap(),
+            vec![saved_note.clone()]
+        );
+        assert_eq!(
+            db.review_rounds(&checkout_id).unwrap(),
+            vec![saved_round.clone()]
+        );
+
+        fs::rename(&unavailable, &linked).unwrap();
+        let returned = restore(&db, &home_directory(temp.path())).unwrap();
+        let repo = returned
+            .repos
+            .iter()
+            .find(|repo| repo.kind == RepoKind::Git)
+            .unwrap();
+        assert!(repo
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.id == checkout_id && !checkout.is_missing));
+        assert_eq!(db.review_notes(&checkout_id).unwrap(), vec![saved_note]);
+        assert_eq!(db.review_rounds(&checkout_id).unwrap(), vec![saved_round]);
     }
 
     #[test]
@@ -893,9 +1585,13 @@ mod tests {
             ],
         );
 
-        let synced = sync_repo(&db, &repo_id)
-            .unwrap()
-            .expect("a worktree joined");
+        let synced = sync_repo(
+            &db,
+            &crate::services::agent::AgentService::default(),
+            &repo_id,
+        )
+        .unwrap()
+        .expect("a worktree joined");
 
         assert_eq!(synced.repos.len(), 1);
         assert_eq!(synced.repos[0].checkouts.len(), 2);
@@ -916,9 +1612,197 @@ mod tests {
         let db = database(temp.path());
         let opened = register_folder(&db, &primary).unwrap();
 
-        let synced = sync_repo(&db, &opened.repos[0].id).unwrap();
+        let synced = sync_repo(
+            &db,
+            &crate::services::agent::AgentService::default(),
+            &opened.repos[0].id,
+        )
+        .unwrap();
 
         assert!(synced.is_none());
+    }
+
+    #[test]
+    fn conditional_sync_keeps_a_checkout_registered_after_its_snapshot() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let linked = temp.path().join("late checkout");
+        init_repo(&primary);
+        let db = database(temp.path());
+        let opened = register_folder(&db, &primary).unwrap();
+        let repo_id = opened.repos[0].id.clone();
+        let expected = db
+            .git_repo_registration_snapshot(&repo_id)
+            .unwrap()
+            .expect("the Git repository registration snapshot");
+        let stale = super::resolve_repo(&db, &repo_id)
+            .unwrap()
+            .expect("the repository resolves before another checkout is added");
+        assert_eq!(stale.checkouts.len(), 1);
+
+        git(
+            &primary,
+            &["worktree", "add", "-b", "late", linked.to_str().unwrap()],
+        );
+        register_folder(&db, &linked).unwrap();
+        let late_id = crate::domain::workspace::checkout_id_for_path(
+            &linked.canonicalize().unwrap().display().to_string(),
+        );
+        assert!(db.load_workspace().unwrap().repos[0]
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.id == late_id && !checkout.is_missing));
+
+        assert!(!db
+            .reconcile_git_repo_if_unchanged(&stale, &expected)
+            .unwrap());
+        let current = db.load_workspace().unwrap();
+        let late_checkout = current.repos[0]
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.id == late_id)
+            .unwrap();
+        assert!(!late_checkout.is_missing);
+    }
+
+    #[test]
+    fn conditional_locate_does_not_mark_a_late_worktree_missing() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let old_path = temp.path().join("old worktree");
+        let moved_path = temp.path().join("moved worktree");
+        let late_path = temp.path().join("late worktree");
+        init_repo(&primary);
+        git(
+            &primary,
+            &["worktree", "add", "-b", "moved", old_path.to_str().unwrap()],
+        );
+        let db = database(temp.path());
+        let opened = register_folder(&db, &primary).unwrap();
+        let repo_id = opened.repos[0].id.clone();
+        let missing_id = crate::domain::workspace::checkout_id_for_path(
+            &old_path.canonicalize().unwrap().display().to_string(),
+        );
+        let expected = db
+            .git_repo_registration_snapshot(&repo_id)
+            .unwrap()
+            .expect("the Git repository registration snapshot");
+
+        fs::rename(&old_path, &moved_path).unwrap();
+        git(
+            &primary,
+            &["worktree", "repair", moved_path.to_str().unwrap()],
+        );
+        let (resolved, focus_id) =
+            crate::git::resolve_repository(&moved_path, &crate::persistence::timestamp())
+                .unwrap()
+                .expect("the relocated worktree resolves");
+        git(
+            &primary,
+            &["worktree", "add", "-b", "late", late_path.to_str().unwrap()],
+        );
+        register_folder(&db, &late_path).unwrap();
+        let late_id = crate::domain::workspace::checkout_id_for_path(
+            &late_path.canonicalize().unwrap().display().to_string(),
+        );
+
+        assert!(db.load_workspace().unwrap().repos[0]
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.id == late_id && !checkout.is_missing));
+        assert!(!db
+            .locate_git_checkout_if_unchanged(&resolved, &missing_id, &focus_id, &expected)
+            .unwrap());
+        let current = db.load_workspace().unwrap();
+        assert!(current.repos[0]
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.id == late_id && !checkout.is_missing));
+        assert!(current.repos[0]
+            .checkouts
+            .iter()
+            .any(|checkout| checkout.id == missing_id));
+    }
+
+    #[test]
+    fn conditional_sync_rejects_concurrent_archive_membership_changes() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let linked = temp.path().join("sibling");
+        init_repo(&primary);
+        git(
+            &primary,
+            &["worktree", "add", "-b", "sibling", linked.to_str().unwrap()],
+        );
+        let db = database(temp.path());
+        let opened = register_folder(&db, &primary).unwrap();
+        let repo_id = opened.repos[0].id.clone();
+        let sibling_id = opened.repos[0]
+            .checkouts
+            .iter()
+            .find(|checkout| !checkout.is_primary)
+            .unwrap()
+            .id
+            .clone();
+        let agents = crate::services::agent::AgentService::default();
+        let snapshot = super::git_repo_sync_snapshot(&db, &agents, &repo_id)
+            .unwrap()
+            .expect("the Git repository registration snapshot");
+        let stale = super::resolve_repo(&db, &repo_id)
+            .unwrap()
+            .expect("the stale Git snapshot");
+        archive_checkout(&db, &agents, &sibling_id).unwrap();
+
+        assert!(
+            super::reconcile_git_repo_if_current(&db, &agents, &snapshot, &stale)
+                .unwrap()
+                .is_none()
+        );
+        let current = db.load_workspace().unwrap();
+        assert_eq!(current.repos[0].checkouts.len(), 1);
+        assert_eq!(current.archived_worktrees.len(), 1);
+        assert_eq!(current.archived_worktrees[0].id, sibling_id);
+    }
+
+    #[test]
+    fn conditional_sync_preserves_concurrent_metadata_for_same_checkout_path() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        init_repo(&primary);
+        let db = database(temp.path());
+        let opened = register_folder(&db, &primary).unwrap();
+        let repo_id = opened.repos[0].id.clone();
+        let checkout_id = opened.repos[0].checkouts[0].id.clone();
+        let agents = crate::services::agent::AgentService::default();
+        let snapshot = super::git_repo_sync_snapshot(&db, &agents, &repo_id)
+            .unwrap()
+            .expect("the Git repository registration snapshot");
+        let stale = super::resolve_repo(&db, &repo_id)
+            .unwrap()
+            .expect("the stale Git snapshot");
+
+        let mut concurrent = opened.repos[0].clone();
+        let checkout = &mut concurrent.checkouts[0];
+        checkout.branch = Some("concurrent-branch".into());
+        checkout.head = Some("concurrent-head".into());
+        checkout.is_missing = true;
+        db.register_git_repo(concurrent, &checkout_id).unwrap();
+
+        assert!(
+            super::reconcile_git_repo_if_current(&db, &agents, &snapshot, &stale)
+                .unwrap()
+                .is_none()
+        );
+        let current = db.load_workspace().unwrap();
+        let checkout = &current.repos[0].checkouts[0];
+        assert_eq!(checkout.id, checkout_id);
+        assert_eq!(
+            checkout.canonical_path,
+            opened.repos[0].checkouts[0].canonical_path
+        );
+        assert_eq!(checkout.branch.as_deref(), Some("concurrent-branch"));
+        assert_eq!(checkout.head.as_deref(), Some("concurrent-head"));
+        assert!(checkout.is_missing);
     }
 
     #[test]
@@ -930,7 +1814,11 @@ mod tests {
         let opened = register_folder(&db, &primary).unwrap();
         fs::rename(primary.join(".git"), primary.join(".git unavailable")).unwrap();
 
-        let result = sync_repo(&db, &opened.repos[0].id);
+        let result = sync_repo(
+            &db,
+            &crate::services::agent::AgentService::default(),
+            &opened.repos[0].id,
+        );
 
         assert!(result.is_err());
     }
@@ -960,7 +1848,13 @@ mod tests {
         let worktree_id = opened.repos[0].checkouts[1].id.clone();
         git(&primary, &["worktree", "remove", linked.to_str().unwrap()]);
 
-        let synced = sync_repo(&db, &repo_id).unwrap().expect("a worktree left");
+        let synced = sync_repo(
+            &db,
+            &crate::services::agent::AgentService::default(),
+            &repo_id,
+        )
+        .unwrap()
+        .expect("a worktree left");
 
         let checkout = synced.repos[0]
             .checkouts
@@ -994,15 +1888,24 @@ mod tests {
         let opened = register_folder(&db, &archived).unwrap();
         let repo_id = opened.repos[0].id.clone();
         let worktree_id = opened.repos[0].checkouts[1].id.clone();
-        archive_checkout(&db, &worktree_id).unwrap();
+        archive_checkout(
+            &db,
+            &crate::services::agent::AgentService::default(),
+            &worktree_id,
+        )
+        .unwrap();
         git(
             &primary,
             &["worktree", "add", "-b", "added", added.to_str().unwrap()],
         );
 
-        let synced = sync_repo(&db, &repo_id)
-            .unwrap()
-            .expect("a worktree joined");
+        let synced = sync_repo(
+            &db,
+            &crate::services::agent::AgentService::default(),
+            &repo_id,
+        )
+        .unwrap()
+        .expect("a worktree joined");
 
         assert_eq!(synced.repos[0].checkouts.len(), 2);
         assert!(synced.repos[0]
@@ -1021,6 +1924,64 @@ mod tests {
     /// registered, so an archived worktree is re-inserted on every start. It has to come
     /// back archived: otherwise archiving would last until the next launch, and the user
     /// would find their panel rearranged by a restart they did nothing to cause.
+    #[test]
+    fn stale_sync_snapshot_cannot_resurrect_a_checkout_after_close_and_reopen() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        let stale_worktree = temp.path().join("stale worktree");
+        init_repo(&primary);
+        let db = database(temp.path());
+        let opened = register_folder(&db, &primary).unwrap();
+        let repo_id = opened.repos[0].id.clone();
+        let primary_id = opened.repos[0].checkouts[0].id.clone();
+        git(
+            &primary,
+            &[
+                "worktree",
+                "add",
+                "-b",
+                "stale",
+                stale_worktree.to_str().unwrap(),
+            ],
+        );
+        let agents = crate::services::agent::AgentService::default();
+        let snapshot = super::git_repo_sync_snapshot(&db, &agents, &repo_id)
+            .unwrap()
+            .expect("the repository is still registered");
+        let resolved = super::resolve_repo(&db, &repo_id)
+            .unwrap()
+            .expect("Git still resolves the stale worktree");
+        assert_eq!(snapshot.state.repos[0].checkouts.len(), 1);
+        assert_eq!(resolved.checkouts.len(), 2);
+
+        git(
+            &primary,
+            &[
+                "worktree",
+                "remove",
+                "--force",
+                stale_worktree.to_str().unwrap(),
+            ],
+        );
+        close_checkout(
+            &db,
+            &crate::terminal::TerminalBackend::default(),
+            &agents,
+            &primary_id,
+        )
+        .unwrap();
+        let reopened = register_folder(&db, &primary).unwrap();
+        assert_eq!(reopened.repos[0].checkouts.len(), 1);
+
+        let stale_result =
+            super::reconcile_git_repo_if_current(&db, &agents, &snapshot, &resolved).unwrap();
+
+        assert!(stale_result.is_none());
+        let current = db.load_workspace().unwrap();
+        assert_eq!(current.repos[0].checkouts.len(), 1);
+        assert_eq!(current.repos[0].checkouts[0].id, primary_id);
+    }
+
     #[test]
     fn a_restart_keeps_an_archived_worktree_archived() {
         let temp = tempdir().unwrap();
@@ -1042,7 +2003,12 @@ mod tests {
             .id
             .clone();
 
-        archive_checkout(&db, &worktree_id).unwrap();
+        archive_checkout(
+            &db,
+            &crate::services::agent::AgentService::default(),
+            &worktree_id,
+        )
+        .unwrap();
         let restored = restore(&db, &home_directory(temp.path())).unwrap();
 
         let repo = restored
@@ -1136,6 +2102,45 @@ mod tests {
             .unwrap()
             .active_checkout_id
             .unwrap();
+        for (round_id, status) in [
+            ("review-round:acked", "acked"),
+            ("review-round:dispatched", "dispatched"),
+            ("review-round:queued", "queued"),
+            ("review-round:dispatching", "dispatching"),
+        ] {
+            let note_id = format!("review-note:{round_id}");
+            database
+                .add_review_note(&ReviewNote {
+                    id: note_id.clone(),
+                    checkout_id: old_id.clone(),
+                    path: "tracked.txt".into(),
+                    side: "new".into(),
+                    line_start: 1,
+                    line_end: None,
+                    content: format!("Review note for {status}"),
+                    code: "initial".into(),
+                    status: "draft".into(),
+                    code_hash: "test-hash".into(),
+                    outdated: false,
+                    round_id: None,
+                    created_at: "now".into(),
+                    updated_at: "now".into(),
+                })
+                .unwrap();
+            let round = ReviewRound {
+                id: round_id.into(),
+                checkout_id: old_id.clone(),
+                session_id: Some("session:historical-agent".into()),
+                status: status.into(),
+                marker: format!("marvis-review:{round_id}"),
+                note_ids: vec![note_id],
+                created_at: "now".into(),
+                updated_at: "now".into(),
+            };
+            database
+                .add_review_round(&round, &round.note_ids, Some("saved prompt"))
+                .unwrap();
+        }
         let session = Session {
             id: "session:feature-shell".into(),
             session_type: SessionType::Shell,
@@ -1161,7 +2166,13 @@ mod tests {
         let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
         fs::rename(&moved_from, &moved_to).unwrap();
 
-        let located = locate_missing_checkout(&database, &old_id, &moved_to).unwrap();
+        let located = locate_missing_checkout(
+            &database,
+            &crate::services::agent::AgentService::default(),
+            &old_id,
+            &moved_to,
+        )
+        .unwrap();
         let repo = &located.repos[0];
         let new_id = crate::domain::workspace::checkout_id_for_path(
             &moved_to.canonicalize().unwrap().display().to_string(),
@@ -1183,6 +2194,48 @@ mod tests {
         assert_eq!(database.load_terminal_layout(&new_id).unwrap(), None);
         assert_eq!(database.viewed_files(&new_id).unwrap(), ["README.md"]);
         assert_eq!(repo.id, registered.repos[0].id);
+        assert!(database.review_notes(&old_id).unwrap().is_empty());
+        assert!(database.review_rounds(&old_id).unwrap().is_empty());
+        let moved_rounds = database.review_rounds(&new_id).unwrap();
+        let moved_notes = database.review_notes(&new_id).unwrap();
+        assert_eq!(moved_rounds.len(), 4);
+        assert_eq!(moved_notes.len(), 4);
+        for (round_id, original_status) in [
+            ("review-round:acked", "acked"),
+            ("review-round:dispatched", "dispatched"),
+            ("review-round:queued", "queued"),
+            ("review-round:dispatching", "dispatching"),
+        ] {
+            let round = moved_rounds
+                .iter()
+                .find(|round| round.id == round_id)
+                .unwrap();
+            let note_id = format!("review-note:{round_id}");
+            let expected_status = match original_status {
+                "queued" | "dispatching" => "relocated",
+                other => other,
+            };
+            assert_eq!(round.checkout_id, new_id);
+            assert_eq!(round.status, expected_status);
+            assert_eq!(
+                round.session_id.as_deref(),
+                Some("session:historical-agent")
+            );
+            assert_eq!(round.marker, format!("marvis-review:{round_id}"));
+            assert_eq!(round.note_ids, [note_id.as_str()]);
+            assert_eq!(
+                database
+                    .review_round_prompt(round_id, &new_id)
+                    .unwrap()
+                    .as_deref(),
+                Some("saved prompt")
+            );
+            let note = moved_notes.iter().find(|note| note.id == note_id).unwrap();
+            assert_eq!(note.checkout_id, new_id);
+            assert_eq!(note.round_id.as_deref(), Some(round_id));
+            assert_eq!(note.status, "sent");
+            assert_eq!(note.content, format!("Review note for {original_status}"));
+        }
     }
 
     #[test]
@@ -1198,8 +2251,20 @@ mod tests {
         let other = temp.path().join("other");
         fs::create_dir(&other).unwrap();
 
-        assert!(locate_missing_checkout(&database, &checkout_id, &other).is_err());
-        let restored = locate_missing_checkout(&database, &checkout_id, &path).unwrap();
+        assert!(locate_missing_checkout(
+            &database,
+            &crate::services::agent::AgentService::default(),
+            &checkout_id,
+            &other
+        )
+        .is_err());
+        let restored = locate_missing_checkout(
+            &database,
+            &crate::services::agent::AgentService::default(),
+            &checkout_id,
+            &path,
+        )
+        .unwrap();
         assert!(!restored.repos[0].checkouts[0].is_missing);
     }
 
@@ -1226,7 +2291,13 @@ mod tests {
         let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
         fs::rename(&old_path, &new_path).unwrap();
 
-        let relocated = locate_missing_checkout(&database, &old_id, &new_path).unwrap();
+        let relocated = locate_missing_checkout(
+            &database,
+            &crate::services::agent::AgentService::default(),
+            &old_id,
+            &new_path,
+        )
+        .unwrap();
         let repo = &relocated.repos[0];
         let new_id = crate::domain::workspace::checkout_id_for_path(
             &new_path.canonicalize().unwrap().display().to_string(),
@@ -1263,6 +2334,7 @@ mod tests {
         let closed = close_missing_checkout(
             &database,
             &crate::terminal::TerminalBackend::default(),
+            &crate::services::agent::AgentService::default(),
             &checkout_id,
         )
         .unwrap();
@@ -1306,7 +2378,13 @@ mod tests {
         let backend = crate::terminal::TerminalBackend::default();
 
         // A live session still blocks the close, exactly as it does for a worktree on disk.
-        let refused = close_missing_checkout(&database, &backend, &linked_id).unwrap_err();
+        let refused = close_missing_checkout(
+            &database,
+            &backend,
+            &crate::services::agent::AgentService::default(),
+            &linked_id,
+        )
+        .unwrap_err();
         assert!(refused.message.contains("active terminal sessions"));
         assert_eq!(
             database.load_workspace().unwrap().repos[0].checkouts.len(),
@@ -1314,7 +2392,13 @@ mod tests {
         );
 
         database.remove_terminal_session("session:gone").unwrap();
-        let closed = close_missing_checkout(&database, &backend, &linked_id).unwrap();
+        let closed = close_missing_checkout(
+            &database,
+            &backend,
+            &crate::services::agent::AgentService::default(),
+            &linked_id,
+        )
+        .unwrap();
 
         // Only the entry leaves the list: the repository, its file and its branch stay.
         assert_eq!(closed.repos[0].checkouts.len(), 1);
@@ -1342,6 +2426,7 @@ mod tests {
         let error = close_missing_checkout(
             &database,
             &crate::terminal::TerminalBackend::default(),
+            &crate::services::agent::AgentService::default(),
             &checkout_id,
         )
         .unwrap_err();
@@ -1378,7 +2463,13 @@ mod tests {
             .expect("opening the worktree selects it");
         let backend = crate::terminal::TerminalBackend::default();
 
-        let closed = close_checkout(&database, &backend, &linked_id).unwrap();
+        let closed = close_checkout(
+            &database,
+            &backend,
+            &crate::services::agent::AgentService::default(),
+            &linked_id,
+        )
+        .unwrap();
 
         // The row is gone and everything it pointed at is still there, uncommitted work
         // included: opening the folder again is what brings the workdir back.
@@ -1439,6 +2530,7 @@ mod tests {
         let refused = close_checkout(
             &database,
             &crate::terminal::TerminalBackend::default(),
+            &crate::services::agent::AgentService::default(),
             &linked_id,
         )
         .unwrap_err();
@@ -1480,6 +2572,7 @@ mod tests {
         let closed = close_checkout(
             &database,
             &crate::terminal::TerminalBackend::default(),
+            &crate::services::agent::AgentService::default(),
             &linked_id,
         )
         .unwrap();
@@ -1517,6 +2610,7 @@ mod tests {
         let error = close_missing_checkout(
             &database,
             &crate::terminal::TerminalBackend::default(),
+            &crate::services::agent::AgentService::default(),
             &checkout_id,
         )
         .unwrap_err();

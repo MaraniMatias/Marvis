@@ -6,7 +6,7 @@
 //! is meaningless in another checkout's server, and `agent_session` is what enforces that.
 
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader, Read, Write},
     net::{Shutdown, SocketAddr, TcpListener, TcpStream},
     path::{Path, PathBuf},
@@ -49,6 +49,13 @@ const EARLY_EOF_MESSAGE: &str = "the agent server reached EOF before reporting c
 /// The server is a loopback child, so basic auth with a per-child password is the
 /// whole trust boundary. See `sec_09`.
 const MAX_PROMPT_BYTES: usize = 512 * 1024;
+// Bound both each response header line and the aggregate (status + headers).
+const MAX_EVENT_HEADERS_BYTES: usize = 32 * 1024;
+const MAX_EVENT_HEADER_LINE_BYTES: usize = 8 * 1024;
+const MAX_CREDENTIAL_LINE_BYTES: usize = 8 * 1024;
+// SSE event payloads can include long transcript text; bound all wire bytes per event.
+const MAX_SSE_FRAME_BYTES: usize = 1024 * 1024;
+const MAX_SSE_FRAME_LINES: usize = 16 * 1024;
 
 /// `opencode` prints two lines on startup; the second is the only place the password exists.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -455,7 +462,7 @@ impl AgentBridge {
         }));
     }
 
-    fn directory(&self) -> &Path {
+    pub(crate) fn directory(&self) -> &Path {
         &self.credentials.directory
     }
 
@@ -623,6 +630,168 @@ struct SseFrame {
     data: serde_json::Value,
 }
 
+/// Reads at most limit wire bytes; LF/CRLF terminators count, while an EOF-terminated line
+/// may use the full limit because EOF adds no byte.
+fn read_bounded_line(
+    reader: &mut impl BufRead,
+    line: &mut Vec<u8>,
+    limit: usize,
+) -> io::Result<usize> {
+    line.clear();
+    loop {
+        if line.len() == limit {
+            if reader.fill_buf()?.is_empty() {
+                return Ok(line.len());
+            }
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "line exceeds configured limit",
+            ));
+        }
+        let (read, complete, over_limit) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                return Ok(line.len());
+            }
+            let newline = available.iter().position(|byte| *byte == b'\n');
+            let read = newline.map_or(available.len(), |index| index + 1);
+            let remaining = limit - line.len();
+            if read > remaining {
+                line.extend_from_slice(&available[..remaining]);
+                (remaining, false, true)
+            } else {
+                line.extend_from_slice(&available[..read]);
+                (read, newline.is_some(), false)
+            }
+        };
+        reader.consume(read);
+        if over_limit {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "line exceeds configured limit",
+            ));
+        }
+        if complete {
+            return Ok(line.len());
+        }
+    }
+}
+
+fn discard_line(reader: &mut impl BufRead) -> io::Result<()> {
+    loop {
+        let (length, complete) = {
+            let available = reader.fill_buf()?;
+            if available.is_empty() {
+                return Ok(());
+            }
+            match available.iter().position(|byte| *byte == b'\n') {
+                Some(index) => (index + 1, true),
+                None => (available.len(), false),
+            }
+        };
+        reader.consume(length);
+        if complete {
+            return Ok(());
+        }
+    }
+}
+
+fn trim_line_ending(line: &[u8]) -> &[u8] {
+    let line = line.strip_suffix(b"\n").unwrap_or(line);
+    line.strip_suffix(b"\r").unwrap_or(line)
+}
+
+fn read_http_header_line(
+    reader: &mut impl BufRead,
+    line: &mut Vec<u8>,
+    remaining: &mut usize,
+) -> io::Result<()> {
+    let length = read_bounded_line(reader, line, (*remaining).min(MAX_EVENT_HEADER_LINE_BYTES))?;
+    if length == 0 || line.last() != Some(&b'\n') {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "incomplete SSE response headers",
+        ));
+    }
+    *remaining -= length;
+    Ok(())
+}
+
+fn read_sse_frame(reader: &mut impl BufRead) -> io::Result<Option<Vec<u8>>> {
+    let mut data = Vec::new();
+    let mut line = Vec::new();
+    let mut frame_bytes = 0;
+    let mut frame_lines = 0;
+    let mut data_seen = false;
+    loop {
+        let length = read_bounded_line(
+            reader,
+            &mut line,
+            MAX_SSE_FRAME_BYTES.saturating_sub(frame_bytes),
+        )?;
+        if length == 0 {
+            if data_seen {
+                data.pop();
+                return Ok(Some(data));
+            }
+            return Ok(None);
+        }
+        frame_bytes += length;
+        frame_lines += 1;
+        if frame_lines > MAX_SSE_FRAME_LINES {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidData,
+                "SSE frame has too many lines",
+            ));
+        }
+        let text = std::str::from_utf8(trim_line_ending(&line)).map_err(|_| {
+            io::Error::new(io::ErrorKind::InvalidData, "invalid UTF-8 in SSE stream")
+        })?;
+        if text.is_empty() {
+            if data_seen {
+                data.pop();
+                return Ok(Some(data));
+            }
+            frame_bytes = 0;
+            frame_lines = 0;
+            continue;
+        }
+        if text.starts_with(':') {
+            continue;
+        }
+        let (field, value) = text.split_once(':').unwrap_or((text, ""));
+        if field == "data" {
+            let value = value.strip_prefix(' ').unwrap_or(value);
+            data.extend_from_slice(value.as_bytes());
+            data.push(b'\n');
+            data_seen = true;
+        }
+    }
+}
+
+fn event_from_payload(payload: &[u8], bridge: &AgentBridge) -> io::Result<Option<AgentEvent>> {
+    let frame = serde_json::from_slice::<SseFrame>(payload)
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid SSE event"))?;
+    if let Some(location) = &frame.location {
+        if !same_directory(Path::new(&location.directory), bridge.directory()) {
+            return Ok(None);
+        }
+    }
+    let data = frame.data;
+    let session_id = data
+        .get("sessionID")
+        .and_then(|value| value.as_str())
+        .map(str::to_string);
+    let raw_type = frame.raw_type;
+    Ok(Some(AgentEvent {
+        checkout_id: bridge.checkout_id.clone(),
+        session_id,
+        kind: agent_event_kind(&raw_type),
+        raw_type,
+        data,
+    }))
+}
+
 /// A small HTTP body reader for `/api/event`. ureq's body timeout is a total-body timeout, which
 /// would periodically tear down a healthy event stream. The bridge keeps a clone of this socket
 /// so stop can interrupt a silent read without changing the stream's lifetime.
@@ -639,23 +808,43 @@ impl Read for SseReader {
             return Ok(0);
         }
         if self.chunked && self.remaining_chunk == 0 {
-            let mut size = String::new();
-            self.reader.read_line(&mut size)?;
-            let size = size
-                .trim_end()
+            let mut size_line = Vec::new();
+            let length = read_bounded_line(
+                &mut self.reader,
+                &mut size_line,
+                MAX_EVENT_HEADER_LINE_BYTES,
+            )?;
+            if length == 0 || size_line.last() != Some(&b'\n') {
+                return Err(io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "incomplete SSE chunk header",
+                ));
+            }
+            let size_text = std::str::from_utf8(trim_line_ending(&size_line))
+                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid SSE chunk"))?;
+            let size = size_text
                 .split(';')
                 .next()
                 .and_then(|value| usize::from_str_radix(value.trim(), 16).ok())
                 .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid SSE chunk"))?;
             if size == 0 {
-                let mut trailer = String::new();
+                let mut trailer_budget = MAX_EVENT_HEADERS_BYTES;
+                let mut trailer = Vec::new();
                 loop {
-                    trailer.clear();
-                    if self.reader.read_line(&mut trailer)? == 0 {
+                    let length = read_bounded_line(
+                        &mut self.reader,
+                        &mut trailer,
+                        trailer_budget.min(MAX_EVENT_HEADER_LINE_BYTES),
+                    )?;
+                    if length == 0 {
                         self.finished = true;
-                        return Ok(0);
+                        return Err(io::Error::new(
+                            io::ErrorKind::UnexpectedEof,
+                            "incomplete SSE chunk trailers",
+                        ));
                     }
-                    if trailer == "\r\n" || trailer == "\n" {
+                    trailer_budget -= length;
+                    if trailer == b"\r\n" || trailer == b"\n" {
                         break;
                     }
                 }
@@ -673,7 +862,14 @@ impl Read for SseReader {
         let read = self.reader.read(&mut buffer[..limit])?;
         if read == 0 {
             self.finished = true;
-            return Ok(0);
+            return if self.chunked {
+                Err(io::Error::new(
+                    io::ErrorKind::UnexpectedEof,
+                    "truncated SSE chunk",
+                ))
+            } else {
+                Ok(0)
+            };
         }
         if self.chunked {
             self.remaining_chunk -= read;
@@ -712,10 +908,13 @@ fn event_stream(bridge: &AgentBridge) -> io::Result<SseReader> {
     }
 
     let mut reader = BufReader::new(stream);
-    let mut status_line = String::new();
-    reader.read_line(&mut status_line)?;
+    let mut header_budget = MAX_EVENT_HEADERS_BYTES;
+    let mut line = Vec::new();
+    read_http_header_line(&mut reader, &mut line, &mut header_budget)?;
+    let status_line = std::str::from_utf8(trim_line_ending(&line))
+        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid SSE response"))?;
     let status = status_line
-        .split_whitespace()
+        .split_ascii_whitespace()
         .nth(1)
         .and_then(|value| value.parse::<u16>().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid SSE response"))?;
@@ -726,21 +925,23 @@ fn event_stream(bridge: &AgentBridge) -> io::Result<SseReader> {
         ));
     }
     let mut chunked = false;
-    let mut header = String::new();
     loop {
-        header.clear();
-        reader.read_line(&mut header)?;
-        if header == "\r\n" || header == "\n" {
+        read_http_header_line(&mut reader, &mut line, &mut header_budget)?;
+        let header = std::str::from_utf8(trim_line_ending(&line))
+            .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "invalid SSE response"))?;
+        if header.is_empty() {
             break;
         }
-        if let Some((name, value)) = header.split_once(':') {
-            if name.eq_ignore_ascii_case("transfer-encoding")
-                && value
-                    .split(',')
-                    .any(|value| value.trim().eq_ignore_ascii_case("chunked"))
-            {
-                chunked = true;
-            }
+        let (name, value) = header
+            .split_once(':')
+            .filter(|(name, _)| !name.is_empty())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "invalid SSE response"))?;
+        if name.eq_ignore_ascii_case("transfer-encoding")
+            && value
+                .split(',')
+                .any(|value| value.trim().eq_ignore_ascii_case("chunked"))
+        {
+            chunked = true;
         }
     }
     Ok(SseReader {
@@ -771,38 +972,18 @@ fn read_events(bridge: Arc<AgentBridge>, sink: EventSink) {
             }
         });
         backoff = Duration::from_millis(250);
-        let mut line = String::new();
         while !bridge.is_stopped() {
-            line.clear();
-            match reader.read_line(&mut line) {
-                Ok(0) | Err(_) => break,
-                Ok(_) => {}
-            }
-            let Some(payload) = line.trim().strip_prefix("data:") else {
-                // `: heartbeat` comments and event/id/field lines carry no payload here.
-                continue;
+            let payload = match read_sse_frame(&mut reader) {
+                Ok(Some(payload)) => payload,
+                Ok(None) | Err(_) => break,
             };
-            let Ok(frame) = serde_json::from_str::<SseFrame>(payload.trim()) else {
-                continue;
-            };
-            // A frame for another directory is not ours, even from our own server.
-            if let Some(location) = &frame.location {
-                if !same_directory(Path::new(&location.directory), bridge.directory()) {
-                    continue;
-                }
+            match event_from_payload(&payload, &bridge) {
+                Ok(Some(event)) => sink(event),
+                Ok(None) => continue,
+                Err(_) => break,
             }
-            let data = frame.data;
-            sink(AgentEvent {
-                checkout_id: bridge.checkout_id.clone(),
-                session_id: data
-                    .get("sessionID")
-                    .and_then(|value| value.as_str())
-                    .map(str::to_string),
-                kind: agent_event_kind(&frame.raw_type),
-                raw_type: frame.raw_type.clone(),
-                data,
-            });
         }
+        drop(reader);
         bridge.clear_event_socket();
         if !sleep_unless_stopped(&bridge, backoff) {
             return;
@@ -998,26 +1179,55 @@ fn read_credentials(
 
     let (credentials_tx, credentials_rx) = mpsc::channel();
     let output_reader = std::thread::spawn(move || {
-        let mut lines = BufReader::new(stdout).lines();
+        let mut lines = BufReader::with_capacity(MAX_CREDENTIAL_LINE_BYTES, stdout);
+        let mut line = Vec::new();
         let mut reported = false;
         loop {
-            match lines.next() {
-                Some(Ok(line)) if !reported => {
-                    if let Some(password) = line.strip_prefix("server password ") {
-                        reported = true;
-                        let _ = credentials_tx.send(Ok(Some(password.trim().to_string())));
-                    }
-                }
-                Some(Ok(_)) => {}
-                Some(Err(error)) => {
+            match read_bounded_line(&mut lines, &mut line, MAX_CREDENTIAL_LINE_BYTES) {
+                Ok(0) => {
                     if !reported {
-                        let _ = credentials_tx.send(Err(error));
+                        let _ = credentials_tx.send(Ok(None));
                     }
                     break;
                 }
-                None => {
+                Ok(_) => {
+                    let text = match std::str::from_utf8(trim_line_ending(&line)) {
+                        Ok(text) => text,
+                        Err(_) if !reported => {
+                            let _ = credentials_tx.send(Err(io::Error::new(
+                                io::ErrorKind::InvalidData,
+                                "agent server output is not UTF-8",
+                            )));
+                            break;
+                        }
+                        Err(_) => continue,
+                    };
                     if !reported {
-                        let _ = credentials_tx.send(Ok(None));
+                        if let Some(password) = text.strip_prefix("server password ") {
+                            reported = true;
+                            let _ = credentials_tx.send(Ok(Some(password.trim().to_string())));
+                        }
+                    }
+                }
+                Err(error)
+                    if error.kind() == io::ErrorKind::InvalidData
+                        && line.starts_with(b"server password ")
+                        && !reported =>
+                {
+                    let _ = credentials_tx.send(Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        "agent credential line exceeds configured limit",
+                    )));
+                    break;
+                }
+                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                    if discard_line(&mut lines).is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    if !reported {
+                        let _ = credentials_tx.send(Err(error));
                     }
                     break;
                 }
@@ -1149,6 +1359,72 @@ type BridgeLauncher = dyn Fn(&str, &Path) -> Result<Arc<AgentBridge>, BridgeErro
 type ReaderStarter = dyn Fn(&Arc<AgentBridge>, &EventSink) + Send + Sync;
 type BridgeStopper = dyn Fn(&Arc<AgentBridge>, Duration) + Send + Sync;
 type SlotStopper = dyn Fn(Arc<BridgeSlot>, Duration) + Send + Sync;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TrackedTurn {
+    Pending,
+    Started,
+}
+
+#[derive(Default)]
+struct RemovalState {
+    active: HashSet<String>,
+    generations: HashMap<String, u64>,
+}
+
+/// Keep delivery serialized with epoch changes so an old event cannot cross a reopen.
+fn generation_scoped_sink(
+    state: Arc<Mutex<RemovalState>>,
+    checkout_id: String,
+    generation: u64,
+    sink: EventSink,
+) -> EventSink {
+    Arc::new(move |event| {
+        if let Ok(state) = state.lock() {
+            let current = !state.active.contains(&checkout_id)
+                && state
+                    .generations
+                    .get(&checkout_id)
+                    .copied()
+                    .unwrap_or_default()
+                    == generation;
+            if current {
+                sink(event);
+            }
+        }
+    })
+}
+
+pub(crate) struct WorktreeRemovalGuard {
+    state: Arc<Mutex<RemovalState>>,
+    checkout_id: String,
+    committed: bool,
+}
+
+impl WorktreeRemovalGuard {
+    /// Invalidate queued requests atomically before releasing the removal reservation.
+    pub(crate) fn commit(mut self) {
+        if let Ok(mut state) = self.state.lock() {
+            state.active.remove(&self.checkout_id);
+            let generation = state
+                .generations
+                .entry(self.checkout_id.clone())
+                .or_default();
+            *generation = generation.wrapping_add(1);
+        }
+        self.committed = true;
+    }
+}
+
+impl Drop for WorktreeRemovalGuard {
+    fn drop(&mut self) {
+        if !self.committed {
+            if let Ok(mut state) = self.state.lock() {
+                state.active.remove(&self.checkout_id);
+            }
+        }
+    }
+}
 
 enum BridgeState {
     Starting { stop_requested: bool },
@@ -1315,6 +1591,9 @@ impl BridgeSlot {
 /// Owns one server per checkout for the app's lifetime.
 pub struct AgentService {
     bridges: Mutex<HashMap<String, Arc<BridgeSlot>>>,
+    checkout_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    removal_state: Arc<Mutex<RemovalState>>,
+    busy_turns: Arc<Mutex<HashMap<String, HashMap<String, TrackedTurn>>>>,
     sink: Mutex<Option<EventSink>>,
     launcher: Arc<BridgeLauncher>,
     reader_starter: Arc<ReaderStarter>,
@@ -1356,6 +1635,30 @@ impl AgentService {
         )
     }
 
+    #[cfg(test)]
+    pub(crate) fn with_test_server(port: u16) -> Self {
+        Self::with_lifecycle(
+            Arc::new(move |checkout_id, directory| {
+                Ok(Arc::new(AgentBridge {
+                    checkout_id: checkout_id.to_string(),
+                    child: Mutex::new(None),
+                    credentials: ServerCredentials {
+                        port,
+                        password: "test".into(),
+                        directory: directory.to_path_buf(),
+                    },
+                    output_reader: Mutex::new(None),
+                    event_socket: Mutex::new(None),
+                    reader: Mutex::new(None),
+                    stopped: std::sync::atomic::AtomicBool::new(false),
+                }))
+            }),
+            Arc::new(|_, _| {}),
+            Arc::new(|bridge, timeout| bridge.stop_with_timeout(timeout)),
+            Duration::from_millis(50),
+        )
+    }
+
     fn with_lifecycle_and_slot_stopper(
         launcher: Arc<BridgeLauncher>,
         reader_starter: Arc<ReaderStarter>,
@@ -1365,6 +1668,9 @@ impl AgentService {
     ) -> Self {
         Self {
             bridges: Mutex::new(HashMap::new()),
+            checkout_operations: Mutex::new(HashMap::new()),
+            removal_state: Arc::new(Mutex::new(RemovalState::default())),
+            busy_turns: Arc::new(Mutex::new(HashMap::new())),
             sink: Mutex::new(None),
             launcher,
             reader_starter,
@@ -1378,9 +1684,257 @@ impl AgentService {
     /// Sets where normalized events are delivered. Without one the bridges still work,
     /// they just do not report live turn state.
     pub fn set_event_sink(&self, sink: EventSink) {
+        let forward = sink;
+        let busy_turns = Arc::clone(&self.busy_turns);
+        let sink: EventSink = Arc::new(move |event| {
+            if let Some(session_id) = event.session_id.as_deref() {
+                if let Ok(mut turns) = busy_turns.lock() {
+                    let checkout = turns.entry(event.checkout_id.clone()).or_default();
+                    match event.kind {
+                        crate::domain::agent::AgentEventKind::TurnStarted
+                        | crate::domain::agent::AgentEventKind::TurnFinished => {
+                            checkout.insert(session_id.to_string(), TrackedTurn::Started);
+                        }
+                        crate::domain::agent::AgentEventKind::TurnFailed
+                        | crate::domain::agent::AgentEventKind::PermissionAsked => {
+                            checkout.remove(session_id);
+                        }
+                        _ => {}
+                    }
+                    if checkout.is_empty() {
+                        turns.remove(&event.checkout_id);
+                    }
+                }
+            }
+            forward(event);
+        });
         if let Ok(mut slot) = self.sink.lock() {
             *slot = Some(sink);
         }
+    }
+
+    fn checkout_operation_lock(&self, checkout_id: &str) -> Arc<Mutex<()>> {
+        let mut operations = self
+            .checkout_operations
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        Arc::clone(
+            operations
+                .entry(checkout_id.to_string())
+                .or_insert_with(|| Arc::new(Mutex::new(()))),
+        )
+    }
+
+    pub(crate) fn with_checkout_operation<T>(
+        &self,
+        checkout_id: &str,
+        operation: impl FnOnce() -> T,
+    ) -> T {
+        let lock = self.checkout_operation_lock(checkout_id);
+        let _guard = lock.lock().unwrap_or_else(|error| error.into_inner());
+        operation()
+    }
+
+    fn ensure_checkout_not_removing(&self, checkout_id: &str) -> Result<(), BridgeError> {
+        let state = self
+            .removal_state
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent removal state is poisoned".into()))?;
+        if state.active.contains(checkout_id) {
+            return Err(BridgeError::Unavailable(
+                "this checkout is being removed".into(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Snapshot before command path lookup / async dispatch; revalidate after taking its lock.
+    pub(crate) fn checkout_generation(&self, checkout_id: &str) -> Result<u64, BridgeError> {
+        let state = self
+            .removal_state
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent removal state is poisoned".into()))?;
+        if state.active.contains(checkout_id) {
+            return Err(BridgeError::Unavailable(
+                "this checkout is being removed".into(),
+            ));
+        }
+        Ok(state
+            .generations
+            .get(checkout_id)
+            .copied()
+            .unwrap_or_default())
+    }
+
+    /// Read the current epoch even while a removal reservation is held by its owner.
+    pub(crate) fn checkout_epoch(&self, checkout_id: &str) -> Result<u64, BridgeError> {
+        let state = self
+            .removal_state
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent removal state is poisoned".into()))?;
+        Ok(state
+            .generations
+            .get(checkout_id)
+            .copied()
+            .unwrap_or_default())
+    }
+
+    /// Revalidate the request epoch and current DB registration under the checkout operation lock.
+    pub(crate) fn with_checkout_generation<T>(
+        &self,
+        checkout_id: &str,
+        generation: u64,
+        is_registered: impl Fn() -> bool,
+        operation: impl FnOnce() -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        self.with_checkout_operation(checkout_id, || {
+            if self.checkout_generation(checkout_id)? != generation {
+                return Err(BridgeError::Unavailable(
+                    "the checkout changed while the agent request was queued; retry it".into(),
+                ));
+            }
+            if !is_registered() {
+                return Err(BridgeError::Unavailable(
+                    "this checkout is no longer registered".into(),
+                ));
+            }
+            operation()
+        })
+    }
+
+    pub(crate) fn reserve_worktree_removal(
+        &self,
+        checkout_id: &str,
+    ) -> Result<WorktreeRemovalGuard, BridgeError> {
+        {
+            let mut state = self
+                .removal_state
+                .lock()
+                .map_err(|_| BridgeError::Failed("the agent removal state is poisoned".into()))?;
+            if !state.active.insert(checkout_id.to_string()) {
+                return Err(BridgeError::Unavailable(
+                    "this checkout is already being removed".into(),
+                ));
+            }
+        }
+        let removal = WorktreeRemovalGuard {
+            state: Arc::clone(&self.removal_state),
+            checkout_id: checkout_id.to_string(),
+            committed: false,
+        };
+        let slot = self
+            .bridges
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?
+            .get(checkout_id)
+            .cloned();
+        if let Some(slot) = slot {
+            let state = slot
+                .state
+                .lock()
+                .map_err(|_| BridgeError::Failed("the agent bridge state is poisoned".into()))?;
+            if matches!(
+                &*state,
+                BridgeState::Starting { .. } | BridgeState::Stopping | BridgeState::Stopped
+            ) {
+                return Err(BridgeError::Unavailable(
+                    "the agent bridge is starting or stopping; stop it and retry worktree removal"
+                        .into(),
+                ));
+            }
+        }
+        Ok(removal)
+    }
+
+    /// Busy sessions observed by the real checkout bridge; does not start a bridge.
+    pub(crate) fn active_worktree_agent_sessions(
+        &self,
+        checkout_id: &str,
+    ) -> Result<Vec<AgentSession>, BridgeError> {
+        let slot = self
+            .bridges
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?
+            .get(checkout_id)
+            .cloned();
+        let Some(slot) = slot else {
+            return Ok(Vec::new());
+        };
+        let bridge = {
+            let state = slot
+                .state
+                .lock()
+                .map_err(|_| BridgeError::Failed("the agent bridge state is poisoned".into()))?;
+            match &*state {
+                BridgeState::Ready(bridge) => Arc::clone(bridge),
+                BridgeState::Failed(_) => return Ok(Vec::new()),
+                BridgeState::Starting { .. } | BridgeState::Stopping | BridgeState::Stopped => {
+                    return Err(BridgeError::Unavailable(
+                        "the agent bridge is starting or stopping; retry worktree removal".into(),
+                    ));
+                }
+            }
+        };
+        let listed: Vec<ApiSession> =
+            bridge.get_json_with_timeout("/api/session", Duration::from_secs(5))?;
+        let turns = self
+            .busy_turns
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent activity state is poisoned".into()))?;
+        let mut tracked = turns.get(checkout_id).cloned().unwrap_or_default();
+        drop(turns);
+        let mut seen = HashSet::new();
+        let mut idle = HashSet::new();
+        let mut active = Vec::new();
+        for raw in listed {
+            if raw.check_scope(bridge.directory()).is_err() {
+                continue;
+            }
+            seen.insert(raw.id.clone());
+            match tracked.get(&raw.id) {
+                Some(TrackedTurn::Pending) => active.push(bridge.to_agent_session(&raw)),
+                Some(TrackedTurn::Started) if raw.time.idle.is_none() => {
+                    active.push(bridge.to_agent_session(&raw));
+                }
+                Some(TrackedTurn::Started) => {
+                    idle.insert(raw.id.clone());
+                }
+                None => {}
+            }
+        }
+        for (session_id, state) in &tracked {
+            if *state == TrackedTurn::Pending && !seen.contains(session_id) {
+                active.push(AgentSession {
+                    id: session_id.clone(),
+                    checkout_id: checkout_id.to_string(),
+                    title: "OpenCode prompt status is unknown".into(),
+                    idle_at: None,
+                    blocked_on_permission: false,
+                    agent: None,
+                    model: None,
+                    parent_id: None,
+                    outcome: None,
+                    created_at: 0,
+                    updated_at: 0,
+                });
+            }
+        }
+        tracked.retain(|session_id, state| match state {
+            TrackedTurn::Pending => true,
+            TrackedTurn::Started => seen.contains(session_id) && !idle.contains(session_id),
+        });
+        if let Ok(mut turns) = self.busy_turns.lock() {
+            if tracked.is_empty() {
+                turns.remove(checkout_id);
+            } else {
+                turns.insert(checkout_id.to_string(), tracked);
+            }
+        }
+        Ok(active)
+    }
+
+    pub(crate) fn stop_for_worktree_removal(&self, checkout_id: &str) {
+        self.stop_locked(checkout_id);
     }
 
     /// Returns the checkout's bridge, starting its server on first use.
@@ -1391,6 +1945,20 @@ impl AgentService {
     ) -> Result<Arc<AgentBridge>, BridgeError> {
         // Reserve this checkout under the global lock, then boot and create its reader only
         // after releasing it. Stops likewise remove slots before killing or joining anything.
+        let removal_state = self
+            .removal_state
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent removal state is poisoned".into()))?;
+        if removal_state.active.contains(checkout_id) {
+            return Err(BridgeError::Unavailable(
+                "this checkout is being removed".into(),
+            ));
+        }
+        let generation = removal_state
+            .generations
+            .get(checkout_id)
+            .copied()
+            .unwrap_or_default();
         let (slot, is_starter) = {
             let mut bridges = self
                 .bridges
@@ -1405,6 +1973,7 @@ impl AgentService {
                 }
             }
         };
+        drop(removal_state);
 
         if !is_starter {
             return slot.wait_with_timeout(self.startup_wait);
@@ -1414,7 +1983,15 @@ impl AgentService {
             .sink
             .lock()
             .ok()
-            .and_then(|slot| slot.as_ref().map(Arc::clone));
+            .and_then(|slot| slot.as_ref().map(Arc::clone))
+            .map(|sink| {
+                generation_scoped_sink(
+                    Arc::clone(&self.removal_state),
+                    checkout_id.to_string(),
+                    generation,
+                    sink,
+                )
+            });
         let started = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             (self.launcher)(checkout_id, directory)
         }))
@@ -1557,14 +2134,44 @@ impl AgentService {
         directory: &Path,
         title: &str,
     ) -> Result<AgentSession, BridgeError> {
+        self.with_checkout_operation(checkout_id, || {
+            self.create_session_locked(checkout_id, directory, title)
+        })
+    }
+
+    pub(crate) fn create_session_at_generation(
+        &self,
+        checkout_id: &str,
+        directory: &Path,
+        title: &str,
+        generation: u64,
+        is_registered: impl Fn() -> bool,
+    ) -> Result<AgentSession, BridgeError> {
+        self.with_checkout_generation(checkout_id, generation, is_registered, || {
+            self.create_session_locked(checkout_id, directory, title)
+        })
+    }
+
+    fn create_session_locked(
+        &self,
+        checkout_id: &str,
+        directory: &Path,
+        title: &str,
+    ) -> Result<AgentSession, BridgeError> {
+        self.ensure_checkout_not_removing(checkout_id)?;
         let bridge = self.bridge(checkout_id, directory)?;
+        if bridge.is_stopped() {
+            return Err(BridgeError::Unavailable(
+                "the agent bridge was stopped".into(),
+            ));
+        }
         let created: ApiSession =
             bridge.post_json("/api/session", &serde_json::json!({ "title": title }))?;
         created.check_scope(directory)?;
         Ok(bridge.to_agent_session(&created))
     }
 
-    /// Sends the review as one message. v2.0.18 wants `{"text": …}` on this route.
+    /// Sends the review as one message. v2.0.18 wants {"text": …} on this route.
     pub fn prompt(
         &self,
         checkout_id: &str,
@@ -1572,6 +2179,28 @@ impl AgentService {
         session_id: &str,
         text: &str,
     ) -> Result<AgentSession, BridgeError> {
+        let text = Self::validate_prompt(text)?;
+        self.with_checkout_operation(checkout_id, || {
+            self.prompt_locked(checkout_id, directory, session_id, text)
+        })
+    }
+
+    pub(crate) fn prompt_at_generation(
+        &self,
+        checkout_id: &str,
+        directory: &Path,
+        session_id: &str,
+        text: &str,
+        generation: u64,
+        is_registered: impl Fn() -> bool,
+    ) -> Result<AgentSession, BridgeError> {
+        let text = Self::validate_prompt(text)?;
+        self.with_checkout_generation(checkout_id, generation, is_registered, || {
+            self.prompt_locked(checkout_id, directory, session_id, text)
+        })
+    }
+
+    fn validate_prompt(text: &str) -> Result<&str, BridgeError> {
         let text = text.trim();
         if text.is_empty() {
             return Err(BridgeError::Failed("the review is empty".into()));
@@ -1581,9 +2210,28 @@ impl AgentService {
                 "the review is too large to send to the agent in one message".into(),
             ));
         }
+        Ok(text)
+    }
+
+    fn prompt_locked(
+        &self,
+        checkout_id: &str,
+        directory: &Path,
+        session_id: &str,
+        text: &str,
+    ) -> Result<AgentSession, BridgeError> {
+        self.ensure_checkout_not_removing(checkout_id)?;
         let bridge = self.bridge(checkout_id, directory)?;
+        if bridge.is_stopped() {
+            return Err(BridgeError::Unavailable(
+                "the agent bridge was stopped".into(),
+            ));
+        }
         // Resolve first so a foreign id fails before anything is sent.
         bridge.session(session_id)?;
+        self.track_prompt_pending(checkout_id, session_id);
+        // A transport error can arrive after OpenCode accepted the prompt, so retain the
+        // pending activity marker until a turn ends or the bridge is explicitly stopped.
         let _: serde_json::Value = bridge.post_json(
             &format!("/api/session/{session_id}/prompt"),
             &serde_json::json!({ "text": text }),
@@ -1609,8 +2257,33 @@ impl AgentService {
         Ok(bridge.session_transcript(session_id)?.contains(marker))
     }
 
+    pub(crate) fn session_mentions_at_generation(
+        &self,
+        checkout_id: &str,
+        directory: &Path,
+        session_id: &str,
+        marker: &str,
+        generation: u64,
+        is_registered: impl Fn() -> bool,
+    ) -> Result<bool, BridgeError> {
+        self.with_checkout_generation(checkout_id, generation, is_registered, || {
+            self.session_mentions(checkout_id, directory, session_id, marker)
+        })
+    }
+
     /// Stops the checkout's server. Called when the app shuts down.
     pub fn stop(&self, checkout_id: &str) {
+        self.with_checkout_operation(checkout_id, || self.stop_locked(checkout_id));
+    }
+
+    fn stop_locked(&self, checkout_id: &str) {
+        if let Ok(mut state) = self.removal_state.lock() {
+            let generation = state
+                .generations
+                .entry(checkout_id.to_string())
+                .or_default();
+            *generation = generation.wrapping_add(1);
+        }
         let slot = self
             .bridges
             .lock()
@@ -1618,6 +2291,30 @@ impl AgentService {
             .and_then(|mut bridges| bridges.remove(checkout_id));
         if let Some(slot) = slot {
             slot.stop(self.stopper.as_ref(), self.startup_stop_wait);
+        }
+        if let Ok(mut turns) = self.busy_turns.lock() {
+            turns.remove(checkout_id);
+        }
+    }
+
+    pub(crate) fn stop_at_generation(
+        &self,
+        checkout_id: &str,
+        generation: u64,
+        is_registered: impl Fn() -> bool,
+    ) -> Result<(), BridgeError> {
+        self.with_checkout_generation(checkout_id, generation, is_registered, || {
+            self.stop_locked(checkout_id);
+            Ok(())
+        })
+    }
+
+    fn track_prompt_pending(&self, checkout_id: &str, session_id: &str) {
+        if let Ok(mut turns) = self.busy_turns.lock() {
+            turns
+                .entry(checkout_id.to_string())
+                .or_default()
+                .insert(session_id.to_string(), TrackedTurn::Pending);
         }
     }
 
@@ -1658,7 +2355,7 @@ pub fn map_error(error: BridgeError) -> IpcError {
 mod tests {
     use std::{
         collections::HashMap,
-        io::{self, Read, Write},
+        io::{self, BufRead, BufReader, Cursor, Read, Write},
         net::{Shutdown, TcpListener},
         panic::{catch_unwind, AssertUnwindSafe},
         path::{Path, PathBuf},
@@ -1677,13 +2374,420 @@ mod tests {
     };
 
     use super::{
-        agent_program, basic_credentials, event_stream, finish_credentials, first_available_port,
-        free_port_with, join_reader, no_startup_child_tracking, port_candidates, read_credentials,
-        remove_slot_if_current, same_directory, status_detail, terminate_child,
-        validate_session_id, AgentBridge, AgentEvent, AgentService, BridgeError, BridgeState,
-        BridgeStopper, ChildGuard, EventSink, PortHooks, ServerCredentials, StartupChild,
-        EARLY_EOF_MESSAGE, MAX_PROMPT_BYTES, MAX_START_ATTEMPTS, PORT_RANGE_LEN, PORT_RANGE_START,
+        agent_program, basic_credentials, discard_line, event_from_payload, event_stream,
+        finish_credentials, first_available_port, free_port_with, generation_scoped_sink,
+        join_reader, no_startup_child_tracking, port_candidates, read_bounded_line,
+        read_credentials, read_sse_frame, remove_slot_if_current, same_directory, status_detail,
+        terminate_child, validate_session_id, AgentBridge, AgentEvent, AgentService, BridgeError,
+        BridgeState, BridgeStopper, ChildGuard, EventSink, PortHooks, RemovalState,
+        ServerCredentials, StartupChild, EARLY_EOF_MESSAGE, MAX_CREDENTIAL_LINE_BYTES,
+        MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES,
+        MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES, MAX_START_ATTEMPTS, PORT_RANGE_LEN,
+        PORT_RANGE_START,
     };
+
+    fn test_event_bridge(directory: &Path, port: u16) -> AgentBridge {
+        AgentBridge {
+            checkout_id: "test-checkout".into(),
+            child: Mutex::new(None),
+            credentials: ServerCredentials {
+                port,
+                password: "test-secret".into(),
+                directory: directory.to_path_buf(),
+            },
+            output_reader: Mutex::new(None),
+            event_socket: Mutex::new(None),
+            reader: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn mock_event_response(
+        directory: &Path,
+        response: Vec<u8>,
+    ) -> (AgentBridge, std::thread::JoinHandle<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock server should bind");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            if let Ok((mut stream, _)) = listener.accept() {
+                let mut request = Vec::new();
+                let mut buffer = [0; 512];
+                while request.len() < 2048 && !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                    let Ok(read) = stream.read(&mut buffer) else {
+                        return;
+                    };
+                    if read == 0 {
+                        return;
+                    }
+                    request.extend_from_slice(&buffer[..read]);
+                }
+                let _ = stream.write_all(&response);
+            }
+        });
+        (test_event_bridge(directory, port), server)
+    }
+
+    type CapturedJsonRequest = (String, String, Vec<u8>);
+
+    fn mock_json_responses(
+        responses: Vec<serde_json::Value>,
+    ) -> (u16, std::thread::JoinHandle<Vec<CapturedJsonRequest>>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock server should bind");
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            responses
+                .into_iter()
+                .map(|response| {
+                    let (mut stream, _) = listener.accept().expect("request should connect");
+                    let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                    let mut request_line = String::new();
+                    reader
+                        .read_line(&mut request_line)
+                        .expect("request line should be readable");
+                    let mut authorization = String::new();
+                    let mut content_length = 0;
+                    loop {
+                        let mut line = String::new();
+                        reader.read_line(&mut line).expect("headers should be readable");
+                        if line == "\r\n" || line.is_empty() {
+                            break;
+                        }
+                        if let Some((name, value)) = line.trim_end().split_once(':') {
+                            if name.eq_ignore_ascii_case("authorization") {
+                                authorization = value.trim().to_string();
+                            } else if name.eq_ignore_ascii_case("content-length") {
+                                content_length = value.trim().parse().expect("valid body length");
+                            }
+                        }
+                    }
+                    let mut body = vec![0; content_length];
+                    reader.read_exact(&mut body).expect("request body should be readable");
+                    let response = serde_json::to_vec(&response).expect("response should encode");
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        response.len()
+                    )
+                    .expect("response headers should be writable");
+                    stream
+                        .write_all(&response)
+                        .expect("response body should be writable");
+                    (request_line.trim().to_string(), authorization, body)
+                })
+                .collect()
+        });
+        (port, server)
+    }
+
+    fn assert_event_response_rejected(directory: &Path, response: Vec<u8>) {
+        let (bridge, server) = mock_event_response(directory, response);
+        let error = match event_stream(&bridge) {
+            Err(error) => error,
+            Ok(reader) => {
+                drop(reader);
+                panic!("malformed event response should be rejected");
+            }
+        };
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        bridge.clear_event_socket();
+        server.join().expect("mock server should finish");
+    }
+
+    #[test]
+    fn bounded_line_accepts_exact_limit_at_eof_and_rejects_the_next_byte() {
+        let limit = 16;
+        let mut exact = std::io::BufReader::with_capacity(8, Cursor::new(vec![b'x'; limit]));
+        let mut line = Vec::new();
+        assert_eq!(
+            read_bounded_line(&mut exact, &mut line, limit).unwrap(),
+            limit
+        );
+        assert_eq!(line.len(), limit);
+        assert_eq!(read_bounded_line(&mut exact, &mut line, limit).unwrap(), 0);
+
+        let mut over = std::io::BufReader::with_capacity(8, Cursor::new(vec![b'x'; limit + 1]));
+        let error = read_bounded_line(&mut over, &mut line, limit)
+            .expect_err("an additional byte must exceed the limit");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(line.len(), limit);
+        assert_eq!(read_bounded_line(&mut over, &mut line, limit).unwrap(), 1);
+        assert_eq!(line.len(), 1);
+    }
+
+    #[test]
+    fn oversized_stdout_line_is_bounded_and_its_tail_is_consumed() {
+        let input = vec![b'x'; MAX_CREDENTIAL_LINE_BYTES * 2 + 7];
+        let mut reader = std::io::BufReader::with_capacity(1024, Cursor::new(input));
+        let mut line = Vec::new();
+
+        let error = read_bounded_line(&mut reader, &mut line, MAX_CREDENTIAL_LINE_BYTES)
+            .expect_err("an oversized credential output line must be rejected");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+        assert_eq!(line.len(), MAX_CREDENTIAL_LINE_BYTES);
+
+        discard_line(&mut reader).expect("the oversized line tail should be drained");
+        assert_eq!(
+            read_bounded_line(&mut reader, &mut line, MAX_CREDENTIAL_LINE_BYTES).unwrap(),
+            0
+        );
+    }
+
+    #[test]
+    fn event_stream_bounds_header_lines_and_aggregate_header_bytes() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut long_line = b"HTTP/1.1 200 OK\r\nX: ".to_vec();
+        long_line.extend(vec![b'a'; MAX_EVENT_HEADER_LINE_BYTES]);
+        long_line.extend_from_slice(b"\r\n\r\n");
+        assert_event_response_rejected(directory.path(), long_line);
+
+        let mut many_lines = b"HTTP/1.1 200 OK\r\n".to_vec();
+        for _ in 0..=(MAX_EVENT_HEADERS_BYTES / 6) {
+            many_lines.extend_from_slice(b"X: a\r\n");
+        }
+        many_lines.extend_from_slice(b"\r\n");
+        assert_event_response_rejected(directory.path(), many_lines);
+
+        assert_event_response_rejected(
+            directory.path(),
+            b"HTTP/1.1 200 OK\r\nMalformed\r\n\r\n".to_vec(),
+        );
+    }
+
+    #[test]
+    fn sse_frames_bound_single_lines_multiline_data_and_line_count() {
+        let mut oversized_line = b"data: ".to_vec();
+        oversized_line.extend(vec![b'x'; MAX_SSE_FRAME_BYTES]);
+        oversized_line.extend_from_slice(b"\n\n");
+        let error = read_sse_frame(&mut Cursor::new(oversized_line))
+            .expect_err("an oversized data line must close the stream");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+        let mut oversized_frame = Vec::new();
+        for _ in 0..2 {
+            oversized_frame.extend_from_slice(b"data: ");
+            oversized_frame.extend(vec![b'x'; MAX_SSE_FRAME_BYTES / 2]);
+            oversized_frame.push(b'\n');
+        }
+        let error = read_sse_frame(&mut Cursor::new(oversized_frame))
+            .expect_err("the aggregate multiline frame must stay bounded");
+        assert_eq!(error.kind(), io::ErrorKind::InvalidData);
+
+        let mut exact_bytes = b"data: {}\n".to_vec();
+        exact_bytes.resize(MAX_SSE_FRAME_BYTES, b':');
+        assert_eq!(
+            read_sse_frame(&mut Cursor::new(exact_bytes.clone()))
+                .unwrap()
+                .as_deref(),
+            Some(&b"{}"[..])
+        );
+        exact_bytes.push(b'x');
+        assert_eq!(
+            read_sse_frame(&mut Cursor::new(exact_bytes))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+
+        let exact_lines = [
+            b"data: {}\n".as_slice(),
+            &b":\n".repeat(MAX_SSE_FRAME_LINES - 1),
+        ]
+        .concat();
+        assert_eq!(
+            read_sse_frame(&mut Cursor::new(exact_lines.clone()))
+                .unwrap()
+                .as_deref(),
+            Some(&b"{}"[..])
+        );
+        let mut extra_line = exact_lines;
+        extra_line.extend_from_slice(b":\n");
+        assert_eq!(
+            read_sse_frame(&mut Cursor::new(extra_line))
+                .unwrap_err()
+                .kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn sse_frames_accumulate_crlf_multiline_data_and_dispatch_at_eof() {
+        let mut reader = Cursor::new(
+            ": heartbeat\r\ndata: {\"type\":\"session.idle\",\r\ndata: \"data\":{\"text\":\"café\"}}\r\n\r\n"
+                .as_bytes()
+                .to_vec(),
+        );
+        let payload = read_sse_frame(&mut reader)
+            .expect("the CRLF multiline frame should parse")
+            .expect("the data lines form one frame");
+        let parsed: serde_json::Value = serde_json::from_slice(&payload).unwrap();
+        assert_eq!(parsed["data"]["text"], "café");
+        assert!(read_sse_frame(&mut reader).unwrap().is_none());
+
+        let mut eof = Cursor::new(b"data: {\"type\":\"done\"}\r\n".to_vec());
+        assert_eq!(
+            read_sse_frame(&mut eof).unwrap().as_deref(),
+            Some(&b"{\"type\":\"done\"}"[..])
+        );
+        assert!(read_sse_frame(&mut eof).unwrap().is_none());
+
+        let mut invalid_utf8 = Cursor::new(b"data: \xff\n\n".to_vec());
+        assert_eq!(
+            read_sse_frame(&mut invalid_utf8).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn sse_payloads_reject_malformed_json_and_foreign_scopes() {
+        let local = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let bridge = test_event_bridge(local.path(), 0);
+        let location = foreign.path().to_string_lossy();
+        let payload = serde_json::json!({
+            "type": "session.idle",
+            "location": {"directory": location},
+            "data": {"sessionID": "ses_foreign"}
+        })
+        .to_string();
+        assert!(event_from_payload(payload.as_bytes(), &bridge)
+            .unwrap()
+            .is_none());
+
+        let location = local.path().to_string_lossy();
+        let payload = serde_json::json!({
+            "type": "session.idle",
+            "location": {"directory": location},
+            "data": {"sessionID": "ses_local"}
+        })
+        .to_string();
+        let event = event_from_payload(payload.as_bytes(), &bridge)
+            .unwrap()
+            .expect("a local event should pass the scope check");
+        assert_eq!(event.checkout_id, "test-checkout");
+        assert_eq!(event.session_id.as_deref(), Some("ses_local"));
+        assert_eq!(
+            event_from_payload(b"not-json", &bridge).unwrap_err().kind(),
+            io::ErrorKind::InvalidData
+        );
+    }
+
+    #[test]
+    fn owned_loopback_api_auth_scopes_catalog_and_prompt_contract_to_checkout() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_directory = first.path().to_string_lossy().into_owned();
+        let second_directory = second.path().to_string_lossy().into_owned();
+        let owned_session = serde_json::json!({
+            "id": "ses_owned",
+            "title": "Owned session",
+            "location": {"directory": first_directory},
+            "time": {"created": 1, "updated": 2, "idle": 3}
+        });
+        let foreign_session = serde_json::json!({
+            "id": "ses_foreign",
+            "title": "Foreign session",
+            "location": {"directory": second_directory}
+        });
+        let (first_port, first_server) = mock_json_responses(vec![
+            serde_json::json!({
+                "data": [{"id": "build", "name": "Build", "mode": "primary", "color": "#123456"}],
+                "location": {"directory": first_directory}
+            }),
+            serde_json::json!({"data": [owned_session.clone(), foreign_session]}),
+            serde_json::json!({"data": owned_session.clone()}),
+            serde_json::json!({"data": {"accepted": true}}),
+            serde_json::json!({"data": owned_session.clone()}),
+        ]);
+        let (second_port, second_server) = mock_json_responses(vec![serde_json::json!({
+            "data": {
+                "id": "ses_owned",
+                "title": "Wrong checkout",
+                "location": {"directory": first_directory}
+            }
+        })]);
+        let agents = AgentService::with_test_server(first_port);
+        let other_agents = AgentService::with_test_server(second_port);
+
+        let catalog = agents.agents("first", first.path()).unwrap();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(catalog[0].id, "build");
+        let sessions = agents.sessions("first", first.path()).unwrap();
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(sessions[0].id, "ses_owned");
+        let prompted = agents
+            .prompt("first", first.path(), "ses_owned", "  send one prompt  ")
+            .unwrap();
+        assert_eq!(prompted.id, "ses_owned");
+        assert_eq!(prompted.idle_at, Some(3));
+        assert!(matches!(
+            other_agents.owned_session("second", second.path(), "ses_owned"),
+            Err(BridgeError::Foreign(_))
+        ));
+
+        let first_requests = first_server
+            .join()
+            .expect("first mock server should finish");
+        assert_eq!(first_requests.len(), 5);
+        assert_eq!(
+            first_requests
+                .iter()
+                .map(|request| request.0.as_str())
+                .collect::<Vec<_>>(),
+            [
+                "GET /api/agent HTTP/1.1",
+                "GET /api/session HTTP/1.1",
+                "GET /api/session/ses_owned HTTP/1.1",
+                "POST /api/session/ses_owned/prompt HTTP/1.1",
+                "GET /api/session/ses_owned HTTP/1.1",
+            ]
+        );
+        let first_authorization = format!("Basic {}", basic_credentials("test"));
+        assert!(first_requests
+            .iter()
+            .all(|request| request.1 == first_authorization));
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&first_requests[3].2).unwrap(),
+            serde_json::json!({"text": "send one prompt"})
+        );
+
+        let second_requests = second_server
+            .join()
+            .expect("second mock server should finish");
+        assert_eq!(second_requests.len(), 1);
+        assert_eq!(second_requests[0].0, "GET /api/session/ses_owned HTTP/1.1");
+        assert_eq!(second_requests[0].1, first_authorization);
+    }
+
+    #[test]
+    fn old_bridge_events_are_dropped_after_checkout_reopens() {
+        let state = Arc::new(Mutex::new(RemovalState::default()));
+        let delivered = Arc::new(AtomicUsize::new(0));
+        let forward = Arc::clone(&delivered);
+        let sink: EventSink = Arc::new(move |_| {
+            forward.fetch_add(1, Ordering::SeqCst);
+        });
+        let old =
+            generation_scoped_sink(Arc::clone(&state), "checkout".into(), 0, Arc::clone(&sink));
+        let event = || AgentEvent {
+            checkout_id: "checkout".into(),
+            session_id: None,
+            kind: crate::domain::agent::AgentEventKind::Unknown,
+            raw_type: "test".into(),
+            data: serde_json::json!({}),
+        };
+
+        old(event());
+        assert_eq!(delivered.load(Ordering::SeqCst), 1);
+        state
+            .lock()
+            .unwrap()
+            .generations
+            .insert("checkout".into(), 1);
+        old(event());
+        assert_eq!(delivered.load(Ordering::SeqCst), 1);
+        generation_scoped_sink(state, "checkout".into(), 1, sink)(event());
+        assert_eq!(delivered.load(Ordering::SeqCst), 2);
+    }
 
     fn required_live_directory(name: &str) -> PathBuf {
         let directory = std::env::var(name)
@@ -2576,6 +3680,98 @@ mod tests {
     }
 
     #[test]
+    fn oversized_stdout_log_is_skipped_before_the_password_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = format!(
+            "printf '%{}s\n' x; printf 'server password fixture-secret\n'; exec tail -f /dev/null",
+            MAX_CREDENTIAL_LINE_BYTES + 1
+        );
+        let mut child = fixture_child(directory.path(), &script);
+        let (credentials, output_reader) = read_credentials(
+            &mut child,
+            directory.path(),
+            1,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("an oversized unrelated log line should be discarded");
+
+        assert_eq!(credentials.password, "fixture-secret");
+        terminate_child(child, Instant::now() + Duration::from_secs(1));
+        join_reader(output_reader, Instant::now() + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn exact_limit_password_line_at_eof_is_accepted() {
+        let directory = tempfile::tempdir().unwrap();
+        let password_width = MAX_CREDENTIAL_LINE_BYTES - "server password ".len();
+        let script = format!("printf 'server password '; printf '%{}s' x", password_width);
+        let mut child = fixture_child(directory.path(), &script);
+        let (credentials, output_reader) = read_credentials(
+            &mut child,
+            directory.path(),
+            1,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect("an EOF-terminated credential at the exact byte limit is valid");
+
+        assert_eq!(credentials.password, "x");
+        terminate_child(child, Instant::now() + Duration::from_secs(1));
+        join_reader(output_reader, Instant::now() + Duration::from_secs(1));
+    }
+
+    #[test]
+    fn oversized_password_line_is_rejected_without_exposing_its_contents() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = format!(
+            "printf 'server password %{}s\n' x; exec tail -f /dev/null",
+            MAX_CREDENTIAL_LINE_BYTES
+        );
+        let mut child = fixture_child(directory.path(), &script);
+        let error = read_credentials(
+            &mut child,
+            directory.path(),
+            1,
+            Instant::now() + Duration::from_secs(1),
+        )
+        .expect_err("an oversized password line must fail startup");
+
+        assert!(error_message(&error).contains("credential line exceeds configured limit"));
+        let kill_deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            if child.try_wait().unwrap().is_some() {
+                break;
+            }
+            assert!(Instant::now() < kill_deadline, "child should be stopped");
+            sleep(Duration::from_millis(5));
+        }
+    }
+
+    #[test]
+    fn continuous_oversized_stdout_cannot_extend_the_startup_deadline() {
+        let directory = tempfile::tempdir().unwrap();
+        let script = format!(
+            "while :; do printf '%{}s' x; done",
+            MAX_CREDENTIAL_LINE_BYTES + 1
+        );
+        let mut child = fixture_child(directory.path(), &script);
+        let started = Instant::now();
+        let error = read_credentials(
+            &mut child,
+            directory.path(),
+            1,
+            started + Duration::from_millis(50),
+        )
+        .expect_err("a child streaming an unterminated log line must time out");
+
+        assert!(error_message(&error).contains("timed out"));
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(
+            child.try_wait().unwrap().is_some(),
+            "child should be stopped"
+        );
+    }
+
+    #[test]
     fn credential_reader_drains_stdout_after_startup() {
         let directory = tempfile::tempdir().unwrap();
         let mut child = fixture_child(
@@ -2721,10 +3917,69 @@ mod tests {
         let result = reader.read_to_end(&mut body);
 
         assert!(started.elapsed() < Duration::from_secs(1));
-        assert!(result.is_ok() || result.unwrap_err().kind() == io::ErrorKind::ConnectionReset);
+        assert_eq!(result.unwrap_err().kind(), io::ErrorKind::UnexpectedEof);
         assert!(body.is_empty());
         bridge.clear_event_socket();
         server.join().unwrap();
+    }
+
+    #[test]
+    fn truncated_chunk_cannot_dispatch_a_complete_json_line() {
+        let directory = tempfile::tempdir().unwrap();
+        let body =
+            b"data: {\"type\":\"session.idle\",\"data\":{\"sessionID\":\"ses_truncated\"}}\n";
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        response.extend_from_slice(format!("{:x}\r\n", body.len() + 8).as_bytes());
+        response.extend_from_slice(body);
+        let (bridge, server) = mock_event_response(directory.path(), response);
+        let mut reader =
+            std::io::BufReader::new(event_stream(&bridge).expect("mock stream should connect"));
+
+        let error = read_sse_frame(&mut reader)
+            .expect_err("EOF inside a declared chunk must not dispatch the pending frame");
+
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        bridge.clear_event_socket();
+        server.join().expect("mock server should finish");
+    }
+
+    #[test]
+    fn truncated_chunk_at_exact_frame_byte_limit_is_not_accepted_as_eof() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut body = b"data: {}\n".to_vec();
+        body.resize(MAX_SSE_FRAME_BYTES, b':');
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        response.extend_from_slice(format!("{:x}\r\n", body.len() + 1).as_bytes());
+        response.extend_from_slice(&body);
+        let (bridge, server) = mock_event_response(directory.path(), response);
+        let mut reader =
+            std::io::BufReader::new(event_stream(&bridge).expect("mock stream should connect"));
+
+        let error = read_sse_frame(&mut reader)
+            .expect_err("truncated chunk EOF must not finalize an exact-cap frame");
+
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        bridge.clear_event_socket();
+        server.join().expect("mock server should finish");
+    }
+
+    #[test]
+    fn truncated_chunk_terminator_cannot_dispatch_a_complete_frame() {
+        let directory = tempfile::tempdir().unwrap();
+        let body = b"data: {\"type\":\"session.idle\",\"data\":{}}\n\n";
+        let mut response = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n".to_vec();
+        response.extend_from_slice(format!("{:x}\r\n", body.len()).as_bytes());
+        response.extend_from_slice(body);
+        let (bridge, server) = mock_event_response(directory.path(), response);
+        let mut reader =
+            std::io::BufReader::new(event_stream(&bridge).expect("mock stream should connect"));
+
+        let error = read_sse_frame(&mut reader)
+            .expect_err("EOF before the chunk CRLF must not dispatch its event");
+
+        assert_eq!(error.kind(), io::ErrorKind::UnexpectedEof);
+        bridge.clear_event_socket();
+        server.join().expect("mock server should finish");
     }
 
     fn error_message(error: &BridgeError) -> &str {

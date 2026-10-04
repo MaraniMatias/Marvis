@@ -4,7 +4,7 @@ import { computed, ref, watch } from "vue";
 import type { Checkout, Repo, WorkspaceState } from "../domain/workspace";
 import type { WorktreeRemovalInfo } from "../domain/worktree";
 import { isIpcError } from "../domain/ipc";
-import { trapDialogTab } from "../lib/dialog-focus";
+import { handleDialogKeydown } from "../lib/dialog-focus";
 import {
   archiveCheckout,
   createWorktree,
@@ -186,13 +186,7 @@ function messageOf(cause: unknown): string {
 }
 
 function onDialogKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape") {
-    event.stopPropagation();
-    event.preventDefault();
-    emit("close");
-    return;
-  }
-  trapDialogTab(event, event.currentTarget as HTMLElement);
+  handleDialogKeydown(event, () => emit("close"));
 }
 </script>
 

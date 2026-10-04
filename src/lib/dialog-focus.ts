@@ -25,3 +25,14 @@ export function trapDialogTab(event: KeyboardEvent, dialog: HTMLElement | null) 
     first.focus();
   }
 }
+
+/** Close a modal on Escape and keep keyboard focus inside it on Tab. */
+export function handleDialogKeydown(event: KeyboardEvent, onEscape: () => void) {
+  if (event.key === "Escape") {
+    event.stopPropagation();
+    event.preventDefault();
+    onEscape();
+    return;
+  }
+  trapDialogTab(event, event.currentTarget as HTMLElement);
+}

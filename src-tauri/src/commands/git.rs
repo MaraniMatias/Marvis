@@ -111,6 +111,8 @@ pub async fn git_mark_viewed(
 #[tauri::command]
 pub async fn git_watch_repo(
     repo_id: String,
+    registration_id: String,
+    expected_checkout_ids: Vec<String>,
     app: AppHandle,
     database: State<'_, Database>,
     watchers: State<'_, std::sync::Arc<GitWatcherManager>>,
@@ -119,7 +121,13 @@ pub async fn git_watch_repo(
     let watchers = watchers.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         let plan = git::watch_plan(&database, &repo_id)?;
-        watchers.watch(app, repo_id, plan)
+        if !git::watch_plan_matches_request(&plan, &expected_checkout_ids) {
+            return Err(IpcError::new(
+                IpcErrorCode::OperationFailed,
+                "repository checkout plan changed while starting its watcher",
+            ));
+        }
+        watchers.watch(app, repo_id, registration_id, plan)
     })
     .await
     .map_err(operation_error)?

@@ -42,22 +42,12 @@ pub fn config_file(home: &Path) -> ConfigFile {
 /// Every field defaults, unlike the rows in the database: this file is written by a person as
 /// well as by the dialog, and a line they deleted is a preference they did not set, not a shape
 /// this build cannot read.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
     pub ui: UiSettings,
     pub terminal: TerminalSettings,
     pub editor: EditorSettings,
-}
-
-impl Default for AppSettings {
-    fn default() -> Self {
-        Self {
-            ui: UiSettings::default(),
-            terminal: TerminalSettings::default(),
-            editor: EditorSettings::default(),
-        }
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]

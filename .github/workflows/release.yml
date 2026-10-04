@@ -125,7 +125,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
       # The release is the one build that cannot skip work, and the Rust dependencies are most of
@@ -151,7 +151,7 @@ jobs:
             libfuse2 \
             libgtk-3-0
       - run: pnpm install --frozen-lockfile
-      - run: pnpm tauri build --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - run: pnpm run build:app -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
       - uses: actions/upload-artifact@v4
         with:
           name: release-${{ matrix.platform }}

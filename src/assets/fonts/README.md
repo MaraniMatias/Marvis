@@ -1,9 +1,12 @@
 # Bundled fonts
 
 `FiraCodeNerdFontMono-Regular.ttf` and `FiraCodeNerdFontMono-Bold.ttf` are
-[FiraCode Nerd Font Mono](https://github.com/ryanoasis/nerd-fonts), copied here
-unmodified. The license is `LICENSE-FiraCode.txt` (SIL Open Font License 1.1) and
-it travels with the files, which is what that license asks for.
+[FiraCode Nerd Font Mono](https://github.com/ryanoasis/nerd-fonts) builds with
+Nerd Fonts glyph patches. The source tree includes the Fira Code license,
+`LICENSE-FiraCode.txt` (SIL Open Font License 1.1), and the production build
+copies it beside the font assets. The upstream glyph-set license inventory is
+not present here; the Fira Code notice does not claim to cover separate glyph
+licenses.
 
 They are bundled so terminal and editor typography is consistent regardless of
 which fonts happen to be installed on the machine. The terminal waits for these

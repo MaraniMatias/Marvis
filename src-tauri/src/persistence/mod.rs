@@ -1,10 +1,11 @@
 use std::{
+    collections::HashMap,
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 
 use crate::domain::review::{ReviewNote, ReviewRound};
@@ -14,7 +15,7 @@ use crate::domain::workspace::{
     WorkspaceState,
 };
 
-const SCHEMA_VERSION: i64 = 11;
+const SCHEMA_VERSION: i64 = 13;
 const REVIEW_NOTE_COLUMNS: &str = "id, checkout_id, path, side, line_start, line_end, content, code, status, code_hash, outdated, round_id, created_at, updated_at";
 const ACTIVE_CHECKOUT: &str = "active_checkout_id";
 const ACTIVE_SESSION: &str = "active_session_id";
@@ -137,6 +138,56 @@ pub struct WindowGeometry {
 pub struct Database {
     connection: Arc<Mutex<Connection>>,
     home_checkout_id: Arc<Mutex<Option<String>>>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct GitRepoRegistrationSnapshot {
+    repo_id: String,
+    kind: String,
+    name: String,
+    root: String,
+    default_branch: Option<String>,
+    last_opened_at: String,
+    checkouts: Vec<GitCheckoutRegistrationSnapshot>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct GitCheckoutRegistrationSnapshot {
+    id: String,
+    path: String,
+    canonical_path: String,
+    is_primary: bool,
+    branch: Option<String>,
+    head: Option<String>,
+    ahead_of_default: Option<u32>,
+    position: i64,
+    is_missing: bool,
+    is_archived: bool,
+}
+
+impl GitRepoRegistrationSnapshot {
+    pub(crate) fn checkout_ids(&self) -> Vec<String> {
+        self.checkouts
+            .iter()
+            .map(|checkout| checkout.id.clone())
+            .collect()
+    }
+
+    pub(crate) fn is_archived_checkout(&self, checkout_id: &str) -> bool {
+        self.checkouts
+            .iter()
+            .any(|checkout| checkout.id == checkout_id && checkout.is_archived)
+    }
+
+    fn matches(&self, expected: &Self, writes_last_opened_at: bool) -> bool {
+        self.repo_id == expected.repo_id
+            && self.kind == expected.kind
+            && self.name == expected.name
+            && self.root == expected.root
+            && self.default_branch == expected.default_branch
+            && (!writes_last_opened_at || self.last_opened_at == expected.last_opened_at)
+            && self.checkouts == expected.checkouts
+    }
 }
 
 impl Database {
@@ -374,22 +425,70 @@ impl Database {
         self.load_workspace()
     }
 
+    /// Register against a full snapshot, or only if absent when the snapshot is `None`.
+    pub(crate) fn register_git_repo_if_unchanged(
+        &self,
+        repo: &Repo,
+        focus_checkout_id: &str,
+        expected: Option<&GitRepoRegistrationSnapshot>,
+    ) -> Result<Option<WorkspaceState>, String> {
+        if !self.store_git_repo_replacing(
+            repo,
+            Some(focus_checkout_id),
+            None,
+            expected,
+            expected.is_none(),
+        )? {
+            return Ok(None);
+        }
+        self.load_workspace().map(Some)
+    }
+
     pub fn reconcile_git_repo(&self, repo: &Repo) -> Result<(), String> {
         self.store_git_repo(repo, None)
     }
 
-    fn store_git_repo(&self, repo: &Repo, focus_checkout_id: Option<&str>) -> Result<(), String> {
-        self.store_git_repo_replacing(repo, focus_checkout_id, None)
+    /// Capture the persisted fields a Git reconciliation may update, including archived rows.
+    pub(crate) fn git_repo_registration_snapshot(
+        &self,
+        repo_id: &str,
+    ) -> Result<Option<GitRepoRegistrationSnapshot>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        let snapshot = git_repo_registration_snapshot_in(&transaction, repo_id)?;
+        transaction.commit().map_err(db_error)?;
+        Ok(snapshot)
     }
 
-    pub fn locate_git_checkout(
+    /// Reconcile only if the full persisted registration still matches the snapshot.
+    /// Returns false without writing if another operation changed it.
+    pub(crate) fn reconcile_git_repo_if_unchanged(
+        &self,
+        repo: &Repo,
+        expected: &GitRepoRegistrationSnapshot,
+    ) -> Result<bool, String> {
+        self.store_git_repo_replacing(repo, None, None, Some(expected), false)
+    }
+
+    fn store_git_repo(&self, repo: &Repo, focus_checkout_id: Option<&str>) -> Result<(), String> {
+        self.store_git_repo_replacing(repo, focus_checkout_id, None, None, false)
+            .map(|_| ())
+    }
+
+    pub(crate) fn locate_git_checkout_if_unchanged(
         &self,
         repo: &Repo,
         missing_checkout_id: &str,
         focus_checkout_id: &str,
-    ) -> Result<WorkspaceState, String> {
-        self.store_git_repo_replacing(repo, Some(focus_checkout_id), Some(missing_checkout_id))?;
-        self.load_workspace()
+        expected: &GitRepoRegistrationSnapshot,
+    ) -> Result<bool, String> {
+        self.store_git_repo_replacing(
+            repo,
+            Some(focus_checkout_id),
+            Some(missing_checkout_id),
+            Some(expected),
+            false,
+        )
     }
 
     pub fn relocate_plain_checkout(
@@ -528,9 +627,9 @@ impl Database {
                 params![new_repo.root, new_repo.last_opened_at],
             )
             .map_err(db_error)?;
+        let workspace = load_workspace(&transaction)?;
         transaction.commit().map_err(db_error)?;
-        drop(connection);
-        self.load_workspace()
+        Ok(workspace)
     }
 
     fn store_git_repo_replacing(
@@ -538,7 +637,9 @@ impl Database {
         repo: &Repo,
         focus_checkout_id: Option<&str>,
         replace_missing_checkout_id: Option<&str>,
-    ) -> Result<(), String> {
+        expected_snapshot: Option<&GitRepoRegistrationSnapshot>,
+        require_absent: bool,
+    ) -> Result<bool, String> {
         if repo.kind != RepoKind::Git
             || repo.id != crate::domain::workspace::repo_id_for_path(&repo.root)
             || repo.checkouts.is_empty()
@@ -564,8 +665,27 @@ impl Database {
             }
         }
 
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let transaction = connection.unchecked_transaction().map_err(db_error)?;
+        let mut connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let transaction = if expected_snapshot.is_some() || require_absent {
+            connection.transaction_with_behavior(TransactionBehavior::Immediate)
+        } else {
+            connection.unchecked_transaction()
+        }
+        .map_err(db_error)?;
+        if let Some(expected) = expected_snapshot {
+            let current = git_repo_registration_snapshot_in(&transaction, &repo.id)?;
+            if expected.repo_id != repo.id
+                || expected.root != repo.root
+                || !current
+                    .is_some_and(|current| current.matches(expected, focus_checkout_id.is_some()))
+            {
+                return Ok(false);
+            }
+        } else if require_absent
+            && git_repo_registration_snapshot_in(&transaction, &repo.id)?.is_some()
+        {
+            return Ok(false);
+        }
         let now = &repo.last_opened_at;
         let position: i64 = transaction
             .query_row(
@@ -704,7 +824,8 @@ impl Database {
                 )
                 .map_err(db_error)?;
         }
-        transaction.commit().map_err(db_error)
+        transaction.commit().map_err(db_error)?;
+        Ok(true)
     }
 
     pub fn existing_git_checkout(&self, repo_id: &str) -> Result<Option<PathBuf>, String> {
@@ -935,15 +1056,14 @@ impl Database {
         self.forget_checkout(checkout_id, false)
     }
 
-    /// Drops a checkout that cannot be opened, and nothing else. A live one is refused, so that
-    /// the only way to forget it is [`Database::close_checkout`], which asks for it on purpose.
+    /// Drops an unavailable checkout only when the caller explicitly chooses to close it.
+    /// A live one is refused, so it can only be forgotten through [`Database::close_checkout`].
     pub fn close_missing_checkout(&self, checkout_id: &str) -> Result<WorkspaceState, String> {
         self.forget_checkout(checkout_id, true)
     }
 
-    /// The one routine behind both closes. `require_missing` is the whole difference: a checkout
-    /// whose directory is gone has nothing left on disk to speak for, so it can be dropped on
-    /// sight, while a live one is only dropped when the caller meant it.
+    /// The one routine behind both explicit closes. `require_missing` is the whole difference:
+    /// the missing-checkout action refuses a live directory.
     fn forget_checkout(
         &self,
         checkout_id: &str,
@@ -1036,9 +1156,9 @@ impl Database {
                 set_preference(&transaction, ACTIVE_SESSION, None)?;
             }
         }
+        let workspace = load_workspace(&transaction)?;
         transaction.commit().map_err(db_error)?;
-        drop(connection);
-        self.load_workspace()
+        Ok(workspace)
     }
 
     /// Takes a worktree off the panel without forgetting it, and leaves the disk exactly
@@ -1111,9 +1231,9 @@ impl Database {
             set_preference(&transaction, ACTIVE_CHECKOUT, Some(&primary_id))?;
             set_preference(&transaction, ACTIVE_SESSION, None)?;
         }
+        let workspace = load_workspace(&transaction)?;
         transaction.commit().map_err(db_error)?;
-        drop(connection);
-        self.load_workspace()
+        Ok(workspace)
     }
 
     /// Puts every archived worktree of one repository back on the panel, and leaves the
@@ -1137,75 +1257,9 @@ impl Database {
                 [repo_id],
             )
             .map_err(db_error)?;
+        let workspace = load_workspace(&transaction)?;
         transaction.commit().map_err(db_error)?;
-        drop(connection);
-        self.load_workspace()
-    }
-
-    /// Drops every checkout whose directory no longer exists, and then every repository left
-    /// without checkouts, so a reopened app lists only locations that are really on disk.
-    ///
-    /// `!Path::new(path).is_dir()` is the same test `close_missing_checkout` applies, so both
-    /// agree on what "missing" means. A path on a volume that is not mounted fails it too:
-    /// reopening Marvis with an external volume unplugged therefore discards the worktrees
-    /// registered on it. To keep those registrations, drop the `prune_missing_checkouts` call
-    /// from `services::workspace::restore`; a checkout whose directory is still gone then stays
-    /// listed as `is_missing` and can be closed from the sidebar.
-    pub fn prune_missing_checkouts(&self) -> Result<(), String> {
-        let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let transaction = connection.unchecked_transaction().map_err(db_error)?;
-        let mut statement = transaction
-            .prepare("SELECT id, repo_id, canonical_path FROM checkouts")
-            .map_err(db_error)?;
-        let checkouts: Vec<(String, String, String)> = statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                ))
-            })
-            .map_err(db_error)?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(db_error)?;
-        drop(statement);
-        let active_id = get_preference(&transaction, ACTIVE_CHECKOUT)?;
-        let mut active_repo_id = None;
-        for (checkout_id, repo_id, path) in &checkouts {
-            if Path::new(path).is_dir() {
-                continue;
-            }
-            if active_id.as_deref() == Some(checkout_id.as_str()) {
-                active_repo_id = Some(repo_id.as_str());
-            }
-            transaction
-                .execute("DELETE FROM checkouts WHERE id = ?1", [checkout_id])
-                .map_err(db_error)?;
-        }
-        // A repository whose checkouts are all gone has nothing left to represent.
-        transaction
-            .execute(
-                "DELETE FROM repos WHERE NOT EXISTS (SELECT 1 FROM checkouts WHERE repo_id = repos.id)",
-                [],
-            )
-            .map_err(db_error)?;
-        if let Some(repo_id) = active_repo_id {
-            // The selection that was dropped hands over to the repository's surviving primary
-            // checkout, the same choice `close_missing_checkout` makes; nothing left means
-            // nothing stays selected.
-            let primary_id: Option<String> = transaction
-                .query_row(
-                    "SELECT id FROM checkouts WHERE repo_id = ?1 AND is_primary = 1",
-                    [repo_id],
-                    |row| row.get(0),
-                )
-                .optional()
-                .map_err(db_error)?;
-            set_preference(&transaction, ACTIVE_CHECKOUT, primary_id.as_deref())?;
-            set_preference(&transaction, ACTIVE_SESSION, None)?;
-        }
-        transaction.commit().map_err(db_error)?;
-        Ok(())
+        Ok(workspace)
     }
 
     pub fn terminal_session_checkout(&self, session_id: &str) -> Result<Option<String>, String> {
@@ -1268,9 +1322,9 @@ impl Database {
                 set_preference(&transaction, ACTIVE_SESSION, None)?;
             }
         }
+        let workspace = load_workspace(&transaction)?;
         transaction.commit().map_err(db_error)?;
-        drop(connection);
-        self.load_workspace()
+        Ok(workspace)
     }
 
     pub fn select_checkout(&self, checkout_id: Option<String>) -> Result<WorkspaceState, String> {
@@ -1328,7 +1382,7 @@ impl Database {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let stored_path = connection
             .query_row(
-                "SELECT canonical_path FROM checkouts WHERE id = ?1 AND is_missing = 0",
+                "SELECT canonical_path FROM checkouts WHERE id = ?1 AND is_missing = 0 AND is_archived = 0",
                 [checkout_id],
                 |row| row.get::<_, String>(0),
             )
@@ -1393,9 +1447,9 @@ impl Database {
         if get_preference(&transaction, ACTIVE_SESSION)?.as_deref() == Some(session_id) {
             set_preference(&transaction, ACTIVE_SESSION, None)?;
         }
+        let workspace = load_workspace(&transaction)?;
         transaction.commit().map_err(db_error)?;
-        drop(connection);
-        self.load_workspace()
+        Ok(workspace)
     }
 
     /// Renames a session in place.
@@ -1484,6 +1538,28 @@ impl Database {
         transaction.commit().map_err(db_error)?;
         drop(connection);
         self.load_workspace()
+    }
+
+    /// Load one registered checkout without hydrating unrelated repositories or preferences.
+    /// Load one registered checkout and its repository without hydrating unrelated repositories.
+    pub fn load_registered_checkout(
+        &self,
+        checkout_id: &str,
+    ) -> Result<Option<(Repo, Checkout)>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let workspace = load_workspace_for_checkout(&connection, checkout_id)?;
+        let Some(repo) = workspace.repos.into_iter().next() else {
+            return Ok(None);
+        };
+        let Some(checkout) = repo
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.id == checkout_id)
+            .cloned()
+        else {
+            return Ok(None);
+        };
+        Ok(Some((repo, checkout)))
     }
 
     pub fn load_workspace(&self) -> Result<WorkspaceState, String> {
@@ -2036,6 +2112,35 @@ fn transfer_checkout_metadata(
     previous_checkout_id: &str,
     next_checkout_id: &str,
 ) -> Result<(), String> {
+    let conflicting_reference: bool = transaction
+        .query_row(
+            "SELECT EXISTS (
+                 SELECT 1 FROM review_notes note
+                 LEFT JOIN review_rounds round ON round.id = note.round_id
+                 WHERE note.checkout_id = ?1 AND note.round_id IS NOT NULL
+                   AND (round.id IS NULL OR round.checkout_id != ?1)
+             ) OR EXISTS (
+                 SELECT 1 FROM review_notes note
+                 JOIN review_rounds round ON round.id = note.round_id
+                 WHERE note.checkout_id = ?2 AND round.checkout_id = ?1
+             ) OR EXISTS (
+                 SELECT 1 FROM review_rounds moved_round
+                 CROSS JOIN json_each(moved_round.note_ids) listed_note
+                 JOIN review_notes existing_note ON existing_note.id = listed_note.value
+                 WHERE moved_round.checkout_id = ?1 AND existing_note.checkout_id = ?2
+             ) OR EXISTS (
+                 SELECT 1 FROM review_rounds existing_round
+                 CROSS JOIN json_each(existing_round.note_ids) listed_note
+                 JOIN review_notes moved_note ON moved_note.id = listed_note.value
+                 WHERE existing_round.checkout_id = ?2 AND moved_note.checkout_id = ?1
+             )",
+            params![previous_checkout_id, next_checkout_id],
+            |row| row.get(0),
+        )
+        .map_err(db_error)?;
+    if conflicting_reference {
+        return Err("review notes and rounds have conflicting checkout ownership".into());
+    }
     transaction
         .execute(
             "UPDATE sessions SET checkout_id = ?1 WHERE checkout_id = ?2",
@@ -2052,6 +2157,16 @@ fn transfer_checkout_metadata(
         .execute(
             "UPDATE viewed_files SET checkout_id = ?1 WHERE checkout_id = ?2",
             params![next_checkout_id, previous_checkout_id],
+        )
+        .map_err(db_error)?;
+    transaction
+        .execute(
+            "UPDATE review_rounds
+             SET checkout_id = ?1,
+                 status = CASE WHEN status IN ('queued', 'dispatching') THEN 'relocated' ELSE status END,
+                 updated_at = CASE WHEN status IN ('queued', 'dispatching') THEN ?3 ELSE updated_at END
+             WHERE checkout_id = ?2",
+            params![next_checkout_id, previous_checkout_id, timestamp()],
         )
         .map_err(db_error)?;
     transaction
@@ -2256,7 +2371,7 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
             CREATE TABLE sessions (
                 id TEXT PRIMARY KEY NOT NULL,
                 checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
-                session_type TEXT NOT NULL CHECK (session_type IN ('shell', 'nvim', 'server', 'custom', 'agent')),
+                session_type TEXT NOT NULL CHECK (session_type IN ('shell', 'agent')),
                 name TEXT NOT NULL,
                 created_at TEXT NOT NULL,
                 status TEXT NOT NULL DEFAULT 'inactive' CHECK (status IN ('active', 'inactive'))
@@ -2306,7 +2421,7 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
                 checkout_id TEXT NOT NULL REFERENCES checkouts(id) ON DELETE CASCADE,
                 session_id TEXT,
                 status TEXT NOT NULL CHECK (
-                    status IN ('queued', 'dispatching', 'dispatched', 'acked')
+                    status IN ('queued', 'dispatching', 'dispatched', 'acked', 'relocated')
                 ),
                 marker TEXT NOT NULL,
                 note_ids TEXT NOT NULL,
@@ -2324,14 +2439,33 @@ fn create_schema(connection: &Connection) -> Result<(), String> {
 }
 
 fn load_workspace(connection: &Connection) -> Result<WorkspaceState, String> {
+    load_workspace_filtered(connection, None)
+}
+
+fn load_workspace_for_checkout(
+    connection: &Connection,
+    checkout_id: &str,
+) -> Result<WorkspaceState, String> {
+    load_workspace_filtered(connection, Some(checkout_id))
+}
+
+// Full loads use four set queries; a scoped lookup uses the same three without preferences.
+fn load_workspace_filtered(
+    connection: &Connection,
+    checkout_id: Option<&str>,
+) -> Result<WorkspaceState, String> {
     let mut repos_statement = connection
         .prepare(
             "SELECT id, kind, name, root, default_branch, created_at, last_opened_at
-             FROM repos ORDER BY position",
+             FROM repos
+             WHERE ?1 IS NULL OR id = (
+                 SELECT repo_id FROM checkouts WHERE id = ?1 AND is_archived = 0
+             )
+             ORDER BY position",
         )
         .map_err(db_error)?;
     let repo_rows = repos_statement
-        .query_map([], |row| {
+        .query_map([checkout_id], |row| {
             Ok((
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
@@ -2346,36 +2480,73 @@ fn load_workspace(connection: &Connection) -> Result<WorkspaceState, String> {
     let repo_rows = repo_rows.collect::<Result<Vec<_>, _>>().map_err(db_error)?;
     drop(repos_statement);
 
+    let mut checkouts_statement = connection
+        .prepare(
+            "SELECT repo_id, id, path, canonical_path, is_primary, branch, head, ahead_of_default,
+                    changed_files, is_missing, is_archived
+             FROM checkouts
+             WHERE ?1 IS NULL OR repo_id = (
+                 SELECT repo_id FROM checkouts WHERE id = ?1 AND is_archived = 0
+             )
+             ORDER BY repo_id, position",
+        )
+        .map_err(db_error)?;
+    let checkout_rows = checkouts_statement
+        .query_map([checkout_id], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                (
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, bool>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<u32>>(7)?,
+                    row.get::<_, u32>(8)?,
+                    row.get::<_, bool>(9)?,
+                    row.get::<_, bool>(10)?,
+                ),
+            ))
+        })
+        .map_err(db_error)?;
+    let mut checkouts_by_repo = HashMap::new();
+    for row in checkout_rows {
+        let (repo_id, checkout) = row.map_err(db_error)?;
+        checkouts_by_repo
+            .entry(repo_id)
+            .or_insert_with(Vec::new)
+            .push(checkout);
+    }
+    drop(checkouts_statement);
+
+    let mut sessions_statement = connection
+        .prepare(
+            "SELECT s.checkout_id, s.id, s.session_type, s.name, s.created_at, s.status
+             FROM sessions s JOIN checkouts c ON c.id = s.checkout_id
+             WHERE c.is_archived = 0 AND (?1 IS NULL OR c.repo_id = (
+                 SELECT repo_id FROM checkouts WHERE id = ?1 AND is_archived = 0
+             ))
+             ORDER BY c.repo_id, c.position, s.rowid",
+        )
+        .map_err(db_error)?;
+    let session_rows = sessions_statement
+        .query_map([checkout_id], session_from_row)
+        .map_err(db_error)?;
+    let mut sessions_by_checkout = HashMap::new();
+    for row in session_rows {
+        let (checkout_id, session) = row.map_err(db_error)?;
+        sessions_by_checkout
+            .entry(checkout_id)
+            .or_insert_with(Vec::new)
+            .push(session);
+    }
+    drop(sessions_statement);
+
     let mut repos = Vec::with_capacity(repo_rows.len());
     let mut archived_worktrees = Vec::new();
     for (id, kind, name, root, default_branch, created_at, last_opened_at) in repo_rows {
-        let mut checkouts_statement = connection
-            .prepare(
-                "SELECT id, path, canonical_path, is_primary, branch, head, ahead_of_default, changed_files, is_missing, is_archived
-                 FROM checkouts WHERE repo_id = ?1 ORDER BY position",
-            )
-            .map_err(db_error)?;
-        let checkout_rows = checkouts_statement
-            .query_map([&id], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, bool>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<u32>>(6)?,
-                    row.get::<_, u32>(7)?,
-                    row.get::<_, bool>(8)?,
-                    row.get::<_, bool>(9)?,
-                ))
-            })
-            .map_err(db_error)?;
-        let checkout_rows = checkout_rows
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(db_error)?;
-        drop(checkouts_statement);
-
+        let checkout_rows = checkouts_by_repo.remove(&id).unwrap_or_default();
         let mut checkouts = Vec::with_capacity(checkout_rows.len());
         for (
             checkout_id,
@@ -2402,45 +2573,9 @@ fn load_workspace(connection: &Connection) -> Result<WorkspaceState, String> {
                 });
                 continue;
             }
-            let mut sessions_statement = connection
-                .prepare(
-                    "SELECT id, session_type, name, created_at, status FROM sessions WHERE checkout_id = ?1 ORDER BY rowid",
-                )
-                .map_err(db_error)?;
-            let sessions = sessions_statement
-                .query_map([&checkout_id], |row| {
-                    Ok((
-                        row.get::<_, String>(0)?,
-                        row.get::<_, String>(1)?,
-                        row.get::<_, String>(2)?,
-                        row.get::<_, String>(3)?,
-                        row.get::<_, String>(4)?,
-                    ))
-                })
-                .map_err(db_error)?
-                .map(|row| {
-                    let (id, session_type, name, created_at, status) = row?;
-                    Ok(Session {
-                        id,
-                        session_type: parse_session_type(&session_type).map_err(|error| {
-                            rusqlite::Error::FromSqlConversionFailure(
-                                1,
-                                rusqlite::types::Type::Text,
-                                Box::new(std::io::Error::other(error)),
-                            )
-                        })?,
-                        checkout_id: checkout_id.clone(),
-                        name,
-                        created_at,
-                        status: match status.as_str() {
-                            "active" => SessionStatus::Active,
-                            "inactive" => SessionStatus::Inactive,
-                            _ => return Err(rusqlite::Error::InvalidQuery),
-                        },
-                    })
-                })
-                .collect::<Result<Vec<_>, rusqlite::Error>>()
-                .map_err(db_error)?;
+            let sessions = sessions_by_checkout
+                .remove(&checkout_id)
+                .unwrap_or_default();
             checkouts.push(Checkout {
                 id: checkout_id,
                 repo_id: id.clone(),
@@ -2468,13 +2603,63 @@ fn load_workspace(connection: &Connection) -> Result<WorkspaceState, String> {
         });
     }
 
+    let (active_checkout_id, active_session_id) = if checkout_id.is_some() {
+        (None, None)
+    } else {
+        let mut statement = connection
+            .prepare("SELECT key, value FROM preferences WHERE key IN (?1, ?2)")
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([ACTIVE_CHECKOUT, ACTIVE_SESSION], |row| {
+                Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+            })
+            .map_err(db_error)?;
+        let (mut active_checkout_id, mut active_session_id) = (None, None);
+        for row in rows {
+            let (key, value) = row.map_err(db_error)?;
+            match key.as_str() {
+                ACTIVE_CHECKOUT => active_checkout_id = Some(value),
+                ACTIVE_SESSION => active_session_id = Some(value),
+                _ => unreachable!(),
+            }
+        }
+        (active_checkout_id, active_session_id)
+    };
+
     Ok(WorkspaceState {
         repos,
         home_checkout_id: None,
         archived_worktrees,
-        active_checkout_id: get_preference(connection, ACTIVE_CHECKOUT)?,
-        active_session_id: get_preference(connection, ACTIVE_SESSION)?,
+        active_checkout_id,
+        active_session_id,
     })
+}
+
+fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Session)> {
+    let checkout_id: String = row.get(0)?;
+    let session_type: String = row.get(2)?;
+    let status: String = row.get(5)?;
+    Ok((
+        checkout_id.clone(),
+        Session {
+            id: row.get(1)?,
+            session_type: parse_session_type(&session_type).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(std::io::Error::other(error)),
+                )
+            })?,
+            checkout_id,
+            name: row.get(3)?,
+            created_at: row.get(4)?,
+            status: match status.as_str() {
+                "active" => SessionStatus::Active,
+                "inactive" => SessionStatus::Inactive,
+                _ => return Err(rusqlite::Error::InvalidQuery),
+            },
+        },
+    ))
 }
 
 fn parse_repo_kind(kind: &str) -> Result<RepoKind, String> {
@@ -2488,9 +2673,6 @@ fn parse_repo_kind(kind: &str) -> Result<RepoKind, String> {
 fn parse_session_type(session_type: &str) -> Result<SessionType, String> {
     match session_type {
         "shell" => Ok(SessionType::Shell),
-        "nvim" => Ok(SessionType::Nvim),
-        "server" => Ok(SessionType::Server),
-        "custom" => Ok(SessionType::Custom),
         "agent" => Ok(SessionType::Agent),
         _ => Err(format!("unknown session type: {session_type}")),
     }
@@ -2499,9 +2681,6 @@ fn parse_session_type(session_type: &str) -> Result<SessionType, String> {
 fn session_type_name(session_type: &SessionType) -> &'static str {
     match session_type {
         SessionType::Shell => "shell",
-        SessionType::Nvim => "nvim",
-        SessionType::Server => "server",
-        SessionType::Custom => "custom",
         SessionType::Agent => "agent",
     }
 }
@@ -2546,6 +2725,70 @@ pub fn timestamp() -> String {
     millis.to_string()
 }
 
+fn git_repo_registration_snapshot_in(
+    connection: &Connection,
+    repo_id: &str,
+) -> Result<Option<GitRepoRegistrationSnapshot>, String> {
+    let Some((repo_id, kind, name, root, default_branch, last_opened_at)) = connection
+        .query_row(
+            "SELECT id, kind, name, root, default_branch, last_opened_at
+             FROM repos WHERE id = ?1",
+            [repo_id],
+            |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, String>(5)?,
+                ))
+            },
+        )
+        .optional()
+        .map_err(db_error)?
+    else {
+        return Ok(None);
+    };
+    if kind != "git" {
+        return Ok(None);
+    }
+    let mut statement = connection
+        .prepare(
+            "SELECT id, path, canonical_path, is_primary, branch, head,
+                    ahead_of_default, position, is_missing, is_archived
+             FROM checkouts WHERE repo_id = ?1 ORDER BY id",
+        )
+        .map_err(db_error)?;
+    let checkouts = statement
+        .query_map([&repo_id], |row| {
+            Ok(GitCheckoutRegistrationSnapshot {
+                id: row.get(0)?,
+                path: row.get(1)?,
+                canonical_path: row.get(2)?,
+                is_primary: row.get(3)?,
+                branch: row.get(4)?,
+                head: row.get(5)?,
+                ahead_of_default: row.get(6)?,
+                position: row.get(7)?,
+                is_missing: row.get(8)?,
+                is_archived: row.get(9)?,
+            })
+        })
+        .map_err(db_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(db_error)?;
+    Ok(Some(GitRepoRegistrationSnapshot {
+        repo_id,
+        kind,
+        name,
+        root,
+        default_branch,
+        last_opened_at,
+        checkouts,
+    }))
+}
+
 fn db_error(error: rusqlite::Error) -> String {
     format!("SQLite operation failed: {error}")
 }
@@ -2567,12 +2810,97 @@ mod tests {
     };
 
     use super::{
-        AppLayoutState, CheckoutUiState, Database, PersistedDocument, ReviewNote,
+        AppLayoutState, CheckoutUiState, Database, PersistedDocument, ReviewNote, ReviewRound,
         APP_LAYOUT_VERSION, SCHEMA_VERSION,
     };
 
     fn plain_repo(path: &Path, now: &str) -> Repo {
         Repo::plain(path, now).expect("plain repo")
+    }
+
+    fn add_round(database: &Database, checkout_id: &str, id: &str, status: &str) -> ReviewRound {
+        let note_id = format!("note:{id}");
+        let code = "let answer = 42;";
+        database
+            .add_review_note(&ReviewNote {
+                id: note_id.clone(),
+                checkout_id: checkout_id.into(),
+                path: "src/lib.rs".into(),
+                side: "new".into(),
+                line_start: 7,
+                line_end: None,
+                content: format!("note for {id}"),
+                code: code.into(),
+                status: "draft".into(),
+                code_hash: review_anchor_hash(code),
+                outdated: false,
+                round_id: None,
+                created_at: "now".into(),
+                updated_at: "now".into(),
+            })
+            .unwrap();
+        let round = ReviewRound {
+            id: id.into(),
+            checkout_id: checkout_id.into(),
+            session_id: Some("session:historic".into()),
+            status: status.into(),
+            marker: format!("marvis-review:{id}"),
+            note_ids: vec![note_id],
+            created_at: "now".into(),
+            updated_at: "now".into(),
+        };
+        database
+            .add_review_round(&round, &round.note_ids, Some("saved review prompt"))
+            .unwrap()
+    }
+
+    fn assert_moved_round(
+        database: &Database,
+        checkout_id: &str,
+        id: &str,
+        status: &str,
+    ) -> ReviewRound {
+        let round = database
+            .review_rounds(checkout_id)
+            .unwrap()
+            .into_iter()
+            .find(|round| round.id == id)
+            .expect("round remains addressable in the destination checkout");
+        let note_id = format!("note:{id}");
+        assert_eq!(round.checkout_id, checkout_id);
+        assert_eq!(round.status, status);
+        assert_eq!(round.session_id.as_deref(), Some("session:historic"));
+        assert_eq!(round.note_ids.as_slice(), std::slice::from_ref(&note_id));
+        assert_eq!(round.marker, format!("marvis-review:{id}"));
+        assert_eq!(
+            database
+                .review_round_prompt(id, checkout_id)
+                .unwrap()
+                .as_deref(),
+            Some("saved review prompt")
+        );
+        let note = database
+            .review_notes(checkout_id)
+            .unwrap()
+            .into_iter()
+            .find(|note| note.id == note_id)
+            .expect("round note remains addressable in the destination checkout");
+        assert_eq!(note.checkout_id, checkout_id);
+        assert_eq!(note.round_id.as_deref(), Some(id));
+        assert_eq!(note.status, "sent");
+        assert_eq!(note.content, format!("note for {id}"));
+        assert_eq!(note.code, "let answer = 42;");
+        round
+    }
+
+    #[test]
+    fn persisted_session_parser_rejects_removed_session_types() {
+        for session_type in ["nvim", "server", "custom"] {
+            assert_eq!(
+                super::parse_session_type(session_type).unwrap_err(),
+                format!("unknown session type: {session_type}")
+            );
+        }
     }
 
     #[test]
@@ -2642,6 +2970,11 @@ mod tests {
         let temp = tempdir().unwrap();
         let path = temp.path().join("workspace.sqlite3");
         let database = Database::open(&path).expect("fresh database");
+        let checkout_path = temp.path().join("checkout");
+        fs::create_dir(&checkout_path).unwrap();
+        let repo = plain_repo(&checkout_path, "now");
+        let checkout_id = repo.checkouts[0].id.clone();
+        database.register_plain_repo(repo).unwrap();
         {
             let connection = database.connection.lock().unwrap();
             assert_eq!(
@@ -2661,6 +2994,19 @@ mod tests {
                 )
                 .unwrap();
             assert_eq!(tables, 10);
+            for session_type in ["nvim", "server", "custom"] {
+                let error = connection
+                    .execute(
+                        "INSERT INTO sessions (id, checkout_id, session_type, name, created_at)
+                         VALUES (?1, ?2, ?3, 'legacy', 'now')",
+                        params![format!("session:{session_type}"), checkout_id, session_type],
+                    )
+                    .unwrap_err();
+                assert!(
+                    error.to_string().contains("CHECK constraint failed"),
+                    "{error}"
+                );
+            }
             // Reopening what this build already wrote has nothing left to do.
             super::create_schema(&connection).expect("a stamped file is left alone");
         }
@@ -2668,13 +3014,13 @@ mod tests {
         let foreign_path = temp.path().join("foreign.sqlite3");
         Connection::open(&foreign_path)
             .unwrap()
-            .pragma_update(None, "user_version", 3)
+            .pragma_update(None, "user_version", 12)
             .unwrap();
         let error = Database::open(&foreign_path)
             .err()
             .expect("a file from another schema version is refused");
-        assert!(error.contains("schema version 3"), "{error}");
-        assert!(error.contains(&SCHEMA_VERSION.to_string()), "{error}");
+        assert!(error.contains("schema version 12"), "{error}");
+        assert!(error.contains("this build speaks version 13"), "{error}");
         assert!(error.contains("deleting"), "{error}");
     }
 
@@ -3203,6 +3549,182 @@ mod tests {
     }
 
     #[test]
+    fn relocating_plain_checkout_preserves_review_history_and_strands_pending_rounds() {
+        let temp = tempdir().unwrap();
+        let old_path = temp.path().join("old");
+        let new_path = temp.path().join("new");
+        let other_path = temp.path().join("other");
+        for path in [&old_path, &new_path, &other_path] {
+            fs::create_dir(path).unwrap();
+        }
+        let old_repo = plain_repo(&old_path, "1");
+        let new_repo = plain_repo(&new_path, "2");
+        let other_repo = plain_repo(&other_path, "3");
+        let old_id = old_repo.checkouts[0].id.clone();
+        let new_id = new_repo.checkouts[0].id.clone();
+        let other_id = other_repo.checkouts[0].id.clone();
+        let database = Database::open_in_memory().unwrap();
+        database.register_plain_repo(old_repo.clone()).unwrap();
+        database.register_plain_repo(other_repo).unwrap();
+        add_round(&database, &old_id, "round:acked", "acked");
+        add_round(&database, &old_id, "round:dispatched", "dispatched");
+        add_round(&database, &old_id, "round:queued", "queued");
+        add_round(&database, &old_id, "round:dispatching", "dispatching");
+        add_round(&database, &other_id, "round:other", "acked");
+        fs::remove_dir(&old_path).unwrap();
+
+        database
+            .relocate_plain_checkout(&old_repo.id, &old_id, &new_repo)
+            .unwrap();
+
+        assert!(database
+            .load_registered_checkout(&old_id)
+            .unwrap()
+            .is_none());
+        assert!(database.review_notes(&old_id).unwrap().is_empty());
+        assert!(database.review_rounds(&old_id).unwrap().is_empty());
+        assert_moved_round(&database, &new_id, "round:acked", "acked");
+        assert_moved_round(&database, &new_id, "round:dispatched", "dispatched");
+        for id in ["round:queued", "round:dispatching"] {
+            let relocated = assert_moved_round(&database, &new_id, id, "relocated");
+            assert!(!relocated.is_pending());
+        }
+        assert_eq!(database.requeue_review_rounds(&new_id).unwrap(), 0);
+        assert_moved_round(&database, &other_id, "round:other", "acked");
+
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute("DELETE FROM repos WHERE id = ?1", [&new_repo.id])
+            .unwrap();
+        assert!(database.review_notes(&new_id).unwrap().is_empty());
+        assert!(database.review_rounds(&new_id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn locating_git_checkout_preserves_review_round_links_and_other_ownership() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let old_path = temp.path().join("old-worktree");
+        let new_path = temp.path().join("new-worktree");
+        let other_root = temp.path().join("other-repo");
+        let other_worktree = temp.path().join("other-worktree");
+        for path in [&root, &old_path, &other_root, &other_worktree] {
+            fs::create_dir_all(path).unwrap();
+        }
+        let (old_repo, old_id) = git_repo_with_worktree(&root, &old_path);
+        let (other_repo, other_id) = git_repo_with_worktree(&other_root, &other_worktree);
+        let database = Database::open_in_memory().unwrap();
+        database
+            .register_git_repo(old_repo.clone(), &old_id)
+            .unwrap();
+        database.register_git_repo(other_repo, &other_id).unwrap();
+        add_round(&database, &old_id, "round:git-acked", "acked");
+        add_round(&database, &other_id, "round:other-git", "acked");
+        fs::remove_dir_all(&old_path).unwrap();
+        fs::create_dir(&new_path).unwrap();
+
+        let (mut located_repo, new_id) = git_repo_with_worktree(&root, &new_path);
+        located_repo
+            .checkouts
+            .iter_mut()
+            .find(|checkout| checkout.id == new_id)
+            .unwrap()
+            .branch = Some("feature".into());
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE checkouts SET is_missing = 1, branch = 'feature' WHERE id = ?1",
+                [&old_id],
+            )
+            .unwrap();
+        let snapshot = database
+            .git_repo_registration_snapshot(&old_repo.id)
+            .unwrap()
+            .unwrap();
+
+        assert!(database
+            .locate_git_checkout_if_unchanged(&located_repo, &old_id, &new_id, &snapshot)
+            .unwrap());
+
+        assert!(database
+            .load_registered_checkout(&old_id)
+            .unwrap()
+            .is_none());
+        assert!(database.review_notes(&old_id).unwrap().is_empty());
+        assert!(database.review_rounds(&old_id).unwrap().is_empty());
+        assert_moved_round(&database, &new_id, "round:git-acked", "acked");
+        assert_moved_round(&database, &other_id, "round:other-git", "acked");
+    }
+
+    #[test]
+    fn relocation_rejects_cross_checkout_round_references_and_rolls_back() {
+        let temp = tempdir().unwrap();
+        let source_path = temp.path().join("source");
+        let target_path = temp.path().join("target");
+        fs::create_dir(&source_path).unwrap();
+        fs::create_dir(&target_path).unwrap();
+        let source = plain_repo(&source_path, "1");
+        let target = plain_repo(&target_path, "2");
+        let source_id = source.checkouts[0].id.clone();
+        let target_id = target.checkouts[0].id.clone();
+        let database = Database::open_in_memory().unwrap();
+        database.register_plain_repo(source).unwrap();
+        database.register_plain_repo(target).unwrap();
+        add_round(&database, &source_id, "round:source", "acked");
+        database
+            .add_review_note(&ReviewNote {
+                id: "note:target-collision".into(),
+                checkout_id: target_id.clone(),
+                path: "src/main.rs".into(),
+                side: "new".into(),
+                line_start: 1,
+                line_end: None,
+                content: "must stay with target".into(),
+                code: "fn main() {}".into(),
+                status: "sent".into(),
+                code_hash: review_anchor_hash("fn main() {}"),
+                outdated: false,
+                round_id: Some("round:source".into()),
+                created_at: "now".into(),
+                updated_at: "now".into(),
+            })
+            .unwrap();
+
+        {
+            let connection = database.connection.lock().unwrap();
+            let transaction = connection.unchecked_transaction().unwrap();
+            transaction
+                .execute(
+                    "INSERT INTO preferences (key, value) VALUES ('rollback_probe', 'written')",
+                    [],
+                )
+                .unwrap();
+            let error = super::transfer_checkout_metadata(&transaction, &source_id, &target_id)
+                .unwrap_err();
+            assert!(error.contains("conflicting checkout ownership"), "{error}");
+        }
+
+        let connection = database.connection.lock().unwrap();
+        let probe_written: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM preferences WHERE key = 'rollback_probe')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!probe_written);
+        drop(connection);
+        assert_moved_round(&database, &source_id, "round:source", "acked");
+        let target_note = database.review_notes(&target_id).unwrap().pop().unwrap();
+        assert_eq!(target_note.checkout_id, target_id);
+        assert_eq!(target_note.round_id.as_deref(), Some("round:source"));
+    }
+
+    #[test]
     fn viewed_file_progress_is_checkout_scoped_and_survives_database_restart() {
         let temp = tempdir().expect("temporary directory");
         let db_path = temp.path().join("workspace.sqlite3");
@@ -3417,6 +3939,140 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["checkout:feature", repo.checkouts[0].id.as_str()]
         );
+    }
+
+    #[test]
+    fn batched_workspace_load_preserves_checkout_order_sessions_archives_and_missing_state() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        let feature = temp.path().join("feature");
+        let archived = temp.path().join("archived");
+        let other_root = temp.path().join("other");
+        for path in [&root, &feature, &archived, &other_root] {
+            fs::create_dir(path).unwrap();
+        }
+        let repo = plain_repo(&root, "1");
+        let other_repo = plain_repo(&other_root, "2");
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_plain_repo(repo.clone()).unwrap();
+        database.register_plain_repo(other_repo.clone()).unwrap();
+        let feature_id = "checkout:feature";
+        let archived_id = "checkout:archived";
+        {
+            let connection = database.connection.lock().unwrap();
+            connection
+                .execute("UPDATE repos SET kind = 'git' WHERE id = ?1", [&repo.id])
+                .unwrap();
+            connection
+                .execute(
+                    "UPDATE checkouts SET position = 2, is_missing = 1 WHERE id = ?1",
+                    [&repo.checkouts[0].id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO checkouts
+                     (id, repo_id, path, canonical_path, is_primary, branch, changed_files, position)
+                     VALUES (?1, ?2, ?3, ?4, 0, 'feature', 7, 0)",
+                    params![
+                        feature_id,
+                        repo.id,
+                        feature.display().to_string(),
+                        feature.canonicalize().unwrap().display().to_string(),
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO checkouts
+                     (id, repo_id, path, canonical_path, is_primary, branch, is_archived, position)
+                     VALUES (?1, ?2, ?3, ?4, 0, 'archived', 1, 1)",
+                    params![
+                        archived_id,
+                        repo.id,
+                        archived.display().to_string(),
+                        archived.canonicalize().unwrap().display().to_string(),
+                    ],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO sessions (id, checkout_id, session_type, name, created_at, status)
+                     VALUES ('session:feature', ?1, 'shell', 'feature shell', '3', 'active'),
+                            ('session:archived', ?2, 'shell', 'archived shell', '4', 'active')",
+                    params![feature_id, archived_id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO preferences (key, value) VALUES ('active_checkout_id', ?1)
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [feature_id],
+                )
+                .unwrap();
+            connection
+                .execute(
+                    "INSERT INTO preferences (key, value) VALUES ('active_session_id', 'session:feature')
+                     ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let state = database.load_workspace().expect("load workspace");
+        assert_eq!(
+            state
+                .repos
+                .iter()
+                .map(|repo| repo.id.as_str())
+                .collect::<Vec<_>>(),
+            [repo.id.as_str(), other_repo.id.as_str()]
+        );
+        assert_eq!(
+            state.repos[0]
+                .checkouts
+                .iter()
+                .map(|checkout| checkout.id.as_str())
+                .collect::<Vec<_>>(),
+            [feature_id, repo.checkouts[0].id.as_str()]
+        );
+        assert_eq!(state.repos[0].checkouts[0].changed_files, 7);
+        assert!(state.repos[0].checkouts[1].is_missing);
+        assert_eq!(
+            state.repos[0].checkouts[0].sessions[0].id,
+            "session:feature"
+        );
+        assert_eq!(
+            state
+                .archived_worktrees
+                .iter()
+                .map(|checkout| checkout.id.as_str())
+                .collect::<Vec<_>>(),
+            [archived_id]
+        );
+        assert_eq!(state.active_checkout_id.as_deref(), Some(feature_id));
+        assert_eq!(state.active_session_id.as_deref(), Some("session:feature"));
+
+        let (lookup_repo, lookup_checkout) = database
+            .load_registered_checkout(feature_id)
+            .unwrap()
+            .expect("registered checkout");
+        assert_eq!(lookup_repo.id, repo.id);
+        assert_eq!(lookup_repo.checkouts[0].id, feature_id);
+        assert_eq!(lookup_checkout.sessions[0].id, "session:feature");
+        assert!(database
+            .load_registered_checkout(archived_id)
+            .unwrap()
+            .is_none());
+        assert!(database
+            .load_registered_checkout("checkout:unregistered")
+            .unwrap()
+            .is_none());
+        let (other_lookup_repo, _) = database
+            .load_registered_checkout(&other_repo.checkouts[0].id)
+            .unwrap()
+            .expect("checkout from second repository");
+        assert_eq!(other_lookup_repo.id, other_repo.id);
     }
 
     #[test]
@@ -4094,34 +4750,118 @@ mod tests {
         assert!(folder.is_dir());
     }
 
-    #[test]
-    fn pruning_drops_a_checkout_whose_path_cannot_be_resolved() {
-        let temp = tempdir().expect("temporary directory");
-        let volume = temp.path().join("volume");
-        let folder = volume.join("work");
-        let live = temp.path().join("live");
-        fs::create_dir_all(&folder).unwrap();
-        fs::create_dir(&live).unwrap();
-        let on_volume = plain_repo(&folder, "1");
-        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
-        database.register_plain_repo(on_volume).unwrap();
-        let kept = plain_repo(&live, "1");
-        database.register_plain_repo(kept.clone()).unwrap();
-        // The volume is not mounted: the path is still registered and still resolves to
-        // nothing, which is exactly what the prune reads as missing. Its registrations are
-        // the accepted cost of the startup prune; `services::workspace::restore` is where
-        // dropping that call brings them back.
-        fs::remove_dir_all(&volume).unwrap();
-
-        database.prune_missing_checkouts().unwrap();
-
-        let state = database.load_workspace().unwrap();
-        assert_eq!(state.repos.len(), 1);
-        assert_eq!(state.repos[0].id, kept.id);
-        // A selection in another checkout survives the prune of an unrelated one.
-        assert_eq!(
-            state.active_checkout_id.as_deref(),
-            Some(kept.checkouts[0].id.as_str())
+    fn print_load_benchmark(name: &str, samples: &[std::time::Duration], error_count: usize) {
+        assert!(!samples.is_empty());
+        let mut ordered = samples.to_vec();
+        ordered.sort_unstable();
+        let percentile = |percent: usize| ordered[(ordered.len() * percent - 1) / 100];
+        println!(
+            "{name} samples={} p50_ns={} p95_ns={} error_count={error_count}",
+            samples.len(),
+            percentile(50).as_nanos(),
+            percentile(95).as_nanos(),
         );
+    }
+
+    #[test]
+    #[ignore = "manual bounded local load benchmark; see docs/persistence-load-benchmark.md"]
+    fn bounded_database_load_metrics() {
+        use std::time::Instant;
+
+        const REPO_COUNT: usize = 12;
+        const REPETITIONS: usize = 25;
+
+        let temp = tempdir().expect("temporary benchmark directory");
+        let database = Database::open(temp.path().join("workspace.sqlite3"))
+            .expect("temporary benchmark database");
+        let mut checkout_ids = Vec::with_capacity(REPO_COUNT);
+        for index in 0..REPO_COUNT {
+            let path = temp.path().join(format!("repo-{index:02}"));
+            fs::create_dir(&path).expect("temporary checkout directory");
+            let repo = plain_repo(&path, &format!("fixture-{index:02}"));
+            checkout_ids.push(repo.checkouts[0].id.clone());
+            database
+                .register_plain_repo(repo)
+                .expect("register fixture repo");
+        }
+
+        let target_checkout_id = checkout_ids.last().expect("fixture checkout").clone();
+        println!("fixtures repos={REPO_COUNT} checkouts={REPO_COUNT} repetitions={REPETITIONS}");
+        let mut workspace_samples = Vec::with_capacity(REPETITIONS);
+        let mut workspace_errors = 0;
+        for _ in 0..REPETITIONS {
+            let started = Instant::now();
+            let result = database.load_workspace();
+            workspace_samples.push(started.elapsed());
+            match result {
+                Ok(state) => assert_benchmark_workspace(&state, REPO_COUNT),
+                Err(_) => workspace_errors += 1,
+            }
+        }
+        print_load_benchmark(
+            "Database::load_workspace",
+            &workspace_samples,
+            workspace_errors,
+        );
+        assert_eq!(workspace_errors, 0, "load_workspace returned errors");
+
+        let mut checkout_samples = Vec::with_capacity(REPETITIONS);
+        let mut checkout_errors = 0;
+        for _ in 0..REPETITIONS {
+            let started = Instant::now();
+            let result = database.load_registered_checkout(&target_checkout_id);
+            checkout_samples.push(started.elapsed());
+            match result {
+                Ok(Some((repo, checkout))) => {
+                    assert_eq!(checkout.id, target_checkout_id);
+                    assert_eq!(repo.id, checkout.repo_id);
+                    assert_eq!(repo.checkouts.len(), 1);
+                    assert!(!checkout.is_missing);
+                }
+                Ok(None) => panic!("registered fixture checkout was not loaded"),
+                Err(_) => checkout_errors += 1,
+            }
+        }
+        print_load_benchmark(
+            "Database::load_registered_checkout",
+            &checkout_samples,
+            checkout_errors,
+        );
+        assert_eq!(
+            checkout_errors, 0,
+            "load_registered_checkout returned errors"
+        );
+
+        // Verify that the real path check is observed and missing/unknown lookups stay explicit.
+        let missing_checkout_id = &checkout_ids[0];
+        fs::remove_dir_all(temp.path().join("repo-00")).expect("remove fixture checkout");
+        let workspace = database
+            .load_workspace()
+            .expect("load workspace with missing path");
+        assert!(workspace
+            .repos
+            .iter()
+            .flat_map(|repo| &repo.checkouts)
+            .any(|checkout| checkout.id == *missing_checkout_id && checkout.is_missing));
+        let (_, checkout) = database
+            .load_registered_checkout(missing_checkout_id)
+            .expect("load missing-path checkout")
+            .expect("registered checkout remains addressable");
+        assert!(checkout.is_missing);
+        assert!(database
+            .load_registered_checkout("checkout:not-registered")
+            .expect("unknown checkout lookup")
+            .is_none());
+    }
+
+    fn assert_benchmark_workspace(
+        state: &crate::domain::workspace::WorkspaceState,
+        expected_repos: usize,
+    ) {
+        assert_eq!(state.repos.len(), expected_repos);
+        assert!(state
+            .repos
+            .iter()
+            .all(|repo| { repo.checkouts.len() == 1 && !repo.checkouts[0].is_missing }));
     }
 }

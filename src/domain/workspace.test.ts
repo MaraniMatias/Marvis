@@ -129,11 +129,11 @@ describe("workspace domain", () => {
       createdAt: "now",
       status: "inactive" as const,
     };
-    const server = {
-      id: "session-server",
-      type: "server" as const,
+    const worktreeShell = {
+      id: "session-worktree-shell",
+      type: "shell" as const,
       checkoutId: "checkout:/work/app-feature",
-      name: "vite",
+      name: "bash",
       createdAt: "now",
       status: "inactive" as const,
     };
@@ -149,7 +149,7 @@ describe("workspace domain", () => {
       path: "/work/app-feature",
       canonicalPath: "/work/app-feature",
       isPrimary: false,
-      sessions: [server],
+      sessions: [worktreeShell],
     });
     const repo: Repo = {
       id: repoId,
@@ -169,9 +169,9 @@ describe("workspace domain", () => {
     expect(state).toMatchObject({ activeCheckoutId: worktree.id, activeSessionId: null });
     expect(getActiveCheckout(state)).toBe(worktree);
 
-    state = selectSession(state, server.id);
-    expect(state).toMatchObject({ activeCheckoutId: worktree.id, activeSessionId: server.id });
+    state = selectSession(state, worktreeShell.id);
+    expect(state).toMatchObject({ activeCheckoutId: worktree.id, activeSessionId: worktreeShell.id });
     expect(primary.sessions).toEqual([shell]);
-    expect(worktree.sessions).toEqual([server]);
+    expect(worktree.sessions).toEqual([worktreeShell]);
   });
 });

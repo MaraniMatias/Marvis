@@ -13,12 +13,6 @@ pub enum RepoKind {
 #[serde(rename_all = "lowercase")]
 pub enum SessionType {
     Shell,
-    /// No session is created with this type any more, but it is still stored: `session_type` is
-    /// persisted, and a workspace that opened Neovim before that entry point was removed still
-    /// holds rows with it. Dropping the variant would make those rows unreadable.
-    Nvim,
-    Server,
-    Custom,
     Agent,
 }
 
@@ -204,7 +198,23 @@ mod tests {
 
     use tempfile::tempdir;
 
-    use super::{checkout_id_for_path, repo_id_for_path, Checkout, Repo, RepoKind};
+    use super::{checkout_id_for_path, repo_id_for_path, Checkout, Repo, RepoKind, SessionType};
+
+    #[test]
+    fn session_types_serialize_and_reject_removed_variants() {
+        assert_eq!(
+            serde_json::to_string(&SessionType::Shell).unwrap(),
+            "\"shell\""
+        );
+        assert_eq!(
+            serde_json::to_string(&SessionType::Agent).unwrap(),
+            "\"agent\""
+        );
+
+        for removed in ["nvim", "server", "custom"] {
+            assert!(serde_json::from_str::<SessionType>(&format!("\"{removed}\"")).is_err());
+        }
+    }
 
     #[test]
     fn plain_repo_has_exactly_one_primary_checkout_with_canonical_ids() {

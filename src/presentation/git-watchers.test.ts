@@ -8,6 +8,16 @@ import type { Checkout, Repo } from "../domain/workspace";
 const mocks = vi.hoisted(() => ({
   watchGitRepo: vi.fn(),
   unwatchGitRepo: vi.fn(),
+  failureListener: undefined as
+    ((event: { payload: { repoId: string; checkoutIds: string[]; registrationId: string } }) => void) | undefined,
+  listenFailure: null as unknown,
+}));
+
+vi.mock("@tauri-apps/api/event", () => ({
+  listen: (_event: string, listener: typeof mocks.failureListener) => {
+    mocks.failureListener = listener;
+    return mocks.listenFailure ? Promise.reject(mocks.listenFailure) : Promise.resolve(() => undefined);
+  },
 }));
 
 vi.mock("../lib/ipc", () => ({
@@ -46,8 +56,8 @@ function repo(id: string, checkouts: Checkout[], kind: Repo["kind"] = "git"): Re
 function host(repos: Ref<Repo[]>) {
   return defineComponent({
     setup() {
-      useGitWatchers(repos);
-      return () => h("div");
+      const unwatched = useGitWatchers(repos);
+      return () => h("div", [...unwatched].join(","));
     },
   });
 }
@@ -71,6 +81,8 @@ async function settle() {
 describe("useGitWatchers", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    mocks.failureListener = undefined;
+    mocks.listenFailure = null;
     mocks.watchGitRepo.mockResolvedValue(undefined);
     mocks.unwatchGitRepo.mockResolvedValue(undefined);
   });
@@ -184,11 +196,146 @@ describe("useGitWatchers", () => {
     const wrapper = mount(host(repos));
     await settle();
     expect(mocks.watchGitRepo).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("repo:a");
+
+    repos.value = [repo("repo:a", [checkout("one")])];
+    await settle();
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("repo:a");
 
     repos.value = [repo("repo:a", [checkout("one"), checkout("two")])];
     await settle();
 
     expect(mocks.watchGitRepo).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).not.toContain("repo:a");
     wrapper.unmount();
+  });
+
+  it("does not install a database plan that diverged during an ABA registration", async () => {
+    const request = deferred<void>();
+    let expectedCheckoutIds: string[] = [];
+    mocks.watchGitRepo.mockImplementationOnce((_repoId, _registrationId, expected) => {
+      expectedCheckoutIds = expected;
+      return request.promise;
+    });
+    const repos = ref([repo("repo:a", [checkout("one")])]);
+    const wrapper = mount(host(repos));
+    await settle();
+
+    repos.value = [repo("repo:a", [checkout("one"), checkout("two")])];
+    await settle();
+    repos.value = [repo("repo:a", [checkout("one")])];
+    await settle();
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(1);
+    expect(expectedCheckoutIds).toEqual(["one"]);
+
+    // Backend observed B while this request expected A; its plan matcher rejects before install.
+    request.reject(new Error("repository checkout plan changed"));
+    await settle();
+    expect(wrapper.text()).toContain("repo:a");
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(1);
+
+    repos.value = [repo("repo:a", [checkout("one"), checkout("two")])];
+    await settle();
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).not.toContain("repo:a");
+    wrapper.unmount();
+  });
+
+  it("marks a runtime-failed watcher unwatched and retries only after the plan changes", async () => {
+    const repos = ref([repo("repo:a", [checkout("one")])]);
+    const wrapper = mount(host(repos));
+    await settle();
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(1);
+
+    const registrationId = mocks.watchGitRepo.mock.calls[0]?.[1];
+    mocks.failureListener?.({ payload: { repoId: "repo:a", checkoutIds: ["one"], registrationId } });
+    await settle();
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("repo:a");
+
+    repos.value = [repo("repo:a", [checkout("one")])];
+    await settle();
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(1);
+    expect(wrapper.text()).toContain("repo:a");
+
+    repos.value = [repo("repo:a", [checkout("one"), checkout("two")])];
+    await settle();
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(2);
+    expect(wrapper.text()).not.toContain("repo:a");
+    wrapper.unmount();
+  });
+
+  it("accepts the current failure token before the watch command resolves", async () => {
+    const pending = deferred<void>();
+    mocks.watchGitRepo.mockImplementation(() => pending.promise);
+    const repos = ref([repo("repo:a", [checkout("one")])]);
+    const wrapper = mount(host(repos));
+    await settle();
+    const registrationId = mocks.watchGitRepo.mock.calls[0]?.[1];
+
+    mocks.failureListener?.({
+      payload: { repoId: "repo:a", checkoutIds: ["one"], registrationId },
+    });
+    await settle();
+    expect(wrapper.text()).toContain("repo:a");
+
+    pending.resolve(undefined);
+    await settle();
+    expect(wrapper.text()).toContain("repo:a");
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("ignores a queued ABA failure from an older registration", async () => {
+    const repos = ref([repo("repo:a", [checkout("one")])]);
+    const wrapper = mount(host(repos));
+    await settle();
+    const oldA = mocks.watchGitRepo.mock.calls[0]?.[1];
+
+    repos.value = [repo("repo:a", [checkout("one"), checkout("two")])];
+    await settle();
+    const b = mocks.watchGitRepo.mock.calls[1]?.[1];
+
+    repos.value = [repo("repo:a", [checkout("one")])];
+    await settle();
+    const newA = mocks.watchGitRepo.mock.calls[2]?.[1];
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(3);
+    expect(newA).not.toBe(oldA);
+    expect(b).not.toBe(newA);
+
+    mocks.failureListener?.({
+      payload: { repoId: "repo:a", checkoutIds: ["one"], registrationId: oldA },
+    });
+    await settle();
+    expect(wrapper.text()).not.toContain("repo:a");
+
+    mocks.failureListener?.({
+      payload: { repoId: "repo:a", checkoutIds: ["one"], registrationId: newA },
+    });
+    await settle();
+    expect(wrapper.text()).toContain("repo:a");
+    expect(mocks.watchGitRepo).toHaveBeenCalledTimes(3);
+    wrapper.unmount();
+  });
+
+  it("fails closed when the watcher-error listener cannot be installed", async () => {
+    mocks.listenFailure = new Error("listener unavailable");
+    const logError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+    const repos = ref([repo("repo:a", [checkout("one")])]);
+    const wrapper = mount(host(repos));
+    await settle();
+
+    expect(mocks.watchGitRepo).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("repo:a");
+    expect(logError).toHaveBeenCalled();
+
+    repos.value = [repo("repo:b", [checkout("two")])];
+    await settle();
+    expect(mocks.watchGitRepo).not.toHaveBeenCalled();
+    expect(wrapper.text()).toContain("repo:b");
+    expect(wrapper.text()).not.toContain("repo:a");
+    wrapper.unmount();
+    logError.mockRestore();
   });
 });

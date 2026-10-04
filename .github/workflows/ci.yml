@@ -26,7 +26,7 @@ jobs:
         with:
           node-version: 22
           cache: pnpm
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
         with:
           components: rustfmt, clippy
       # The Rust dependencies are the build's cost, and they only change when Cargo.lock does.
@@ -41,7 +41,17 @@ jobs:
       - run: pnpm typecheck
       - run: pnpm test
       - run: pnpm test:security
+      - run: pnpm test:coverage
       - run: pnpm build:app
+      # Expected upstream block: glib 0.18.5 (RUSTSEC-2024-0429 / GHSA-WRW7-89JP-8Q8G), pulled by GTK 0.18.
+      # The fixed glib 0.20 line is not currently GTK-compatible; keep this gate fail-closed, with no allowlist.
+      - run: pnpm audit:security
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: frontend-coverage
+          path: coverage/
+          if-no-files-found: warn
 
   # macOS never compiles the Linux branches of the code or links webkit2gtk, so nothing above would
   # notice them rotting. This only builds the .deb: proving the app can be packaged for the platform
@@ -58,7 +68,7 @@ jobs:
         with:
           node-version: 22
       - uses: pnpm/action-setup@v6
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: dtolnay/rust-toolchain@1.97.1
       - name: Install the Tauri Linux prerequisites
         run: |
           sudo apt-get update
@@ -74,4 +84,5 @@ jobs:
             librsvg2-dev
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
-      - run: pnpm tauri build --bundles deb
+      - run: pnpm run build:app -- --bundles deb
+      - run: pnpm audit:rust

@@ -5,9 +5,12 @@ use tauri::State;
 use crate::{
     domain::ipc::{IpcError, IpcErrorCode},
     persistence::Database,
-    services::worktree::{
-        self, CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalConfirmation,
-        WorktreeRemovalInfo,
+    services::{
+        agent::AgentService,
+        worktree::{
+            self, CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalConfirmation,
+            WorktreeRemovalInfo,
+        },
     },
     terminal::TerminalBackend,
 };
@@ -43,11 +46,15 @@ pub async fn worktree_create(
 pub async fn worktree_removal_info(
     checkout_id: String,
     database: State<'_, Database>,
+    agents: State<'_, std::sync::Arc<AgentService>>,
 ) -> Result<WorktreeRemovalInfo, IpcError> {
     let database = database.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || worktree::removal_info(&database, &checkout_id))
-        .await
-        .map_err(operation_error)?
+    let agents = agents.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        worktree::removal_info(&database, &agents, &checkout_id)
+    })
+    .await
+    .map_err(operation_error)?
 }
 
 #[tauri::command]
@@ -56,11 +63,13 @@ pub async fn worktree_remove(
     confirmation: WorktreeRemovalConfirmation,
     database: State<'_, Database>,
     backend: State<'_, std::sync::Arc<TerminalBackend>>,
+    agents: State<'_, std::sync::Arc<AgentService>>,
 ) -> Result<RemovedWorktree, IpcError> {
     let database = database.inner().clone();
     let backend = backend.inner().clone();
+    let agents = agents.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        worktree::remove(&database, &backend, &checkout_id, &confirmation)
+        worktree::remove(&database, &backend, &agents, &checkout_id, &confirmation)
     })
     .await
     .map_err(operation_error)?

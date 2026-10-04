@@ -1,8 +1,21 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
+import type { Checkout } from "../domain/workspace";
+import { DEFAULT_SETTINGS } from "../domain/settings";
+import {
+  closeTerminal,
+  createTerminal,
+  getTerminalStatus,
+  loadTerminalLayout,
+  moveTerminal,
+  resizeTerminal,
+  saveTerminalLayout,
+  writeTerminal,
+} from "../lib/ipc";
+import { useToasts } from "../presentation/toasts";
 import { theme } from "../presentation/theme";
+import SessionPane from "./SessionPane.vue";
 import TerminalSession from "./TerminalSession.vue";
 
 const { MockTerminal, terminalMock } = vi.hoisted(() => {
@@ -181,7 +194,10 @@ vi.mock("../lib/ipc", () => ({
   closeTerminal: vi.fn(),
   createTerminal: vi.fn(),
   getTerminalStatus: vi.fn(),
+  loadTerminalLayout: vi.fn(),
+  moveTerminal: vi.fn(),
   resizeTerminal: vi.fn(),
+  saveTerminalLayout: vi.fn(),
   writeTerminal: vi.fn(),
 }));
 
@@ -894,6 +910,92 @@ describe("TerminalSession UI", () => {
     await wrapper.vm.changeDirectory("/work/repo\nrm -rf /");
     expect(writeTerminal).toHaveBeenCalledTimes(1);
     wrapper.unmount();
+  });
+
+  it("returns false when an input write fails and continues the queue", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+    vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running", foregroundProcess: false });
+    vi.mocked(writeTerminal).mockRejectedValueOnce({
+      code: "terminal_ownership_mismatch",
+      message: "terminal session does not belong to the requested checkout",
+    });
+
+    expect(await wrapper.vm.changeDirectory("/work/repo-wt")).toBe(false);
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toBe("terminal session does not belong to the requested checkout");
+    expect(await wrapper.vm.changeDirectory("/work/repo-wt")).toBe(true);
+    expect(writeTerminal).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("keeps the real PTY error visible after a successful move when the cd write fails", async () => {
+    const { toasts, dismiss } = useToasts();
+    for (const toast of [...toasts.value]) dismiss(toast.id);
+    const checkout: Checkout = {
+      id: "checkout:repo",
+      repoId: "repo:repo",
+      path: "/work/repo",
+      canonicalPath: "/work/repo",
+      isPrimary: true,
+      changedFiles: 0,
+      isMissing: false,
+      sessions: [],
+    };
+    const target = { ...checkout, id: "checkout:target", path: "/work/target", isPrimary: false };
+    const error = {
+      code: "terminal_ownership_mismatch",
+      message: "terminal session does not belong to the requested checkout",
+    };
+    vi.mocked(loadTerminalLayout).mockResolvedValue(null);
+    vi.mocked(saveTerminalLayout).mockResolvedValue(undefined);
+    vi.mocked(moveTerminal).mockResolvedValue({
+      repos: [],
+      activeCheckoutId: target.id,
+      activeSessionId: created.session.id,
+    });
+
+    const wrapper = mount(SessionPane, {
+      props: {
+        checkout,
+        checkouts: [checkout, target],
+        activeSessionId: null,
+        isOpening: true,
+        shellRequest: null,
+        terminalSettings: { ...DEFAULT_SETTINGS.terminal, changeDirectoryOnMove: true },
+      },
+    });
+    await wrapper.setProps({
+      isOpening: false,
+      shellRequest: { checkoutId: checkout.id, token: 1 },
+      activeSessionId: created.session.id,
+      registeredSessionIds: [created.session.id],
+    });
+    await flushPromises();
+    const terminalSession = wrapper.findComponent(TerminalSession);
+    expect(terminalSession.exists()).toBe(true);
+    vi.mocked(writeTerminal).mockRejectedValueOnce(error);
+
+    await wrapper.vm.moveSession(created.session.id, target.id);
+    await flushPromises();
+
+    expect(moveTerminal).toHaveBeenCalledWith(checkout.id, created.session.id, target.id);
+    expect(saveTerminalLayout).toHaveBeenCalledWith(
+      target.id,
+      expect.objectContaining({ sessionOrder: [created.session.id] }),
+    );
+    expect(writeTerminal).toHaveBeenCalledWith(
+      target.id,
+      created.session.id,
+      new TextEncoder().encode("cd '/work/target'\n"),
+    );
+    expect(toasts.value.map((toast) => toast.message)).toEqual([
+      target.path + ": the terminal moved, but its directory was not changed.",
+    ]);
+    expect(toasts.value.map((toast) => toast.message)).not.toContain("busy");
+    expect(terminalSession.get('[role="alert"]').text()).toBe(error.message);
+    wrapper.unmount();
+    for (const toast of [...toasts.value]) dismiss(toast.id);
   });
 
   it("stops asking for status once the process is gone", async () => {

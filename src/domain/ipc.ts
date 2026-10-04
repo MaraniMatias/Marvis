@@ -14,6 +14,9 @@ export type IpcErrorCode =
   | "agent_unavailable"
   | "agent_ownership_mismatch"
   | "file_changed"
+  | "terminal_session_missing"
+  | "terminal_ownership_mismatch"
+  | "invalid_terminal_dimensions"
   | "operation_failed";
 
 const CODES: IpcErrorCode[] = [
@@ -32,6 +35,9 @@ const CODES: IpcErrorCode[] = [
   "agent_unavailable",
   "agent_ownership_mismatch",
   "file_changed",
+  "terminal_session_missing",
+  "terminal_ownership_mismatch",
+  "invalid_terminal_dimensions",
   "operation_failed",
 ];
 

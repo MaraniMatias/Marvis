@@ -4,6 +4,7 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { isIpcError } from "../domain/ipc";
 import type { TerminalSessionStatus } from "../domain/workspace";
 import type { TerminalScrollbarMode } from "../domain/settings";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
@@ -95,7 +96,7 @@ let wheelRemainderPx = 0;
 const SCROLLBAR_FADE_MS = 900;
 
 function showError(cause: unknown) {
-  error.value = cause instanceof Error ? cause.message : String(cause);
+  error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
 }
 
 /**
@@ -351,12 +352,16 @@ function queueResize(cols: number, rows: number) {
     });
 }
 
-function queueInput(value: string) {
-  if (!sessionId || closing.value || state.value.state !== "running") return;
+function queueInput(value: string): Promise<boolean> {
+  if (!sessionId || closing.value || state.value.state !== "running") return Promise.resolve(false);
   const id = sessionId;
   const bytes = new TextEncoder().encode(value);
   const write = inputQueue.then(() => writeTerminal(props.checkoutId, id, bytes));
   inputQueue = write.catch(showError);
+  return write.then(
+    () => true,
+    () => false,
+  );
 }
 
 async function requestClose() {
@@ -412,8 +417,9 @@ function registerFileLinks() {
  * `false` means the directory was left alone, and the caller says so out loud rather than
  * pretending the move changed anything: a shell with a command in front of it cannot be told
  * anything without feeding that command, and a session that has exited has no shell left to tell.
- * The `cd` is written as a line the shell reads rather than asked of the backend, because a PTY
- * has no way to move a process that is already running.
+ * A rejected `cd` write also returns false; its actual error stays in this terminal's alert. The
+ * `cd` is written as a line the shell reads rather than asked of the backend, because a PTY has no
+ * way to move a process that is already running.
  */
 async function changeDirectory(path: string): Promise<boolean> {
   if (!sessionId || closing.value) return false;
@@ -424,9 +430,7 @@ async function changeDirectory(path: string): Promise<boolean> {
   // A directory is typed into the shell as input, so anything that could end the line or run a
   // second command is refused rather than quoted into shape.
   if (/[\n\r\0]/.test(path)) return false;
-  queueInput(`cd '${path.replaceAll("'", `'\\''`)}'\n`);
-  await inputQueue;
-  return true;
+  return queueInput(`cd '${path.replaceAll("'", `'\\''`)}'\n`);
 }
 
 /** A moved terminal keeps its process, so which tree a path may name is a thing that changes. */

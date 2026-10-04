@@ -36,5 +36,8 @@ pub enum IpcErrorCode {
     /// A session id does not belong to the checkout it was used against.
     AgentOwnershipMismatch,
     FileChanged,
+    TerminalSessionMissing,
+    TerminalOwnershipMismatch,
+    InvalidTerminalDimensions,
     OperationFailed,
 }

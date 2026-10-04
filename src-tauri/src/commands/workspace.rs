@@ -30,10 +30,12 @@ pub async fn restore_workspace(
 pub async fn sync_workspace_repo(
     repo_id: String,
     database: State<'_, Database>,
+    agents: State<'_, std::sync::Arc<crate::services::agent::AgentService>>,
 ) -> Result<Option<WorkspaceState>, IpcError> {
     let database = database.inner().clone();
+    let agents = agents.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::workspace::sync_repo(&database, &repo_id)
+        services::workspace::sync_repo(&database, &agents, &repo_id)
     })
     .await
     .map_err(operation_error)?
@@ -65,10 +67,12 @@ pub async fn locate_missing_checkout(
     checkout_id: String,
     path: PathBuf,
     database: State<'_, Database>,
+    agents: State<'_, std::sync::Arc<crate::services::agent::AgentService>>,
 ) -> Result<WorkspaceState, IpcError> {
     let database = database.inner().clone();
+    let agents = agents.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::workspace::locate_missing_checkout(&database, &checkout_id, &path)
+        services::workspace::locate_missing_checkout(&database, &agents, &checkout_id, &path)
     })
     .await
     .map_err(operation_error)?
@@ -79,11 +83,13 @@ pub async fn close_checkout(
     checkout_id: String,
     database: State<'_, Database>,
     backend: State<'_, std::sync::Arc<crate::terminal::TerminalBackend>>,
+    agents: State<'_, std::sync::Arc<crate::services::agent::AgentService>>,
 ) -> Result<WorkspaceState, IpcError> {
     let database = database.inner().clone();
     let backend = backend.inner().clone();
+    let agents = agents.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::workspace::close_checkout(&database, &backend, &checkout_id)
+        services::workspace::close_checkout(&database, &backend, &agents, &checkout_id)
     })
     .await
     .map_err(operation_error)?
@@ -93,10 +99,12 @@ pub async fn close_checkout(
 pub async fn archive_checkout(
     checkout_id: String,
     database: State<'_, Database>,
+    agents: State<'_, std::sync::Arc<crate::services::agent::AgentService>>,
 ) -> Result<WorkspaceState, IpcError> {
     let database = database.inner().clone();
+    let agents = agents.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::workspace::archive_checkout(&database, &checkout_id)
+        services::workspace::archive_checkout(&database, &agents, &checkout_id)
     })
     .await
     .map_err(operation_error)?
@@ -106,10 +114,12 @@ pub async fn archive_checkout(
 pub async fn restore_archived_worktrees(
     repo_id: String,
     database: State<'_, Database>,
+    agents: State<'_, std::sync::Arc<crate::services::agent::AgentService>>,
 ) -> Result<WorkspaceState, IpcError> {
     let database = database.inner().clone();
+    let agents = agents.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::workspace::restore_archived_worktrees(&database, &repo_id)
+        services::workspace::restore_archived_worktrees(&database, &agents, &repo_id)
     })
     .await
     .map_err(operation_error)?
@@ -120,11 +130,13 @@ pub async fn close_missing_checkout(
     checkout_id: String,
     database: State<'_, Database>,
     backend: State<'_, std::sync::Arc<crate::terminal::TerminalBackend>>,
+    agents: State<'_, std::sync::Arc<crate::services::agent::AgentService>>,
 ) -> Result<WorkspaceState, IpcError> {
     let database = database.inner().clone();
     let backend = backend.inner().clone();
+    let agents = agents.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::workspace::close_missing_checkout(&database, &backend, &checkout_id)
+        services::workspace::close_missing_checkout(&database, &backend, &agents, &checkout_id)
     })
     .await
     .map_err(operation_error)?

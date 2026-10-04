@@ -5,9 +5,12 @@ use std::{
     io::{self, BufRead, BufReader},
     path::{Component, Path, PathBuf},
     process::{Command, Output, Stdio},
-    sync::{mpsc, Arc, Mutex},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        mpsc, Arc, Mutex,
+    },
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
@@ -24,9 +27,11 @@ use crate::{
 };
 
 const WATCH_DEBOUNCE: Duration = Duration::from_millis(220);
+const WATCH_MAX_BATCH: Duration = Duration::from_secs(1);
 const STATUS_CHANGED_EVENT: &str = "git-status-changed";
 const FILE_ACTIVITY_EVENT: &str = "checkout-file-activity";
 const WORKTREES_CHANGED_EVENT: &str = "git-worktrees-changed";
+const WATCH_FAILED_EVENT: &str = "git-watch-failed";
 const SMALL_DIFF_LINES: usize = 1000;
 const SMALL_DIFF_BYTES: usize = 512 * 1024;
 const MAX_DIFF_LINES: usize = 100_000;
@@ -140,7 +145,7 @@ pub struct GitWatcherManager {
     /// directory, so watching them one at a time means every write in it is reported once per
     /// worktree, the kernel walks the same tree the same number of times, and a commit still
     /// leaves the siblings holding numbers taken against a merge base that has moved.
-    watchers: Mutex<BTreeMap<String, RepoWatcher>>,
+    watchers: Arc<Mutex<BTreeMap<String, RepoWatcher>>>,
     /// What each checkout was when it was last read, kept here because the same debounced
     /// change that refreshes the file list is what makes it stale. `Arc` so a watch thread can
     /// mark its own entry without borrowing the manager.
@@ -150,6 +155,10 @@ pub struct GitWatcherManager {
 struct RepoWatcher {
     _watcher: RecommendedWatcher,
     sender: mpsc::Sender<WatchMessage>,
+    failed: Arc<AtomicBool>,
+    token: Arc<()>,
+    /// The renderer's request generation, echoed by runtime failure events.
+    registration_id: String,
     /// The plan this watcher was built for, so a worktree joining or leaving the repository is
     /// answered by a watcher that knows about it rather than by the one that predates it.
     plan: RepoWatchPlan,
@@ -169,8 +178,11 @@ pub struct RepoWatchPlan {
     /// The Git directory the worktrees share. A ref or index write there moves the merge base
     /// every sibling diffs against, so it speaks for all of them and not for one.
     pub common_dir: Option<PathBuf>,
-    /// Every checkout the repo still has on disk.
+    /// Every checkout whose Git context this watcher can actually monitor.
     pub all: Vec<String>,
+    /// Live checkout IDs captured before resolving their paths. Runtime failure signals use these
+    /// as their request identity, including checkouts the watcher could not observe.
+    pub requested: Vec<String>,
 }
 
 /// The checkouts a batch of filesystem changes speaks for: the ones whose own files moved, the
@@ -189,13 +201,23 @@ struct WatchUpdate {
 #[derive(Debug, PartialEq, Eq)]
 enum WatchMessage {
     Changed(WatchUpdate),
+    Failed(String),
     Stop,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 enum WatchWakeup {
     Changed(WatchUpdate),
+    Failed(String),
     Stop,
+}
+
+#[derive(Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct WatchFailure {
+    repo_id: String,
+    checkout_ids: Vec<String>,
+    registration_id: String,
 }
 
 #[derive(Clone)]
@@ -233,6 +255,7 @@ struct CachedGitSnapshot {
     /// Choosing another default branch moves the base ref, which no watcher can see, so the
     /// entry is matched against it instead of invalidated.
     default_branch: Option<String>,
+    revision: u64,
     stale: bool,
     snapshot: Snapshot,
     /// Filled in the first time something asks for the lines rather than the file list, and
@@ -244,13 +267,15 @@ struct CachedGitSnapshot {
 #[derive(Default)]
 struct GitSnapshotCache {
     entries: Mutex<BTreeMap<String, CachedGitSnapshot>>,
+    revisions: Mutex<BTreeMap<String, u64>>,
 }
 
 impl GitWatcherManager {
-    pub fn watch(
+    pub fn watch<R: tauri::Runtime>(
         &self,
-        app: AppHandle,
+        app: AppHandle<R>,
         repo_id: String,
+        registration_id: String,
         plan: RepoWatchPlan,
     ) -> Result<(), IpcError> {
         let mut watchers = self
@@ -262,25 +287,22 @@ impl GitWatcherManager {
         // Git directory nothing is watching yet, so its row would describe changes nobody reports.
         // Replacing the watcher is what covers it, and it costs a new watch rather than a second
         // watcher per repository.
-        if watchers
-            .get(&repo_id)
-            .is_some_and(|watched| watched.plan == plan)
-        {
+        if watchers.get(&repo_id).is_some_and(|watched| {
+            watched.plan == plan
+                && watched.registration_id == registration_id
+                && !watched.failed.load(Ordering::Acquire)
+        }) {
             return Ok(());
         }
 
         let (sender, receiver) = mpsc::channel();
         let event_sender = sender.clone();
         let callback_plan = plan.clone();
+        let failed = Arc::new(AtomicBool::new(false));
+        let callback_failed = failed.clone();
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                if let Ok(event) = result {
-                    if let Some(update) = affected_checkouts(&callback_plan, &event) {
-                        // The channel only has to wake the worker; which checkouts moved rides
-                        // along with it, and the worker merges a burst into one answer.
-                        let _ = event_sender.send(WatchMessage::Changed(update));
-                    }
-                }
+                forward_watch_result(result, &callback_plan, &event_sender, &callback_failed);
             })
             .map_err(|error| {
                 IpcError::new(
@@ -305,26 +327,56 @@ impl GitWatcherManager {
         }
 
         let worker_snapshots = self.snapshots.clone();
+        let worker_watchers = self.watchers.clone();
+        let worker_token = Arc::new(());
+        let token = worker_token.clone();
+        let worker_failed = failed.clone();
+        let worker_plan = plan.clone();
+        let worker_registration_id = registration_id.clone();
         thread::Builder::new()
             .name("marvis-git-watch".into())
             .spawn(move || {
-                while let WatchWakeup::Changed(update) =
-                    receive_debounced_change(&receiver, WATCH_DEBOUNCE)
-                {
-                    // Before the event, so a refresh it triggers never reads what the same
-                    // change just invalidated.
-                    worker_snapshots.mark_stale(&update.status);
-                    if !update.status.is_empty() {
-                        let _ = app.emit(STATUS_CHANGED_EVENT, &update.status);
-                    }
-                    if !update.activity.is_empty() {
-                        let _ = app.emit(FILE_ACTIVITY_EVENT, &update.activity);
-                    }
-                    if !update.worktrees.is_empty() {
-                        // The rows themselves are not a status refresh, so the repository is named
-                        // and its registration read again: a worktree created by an agent belongs
-                        // in the sidebar the same way one created here does.
-                        let _ = app.emit(WORKTREES_CHANGED_EVENT, &update.worktrees);
+                loop {
+                    match receive_debounced_change(&receiver, WATCH_DEBOUNCE, WATCH_MAX_BATCH) {
+                        WatchWakeup::Changed(update) => {
+                            // Before the event, so a refresh it triggers never reads what the same
+                            // change just invalidated.
+                            worker_snapshots.mark_stale(&update.status);
+                            if !update.status.is_empty() {
+                                let _ = app.emit(STATUS_CHANGED_EVENT, &update.status);
+                            }
+                            if !update.activity.is_empty() {
+                                let _ = app.emit(FILE_ACTIVITY_EVENT, &update.activity);
+                            }
+                            if !update.worktrees.is_empty() {
+                                // The rows themselves are not a status refresh, so the repository is named
+                                // and its registration read again: a worktree created by an agent belongs
+                                // in the sidebar the same way one created here does.
+                                let _ = app.emit(WORKTREES_CHANGED_EVENT, &update.worktrees);
+                            }
+                        }
+                        WatchWakeup::Failed(error) => {
+                            let update = invalidate_failed_watch(&worker_snapshots, &worker_plan);
+                            log::error!(
+                                "Git watcher for repository {} failed: {error}",
+                                worker_plan.repo_id
+                            );
+                            let _ = app.emit(STATUS_CHANGED_EVENT, &update.status);
+                            let _ = app.emit(
+                                WATCH_FAILED_EVENT,
+                                watch_failure(&worker_plan, &worker_registration_id),
+                            );
+                            if let Ok(mut watchers) = worker_watchers.lock() {
+                                if watchers
+                                    .get(&worker_plan.repo_id)
+                                    .is_some_and(|current| Arc::ptr_eq(&current.token, &token))
+                                {
+                                    watchers.remove(&worker_plan.repo_id);
+                                }
+                            }
+                            break;
+                        }
+                        WatchWakeup::Stop => break,
                     }
                 }
             })
@@ -337,24 +389,33 @@ impl GitWatcherManager {
 
         // The replaced watcher is dropped with its sender, which is what ends the worker reading
         // the plan this one supersedes.
+        if let Some(previous) = watchers.get(&repo_id) {
+            invalidate_replaced_plan(&self.snapshots, &previous.plan, &plan);
+        }
         watchers.insert(
             repo_id,
             RepoWatcher {
                 _watcher: watcher,
                 sender,
-                plan,
+                failed: worker_failed,
+                token: worker_token,
+                registration_id,
+                plan: plan.clone(),
             },
         );
         Ok(())
     }
 
     pub fn unwatch(&self, repo_id: &str, checkout_ids: &[String]) {
+        let mut checkout_ids: BTreeSet<_> = checkout_ids.iter().cloned().collect();
         if let Ok(mut watchers) = self.watchers.lock() {
-            if let Some(RepoWatcher { sender, .. }) = watchers.remove(repo_id) {
+            if let Some(RepoWatcher { sender, plan, .. }) = watchers.remove(repo_id) {
                 let _ = sender.send(WatchMessage::Stop);
+                checkout_ids.extend(plan.requested);
             }
         }
-        self.snapshots.forget_many(checkout_ids);
+        self.snapshots
+            .forget_many(&checkout_ids.into_iter().collect::<Vec<_>>());
     }
 
     /// What is already held for a checkout, or `None` when it must be read again. Every live
@@ -367,8 +428,8 @@ impl GitWatcherManager {
         self.snapshots.fresh(checkout_id, default_branch)
     }
 
-    fn store_state(&self, checkout_id: String, state: CachedGitSnapshot) {
-        self.snapshots.insert(checkout_id, state);
+    fn store_state(&self, checkout_id: String, state: CachedGitSnapshot, revision: Option<u64>) {
+        self.snapshots.insert_at(checkout_id, state, revision);
     }
 }
 
@@ -388,6 +449,10 @@ impl GitWatcherManager {
 /// checkout can speak for: it is answered by naming the repository, and the workspace is read
 /// again to find the worktree that joined or the one that left.
 fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<WatchUpdate> {
+    // Linux inotify also reports opens and closes; these access events are not file changes.
+    if matches!(event.kind, notify::EventKind::Access(_)) {
+        return None;
+    }
     let mut status: BTreeSet<String> = BTreeSet::new();
     let mut activity: BTreeSet<String> = BTreeSet::new();
     let mut worktrees: BTreeSet<String> = BTreeSet::new();
@@ -535,30 +600,65 @@ fn is_pending_worktree_git_dir(path: &Path, common_dir: &Path) -> bool {
 }
 
 impl GitSnapshotCache {
+    fn revision(&self, checkout_id: &str) -> Option<u64> {
+        let revisions = self.revisions.lock().ok()?;
+        Some(*revisions.get(checkout_id).unwrap_or(&0))
+    }
+
     fn fresh(&self, checkout_id: &str, default_branch: Option<&str>) -> Option<CachedGitSnapshot> {
+        let revisions = self.revisions.lock().ok()?;
+        let revision = revisions.get(checkout_id).copied().unwrap_or(0);
         self.entries
             .lock()
             .ok()?
             .get(checkout_id)
-            .filter(|entry| !entry.stale && entry.default_branch.as_deref() == default_branch)
+            .filter(|entry| {
+                entry.revision == revision
+                    && !entry.stale
+                    && entry.default_branch.as_deref() == default_branch
+            })
             .cloned()
     }
 
+    #[cfg(test)]
     fn insert(&self, checkout_id: String, state: CachedGitSnapshot) {
-        if let Ok(mut entries) = self.entries.lock() {
-            entries.insert(
-                checkout_id,
-                CachedGitSnapshot {
-                    stale: false,
-                    ..state
-                },
-            );
+        let revision = self.revision(&checkout_id);
+        self.insert_at(checkout_id, state, revision);
+    }
+
+    fn insert_at(&self, checkout_id: String, state: CachedGitSnapshot, revision: Option<u64>) {
+        let Some(revision) = revision else {
+            return;
+        };
+        let Ok(revisions) = self.revisions.lock() else {
+            return;
+        };
+        if revisions.get(&checkout_id).copied().unwrap_or(0) != revision {
+            return;
         }
+        let Ok(mut entries) = self.entries.lock() else {
+            return;
+        };
+        entries.insert(
+            checkout_id,
+            CachedGitSnapshot {
+                revision,
+                stale: false,
+                ..state
+            },
+        );
     }
 
     /// Marks every checkout a change speaks for, so the refresh it triggers reads the tree
     /// rather than what it looked like a moment ago.
     fn mark_stale(&self, checkout_ids: &[String]) {
+        let Ok(mut revisions) = self.revisions.lock() else {
+            return;
+        };
+        for checkout_id in checkout_ids {
+            let revision = revisions.entry(checkout_id.clone()).or_default();
+            *revision = revision.wrapping_add(1);
+        }
         if let Ok(mut entries) = self.entries.lock() {
             for checkout_id in checkout_ids {
                 if let Some(entry) = entries.get_mut(checkout_id) {
@@ -569,12 +669,36 @@ impl GitSnapshotCache {
     }
 
     fn forget_many(&self, checkout_ids: &[String]) {
+        let Ok(mut revisions) = self.revisions.lock() else {
+            return;
+        };
+        for checkout_id in checkout_ids {
+            let revision = revisions.entry(checkout_id.clone()).or_default();
+            *revision = revision.wrapping_add(1);
+        }
         if let Ok(mut entries) = self.entries.lock() {
             for checkout_id in checkout_ids {
                 entries.remove(checkout_id);
             }
         }
     }
+}
+
+fn invalidate_replaced_plan(
+    snapshots: &GitSnapshotCache,
+    previous: &RepoWatchPlan,
+    next: &RepoWatchPlan,
+) {
+    if previous == next {
+        return;
+    }
+    let affected: BTreeSet<_> = previous
+        .requested
+        .iter()
+        .chain(&next.requested)
+        .cloned()
+        .collect();
+    snapshots.mark_stale(&affected.into_iter().collect::<Vec<_>>());
 }
 
 /// Waits for the directory to go quiet, then names every checkout the quiet period touched.
@@ -585,14 +709,38 @@ impl GitSnapshotCache {
 fn receive_debounced_change(
     receiver: &mpsc::Receiver<WatchMessage>,
     debounce: Duration,
+    max_batch: Duration,
 ) -> WatchWakeup {
-    let mut merged = match receiver.recv() {
+    let merged = match receiver.recv() {
         Ok(WatchMessage::Changed(update)) => update,
+        Ok(WatchMessage::Failed(error)) => return WatchWakeup::Failed(error),
         Ok(WatchMessage::Stop) | Err(_) => return WatchWakeup::Stop,
     };
+    let started = Instant::now();
+    receive_debounced_updates(
+        merged,
+        debounce,
+        max_batch,
+        || started.elapsed(),
+        |timeout| receiver.recv_timeout(timeout),
+    )
+}
+
+fn receive_debounced_updates(
+    mut merged: WatchUpdate,
+    debounce: Duration,
+    max_batch: Duration,
+    mut elapsed: impl FnMut() -> Duration,
+    mut receive: impl FnMut(Duration) -> Result<WatchMessage, mpsc::RecvTimeoutError>,
+) -> WatchWakeup {
     loop {
-        match receiver.recv_timeout(debounce) {
+        let remaining = max_batch.saturating_sub(elapsed());
+        if remaining.is_zero() {
+            return WatchWakeup::Changed(merged);
+        }
+        match receive(debounce.min(remaining)) {
             Ok(WatchMessage::Changed(update)) => merge_update(&mut merged, update),
+            Ok(WatchMessage::Failed(error)) => return WatchWakeup::Failed(error),
             Ok(WatchMessage::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return WatchWakeup::Stop;
             }
@@ -616,6 +764,60 @@ fn merge_update(merged: &mut WatchUpdate, update: WatchUpdate) {
         if !merged.worktrees.contains(&repo_id) {
             merged.worktrees.push(repo_id);
         }
+    }
+}
+
+fn failed_watch_update(plan: &RepoWatchPlan) -> WatchUpdate {
+    WatchUpdate {
+        status: plan.requested.clone(),
+        ..WatchUpdate::default()
+    }
+}
+
+fn requested_watch_ids(plan: &RepoWatchPlan) -> Vec<String> {
+    let mut requested = plan.requested.clone();
+    requested.sort();
+    requested
+}
+
+fn watch_failure(plan: &RepoWatchPlan, registration_id: &str) -> WatchFailure {
+    WatchFailure {
+        repo_id: plan.repo_id.clone(),
+        checkout_ids: requested_watch_ids(plan),
+        registration_id: registration_id.to_owned(),
+    }
+}
+
+fn invalidate_failed_watch(snapshots: &GitSnapshotCache, plan: &RepoWatchPlan) -> WatchUpdate {
+    let update = failed_watch_update(plan);
+    snapshots.mark_stale(&update.status);
+    update
+}
+
+fn forward_watch_result(
+    result: notify::Result<notify::Event>,
+    plan: &RepoWatchPlan,
+    sender: &mpsc::Sender<WatchMessage>,
+    failed: &AtomicBool,
+) {
+    match result {
+        Ok(event) if !failed.load(Ordering::Acquire) => {
+            if let Some(update) = affected_checkouts(plan, &event) {
+                // The channel only has to wake the worker; which checkouts moved rides along with
+                // it, and the worker merges a burst into one answer.
+                let _ = sender.send(WatchMessage::Changed(update));
+            }
+        }
+        Err(error) if !failed.swap(true, Ordering::AcqRel) => {
+            let message = error.to_string();
+            if sender.send(WatchMessage::Failed(message.clone())).is_err() {
+                log::error!(
+                    "Git watcher for repository {} failed: {message}",
+                    plan.repo_id
+                );
+            }
+        }
+        _ => {}
     }
 }
 
@@ -657,8 +859,7 @@ pub fn status(
     watchers: &GitWatcherManager,
     checkout_id: &str,
 ) -> Result<GitStatus, IpcError> {
-    let repos = workspace_repos(database)?;
-    let context = git_context(&repos, checkout_id)?;
+    let context = registered_git_context(database, checkout_id)?;
     Ok(snapshot_of(&context, watchers)?.status)
 }
 
@@ -669,8 +870,7 @@ pub fn diff_stats(
     watchers: &GitWatcherManager,
     checkout_id: &str,
 ) -> Result<GitFileDiffStats, IpcError> {
-    let repos = workspace_repos(database)?;
-    let context = git_context(&repos, checkout_id)?;
+    let context = registered_git_context(database, checkout_id)?;
     Ok(counts_of(&context, watchers)?.files)
 }
 
@@ -746,6 +946,7 @@ fn held_state(context: &GitContext, watchers: &GitWatcherManager) -> Option<Cach
 /// Reads the checkout and remembers it, so the next question about it is a lookup rather than
 /// another walk of the same working tree.
 fn snapshot_of(context: &GitContext, watchers: &GitWatcherManager) -> Result<Snapshot, IpcError> {
+    let revision = watchers.snapshots.revision(&context.checkout.id);
     let default_branch = context.repo.default_branch.clone();
     if let Some(held) = held_state(context, watchers) {
         return Ok(held.snapshot);
@@ -755,10 +956,12 @@ fn snapshot_of(context: &GitContext, watchers: &GitWatcherManager) -> Result<Sna
         context.checkout.id.clone(),
         CachedGitSnapshot {
             default_branch,
+            revision: 0,
             stale: false,
             snapshot: read.clone(),
             counts: None,
         },
+        revision,
     );
     Ok(read)
 }
@@ -766,6 +969,7 @@ fn snapshot_of(context: &GitContext, watchers: &GitWatcherManager) -> Result<Sna
 /// The line counts, from the same snapshot the file list is served from, so a number and the
 /// row it decorates can never describe two change sets.
 fn counts_of(context: &GitContext, watchers: &GitWatcherManager) -> Result<GitCounts, IpcError> {
+    let revision = watchers.snapshots.revision(&context.checkout.id);
     let default_branch = context.repo.default_branch.clone();
     let held = held_state(context, watchers);
     if let Some(counts) = held.as_ref().and_then(|held| held.counts.clone()) {
@@ -781,10 +985,12 @@ fn counts_of(context: &GitContext, watchers: &GitWatcherManager) -> Result<GitCo
         context.checkout.id.clone(),
         CachedGitSnapshot {
             default_branch,
+            revision: 0,
             stale: false,
             snapshot: read,
             counts: Some(counts.clone()),
         },
+        revision,
     );
     Ok(counts)
 }
@@ -1403,6 +1609,7 @@ pub fn watch_plan(database: &Database, repo_id: &str) -> Result<RepoWatchPlan, I
         if checkout.is_missing {
             continue;
         }
+        plan.requested.push(checkout.id.clone());
         let Ok(context) = git_context(&repos, &checkout.id) else {
             continue;
         };
@@ -1428,6 +1635,12 @@ pub fn watch_plan(database: &Database, repo_id: &str) -> Result<RepoWatchPlan, I
         ));
     }
     Ok(plan)
+}
+
+pub fn watch_plan_matches_request(plan: &RepoWatchPlan, expected_checkout_ids: &[String]) -> bool {
+    let mut expected = expected_checkout_ids.to_vec();
+    expected.sort();
+    requested_watch_ids(plan) == expected
 }
 
 /// The checkout ids a repository is registered with, so unwatching can drop exactly the
@@ -1473,7 +1686,16 @@ fn absolute_git_path(root: &Path, text: &str) -> Option<PathBuf> {
 }
 
 fn registered_git_context(database: &Database, checkout_id: &str) -> Result<GitContext, IpcError> {
-    git_context(&workspace_repos(database)?, checkout_id)
+    let (repo, checkout) = database
+        .load_registered_checkout(checkout_id)
+        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))?
+        .ok_or_else(|| {
+            IpcError::new(
+                IpcErrorCode::InvalidCheckout,
+                "checkout ID is not registered",
+            )
+        })?;
+    git_context_for_checkout(&repo, &checkout)
 }
 
 fn git_context(repos: &[Repo], checkout_id: &str) -> Result<GitContext, IpcError> {
@@ -1482,6 +1704,10 @@ fn git_context(repos: &[Repo], checkout_id: &str) -> Result<GitContext, IpcError
         checkout_id,
         "checkout ID is not registered",
     )?;
+    git_context_for_checkout(repo, checkout)
+}
+
+fn git_context_for_checkout(repo: &Repo, checkout: &Checkout) -> Result<GitContext, IpcError> {
     if repo.kind != RepoKind::Git {
         return Err(IpcError::new(
             IpcErrorCode::InvalidCheckout,
@@ -1494,7 +1720,7 @@ fn git_context(repos: &[Repo], checkout_id: &str) -> Result<GitContext, IpcError
             "checkout is no longer available",
         ));
     }
-    let root = resolve_checkout_path(repo, checkout_id, Path::new("."))?;
+    let root = resolve_checkout_path(repo, &checkout.id, Path::new("."))?;
     Ok(GitContext {
         repo: repo.clone(),
         checkout: checkout.clone(),
@@ -1935,11 +2161,15 @@ fn output_text(output: &Output) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeMap,
+        cell::Cell,
+        collections::{BTreeMap, VecDeque},
         fs,
         path::Path,
         process::Command,
-        sync::mpsc,
+        sync::{
+            atomic::{AtomicBool, Ordering},
+            mpsc,
+        },
         time::{Duration, Instant},
     };
 
@@ -1953,11 +2183,13 @@ mod tests {
     };
 
     use super::{
-        affected_checkouts, diff, diff_page, parse_diff_display_line, parse_name_status,
-        parse_numstat, parse_porcelain_v2, receive_debounced_change, resolve_default_ref,
-        should_refresh_path, status, untracked_line_count, CachedGitSnapshot, GitCounts,
-        GitDiffStats, GitSnapshotCache, GitStatus, GitWatcherManager, PathBuf, RepoWatchPlan,
-        WatchMessage, WatchUpdate, WatchWakeup,
+        affected_checkouts, diff, diff_page, failed_watch_update, forward_watch_result,
+        invalidate_failed_watch, parse_diff_display_line, parse_name_status, parse_numstat,
+        parse_porcelain_v2, receive_debounced_change, receive_debounced_updates,
+        requested_watch_ids, resolve_default_ref, should_refresh_path, status,
+        untracked_line_count, watch_failure, watch_plan_matches_request, CachedGitSnapshot,
+        GitCounts, GitDiffStats, GitSnapshotCache, GitStatus, GitWatcherManager, PathBuf,
+        RepoWatchPlan, WatchMessage, WatchUpdate, WatchWakeup,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -2238,10 +2470,14 @@ line.txt";
     }
 
     fn touched(ids: &[&str]) -> WatchUpdate {
+        watch_update(ids, &[], &[])
+    }
+
+    fn watch_update(status: &[&str], activity: &[&str], worktrees: &[&str]) -> WatchUpdate {
         WatchUpdate {
-            status: ids.iter().map(|id| (*id).to_owned()).collect(),
-            activity: Vec::new(),
-            worktrees: Vec::new(),
+            status: status.iter().map(|id| (*id).to_owned()).collect(),
+            activity: activity.iter().map(|id| (*id).to_owned()).collect(),
+            worktrees: worktrees.iter().map(|id| (*id).to_owned()).collect(),
         }
     }
 
@@ -2256,10 +2492,121 @@ line.txt";
         // are separate filesystem events describing one change, and answering them apart would
         // refresh the same rows twice. A checkout named twice is still one row.
         assert_eq!(
-            receive_debounced_change(&receiver, Duration::from_millis(1)),
+            receive_debounced_change(&receiver, Duration::from_millis(1), Duration::from_secs(1),),
             WatchWakeup::Changed(touched(&["a", "b"]))
         );
         assert!(receiver.try_recv().is_err());
+    }
+
+    #[test]
+    fn watcher_caps_a_continuous_batch_and_preserves_changes_for_the_next_batch() {
+        let elapsed = Cell::new(Duration::ZERO);
+        let mut pending = VecDeque::from([
+            (
+                Duration::from_millis(50),
+                WatchMessage::Changed(watch_update(
+                    &["early"],
+                    &["activity-early"],
+                    &["repo-early"],
+                )),
+            ),
+            (
+                Duration::from_millis(120),
+                WatchMessage::Changed(watch_update(
+                    &["middle"],
+                    &["activity-middle"],
+                    &["repo-middle"],
+                )),
+            ),
+            (
+                Duration::from_millis(190),
+                WatchMessage::Changed(watch_update(
+                    &["initial"],
+                    &["activity-early"],
+                    &["repo-early"],
+                )),
+            ),
+            (
+                Duration::from_millis(240),
+                WatchMessage::Changed(watch_update(
+                    &["near-limit"],
+                    &["activity-near-limit"],
+                    &["repo-near-limit"],
+                )),
+            ),
+            (
+                Duration::from_millis(260),
+                WatchMessage::Changed(touched(&["next-batch"])),
+            ),
+        ]);
+        let mut waits = Vec::new();
+        let mut receives = 0;
+
+        let wakeup = receive_debounced_updates(
+            watch_update(&["initial"], &["activity-initial"], &["repo-initial"]),
+            Duration::from_millis(100),
+            Duration::from_millis(250),
+            || elapsed.get(),
+            |timeout| {
+                receives += 1;
+                waits.push(timeout);
+                let deadline = elapsed.get() + timeout;
+                if pending.front().is_some_and(|(at, _)| *at < deadline) {
+                    let (at, message) = pending.pop_front().unwrap();
+                    elapsed.set(at);
+                    Ok(message)
+                } else {
+                    elapsed.set(deadline);
+                    Err(mpsc::RecvTimeoutError::Timeout)
+                }
+            },
+        );
+
+        assert_eq!(
+            wakeup,
+            WatchWakeup::Changed(watch_update(
+                &["initial", "early", "middle", "near-limit"],
+                &[
+                    "activity-initial",
+                    "activity-early",
+                    "activity-middle",
+                    "activity-near-limit",
+                ],
+                &[
+                    "repo-initial",
+                    "repo-early",
+                    "repo-middle",
+                    "repo-near-limit"
+                ],
+            ))
+        );
+        assert_eq!(
+            waits,
+            [
+                Duration::from_millis(100),
+                Duration::from_millis(100),
+                Duration::from_millis(100),
+                Duration::from_millis(60),
+                Duration::from_millis(10),
+            ]
+        );
+        assert_eq!(elapsed.get(), Duration::from_millis(250));
+        assert_eq!(receives, 5);
+        assert!(
+            matches!(pending.front(), Some((at, WatchMessage::Changed(_))) if *at == Duration::from_millis(260))
+        );
+    }
+
+    #[test]
+    fn watcher_stops_if_the_channel_disconnects_during_a_batch() {
+        let (sender, receiver) = mpsc::channel();
+        sender.send(WatchMessage::Changed(touched(&["a"]))).unwrap();
+        drop(sender);
+
+        assert_eq!(
+            receive_debounced_change(&receiver, Duration::from_millis(1), Duration::from_secs(1),),
+            WatchWakeup::Stop
+        );
     }
 
     #[test]
@@ -2282,6 +2629,7 @@ line.txt";
             git_dirs: BTreeMap::new(),
             common_dir: None,
             all: vec!["main".to_owned(), "task".to_owned()],
+            requested: vec!["main".to_owned(), "task".to_owned()],
         };
         let (sender, receiver) = mpsc::channel();
         let event_sender = sender.clone();
@@ -2308,6 +2656,7 @@ line.txt";
         // saying otherwise would make a save in one worktree cost a re-read of every other.
         let update = match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
             WatchMessage::Changed(update) => update,
+            WatchMessage::Failed(error) => panic!("watch failed: {error}"),
             WatchMessage::Stop => panic!("watcher stopped"),
         };
         assert_eq!(update.status, vec!["task".to_owned()]);
@@ -2332,6 +2681,7 @@ line.txt";
             )]),
             common_dir: Some(PathBuf::from("/repo/.git")),
             all: vec!["main".to_owned(), "task".to_owned()],
+            requested: vec!["main".to_owned(), "task".to_owned()],
         };
         let write = notify::Event {
             kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
@@ -2365,6 +2715,7 @@ line.txt";
             )]),
             common_dir: Some(PathBuf::from("/repo/.git")),
             all: vec!["main".to_owned(), "task".to_owned()],
+            requested: vec!["main".to_owned(), "task".to_owned()],
         };
         let staged = notify::Event {
             kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
@@ -2391,6 +2742,7 @@ line.txt";
             git_dirs: BTreeMap::new(),
             common_dir: Some(PathBuf::from("/repo/.git")),
             all: vec!["main".to_owned()],
+            requested: vec!["main".to_owned()],
         };
         // Git registers the worktree, writes its metadata and only then the checkout, wherever
         // the new directory landed: the registration is the one write every way of adding a
@@ -2499,6 +2851,7 @@ line.txt";
             )]),
             common_dir: Some(PathBuf::from("/repo/.git")),
             all: vec!["main".to_owned(), "task".to_owned()],
+            requested: vec!["main".to_owned(), "task".to_owned()],
         };
         let removed = notify::Event {
             kind: notify::EventKind::Remove(notify::event::RemoveKind::File),
@@ -2510,6 +2863,53 @@ line.txt";
 
         assert!(update.status.is_empty());
         assert_eq!(update.worktrees, ["repo"]);
+    }
+
+    #[test]
+    fn opening_primary_files_while_creating_a_worktree_is_not_a_checkout_change() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned()],
+            ..RepoWatchPlan::default()
+        };
+        let path = PathBuf::from("/repo/base.txt");
+
+        // Linux inotify surfaces opens and read-only closes as Access events.
+        for kind in [
+            notify::EventKind::Access(notify::event::AccessKind::Open(
+                notify::event::AccessMode::Any,
+            )),
+            notify::EventKind::Access(notify::event::AccessKind::Close(
+                notify::event::AccessMode::Read,
+            )),
+        ] {
+            let event = notify::Event {
+                kind,
+                paths: vec![path.clone()],
+                attrs: Default::default(),
+            };
+            assert_eq!(affected_checkouts(&plan, &event), None);
+        }
+
+        let write = notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Data(
+                notify::event::DataChange::Any,
+            )),
+            paths: vec![path],
+            attrs: Default::default(),
+        };
+        assert_eq!(
+            affected_checkouts(&plan, &write),
+            Some(WatchUpdate {
+                status: vec!["main".to_owned()],
+                activity: vec!["main".to_owned()],
+                worktrees: Vec::new(),
+            })
+        );
     }
 
     #[test]
@@ -2556,6 +2956,7 @@ line.txt";
             )]),
             common_dir: Some(PathBuf::from("/repo/.git")),
             all: vec!["main".to_owned(), "task".to_owned()],
+            requested: vec!["main".to_owned(), "task".to_owned()],
         };
         // A checkout's own index, lock and HEAD move on every command, and the lock appears and
         // disappears, so kind alone cannot tell them from a registration. Reading the whole
@@ -2596,6 +2997,7 @@ line.txt";
             git_dirs: BTreeMap::new(),
             common_dir: Some(PathBuf::from("/repo/.git")),
             all: vec!["main".to_owned()],
+            requested: vec!["main".to_owned()],
         };
         let event = notify::Event {
             kind: notify::EventKind::Create(notify::event::CreateKind::File),
@@ -2652,11 +3054,67 @@ line.txt";
         let before = super::watch_plan(&database, &repo_id).unwrap();
         assert!(!before.roots.keys().any(|path| path == &added));
 
-        workspace::sync_repo(&database, &repo_id).unwrap();
+        workspace::sync_repo(
+            &database,
+            &crate::services::agent::AgentService::default(),
+            &repo_id,
+        )
+        .unwrap();
 
         let after = super::watch_plan(&database, &repo_id).unwrap();
         assert!(after.roots.keys().any(|path| path == &added));
         assert_ne!(before, after);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_watch_keeps_requested_ids_for_a_symlink_invalid_checkout() {
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let linked = temp.path().join("task");
+        let outside = temp.path().join("outside");
+        init_repo(&root);
+        git(
+            &root,
+            &["worktree", "add", "-b", "task", linked.to_str().unwrap()],
+        );
+        let (database, _) = git_database(temp.path(), &root);
+        let state = workspace::register_folder(&database, &linked).unwrap();
+        let repo = &state.repos[0];
+        let mut requested: Vec<_> = repo
+            .checkouts
+            .iter()
+            .filter(|checkout| !checkout.is_missing)
+            .map(|checkout| checkout.id.clone())
+            .collect();
+        requested.sort();
+        let primary = repo
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.is_primary)
+            .unwrap()
+            .id
+            .clone();
+
+        fs::remove_dir_all(&linked).unwrap();
+        fs::create_dir(&outside).unwrap();
+        symlink(&outside, &linked).unwrap();
+
+        let plan = super::watch_plan(&database, &repo.id).unwrap();
+
+        assert_eq!(plan.all, vec![primary]);
+        assert_eq!(requested_watch_ids(&plan), requested);
+        assert!(watch_plan_matches_request(&plan, &requested));
+        assert!(!watch_plan_matches_request(&plan, &plan.all));
+        assert_eq!(failed_watch_update(&plan).status, plan.requested);
+        let failure = watch_failure(&plan, "registration-7");
+        assert_eq!(failure.checkout_ids, requested);
+        assert_eq!(failure.registration_id, "registration-7");
+        let payload = serde_json::to_value(failure).unwrap();
+        assert_eq!(payload["registrationId"], "registration-7");
+        assert_eq!(payload["checkoutIds"], serde_json::json!(requested));
     }
 
     #[test]
@@ -2669,6 +3127,7 @@ line.txt";
             git_dirs: BTreeMap::new(),
             common_dir: Some(PathBuf::from("/repo/.git")),
             all: vec!["main".to_owned()],
+            requested: vec!["main".to_owned()],
         };
         // Objects and logs churn on every Git command. Re-reading every checkout because a
         // blob was written is the cost this whole path exists to avoid.
@@ -2974,6 +3433,7 @@ line.txt";
     fn cached_state(counts: Option<GitCounts>) -> CachedGitSnapshot {
         CachedGitSnapshot {
             default_branch: Some("trunk".to_owned()),
+            revision: 0,
             stale: false,
             snapshot: super::Snapshot {
                 status: GitStatus {
@@ -2987,6 +3447,49 @@ line.txt";
             },
             counts,
         }
+    }
+
+    #[test]
+    fn runtime_notify_error_is_reported_and_invalidates_the_repository_snapshot() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            all: vec!["checkout:a".to_owned(), "checkout:b".to_owned()],
+            requested: vec!["checkout:a".to_owned(), "checkout:b".to_owned()],
+            ..RepoWatchPlan::default()
+        };
+        let cache = GitSnapshotCache::default();
+        for checkout_id in &plan.all {
+            cache.insert(checkout_id.clone(), cached_state(None));
+            assert!(cache.fresh(checkout_id, Some("trunk")).is_some());
+        }
+
+        let (sender, receiver) = mpsc::channel();
+        let failed = AtomicBool::new(false);
+        forward_watch_result(
+            Err(notify::Error::generic("watch stream failed")),
+            &plan,
+            &sender,
+            &failed,
+        );
+        assert_eq!(
+            receive_debounced_change(&receiver, Duration::ZERO, Duration::ZERO),
+            WatchWakeup::Failed("watch stream failed".to_owned())
+        );
+
+        let update = invalidate_failed_watch(&cache, &plan);
+        assert_eq!(update.status, plan.all);
+        assert!(cache.fresh("checkout:a", Some("trunk")).is_none());
+        assert!(cache.fresh("checkout:b", Some("trunk")).is_none());
+
+        // One terminal error fails the watcher; repeated callback errors do not queue retries.
+        forward_watch_result(
+            Err(notify::Error::generic("second error")),
+            &plan,
+            &sender,
+            &failed,
+        );
+        assert!(receiver.try_recv().is_err());
+        assert!(failed.load(Ordering::Acquire));
     }
 
     #[test]
@@ -3052,6 +3555,109 @@ line.txt";
                 .and_then(|held| held.counts),
             Some(counts)
         );
+    }
+
+    #[test]
+    fn a_refresh_started_before_invalidation_cannot_repopulate_the_cache() {
+        let cache = GitSnapshotCache::default();
+        let checkout_id = "checkout:a".to_owned();
+        cache.insert(checkout_id.clone(), cached_state(None));
+        let refresh_revision = cache.revision(&checkout_id);
+
+        cache.mark_stale(std::slice::from_ref(&checkout_id));
+        cache.insert_at(checkout_id.clone(), cached_state(None), refresh_revision);
+
+        assert!(cache.fresh(&checkout_id, Some("trunk")).is_none());
+    }
+
+    #[test]
+    fn archiving_and_restoring_a_worktree_invalidates_its_cached_status_and_counts() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("task");
+        init_repo(&root);
+        git(
+            &root,
+            &["worktree", "add", "-b", "task", worktree.to_str().unwrap()],
+        );
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let repo_id = state.repos[0].id.clone();
+        let worktree_path = worktree.canonicalize().unwrap();
+        let checkout_id = state.repos[0]
+            .checkouts
+            .iter()
+            .find(|checkout| checkout.canonical_path == worktree_path.to_string_lossy().as_ref())
+            .unwrap()
+            .id
+            .clone();
+        workspace::set_default_branch(&database, &repo_id, "trunk").unwrap();
+
+        let app = tauri::test::mock_app();
+        let watchers = GitWatcherManager::default();
+        watchers
+            .watch(
+                app.handle().clone(),
+                repo_id.clone(),
+                "initial".to_owned(),
+                super::watch_plan(&database, &repo_id).unwrap(),
+            )
+            .unwrap();
+        assert!(status(&database, &watchers, &checkout_id)
+            .unwrap()
+            .files
+            .is_empty());
+        assert!(super::diff_stats(&database, &watchers, &checkout_id)
+            .unwrap()
+            .is_empty());
+
+        workspace::archive_checkout(
+            &database,
+            &crate::services::agent::AgentService::default(),
+            &checkout_id,
+        )
+        .unwrap();
+        watchers
+            .watch(
+                app.handle().clone(),
+                repo_id.clone(),
+                "archived".to_owned(),
+                super::watch_plan(&database, &repo_id).unwrap(),
+            )
+            .unwrap();
+        assert!(watchers.cached_state(&checkout_id, Some("trunk")).is_none());
+
+        fs::write(worktree.join("after-archive.txt"), "changed\n").unwrap();
+        workspace::restore_archived_worktrees(
+            &database,
+            &crate::services::agent::AgentService::default(),
+            &repo_id,
+        )
+        .unwrap();
+        watchers
+            .watch(
+                app.handle().clone(),
+                repo_id.clone(),
+                "restored".to_owned(),
+                super::watch_plan(&database, &repo_id).unwrap(),
+            )
+            .unwrap();
+
+        assert!(status(&database, &watchers, &checkout_id)
+            .unwrap()
+            .files
+            .iter()
+            .any(|file| file.path == "after-archive.txt"));
+        let counts = super::diff_stats(&database, &watchers, &checkout_id).unwrap();
+        assert_eq!(
+            counts
+                .iter()
+                .find(|file| file.path == "after-archive.txt")
+                .unwrap()
+                .additions,
+            Some(1)
+        );
+        watchers.unwatch(&repo_id, &[]);
     }
 
     #[test]
