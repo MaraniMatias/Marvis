@@ -507,13 +507,14 @@ impl AgentBridge {
         path: &str,
         timeout: Duration,
     ) -> Result<T, BridgeError> {
-        let envelope: ApiEnvelope<T> = send_json(
+        let url = format!("{}{path}", self.base_url());
+        let envelope: ApiEnvelope<T> = send_json(retry_interrupted(|| {
             json_client(timeout)
-                .get(&format!("{}{path}", self.base_url()))
+                .get(&url)
                 .header("authorization", self.auth_header())
                 .header("accept", "application/json")
-                .call(),
-        )?;
+                .call()
+        }))?;
         envelope.into_scoped(self.directory())
     }
 
@@ -1614,6 +1615,35 @@ fn finish_credentials(
     }
 }
 
+/// How many times a `GET` may be repeated after a signal interrupts it. The kernel hands back
+/// `EINTR` without consuming anything, and the request has to be made again; more than a couple
+/// of attempts would only hide a socket that is genuinely gone.
+const INTERRUPTED_READ_ATTEMPTS: u32 = 3;
+
+/// Repeats a read a signal cut short.
+///
+/// Only `GET` comes through here. An interrupted read leaves the response unread and the
+/// request unanswered, so making it again asks for the same thing a second time and changes
+/// nothing. A `POST` must not be repeated: the server may already have taken the body, and
+/// sending it again would deliver a second prompt.
+fn retry_interrupted<T>(
+    mut read: impl FnMut() -> Result<T, ureq::Error>,
+) -> Result<T, ureq::Error> {
+    let mut attempts = INTERRUPTED_READ_ATTEMPTS;
+    loop {
+        match read() {
+            Err(error) if is_interrupted(&error) && attempts > 1 => attempts -= 1,
+            result => return result,
+        }
+    }
+}
+
+/// Whether a transport failure is a syscall a signal ended, which is the one error the system
+/// expects its caller to try again rather than report.
+fn is_interrupted(error: &ureq::Error) -> bool {
+    matches!(error, ureq::Error::Io(error) if error.kind() == io::ErrorKind::Interrupted)
+}
+
 /// Parses the `{data: …}` envelope every route replies with.
 fn send_json<T: serde::de::DeserializeOwned>(
     response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
@@ -2674,14 +2704,15 @@ mod tests {
     use super::{
         agent_program, basic_credentials, discard_line, event_from_payload, event_stream,
         finish_credentials, first_available_port, free_port_with, generation_scoped_sink,
-        join_reader, no_startup_child_tracking, orphaned_agent_port, port_candidates,
-        read_bounded_line, read_credentials, read_sse_frame, remove_slot_if_current,
-        same_directory, status_detail, terminate_child, terminate_orphaned_server,
-        validate_session_id, AgentBridge, AgentEvent, AgentService, BridgeError, BridgeState,
-        BridgeStopper, ChildGuard, EventSink, PortHooks, RemovalState, ServerCredentials,
-        StartupChild, EARLY_EOF_MESSAGE, MAX_CREDENTIAL_LINE_BYTES, MAX_EVENT_HEADERS_BYTES,
-        MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
-        MAX_START_ATTEMPTS, PORT_RANGE_END, PORT_RANGE_LEN, PORT_RANGE_START,
+        is_interrupted, join_reader, no_startup_child_tracking, orphaned_agent_port,
+        port_candidates, read_bounded_line, read_credentials, read_sse_frame,
+        remove_slot_if_current, retry_interrupted, same_directory, status_detail, terminate_child,
+        terminate_orphaned_server, validate_session_id, AgentBridge, AgentEvent, AgentService,
+        BridgeError, BridgeState, BridgeStopper, ChildGuard, EventSink, PortHooks, RemovalState,
+        ServerCredentials, StartupChild, EARLY_EOF_MESSAGE, INTERRUPTED_READ_ATTEMPTS,
+        MAX_CREDENTIAL_LINE_BYTES, MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES,
+        MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES, MAX_START_ATTEMPTS,
+        PORT_RANGE_END, PORT_RANGE_LEN, PORT_RANGE_START,
     };
 
     fn test_event_bridge(directory: &Path, port: u16) -> AgentBridge {
@@ -5325,5 +5356,57 @@ mod tests {
 
         agents.stop("checkout:loop");
         agents.stop("checkout:loop-other");
+    }
+
+    fn interrupted_error() -> ureq::Error {
+        ureq::Error::Io(io::Error::from(io::ErrorKind::Interrupted))
+    }
+
+    #[test]
+    fn a_read_a_signal_interrupted_is_asked_again_and_the_answer_arrives() {
+        let mut attempts = 0;
+        let answer = retry_interrupted(|| {
+            attempts += 1;
+            if attempts == 1 {
+                Err(interrupted_error())
+            } else {
+                Ok("catalog")
+            }
+        });
+
+        assert_eq!(answer.expect("the repeated read answers"), "catalog");
+        assert_eq!(attempts, 2, "the interrupted read was made again");
+    }
+
+    #[test]
+    fn a_read_a_signal_keeps_interrupting_gives_up_on_its_budget() {
+        let mut attempts = 0;
+        let error = retry_interrupted(|| {
+            attempts += 1;
+            Err::<(), _>(interrupted_error())
+        })
+        .expect_err("a socket that is never readable is not repeated forever");
+
+        assert!(
+            is_interrupted(&error),
+            "the interrupt that ended it is reported"
+        );
+        assert_eq!(attempts, INTERRUPTED_READ_ATTEMPTS as usize);
+    }
+
+    #[test]
+    fn a_transport_failure_that_is_not_a_signal_is_reported_after_one_attempt() {
+        let mut attempts = 0;
+        let error = retry_interrupted(|| {
+            attempts += 1;
+            Err::<(), _>(ureq::Error::HostNotFound)
+        })
+        .expect_err("a connection that was refused is reported");
+
+        assert!(!is_interrupted(&error));
+        assert_eq!(
+            attempts, 1,
+            "a failure repeating cannot fix is not repeated"
+        );
     }
 }
