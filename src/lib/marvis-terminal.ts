@@ -3,6 +3,7 @@ import { Unicode11Addon } from "@xterm/addon-unicode11";
 import { WebglAddon } from "@xterm/addon-webgl";
 import { Terminal } from "@xterm/xterm";
 import type { ITheme, IDisposable } from "@xterm/xterm";
+import type { TerminalCursorStyle } from "../domain/settings";
 import { ligatureRanges } from "./ligature-joiner";
 
 /**
@@ -54,7 +55,7 @@ export function terminalFontSize(fontSize: number, zoom: number): number {
 const TERMINAL_THEME_TOKENS = {
   background: "--marvis-content-bg-0",
   foreground: "--marvis-content-text",
-  cursor: "--marvis-ansi-bright-white",
+  cursor: "--marvis-cursor",
   cursorAccent: "--marvis-content-bg-0",
   selectionBackground: "--marvis-selection",
   black: "--marvis-ansi-black",
@@ -110,23 +111,27 @@ export type RendererLevel = "webgl" | "dom";
  * preferences from `~/.marvis/config.yml`, read here for the same reason; the ligatures are not,
  * because the joiner only exists once the terminal is on the page.
  *
- * The cursor is a block because that is what a terminal that is not telling you it is waiting for
- * you looks like; whether it blinks is a preference, and a program that asks for another shape
- * through DECSCUSR is answered out of this one rather than fought with it.
+ * The cursor's shape is a preference from the same file, and the shape it opens on is a block: a
+ * cell filled with the theme's `--marvis-cursor` and the glyph under it in the background, so the
+ * caret is the one thing on the page drawn the other way round. Whether it blinks is the other
+ * half of that choice, and a program that asks for another shape through DECSCUSR is answered out
+ * of this one rather than fought with it.
  *
- * The block is the palette's bright white and the glyph under it the background, so the cell under
- * the cursor is drawn inverted: that is the swap Konsole makes, and it is what the two tokens above
- * are for. The bright white rather than a white of its own, because the stylesheet already answers
- * that name per theme and a `#ffffff` block on the light surface is a cell nobody can find a cursor
- * in. It is two colors and not one per cell — a cell that arrives with a color of its own does not
- * hand it to the block — and the panel that is not holding the keyboard draws a frame rather than a
- * block, which says so in shape rather than in a color that has to differ from the focused one.
+ * It is two colors and not one per cell — a cell that arrives with a color of its own does not
+ * hand it to the block — and the panel that is not holding the keyboard draws a frame rather than
+ * the focused shape, which says so in shape rather than in a color that has to differ from the
+ * focused one.
  */
-export function createMarvisTerminal(fontSize = 16, cursorBlink = true, zoom = 1): Terminal {
+export function createMarvisTerminal(
+  fontSize = 16,
+  cursorBlink = true,
+  cursorStyle: TerminalCursorStyle = "block",
+  zoom = 1,
+): Terminal {
   const terminal = new Terminal({
     allowProposedApi: true,
     cursorBlink,
-    cursorStyle: "block",
+    cursorStyle,
     cursorInactiveStyle: "outline",
     fontFamily: TERMINAL_FONT_FAMILY,
     fontSize: terminalFontSize(fontSize, zoom),

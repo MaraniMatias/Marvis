@@ -147,8 +147,8 @@ describe("createMarvisTerminal", () => {
     expect(stubs.terminal?.options).toMatchObject({
       allowProposedApi: true,
       cursorBlink: true,
-      // A block is what a terminal looks like when it is not asking you to wait for it, and the
-      // panel that is not the one you are typing into draws a frame instead of a block.
+      // A block by default: the cell is filled with the theme's cursor color and the glyph under it
+      // is the surface, and the panel that is not the one you are typing into draws a frame instead.
       cursorStyle: "block",
       cursorInactiveStyle: "outline",
       // Icons behind the text face: the atlas is rasterized per glyph from this string, so a
@@ -165,18 +165,20 @@ describe("createMarvisTerminal", () => {
     // this file's: a terminal opened in the light palette gets the light one without a second copy
     // of the values anywhere.
     const style = document.createElement("style");
-    style.textContent = `:root { --marvis-content-bg-0: #282c33; --marvis-content-text: #dce0e5; --marvis-ansi-bright-white: #fafafa; }
-      :root[data-theme="light"] { --marvis-content-bg-0: #fafafa; --marvis-content-text: #242529; --marvis-ansi-bright-white: #242529; }`;
+    style.textContent = `:root { --marvis-content-bg-0: #282c33; --marvis-content-text: #dce0e5; --marvis-cursor: #c2c9f1; }
+      :root[data-theme="light"] { --marvis-content-bg-0: #fafafa; --marvis-content-text: #242529; --marvis-cursor: #242529; }`;
     document.head.append(style);
     try {
-      // The cursor pair is the requirement rather than a detail of the palette: the block is the
-      // theme's brightest white and the glyph under it the theme's background, so a cell with
-      // default colors under the cursor is drawn inverted and neither value is written here.
+      // The cursor pair is the requirement rather than a detail of the palette: the cursor is the
+      // theme's own `--marvis-cursor` and the glyph under a block is the theme's background, so a
+      // cell with default colors under the cursor is drawn inverted and neither value is written
+      // here. Two values rather than one per cell, because a cell that arrives with a color of its
+      // own does not hand it to the block.
       document.documentElement.dataset.theme = "dark";
       expect(marvisTerminalTheme()).toMatchObject({
         background: "#282c33",
         foreground: "#dce0e5",
-        cursor: "#fafafa",
+        cursor: "#c2c9f1",
         cursorAccent: "#282c33",
       });
 
@@ -193,12 +195,12 @@ describe("createMarvisTerminal", () => {
   });
 
   it("builds the terminal at the size and cursor the settings ask for", () => {
-    createMarvisTerminal(20, false, 1.2);
+    createMarvisTerminal(20, false, "underline", 1.2);
 
     // The size is the preference's own, multiplied by the window's scale: the terminal's host
     // cancels the scale out so the grid is measured in screen pixels, which means the cell has to
     // be handed the scaled size rather than inheriting one.
-    expect(stubs.terminal?.options).toMatchObject({ fontSize: 24, cursorBlink: false });
+    expect(stubs.terminal?.options).toMatchObject({ fontSize: 24, cursorBlink: false, cursorStyle: "underline" });
   });
 
   it("hands xterm.js a full ANSI palette, and every color of it out of the stylesheet", () => {

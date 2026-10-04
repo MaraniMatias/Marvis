@@ -54,7 +54,10 @@ const diffSamples: Record<string, string> = {
 function diffSyntaxClasses(): Set<string> {
   const classes = new Set<string>();
   const walk = (node: unknown): void => {
-    const element = node as { properties?: { className?: string[] | string }; children?: unknown[] };
+    const element = node as {
+      properties?: { className?: string[] | string };
+      children?: unknown[];
+    };
     const name = element.properties?.className;
     for (const value of Array.isArray(name) ? name : name ? [name] : []) {
       // A sub-language wrapper is named after the grammar it holds, not prefixed, so it is not a
@@ -228,22 +231,23 @@ describe("UI foreground tokens", () => {
 
   it("draws the editor's caret as a block in the two colors the terminal draws its own with", () => {
     // The caret is the one part of the editor the stylesheet owns rather than CodeMirror: it draws
-    // the element, Marvis decides it is a block, and it is the palette's bright white because that
-    // is the color xterm.js is handed for `cursor`. The width is load-bearing rather than cosmetic:
+    // the element, Marvis decides it is a block, and it is `--marvis-cursor` because that is the
+    // color xterm.js is handed for `cursor`. The width is load-bearing rather than cosmetic:
     // CodeMirror leaves a caret's width unset, and a background on a zero-width box is not drawn.
     const caret = block(".cm-focused .cm-scroller .cm-cursorLayer .cm-cursor) {", documentPaneTemplate);
     expect(caret).toContain("border-left: none;");
     expect(caret).toContain("width: 1ch;");
-    expect(caret).toContain("background: var(--marvis-ansi-bright-white);");
+    expect(caret).toContain("background: var(--marvis-cursor);");
     // The preference is a declaration and not a second animation: CodeMirror blinks the layer
     // itself, so the property is what the toggle in the settings dialog has to reach the caret by.
     expect(block(".cm-focused .cm-scroller .cm-cursorLayer) {", documentPaneTemplate)).toContain(
       "animation-play-state: var(--marvis-editor-cursor-blink, running);",
     );
     // A block nobody can see is the failure, so the cell it fills has to stand off the surface in
-    // both palettes rather than only the dark one.
+    // both palettes rather than only the dark one — which is why the light answer to the dark
+    // palette's lavender is ink rather than the same lavender at a lower alpha.
     for (const theme of Object.values(themes)) {
-      expectReadable(token(theme, "--marvis-ansi-bright-white"), token(theme, "--marvis-content-bg-0"));
+      expectReadable(token(theme, "--marvis-cursor"), token(theme, "--marvis-content-bg-0"));
     }
   });
 
