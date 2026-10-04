@@ -46,7 +46,7 @@ jobs:
       # Expected upstream block: glib 0.18.5 (RUSTSEC-2024-0429 / GHSA-WRW7-89JP-8Q8G), pulled by GTK 0.18.
       # The fixed glib 0.20 line is not currently GTK-compatible; keep this gate fail-closed, with no allowlist.
       - run: pnpm audit:security
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: frontend-coverage
