@@ -2,7 +2,7 @@
 
 ## Integration snapshot (2026-10-04)
 
-- This branch integrates audited fixes/schema 13 with main `5e68d0a` (`v0.13.2`, schema 11) and targets `v0.14.0` / schema 13. The checkpoint and integration commits are local; no release, tag, push, or GitHub settings change was made. Do not release from this worktree.
+- This branch integrates audited fixes/schema 13 with main `5e68d0a` (`v0.13.2`, schema 11). All four version files have been restored to main's `0.13.2`; this integration is unreleased and still refuses schema-11/12 databases. The user reports the previous, unapproved `0.14.0` DMG exits at launch; its cause is not established and no app launch is verified. Any version bump is reserved for main after manual user testing and explicit approval. Checkpoint and integration commits are local; no tag, push, or GitHub settings change was made. Do not release from this worktree.
 - Before 1.0, schema changes have no migration: schema 13 refuses schema 11/12 databases. Users must back up first and expect a new empty Marvis workspace; repository files are not deleted. Do not describe this as a data-preserving upgrade.
 - Read-only GitHub API snapshot: `main` returned “Branch not protected” from the branch-protection endpoint and `[]` rulesets. The `main` commit check-runs were named `checks` and `linux-build` (both queued). This is a dated snapshot, not proof that checks passed or that protection remains absent.
 

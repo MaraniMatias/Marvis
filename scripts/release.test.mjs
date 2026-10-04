@@ -80,6 +80,44 @@ test("--write-only updates versions without Git side effects", (t) => {
   assert.match(check.stdout, /every version file is 0\.10\.0/);
 });
 
+test("--restore writes a lower version to all manifests without Git side effects", (t) => {
+  const cwd = fixture(t);
+  const head = git(cwd, "rev-parse", "HEAD");
+  const tags = git(cwd, "tag", "--list");
+  const result = run(cwd, "--restore", "0.8.0");
+  assert.equal(result.status, 0, result.stderr);
+  assert.equal(git(cwd, "rev-parse", "HEAD"), head);
+  assert.equal(git(cwd, "tag", "--list"), tags);
+  assert.equal(git(cwd, "diff", "--cached", "--name-only"), "");
+  assert.deepEqual(status(cwd).split("\n").sort(), [
+    " M package.json",
+    " M src-tauri/Cargo.lock",
+    " M src-tauri/Cargo.toml",
+    " M src-tauri/tauri.conf.json",
+  ]);
+  const check = run(cwd, "--check");
+  assert.equal(check.status, 0);
+  assert.match(check.stdout, /every version file is 0\.8\.0/);
+});
+
+test("--restore rejects mismatched or non-lower target versions without writing", (t) => {
+  const mismatched = fixture(t, "0.8.0");
+  const mismatchHead = git(mismatched, "rev-parse", "HEAD");
+  const mismatch = run(mismatched, "--restore", "0.8.0");
+  assert.equal(mismatch.status, 1);
+  assert.match(mismatch.stderr, /version files disagree/);
+  assert.equal(git(mismatched, "rev-parse", "HEAD"), mismatchHead);
+  assert.equal(status(mismatched), "");
+
+  const current = fixture(t);
+  const currentHead = git(current, "rev-parse", "HEAD");
+  const forward = run(current, "--restore", "0.10.0");
+  assert.equal(forward.status, 1);
+  assert.match(forward.stderr, /must be lower than current version/);
+  assert.equal(git(current, "rev-parse", "HEAD"), currentHead);
+  assert.equal(status(current), "");
+});
+
 test("--write-only --dry-run leaves files and Git untouched", (t) => {
   const cwd = fixture(t);
   const head = git(cwd, "rev-parse", "HEAD");
