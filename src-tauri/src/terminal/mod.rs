@@ -496,15 +496,24 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(10));
         }
-        // The row in the sidebar shows this, so it has to be the job's own name.
-        assert_eq!(
-            backend
-                .status("foreground")
-                .unwrap()
-                .foreground_app
-                .as_deref(),
-            Some("sleep")
-        );
+        // The row in the sidebar shows this, so it has to be the job's own name. A shell puts the
+        // group in the foreground before the child in it has become the program that was asked
+        // for, so the group already in front is for a moment the shell's own copy of the job: the
+        // foreground is observed first and the name settles on it a moment later.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while backend
+            .status("foreground")
+            .unwrap()
+            .foreground_app
+            .as_deref()
+            != Some("sleep")
+        {
+            assert!(
+                Instant::now() < deadline,
+                "the foreground process was not named after the job"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
 
         backend.write("foreground", b"\x03").unwrap();
         let deadline = Instant::now() + Duration::from_secs(3);
