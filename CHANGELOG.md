@@ -8,6 +8,15 @@ here still gets its generated notes.
 
 ## Unreleased
 
+- **The terminal cursor is a block you can change.** It is drawn in a color of its own: a lavender on
+  the dark palette and the page's own ink on the light one, which is the ink a cell has to be
+  filled with there for the caret to stand off a near-white surface. The glyph under the block is
+  the surface, so a cell is drawn inverted, and the editor's caret is the same block in the same
+  color. Shape (`Block`, `Bar`, `Underline`) and blinking are preferences in the terminal section of
+  Settings, defaulting to a blinking block. `terminal.cursorStyle` in `~/.marvis/config.yml` says
+  the same thing. A shape a program asks for through DECSCUSR still wins over the preference, as
+  it always did.
+
 - **Home is always the first workdir.** Marvis opens a shell there on launch, keeps it running when
   you switch workdirs, and lets you close it like any other terminal. The Home row cannot be removed;
   regular folders with the same name remain ordinary removable workdirs.

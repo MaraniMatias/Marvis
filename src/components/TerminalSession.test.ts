@@ -26,7 +26,12 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     fontLoads: [] as string[],
     fontLoadPromise: null as Promise<FontFace[]> | null,
     /** The size and the scale the terminal was built at, which is the size of its cell from its first frame. */
-    builtAt: { fontSize: 16, cursorBlink: true, zoom: 1 } as { fontSize: number; cursorBlink: boolean; zoom: number },
+    builtAt: { fontSize: 16, cursorBlink: true, cursorStyle: "block", zoom: 1 } as {
+      fontSize: number;
+      cursorBlink: boolean;
+      cursorStyle: string;
+      zoom: number;
+    },
     terminal: null as MockTerminal | null,
   };
   class MockTerminal {
@@ -152,8 +157,8 @@ for (const [property, value] of [
 // the ordering below would be untestable. Asking for them per mount keeps the guarantee this file
 // exists to pin: xterm opens only after both bundled weights are ready.
 vi.mock("../lib/marvis-terminal", () => ({
-  createMarvisTerminal: (fontSize: number, cursorBlink: boolean, zoom: number) => {
-    terminalMock.builtAt = { fontSize, cursorBlink, zoom };
+  createMarvisTerminal: (fontSize: number, cursorBlink: boolean, cursorStyle: string, zoom: number) => {
+    terminalMock.builtAt = { fontSize, cursorBlink, cursorStyle, zoom };
     return new MockTerminal();
   },
   terminalFontSize: (fontSize: number, zoom: number) => fontSize * zoom,
@@ -229,7 +234,7 @@ describe("TerminalSession UI", () => {
     terminalMock.events = [];
     terminalMock.fontLoads = [];
     terminalMock.fontLoadPromise = null;
-    terminalMock.builtAt = { fontSize: 16, cursorBlink: true, zoom: 1 };
+    terminalMock.builtAt = { fontSize: 16, cursorBlink: true, cursorStyle: "block", zoom: 1 };
     terminalMock.terminal = null;
     terminalLib.fitCalls = 0;
     vi.mocked(createTerminal).mockResolvedValue(created);
@@ -481,7 +486,7 @@ describe("TerminalSession UI", () => {
 
     // The cell is the preference's own size times the window's scale, and it is the scale alone
     // that is cancelled on the host: the size is a real change to the grid, not a transform.
-    expect(terminalMock.builtAt).toEqual({ fontSize: 20, cursorBlink: true, zoom: 0.8 });
+    expect(terminalMock.builtAt).toEqual({ fontSize: 20, cursorBlink: true, cursorStyle: "block", zoom: 0.8 });
     expect(wrapper.get(".terminal-host").attributes("style")).toBe("zoom: 1.25;");
     wrapper.unmount();
   });
@@ -496,7 +501,7 @@ describe("TerminalSession UI", () => {
 
     // 18px at 120% is a cell of 21.6, and xterm re-measures and repaints on the assignment; the
     // fit is what tells the PTY how many columns the new cell leaves it.
-    expect(terminalMock.terminal?.options).toEqual({ fontSize: 18 * 1.2, cursorBlink: true });
+    expect(terminalMock.terminal?.options).toEqual({ fontSize: 18 * 1.2, cursorBlink: true, cursorStyle: "block" });
     expect(terminalLib.fitCalls).toBeGreaterThan(fitsBefore);
     expect(wrapper.get(".terminal-host").attributes("style")).toBe("zoom: 0.8333333333333334;");
     wrapper.unmount();

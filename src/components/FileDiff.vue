@@ -1,8 +1,8 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-indent, vue/html-closing-bracket-newline, vue/html-self-closing */
 import { Check as CheckIcon, ChevronDown as ChevronDownIcon } from "@lucide/vue";
-import { DiffFile, DiffModeEnum, DiffViewWithMultiSelect } from "@git-diff-view/vue";
-import type { DiffFileHighlighter } from "@git-diff-view/vue";
+import { DiffFile, DiffModeEnum, DiffViewWithMultiSelect, updateSelectionVisual_Unified } from "@git-diff-view/vue";
+import type { DiffFileHighlighter, LineRange } from "@git-diff-view/vue";
 import "@git-diff-view/vue/styles/diff-view-pure.css";
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui";
 import { computed, inject, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
@@ -10,8 +10,8 @@ import type { GitFileDiff, GitDiffPageLine } from "../domain/git";
 import { ALL_CHANGES_LABEL } from "../domain/main-document";
 import { isIpcError } from "../domain/ipc";
 import { agentAttention, sortAgentSessions } from "../domain/agent";
-import { buildDiffLineTexts, isReviewableNote, reviewRangeCode } from "../domain/review";
-import type { AnchorOutcome, ReviewNote, ReviewSide } from "../domain/review";
+import { isReviewableNote, readDiffLines, reviewRangeCode } from "../domain/review";
+import type { AnchorOutcome, DiffLine, ReviewNote, ReviewSide } from "../domain/review";
 import type { Checkout } from "../domain/workspace";
 import type { EditorSettings } from "../domain/settings";
 import { DEFAULT_SETTINGS } from "../domain/settings";
@@ -103,20 +103,41 @@ const largeDiff = useLargeDiff(
   () => diffRowPx.value,
 );
 const { diffPages, loadVisiblePages, visibleLargeDiffWindow } = largeDiff;
-const draft = ref<{ side: ReviewSide; lineStart: number; lineEnd: number } | null>(null);
+/** A note being written. `end` is the line its `+` was on and `start` the top of its range. */
+const draft = ref<{ side: ReviewSide; start: number; end: number } | null>(null);
 const draftError = ref("");
-/** Diff texts keyed by `${side}:${line}`, for the whole file or all retained virtual pages. */
-const lineTexts = computed(() => {
-  if (!diff.value?.large || diff.value.tooLarge) return buildDiffLineTexts(diff.value?.patch ?? "");
-  const texts = new Map<string, string>();
+/**
+ * The range a small diff's note covers, once its composer has moved it.
+ *
+ * On a large diff the note is written in Marvis' own rows and `draft` is all of it. On a small one
+ * the library draws the rows and holds the selection that opened the note, so until the composer
+ * changes something the library's own band is already the truth and there is nothing to keep.
+ */
+const libraryDraft = ref<{ side: ReviewSide; start: number; end: number } | null>(null);
+/** Each hunk's own element, which is where the library's selection band is painted. */
+const hunkSections = ref<Array<HTMLElement | null>>([]);
+/** Every line of the diff on screen, keyed by `${side}:${line}`, with the sign it carries. */
+const diffLines = computed(() => {
+  if (!diff.value?.large || diff.value.tooLarge) return readDiffLines(diff.value?.patch ?? "");
+  const lines = new Map<string, DiffLine>();
   for (const page of Object.values(diffPages.value)) {
     for (const line of page.lines) {
       const anchor = rowAnchor(line);
-      if (anchor) texts.set(`${anchor.side}:${anchor.line}`, line.text.slice(1));
+      if (!anchor) continue;
+      const mark = line.text[0];
+      const entry: DiffLine = { text: line.text.slice(1), mark: mark === "+" || mark === "-" ? mark : " " };
+      lines.set(`${anchor.side}:${anchor.line}`, entry);
+      // A line the diff left alone is on both sides. `rowAnchor` names the one a row is clicked by,
+      // and a range is walked by numbering, so a note on the old side has to reach over one.
+      if (line.kind === "context") {
+        if (line.oldLineNumber) lines.set(`old:${line.oldLineNumber}`, entry);
+        if (line.newLineNumber) lines.set(`new:${line.newLineNumber}`, entry);
+      }
     }
   }
-  return texts;
+  return lines;
 });
+const lineTexts = computed(() => new Map([...diffLines.value].map(([key, line]) => [key, line.text])));
 const fileNotes = computed(() => props.review.notes.filter((note) => note.path === props.path));
 /** Notes per line, shaped for the diff view's `extendData` slot. */
 const extendData = computed(() => {
@@ -279,18 +300,21 @@ let diffIdentity = 0;
 let mounted = true;
 
 /**
- * Opens a draft, or extends the open one when the click lands on the same side.
- * Extending keeps the range as the span between the first and last clicked line; the
- * composer shows it, and Cancel is the way back to a single-line note.
+ * Opens a draft on the line the `+` was on, which is the last line of its range.
+ *
+ * A range is written the way GitLab writes one: the `+` fixes where the note ends, and a `+`
+ * clicked on a line above it says where it starts. So a click above an open draft moves the top
+ * of the range and leaves the line the note is anchored to alone, and a click at or below it opens
+ * a new note instead of stretching one backwards.
  */
 function openDraft(side: ReviewSide, line: number) {
   draftError.value = "";
   const open = draft.value;
-  if (open && open.side === side) {
-    draft.value = { ...open, lineStart: Math.min(open.lineStart, line), lineEnd: Math.max(open.lineEnd, line) };
+  if (open && open.side === side && line < open.end) {
+    draft.value = { ...open, start: line };
     return;
   }
-  draft.value = { side, lineStart: line, lineEnd: line };
+  draft.value = { side, start: line, end: line };
 }
 
 function cancelDraft() {
@@ -298,9 +322,68 @@ function cancelDraft() {
   draftError.value = "";
 }
 
+/** A saved or cancelled note leaves no range behind, on either kind of diff. */
+function closeLibraryDraft(onClose: () => void) {
+  libraryDraft.value = null;
+  onClose();
+}
+
 function sideName(side: number): ReviewSide {
   return side === 1 ? "old" : "new";
 }
+
+/**
+ * The sign a line carries in the diff gutter, which is what tells an added line from a removed one
+ * at a glance: the two are different lines that can share a number across the sides.
+ */
+function lineMarker(side: ReviewSide, line: number): string {
+  return diffLines.value.get(`${side}:${line}`)?.mark ?? " ";
+}
+
+/**
+ * The lines a note may start on, named by the sign they carry and their number.
+ *
+ * The walk stops at the first line that is not there, which is what keeps a range inside one hunk
+ * and inside the pages a large diff has loaded: two hunks are never adjacent in numbering, so the
+ * line above the top of one is never on the diff at all. A range over lines the diff removed is
+ * walked on the old side, which is where their numbers live.
+ */
+function startCandidates(side: ReviewSide, end: number) {
+  const texts = lineTexts.value;
+  const candidates: number[] = [];
+  for (let line = end; line >= 1 && texts.has(`${side}:${line}`); line -= 1) candidates.push(line);
+  // Walked up from the line the note ends on, then listed the way the diff reads: top of the file
+  // first, so the picker is scrolled to the one that matters.
+  return candidates.reverse().map((line) => ({
+    value: String(line),
+    label: `${lineMarker(side, line)}${line}`,
+  }));
+}
+
+/**
+ * Repaints the library's selection band from the note being written.
+ *
+ * The band is the library's own state and it cannot be set from outside: the component it is drawn
+ * by exposes only events, and no prop. What it does export is the function that paints the band,
+ * so the range the composer chose is drawn with the same class the library's own drag uses, and
+ * clearing it is the same call with no range.
+ */
+function paintLibrarySelection() {
+  const range = libraryDraft.value;
+  diffHunks.value.forEach((hunk, index) => {
+    const container = hunkSections.value[index]?.querySelector<HTMLElement>(".diff-multiselect-wrapper");
+    if (!container) return;
+    const painted: LineRange | null = range
+      ? { side: range.side, startLineNumber: range.start, endLineNumber: range.end }
+      : null;
+    updateSelectionVisual_Unified(container, painted, hunk.file);
+  });
+}
+
+watch([draft, libraryDraft, diffHunks], () => nextTick(paintLibrarySelection), { flush: "post" });
+onUnmounted(() => {
+  libraryDraft.value = null;
+});
 
 async function saveNoteAt(
   side: ReviewSide,
@@ -320,12 +403,13 @@ async function saveNoteAt(
   });
 }
 
-async function saveDraft(content: string): Promise<boolean> {
+async function saveDraft(content: string, lineStart: number): Promise<boolean> {
   const target = draft.value;
   if (!target) return false;
   draftError.value = "";
+  const first = Math.min(lineStart, target.end);
   if (diff.value?.large) {
-    for (let line = target.lineStart; line <= target.lineEnd; line += 1) {
+    for (let line = first; line <= target.end; line += 1) {
       if (!lineTexts.value.has(`${target.side}:${line}`)) {
         draftError.value =
           "Some selected lines are unavailable in the loaded diff pages. Choose a shorter range to include all its code.";
@@ -333,7 +417,7 @@ async function saveDraft(content: string): Promise<boolean> {
       }
     }
   }
-  const created = await saveNoteAt(target.side, target.lineStart, target.lineEnd, content);
+  const created = await saveNoteAt(target.side, first, target.end, content);
   if (created) cancelDraft();
   return created;
 }
@@ -353,15 +437,15 @@ function isDraftSelection(line: GitDiffPageLine | undefined): boolean {
     anchor &&
     draft.value &&
     anchor.side === draft.value.side &&
-    anchor.line >= draft.value.lineStart &&
-    anchor.line <= draft.value.lineEnd,
+    anchor.line >= draft.value.start &&
+    anchor.line <= draft.value.end,
   );
 }
 
 function notesForRow(line: GitDiffPageLine): ReviewNote[] {
   const anchor = rowAnchor(line);
   if (!anchor) return [];
-  // A range is listed on its first line, which is where the composer opens too.
+  // A range is listed on its first line, and its composer opens on its last, where the + was.
   return fileNotes.value.filter((note) => note.side === anchor.side && note.lineStart === anchor.line);
 }
 
@@ -1001,6 +1085,7 @@ onUnmounted(() => {
             <section
               v-for="(hunk, index) in diffHunks"
               :key="`${path}-${index}`"
+              :ref="(el) => (hunkSections[index] = (el as HTMLElement | null) ?? null)"
               class="relative min-w-0 [&_.diff-line-hunk]:cursor-pointer"
               @click="toggleHunkFromLibrary($event, index)"
             >
@@ -1044,17 +1129,26 @@ onUnmounted(() => {
                 class="min-w-0"
               >
                 <template #widget="{ lineNumber, fromLineNumber, side, onClose }">
+                  <!-- The library's own selection says where the range starts and ends, which is
+                       already the shape a range is stored in. The composer may still move the top of
+                       it, so what it emits is what gets saved rather than what the library chose. -->
                   <ReviewComposer
                     :side="sideName(side)"
-                    :line="fromLineNumber"
-                    :line-end="lineNumber !== fromLineNumber ? lineNumber : null"
-                    :code="reviewRangeCode(lineTexts, sideName(side), fromLineNumber, lineNumber)"
-                    @submit="
-                      async (content: string) => {
-                        if (await saveNoteAt(sideName(side), fromLineNumber, lineNumber, content)) onClose();
+                    :line-start="fromLineNumber"
+                    :line-end="lineNumber"
+                    :start-options="startCandidates(sideName(side), lineNumber)"
+                    @update:line-start="
+                      (start: number) => {
+                        libraryDraft = { side: sideName(side), start, end: lineNumber };
                       }
                     "
-                    @cancel="onClose"
+                    @submit="
+                      async (content: string, lineStart: number) => {
+                        if (await saveNoteAt(sideName(side), lineStart, lineNumber, content))
+                          closeLibraryDraft(onClose);
+                      }
+                    "
+                    @cancel="closeLibraryDraft(onClose)"
                   />
                 </template>
                 <template #extend="{ data }">
@@ -1092,11 +1186,11 @@ onUnmounted(() => {
              does. Held here it survives the scroll that finishes the range. -->
         <ReviewComposer
           v-if="diff.large && !diff.tooLarge && draft"
+          v-model:line-start="draft.start"
           class="absolute inset-x-0 bottom-0 z-10"
           :side="draft.side"
-          :line="draft.lineStart"
-          :line-end="draft.lineEnd !== draft.lineStart ? draft.lineEnd : null"
-          :code="reviewRangeCode(lineTexts, draft.side, draft.lineStart, draft.lineEnd ?? null)"
+          :line-end="draft.end"
+          :start-options="startCandidates(draft.side, draft.end)"
           :error="draftError"
           @submit="saveDraft"
           @cancel="cancelDraft"
@@ -1437,8 +1531,15 @@ onUnmounted(() => {
   background: var(--marvis-control-hover);
 }
 
+/**
+ * The range the note being written covers, as a band rather than a set of tinted rows: a rule down
+ * the leading edge is what makes a block of lines read as one thing, and it stays continuous
+ * however many rows the range spans.
+ */
 .review-range-selected {
-  background: color-mix(in srgb, var(--marvis-content-accent) 16%, var(--marvis-content-bg-0));
+  position: relative;
+  background: color-mix(in srgb, var(--marvis-content-accent) 12%, var(--marvis-content-bg-0));
+  box-shadow: inset 3px 0 0 var(--marvis-content-accent);
 }
 
 .diff-status {

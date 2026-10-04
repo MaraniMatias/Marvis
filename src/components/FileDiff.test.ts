@@ -43,6 +43,8 @@ const mocks = vi.hoisted(() => ({
    * read of their own in flight.
    */
   held: new Map<string, Promise<void>>(),
+  /** Every range the component asked the library to paint its selection over. */
+  updateSelectionVisual: vi.fn(),
 }));
 
 // The grammar and the reading of the file are one dynamic import away and are covered end to end by
@@ -97,7 +99,15 @@ vi.mock("@git-diff-view/vue", async () => {
       }
       init() {}
       buildUnifiedDiffLines() {}
+      /** The identity the library scopes its rows to when it paints a selection. */
+      getId() {
+        return this.identity;
+      }
+      identity = "diff-id";
     },
+    // The library paints its own selection band and takes no prop for it, so the range a note
+    // covers is drawn through this. Standing in for it records what it was asked to draw.
+    updateSelectionVisual_Unified: (...args: unknown[]) => mocks.updateSelectionVisual(...args),
     DiffModeEnum: { Unified: 4 },
     // `diff-highlighter.ts` imports this and reuses it: the diff is highlighted by handing the
     // library an object with this on it. What it returns is never read here, only that it exists.
@@ -120,53 +130,63 @@ vi.mock("@git-diff-view/vue", async () => {
       ) => {
         const selectedRange = createRef<[number, number] | null>(null);
         return () =>
-          createElement("div", { "data-testid": "diff-view" }, [
-            // What the library is handed to highlight with, named so a test can read it: whether one
-            // arrives at all is the whole of what `diff-highlighter.ts` is wired up for.
-            createElement("span", {
-              "data-testid": "diff-highlighter",
-              "data-name": (props.registerHighlighter as { name?: string } | undefined)?.name ?? "",
-            }),
-            createElement("span", { "data-testid": "diff-font-size" }, String(props.diffViewFontSize)),
-            // The library draws a row per `@@` header and its own expand buttons inside that row, and
-            // the rows of the diff itself carry their lines, their widget and their notes, which is
-            // the whole of what the collapse is delegated across.
-            createElement("table", {}, [
-              createElement("tbody", {}, [
-                createElement("tr", { "data-testid": "hunk-row", "data-line": "1-hunk" }, [
-                  createElement("td", { class: "diff-line-hunk" }, "@@ -1 +1 @@"),
-                  createElement(
-                    "td",
-                    {},
-                    createElement("button", { class: "diff-widget-tooltip", "data-testid": "hunk-expand" }, "Expand"),
-                  ),
-                ]),
-                createElement("tr", { "data-line": "2-add" }, [
-                  createElement("td", { "data-testid": "line-number" }, "2"),
-                  createElement("td", { class: "diff-line-content" }, [
-                    createElement("span", { class: "diff-line-syntax-raw" }, "const after = 2;"),
-                    // The note composer and the note cards are rendered into the widget row of the
-                    // line they belong to, which is a row of its own.
-                    createElement("div", { "data-line": "2-widget-content", "data-testid": "line-widget" }),
-                    createElement("div", { "data-line": "2-extend-content", "data-testid": "line-note" }),
+          // The library wraps everything it draws in this, and it is the element it is asked to
+          // paint a selection over, so the rows have to sit inside one for that to be testable.
+          createElement("div", { class: "diff-multiselect-wrapper" }, [
+            createElement("div", { "data-testid": "diff-view" }, [
+              // What the library is handed to highlight with, named so a test can read it: whether one
+              // arrives at all is the whole of what `diff-highlighter.ts` is wired up for.
+              createElement("span", {
+                "data-testid": "diff-highlighter",
+                "data-name": (props.registerHighlighter as { name?: string } | undefined)?.name ?? "",
+              }),
+              createElement("span", { "data-testid": "diff-font-size" }, String(props.diffViewFontSize)),
+              // The library draws a row per `@@` header and its own expand buttons inside that row, and
+              // the rows of the diff itself carry their lines, their widget and their notes, which is
+              // the whole of what the collapse is delegated across.
+              createElement("table", {}, [
+                createElement("tbody", {}, [
+                  createElement("tr", { "data-testid": "hunk-row", "data-line": "1-hunk" }, [
+                    createElement("td", { class: "diff-line-hunk" }, "@@ -1 +1 @@"),
+                    createElement(
+                      "td",
+                      {},
+                      createElement("button", { class: "diff-widget-tooltip", "data-testid": "hunk-expand" }, "Expand"),
+                    ),
+                  ]),
+                  createElement("tr", { "data-line": "2-add" }, [
+                    createElement("td", { "data-testid": "line-number" }, "2"),
+                    createElement("td", { class: "diff-line-content" }, [
+                      createElement("span", { class: "diff-line-syntax-raw" }, "const after = 2;"),
+                      // The note composer and the note cards are rendered into the widget row of the
+                      // line they belong to, which is a row of its own.
+                      createElement("div", { "data-line": "2-widget-content", "data-testid": "line-widget" }),
+                      createElement("div", { "data-line": "2-extend-content", "data-testid": "line-note" }),
+                    ]),
                   ]),
                 ]),
               ]),
+              slots.extend?.({ data: props.extendData?.newFile?.["1"]?.data ?? [] } as never),
+              selectedRange.value
+                ? slots.widget?.({
+                    lineNumber: selectedRange.value[1],
+                    fromLineNumber: selectedRange.value[0],
+                    side: 2,
+                    onClose: () => (selectedRange.value = null),
+                  } as never)
+                : null,
+              createElement(
+                "button",
+                { "data-testid": "select-diff-range", onClick: () => (selectedRange.value = [1, 3]) },
+                "Select lines 1-3",
+              ),
+              // The library owns the two ends, and nothing here promises it hands them over in order.
+              createElement(
+                "button",
+                { "data-testid": "select-inverted-range", onClick: () => (selectedRange.value = [3, 1]) },
+                "Select lines 3-1",
+              ),
             ]),
-            slots.extend?.({ data: props.extendData?.newFile?.["1"]?.data ?? [] } as never),
-            selectedRange.value
-              ? slots.widget?.({
-                  lineNumber: selectedRange.value[1],
-                  fromLineNumber: selectedRange.value[0],
-                  side: 2,
-                  onClose: () => (selectedRange.value = null),
-                } as never)
-              : null,
-            createElement(
-              "button",
-              { "data-testid": "select-diff-range", onClick: () => (selectedRange.value = [1, 3]) },
-              "Select lines 1-3",
-            ),
           ]);
       },
     }),
@@ -1063,6 +1083,94 @@ describe("FileDiff", () => {
       { date: "2026-03-14" },
     );
     expect(markdown).toContain("```ts{1-3}\nfirst\nsecond changed\nthird\n```");
+    wrapper.unmount();
+  });
+
+  it("lets the composer move the top of a range without moving the line the note ends on", async () => {
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "@@ -1,3 +1,3 @@\n first\n-second\n+second changed\n third\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 5,
+      hunks: [{ startLine: 0, endLine: 5, title: "@@ -1,3 +1,3 @@" }],
+    });
+    const review = reviewApi();
+    const wrapper = mountDiff({ review });
+    await flushPromises();
+
+    // The library picked lines 1-3, so the note ends on line 3 whatever the composer says, and the
+    // picker offers every line of the run it could start on, marked as the diff marks them: the
+    // two it left alone are on both sides, and the one it added only on the new side.
+    await wrapper.get('[data-testid="select-diff-range"]').trigger("click");
+    const form = () => wrapper.get('form[aria-label="New review note"]');
+    const options = () =>
+      form()
+        .findAll('[role="option"]')
+        .map((row) => row.element.textContent);
+    expect(options()).toEqual([" 1", "+2", " 3"]);
+
+    await wrapper.get('textarea[aria-label="Review note"]').setValue("only the last two lines");
+    await form().findAll('[role="option"]')[options().indexOf("+2") as number].trigger("click");
+    expect(form().text()).toContain("new lines 2-3");
+
+    // The band the library draws is asked to follow the range, which is the one thing the composer
+    // cannot do itself: it is the library's own state and it takes no prop for it.
+    expect(mocks.updateSelectionVisual).toHaveBeenLastCalledWith(
+      expect.anything(),
+      { side: "new", startLineNumber: 2, endLineNumber: 3 },
+      expect.anything(),
+    );
+
+    await form().trigger("submit");
+    await flushPromises();
+
+    expect(review.addNote).toHaveBeenCalledWith({
+      path: "src/app.ts",
+      side: "new",
+      lineStart: 2,
+      lineEnd: 3,
+      content: "only the last two lines",
+      code: "second changed\nthird",
+    });
+
+    // A saved note leaves no range drawn behind it.
+    expect(mocks.updateSelectionVisual).toHaveBeenLastCalledWith(expect.anything(), null, expect.anything());
+    wrapper.unmount();
+  });
+
+  it("shows one line rather than a range the diff library handed over backwards", async () => {
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "@@ -1,3 +1,3 @@\n first\n-second\n+second changed\n third\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 5,
+      hunks: [{ startLine: 0, endLine: 5, title: "@@ -1,3 +1,3 @@" }],
+    });
+    const review = reviewApi();
+    const wrapper = mountDiff({ review });
+    await flushPromises();
+
+    // Both ends come from the library, so a range that arrives upside down is not ours to trust.
+    // What the composer shows has to be what gets saved, or it shows `lines 3-1` and quietly
+    // files a note about line 3 alone.
+    await wrapper.get('[data-testid="select-inverted-range"]').trigger("click");
+    expect(wrapper.get('form[aria-label="New review note"]').text()).toContain("new line 1");
+
+    await wrapper.get('textarea[aria-label="Review note"]').setValue("the first line alone");
+    await wrapper.get('form[aria-label="New review note"]').trigger("submit");
+    await flushPromises();
+
+    expect(review.addNote).toHaveBeenCalledWith({
+      path: "src/app.ts",
+      side: "new",
+      lineStart: 1,
+      content: "the first line alone",
+      code: "first",
+    });
     wrapper.unmount();
   });
 

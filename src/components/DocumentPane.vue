@@ -1233,8 +1233,8 @@ function onMarkdownLink(event: MouseEvent) {
   border-left-color: var(--marvis-content-accent);
 }
 
-/* The caret is a block, in the two colors the terminal draws its own with: the palette's bright
-   white, and the surface behind the glyph — the swap Konsole makes, and the same two tokens
+/* The caret is a block, in the two colors the terminal draws its own with: `--marvis-cursor` for
+   the cell, and the surface behind the glyph — the swap Konsole makes, and the same two tokens
    `marvisTerminalTheme` hands xterm.js.
 
    CodeMirror draws this element on a layer above the text and leaves its width unset for a caret
@@ -1245,7 +1245,7 @@ function onMarkdownLink(event: MouseEvent) {
   border-left: none;
   margin-left: 0;
   width: 1ch;
-  background: var(--marvis-ansi-bright-white);
+  background: var(--marvis-cursor);
 }
 
 /* Blinking is CodeMirror's, on the whole layer, so the preference is not a second animation to

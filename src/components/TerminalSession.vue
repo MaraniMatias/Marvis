@@ -5,7 +5,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import type { TerminalSessionStatus } from "../domain/workspace";
-import type { TerminalScrollbarMode } from "../domain/settings";
+import type { TerminalCursorStyle, TerminalScrollbarMode } from "../domain/settings";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
 import {
   attachTerminalRenderer,
@@ -33,9 +33,19 @@ const props = withDefaults(
     fontSize?: number;
     ligatures?: boolean;
     cursorBlink?: boolean;
+    cursorStyle?: TerminalCursorStyle;
     zoom?: number;
   }>(),
-  { visible: true, focused: false, scrollbar: "hidden", fontSize: 16, ligatures: true, cursorBlink: true, zoom: 1 },
+  {
+    visible: true,
+    focused: false,
+    scrollbar: "hidden",
+    fontSize: 16,
+    ligatures: true,
+    cursorBlink: true,
+    cursorStyle: "block",
+    zoom: 1,
+  },
 );
 const emit = defineEmits<{
   created: [result: Awaited<ReturnType<typeof createTerminal>>];
@@ -54,7 +64,7 @@ const scrollbarMaximum = ref(0);
 const state = ref<TerminalSessionStatus>({ state: "running", foregroundProcess: false });
 const error = ref<string | null>(null);
 const closing = ref(false);
-const terminal = createMarvisTerminal(props.fontSize, props.cursorBlink, props.zoom);
+const terminal = createMarvisTerminal(props.fontSize, props.cursorBlink, props.cursorStyle, props.zoom);
 const fit = new FitAddon();
 terminal.loadAddon(fit);
 const { pushCause } = useToasts();
@@ -539,11 +549,12 @@ watch(theme, () => {
  * effect on the next paint, so neither needs one.
  */
 watch(
-  () => [props.fontSize, props.ligatures, props.cursorBlink, props.zoom] as const,
-  async ([fontSize, ligatures, cursorBlink, zoom]) => {
+  () => [props.fontSize, props.ligatures, props.cursorBlink, props.cursorStyle, props.zoom] as const,
+  async ([fontSize, ligatures, cursorBlink, cursorStyle, zoom]) => {
     if (!terminalReady) return;
     terminal.options.fontSize = terminalFontSize(fontSize, zoom);
     terminal.options.cursorBlink = cursorBlink;
+    terminal.options.cursorStyle = cursorStyle;
     setTerminalLigatures(terminal, ligatures);
     await nextTick();
     fitActiveView();

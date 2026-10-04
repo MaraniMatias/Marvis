@@ -165,9 +165,22 @@ export function buildReviewMarkdown(notes: ReviewNote[], context: ReviewContext 
   ].join("\n");
 }
 
-/** Code behind every diff line, keyed by `${side}:${lineNumber}`, from a unified patch. */
-export function buildDiffLineTexts(patch: string): Map<string, string> {
-  const texts = new Map<string, string>();
+/** One line of a diff: its code, and the sign the gutter marks it with. */
+export interface DiffLine {
+  text: string;
+  /** "+" for a line the diff added, "-" for one it removed, " " for one it left alone. */
+  mark: "+" | "-" | " ";
+}
+
+/**
+ * Every line behind both sides of a unified patch, keyed by `${side}:${line}`.
+ *
+ * The sign travels with the code because it cannot be recovered from it: old line 9 and new line
+ * 9 are two different lines, so a number on both sides says nothing about whether either was added
+ * or removed.
+ */
+export function readDiffLines(patch: string): Map<string, DiffLine> {
+  const lines = new Map<string, DiffLine>();
   let oldLine = 0;
   let newLine = 0;
   for (const line of patch.split("\n")) {
@@ -176,23 +189,20 @@ export function buildDiffLineTexts(patch: string): Map<string, string> {
       oldLine = Number(hunk[1]);
       newLine = Number(hunk[2]);
     } else if (line.startsWith("+")) {
-      texts.set(`new:${newLine}`, line.slice(1));
+      lines.set(`new:${newLine}`, { text: line.slice(1), mark: "+" });
       newLine += 1;
     } else if (line.startsWith("-")) {
-      texts.set(`old:${oldLine}`, line.slice(1));
+      lines.set(`old:${oldLine}`, { text: line.slice(1), mark: "-" });
       oldLine += 1;
     } else if (line.startsWith(" ")) {
-      texts.set(`old:${oldLine}`, line.slice(1));
-      texts.set(`new:${newLine}`, line.slice(1));
+      const context: DiffLine = { text: line.slice(1), mark: " " };
+      lines.set(`old:${oldLine}`, context);
+      lines.set(`new:${newLine}`, context);
       oldLine += 1;
       newLine += 1;
     }
   }
-  return texts;
-}
-
-export function diffLineText(texts: Map<string, string>, side: ReviewSide, line: number): string {
-  return texts.get(`${side}:${line}`) ?? "";
+  return lines;
 }
 
 /** Whether a note still needs to reach the agent. */

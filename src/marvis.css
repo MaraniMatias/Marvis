@@ -124,6 +124,11 @@
      here rather than carrying a second copy of the value. It is the content accent at a quarter, so a
      selection reads as a band over what it covers rather than as a fill that hides it. */
   --marvis-selection: #74ade83d;
+  /* The cursor, for the terminal and for the editor's caret, which is the same block in the same
+     color. A lavender rather than the palette's brightest ink: a block is a fill, so the cell it
+     covers has to stand off the surface, and this stands off `#282c33` without being the first
+     thing the eye lands on. The light answer is below, and it is deliberately not a tint of this. */
+  --marvis-cursor: #c2c9f1;
 
   /* The ANSI palette a terminal is painted with. A colorscheme that uses these would otherwise
      draw xterm.js' own, which has nothing to do with this window. */
@@ -236,6 +241,10 @@
   --marvis-content-accent: #455fd0;
   --marvis-scrollbar: #383a414c;
   --marvis-selection: #455fd03d;
+  /* The light answer to the cursor above, and not the same lavender: a block is a fill, and
+     `#c2c9f1` on this page's `#fafafa` is 1.56:1, which is a cell the caret disappears in. The ink
+     the page is printed in is the fill a cursor needs here, with the surface as the glyph under it. */
+  --marvis-cursor: #242529;
 
   --marvis-ansi-black: #000000;
   --marvis-ansi-red: #c33a2f;

@@ -327,6 +327,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
           :font-size="terminalSettings?.fontSize ?? 16"
           :ligatures="terminalSettings?.ligatures ?? true"
           :cursor-blink="terminalSettings?.cursorBlink ?? true"
+          :cursor-style="terminalSettings?.cursorStyle ?? 'block'"
           :zoom="zoom"
           @created="onCreated(view.key, $event)"
           @closed="onClosed(view.key, $event)"
