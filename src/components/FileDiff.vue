@@ -694,15 +694,30 @@ watch(
   () => [props.checkout.id, props.path] as const,
   () => {
     draft.value = null;
+    lastAnchorChecks = [];
   },
 );
+
+let lastAnchorChecks: ReviewAnchorCheck[] = [];
 
 // Reports the anchor text of every note whose line the diff renders, so the backend can
 // stamp drift. It only fires when a resolved text changes, never on plain scrolling.
 watch(
   anchorChecks,
   (checks) => {
-    if (checks.length > 0 && props.path !== null) void props.review.verifyAnchors(props.path, checks);
+    if (checks.length === 0 || props.path === null) {
+      lastAnchorChecks = [];
+      return;
+    }
+    const alreadyAsked =
+      checks.length === lastAnchorChecks.length &&
+      checks.every(
+        (check, index) =>
+          check.id === lastAnchorChecks[index]?.id && check.currentCode === lastAnchorChecks[index]?.currentCode,
+      );
+    if (alreadyAsked) return;
+    lastAnchorChecks = checks.map((check) => ({ ...check }));
+    void props.review.verifyAnchors(props.path, checks);
   },
   { deep: true },
 );

@@ -1285,6 +1285,71 @@ describe("FileDiff", () => {
     wrapper.unmount();
   });
 
+  it("asks the backend once per set of anchor checks, not once per answer", async () => {
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "@@ -1,2 +1,2 @@\n const a = 1;\n+const b = 2;\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 4,
+      hunks: [{ startLine: 0, endLine: 4, title: "@@ -1,2 +1,2 @@" }],
+    });
+    const review = reviewApi([note()]);
+    review.verifyAnchors.mockImplementation(async () => {
+      review.notes = [...review.notes];
+      return true;
+    });
+
+    const wrapper = mount(FileDiff, {
+      props: { checkout, gitSnapshot: snapshot(), review, path: "src/app.ts", scrollTop: 0 },
+    });
+    for (let tick = 0; tick < 10; tick += 1) await flushPromises();
+
+    expect(review.verifyAnchors).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("asks again once the diff's own text moves a note's anchor", async () => {
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "@@ -1,2 +1,2 @@\n const a = 1;\n+const b = 2;\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 4,
+      hunks: [{ startLine: 0, endLine: 4, title: "@@ -1,2 +1,2 @@" }],
+    });
+    const review = reviewApi([note({ lineStart: 2, code: "const b = 2;" })]);
+    review.verifyAnchors.mockImplementation(async () => {
+      review.notes = [...review.notes];
+      return true;
+    });
+    const git = snapshot();
+    const wrapper = mount(FileDiff, {
+      props: { checkout, gitSnapshot: git, review, path: "src/app.ts", scrollTop: 0 },
+    });
+    for (let tick = 0; tick < 5; tick += 1) await flushPromises();
+    expect(review.verifyAnchors).toHaveBeenCalledTimes(1);
+
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/app.ts",
+      patch: "@@ -1,2 +1,2 @@\n const a = 1;\n+const b = 3;\n",
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 4,
+      hunks: [{ startLine: 0, endLine: 4, title: "@@ -1,2 +1,2 @@" }],
+    });
+    git.statusRevision += 1;
+    await wrapper.setProps({ gitSnapshot: git });
+    await new Promise((resolve) => setTimeout(resolve, 500));
+    await flushPromises();
+
+    expect(review.verifyAnchors).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
   it("draws nothing to send when no shell is above the diff", async () => {
     const wrapper = mount(FileDiff, {
       props: {
