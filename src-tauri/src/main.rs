@@ -283,6 +283,8 @@ mod security_tests {
             [
                 "core:default",
                 "core:window:allow-close",
+                // Tauri's `onCloseRequested` completes the allowed close by calling `destroy()`.
+                "core:window:allow-destroy",
                 // The title bar draws minimize on a window that has no frame of its own.
                 "core:window:allow-minimize",
                 "core:window:allow-start-dragging",
