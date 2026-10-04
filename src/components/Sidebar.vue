@@ -12,6 +12,7 @@ import {
   FolderMinus as FolderMinusIcon,
   GitBranchPlus as GitBranchPlusIcon,
   Plus as PlusIcon,
+  SquareTerminal as SquareTerminalIcon,
   X as XIcon,
 } from "@lucide/vue";
 import {
