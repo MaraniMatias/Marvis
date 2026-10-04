@@ -1,6 +1,6 @@
 # Plan: seguridad de dependencias y toolchain
 
-**Estado:** plan aprobado; pendiente de implementación.  
+**Estado:** plan aprobado; pendiente de implementación. Los objetivos son un inventario del 2 de octubre de 2026 y ya no coinciden con el árbol actual: el toolchain está fijado en `rust-toolchain.toml` (1.97.1, no 1.99.0), la auditoría de Rust usa `scripts/audit-rust.mjs` en lugar de `cargo audit`, y las versiones instaladas son Vitest 4.1.11 y Vite 7. Verificá cada punto contra el árbol antes de aplicarlo.  
 **Inventario consultado:** 2 de octubre de 2026.  
 **Alcance:** pnpm, Cargo/Rust, configuración de OpenCode y GitHub Actions; actualizar dependencias directas a la versión estable más reciente que soporte el toolchain y no viole las políticas del repo.
 
