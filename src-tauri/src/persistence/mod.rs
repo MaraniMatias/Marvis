@@ -4764,7 +4764,7 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "manual bounded local load benchmark; see docs/persistence-load-benchmark.md"]
+    #[ignore = "manual bounded local load benchmark; run scripts/benchmark-persistence-load.mjs"]
     fn bounded_database_load_metrics() {
         use std::time::Instant;
 

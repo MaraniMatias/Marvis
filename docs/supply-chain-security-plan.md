@@ -11,7 +11,7 @@
 - Mantener TypeScript en **5.9.3**: `typescript-eslint@8.71.0` (latest estable y canary consultado) declara `typescript <6.1.0`; no hay TypeScript 6 estable. TypeScript 7 rompería el lint configurado en `eslint.config.js`.
 - Actualizar `rusqlite` a **0.40.2** en este mismo lote. La revisión de usos no encontró las APIs afectadas por sus cambios incompatibles (módulo VTab, `ValueRef`, statement cache opcional, hooks ni `u64`/`usize` SQL).
 - Fijar Rust en `1.99.0`; fijar acciones GitHub por SHA completo.
-- Mantener fuera de alcance: AGENTS.md, los spikes `layout-spike/`, `terminal-spike/`, `git-spike/`, Dependabot y attestations/provenance.
+- Mantener fuera de alcance: AGENTS.md, Dependabot y attestations/provenance.
 
 ## Hallazgos que motivan el trabajo
 

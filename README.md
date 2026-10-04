@@ -96,7 +96,7 @@ This unreleased integration retains main's current app version `0.13.2` but uses
 
 ## Building
 
-Source setup: [docs/development.md](docs/development.md). Build and artifact notes: [docs/build.md](docs/build.md).
+Source setup, build and artifact notes: [docs/development.md](docs/development.md).
 
 Release and branch-gate checklist: [docs/release-safety.md](docs/release-safety.md).
 

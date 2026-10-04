@@ -1,6 +1,6 @@
 # Phase 3 — Claude Code as a review destination
 
-Status: specified, not implemented. Depends on phase 1 (`docs/phase-1-export.md`) for
+Status: specified, not implemented. Depends on phase 1 (`docs/review-export.md`) for
 `ReviewTarget`, and borrows phase 2's one-shot shape (`docs/phase-2-codex.md`).
 
 **Not parity with OpenCode.** Same reasoning as every non-OpenCode phase: Marvis can name the

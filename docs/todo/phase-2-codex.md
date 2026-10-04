@@ -1,6 +1,6 @@
 # Phase 2 — Codex as a review destination
 
-Status: specified, not implemented. Phase 1 (`docs/phase-1-export.md`) is the prerequisite: it adds
+Status: specified, not implemented. Phase 1 (`docs/review-export.md`) is the prerequisite: it adds
 `ReviewTarget` and the `preferences` key, and `"codex"` is added to that union here.
 
 **This is not parity with OpenCode.** The OpenCode integration is a bridge: Marvis runs

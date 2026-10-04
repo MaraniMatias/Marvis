@@ -10,7 +10,7 @@
   rustup toolchain install 1.97.1 --component rustfmt --component clippy
   ```
 
-The production build wrapper also explicitly invokes `rustup run 1.97.1`, validates `rustc` and Cargo, and requires Cargo's `--locked` mode. It does not use an unpinned `cargo` toolchain; see [build notes](build.md).
+The production build wrapper also explicitly invokes `rustup run 1.97.1`, validates `rustc` and Cargo, and requires Cargo's `--locked` mode. It does not use an unpinned `cargo` toolchain; see [building and artifacts](#building-and-artifacts).
 
 ## Operating-system dependencies
 
@@ -65,7 +65,25 @@ Build the normal production app with:
 pnpm build:app
 ```
 
-This uses the pinned production wrapper and mandatory `--locked` Cargo build. On Linux, the default bundle targets are `.deb` and AppImage, so the AppImage runner extras above are needed. To build only the `.deb` with the CI base prerequisites, use `pnpm run build:app -- --bundles deb`. See [build and artifact notes](build.md) for bundle paths and build behavior. The dependency and runner commands above follow [CI](../.github/workflows/ci.yml) and the [release workflow](../.github/workflows/release.yml); they do not imply that CI is currently green.
+This uses the pinned production wrapper and mandatory `--locked` Cargo build. On Linux, the default bundle targets are `.deb` and AppImage, so the AppImage runner extras above are needed. To build only the `.deb` with the CI base prerequisites, use `pnpm run build:app -- --bundles deb`. See [building and artifacts](#building-and-artifacts) for bundle paths and build behavior. The dependency and runner commands above follow [CI](../.github/workflows/ci.yml) and the [release workflow](../.github/workflows/release.yml); they do not imply that CI is currently green.
+
+## Building and artifacts
+
+`pnpm build:app` runs the pinned production wrapper, which requires rustup, runs Rust 1.97.1 explicitly, validates both `rustc` and Cargo, and prints their versions before building. It passes `--locked` to Cargo and remaps this checkout's absolute source path to `.` and Cargo home to `.cargo` in compiler output, including paths containing spaces. Existing `RUSTFLAGS` or `CARGO_ENCODED_RUSTFLAGS` are retained. This rewrites path prefixes only: it does not strip symbols or disable backtraces.
+
+On Linux, the default bundle targets are `.deb` and AppImage. To build only the `.deb` (the CI Linux job's scope), pass the bundle selection through the wrapper:
+
+```sh
+pnpm run build:app -- --bundles deb
+```
+
+The release workflow's Ubuntu 22.04 AppImage builds install the additional `libfuse2` and `libgtk-3-0` packages; the base `.deb` prerequisites and exact runner scope are listed in [operating-system dependencies](#operating-system-dependencies).
+
+By default, bundles are under `src-tauri/target/release/bundle/`; builds with an explicit Rust target triple use `src-tauri/target/<target>/release/bundle/`. A successful locked build is not a promise of bit-identical binaries across operating systems, linkers, SDKs, or system libraries. The CI Linux packaging job uses `ubuntu-22.04`; a macOS build does not cross-compile or verify Linux bundles.
+
+The macOS bundle intentionally uses Tauri's `signingIdentity: "-"` for ad-hoc signing. It is not Developer ID-signed or notarized; changing that requires release signing credentials and a separate distribution decision. Release builds use the default Cargo feature set, so the optional development MCP bridge is excluded.
+
+The production frontend checks also verify the Catppuccin and Fira Code notices/fonts. A scoped TypeScript-AST transform allowlists only the core, WebGL-addon, and Unicode-11-addon runtime modules. Within those modules it rewrites only the complete emitter throw containing the three ordered `disposed?`, `size?`, and `arr?` diagnostics followed by the exact unknown-listener `Error`. Each suppressed call still evaluates its arguments left-to-right and yields `undefined`, preserving effects such as `JSON.stringify` and its exceptions. Other logs, warnings, errors, lookalike prefixes, and unmatched throws remain untouched. The production frontend artifact check confirms those three diagnostic calls are absent and the exact exception is retained.
 
 ## Workspace data and recovery
 

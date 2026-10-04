@@ -1,6 +1,6 @@
 # Phase 4 — pi as a review destination
 
-Status: specified, not implemented. Depends on phase 1 (`docs/phase-1-export.md`) for
+Status: specified, not implemented. Depends on phase 1 (`docs/review-export.md`) for
 `ReviewTarget`; same one-shot shape as phases 2 and 3 (`docs/phase-2-codex.md`,
 `docs/phase-3-claude-code.md`).
 
