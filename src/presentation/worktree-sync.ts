@@ -7,8 +7,8 @@ import { syncWorkspaceRepo } from "../lib/ipc";
  * Brings a worktree somebody else created into the panel.
  *
  * More than one hand adds a worktree: Marvis's own dialog, an agent running `git worktree add`
- * in a terminal, a script. The watcher already sees Git register any of them — the write goes to
- * the Git directory the worktrees share, whichever way the worktree was made — but a watcher can
+ * in a terminal, a script. The watcher already sees Git register any of them: the write goes to
+ * the Git directory the worktrees share, whichever way the worktree was made. But a watcher can
  * only refresh rows that exist, and a worktree nothing has registered yet is not one. So the
  * signal names the repository and this asks the backend to read that one repository's worktree
  * list again, which is the same reading a launch takes.

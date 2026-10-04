@@ -119,7 +119,7 @@ const moveMenuFor = ref<string | null>(null);
  *
  * The menu is reka's, like the titlebar's: it brings the outside press, the Escape, the arrows,
  * the typeahead and the focus back to the button, none of which the panel was giving it. What the
- * panel keeps is which of the groups is open, because that is the one thing reka does not know —
+ * panel keeps is which of the groups is open, because that is the one thing reka does not know:
  * there is a menu per group and only one of them is allowed to be.
  */
 const groupMenuFor = ref<string | null>(null);
@@ -347,7 +347,7 @@ interface WorkdirItem {
    * The worktrees this terminal can be moved to: the others in the same repository.
    *
    * A terminal's session belongs to one worktree, and moving it to a worktree of another
-   * repository would mean handing a shell to a Git directory it has nothing to do with — so the
+   * repository would mean handing a shell to a Git directory it has nothing to do with. So the
    * destinations are the siblings, and a row with none offers no action.
    */
   destinations: { id: string; label: string; title: string }[];
@@ -820,7 +820,7 @@ const agentTitle = computed(() =>
                   </div>
                   <!-- The one slot for the row's right-hand text. What is there is context for
                        the row's name and never the thing it is for, so it steps aside for the
-                       actions like the counts do — except a session that wants attention, which
+                       actions like the counts do. Except a session that wants attention, which
                        stays put because that is the news. The agent belongs to the terminal only
                        while OpenCode is the one running in it: a terminal in Neovim is not an
                        agent's terminal, and saying so next to `nvim` would be a claim about a
@@ -1022,7 +1022,7 @@ const agentTitle = computed(() =>
 
 /* Nothing here positions the menu: reka hangs it below the button and portals it to the body, the
    way every other menu in the app is placed. What is left is what this one says that the others do
-   not — a width for whole phrases rather than branch names, the gap its leading icon asks for, the
+   not: a width for whole phrases rather than branch names, the gap its leading icon asks for, the
    icon itself, and the count at the end of a row. The surface comes from `surface-popover` and the
    rows from `.menu-item`, so the two kinds of menu cannot drift apart. */
 .group-menu {
@@ -1319,7 +1319,7 @@ const agentTitle = computed(() =>
   min-width: 0;
 }
 
-/* The flex box only clips, so the ellipsis lives on the name itself — and on the name's tail
+/* The flex box only clips, so the ellipsis lives on the name itself. And on the name's tail
    rather than on the name, because the tail is the half that says which branch this is. */
 .workdir-name {
   display: flex;

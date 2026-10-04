@@ -180,7 +180,7 @@ export const LANGUAGE_BY_EXTENSION: ReadonlyMap<string, string> = new Map<string
  * `docs/.gitignore` reads like the root one.
  *
  * `gitignore` is its own name rather than `ini` on purpose. Shiki has no gitignore grammar, so it
- * borrows `ini`, which renders the patterns correctly — but the editor has no `ini` tokenizer that
+ * borrows `ini`, which renders the patterns correctly, but the editor has no `ini` tokenizer that
  * survives a file of bare patterns, and naming the family separately is what lets it use one.
  */
 export const LANGUAGE_BY_FILENAME: ReadonlyMap<string, string> = new Map<string, string>([

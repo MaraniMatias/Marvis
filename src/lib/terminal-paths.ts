@@ -34,7 +34,7 @@ const LINE_AND_COLUMN = /:\d+(?::\d+)?$/;
  * The test is a separator or an extension: a path has a directory part or a dot in its last one.
  * That is what keeps `error` in `error: something broke` from being offered as a file, and what
  * keeps `--verbose` from costing a filesystem lookup on every line the mouse crosses. A file
- * with no extension at all — `Makefile`, `LICENSE` — is not offered, and that is the trade: it
+ * with no extension at all (`Makefile`, `LICENSE`) is not offered, and that is the trade: it
  * is the one file a line mentions that this cannot tell apart from a word.
  */
 function looksLikePath(token: string): boolean {

@@ -100,7 +100,7 @@ let wheelRemainderPx = 0;
  * How long `auto` leaves the thumb up after the last scroll.
  *
  * Long enough to read where the thumb landed and to catch it again, short enough that a terminal
- * nobody is scrolling looks like a terminal with no scrollbar — which is what the setting is for
+ * nobody is scrolling looks like a terminal with no scrollbar. Which is what the setting is for
  * people who scrolled once and decided they did not need one.
  */
 const SCROLLBAR_FADE_MS = 900;
@@ -141,7 +141,7 @@ function updateScrollbar() {
  * `auto` shows the thumb while something is moving and takes it away when nothing is.
  *
  * The timer restarts on every scroll instead of running once, so a build that prints for a minute
- * keeps its scrollbar up for that minute — the thumb genuinely is moving the whole time — and the
+ * keeps its scrollbar up for that minute (the thumb genuinely is moving the whole time) and the
  * fade happens when the output stops. Dragging counts as scrolling, and so does the wheel over
  * the track, or the thumb would fade out from under a pointer that is still holding it.
  */
@@ -282,7 +282,7 @@ function updateStatus(status: TerminalSessionStatus) {
   // in the sidebar with a live-looking entry, and the only way out is the close button on a pane
   // the user has to go looking for. `exit` and `:q` are how a shell is ended on purpose, so the
   // session goes with it. The close asks the backend once more before acting, finds the process
-  // already gone, and so never reaches the confirmation that stopping a live process needs — that
+  // already gone, and so never reaches the confirmation that stopping a live process needs: that
   // question stays where it belongs, on the close the user asked for.
   //
   // This runs for any status report, including the one `requestClose` makes on its own way out,
@@ -323,7 +323,7 @@ function fitActiveView() {
  *
  * A session that is closing or already unmounted has no pane left to size: the PTY is either about
  * to be shut down or already is, and a send after that is a call the backend refuses at best. This
- * is the same guard `queueInput` uses, for the same reason — once the session is on its way out,
+ * is the same guard `queueInput` uses, for the same reason: once the session is on its way out,
  * nothing about the layout is worth another round trip.
  */
 function resizeAllowed() {
@@ -499,8 +499,8 @@ terminal.onTitleChange((title) => {
 });
 terminal.onResize(({ cols, rows }) => queueResize(cols, rows));
 // xterm fires this whenever the viewport moves, whether a wheel, a drag, Shift+PageUp or output
-// arriving at the bottom caused it, and it does not promise what the payload is — some paths send
-// the new position, some send an object wrapping it — so the position is read back off the buffer
+// arriving at the bottom caused it, and it does not promise what the payload is (some paths send
+// the new position, some send an object wrapping it). So the position is read back off the buffer
 // rather than taken from the event. Output is the reason this is worth subscribing to at all: a
 // scrollback that grows has to shrink its thumb, and nothing else says so.
 terminal.onScroll(() => {
@@ -510,7 +510,7 @@ terminal.onScroll(() => {
 
 /**
  * Picking a mode is a change to what the pane draws, so the thumb is measured again once the
- * overlay is really there — the element only exists in the modes that draw one, and a thumb sized
+ * overlay is really there: the element only exists in the modes that draw one, and a thumb sized
  * against a track that was not in the document yet would be sized against nothing.
  */
 watch(

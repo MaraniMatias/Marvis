@@ -872,7 +872,7 @@ pub fn restore(
 ///
 /// More than one hand adds a worktree: Marvis's own dialog, an agent running `git worktree add`
 /// in a terminal, a script. The disk is what they all wrote to and what the panel has to agree
-/// with, so this asks Git for one repository's list and reconciles the answer — the same reading
+/// with, so this asks Git for one repository's list and reconciles the answer: the same reading
 /// [`restore`] takes for every repository, asked for one because a change said this one moved.
 ///
 /// The archived stay archived: reconciliation writes what Git lists and leaves every other

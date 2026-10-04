@@ -4,8 +4,8 @@ import type { MainDocument, MainViewState } from "./main-document";
  * How the window is arranged, and nothing else.
  *
  * These are the shapes a person arrives at by dragging and then leaves alone, which is why they
- * live in the database next to the workspace they belong to. The preferences — sizes, ligatures,
- * the scale — are in `src/domain/settings.ts`, in `~/.marvis/config.yml`.
+ * live in the database next to the workspace they belong to. The preferences (sizes, ligatures,
+ * the scale) are in `src/domain/settings.ts`, in `~/.marvis/config.yml`.
  */
 export interface AppLayoutState {
   version: 5;

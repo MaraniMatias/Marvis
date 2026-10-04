@@ -30,7 +30,7 @@ const INSPECTOR_WIDTH_MAX: u32 = 480;
 const PREVIEW_WIDTH_MIN: u32 = 260;
 const PREVIEW_WIDTH_MAX: u32 = 900;
 /// The layout row is the window's own shape and nothing else. The preferences a person sets once
-/// — sizes, ligatures, the scale — live in `~/.marvis/config.yml`, which this shape was widened
+/// (sizes, ligatures, the scale) live in `~/.marvis/config.yml`, which this shape was widened
 /// and narrowed once to make room for, before that file existed.
 const APP_LAYOUT_VERSION: u8 = 5;
 

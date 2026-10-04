@@ -228,8 +228,8 @@ const sanitizerOptions = {
 };
 
 /**
- * The only way a Markdown fence reaches a grammar. The info string is attacker-controlled — it
- * comes from the file being previewed — so it is looked up in this allowlist and never turned
+ * The only way a Markdown fence reaches a grammar. The info string is attacker-controlled (it
+ * comes from the file being previewed) so it is looked up in this allowlist and never turned
  * into a module path. An unknown alias means no highlighting, not a fallback guess.
  */
 const fenceLanguageAliases = {

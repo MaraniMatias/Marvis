@@ -96,7 +96,7 @@ export function workdirTitle(repo: Repo, checkout: Checkout): string {
  * same list read twice, so the rule is written once and neither of them keeps its own.
  *
  * A program-set terminal title wins; otherwise the program in front of the shell, and the name it
- * was opened with when nothing is in front of it — which is also what a terminal with no live
+ * was opened with when nothing is in front of it, which is also what a terminal with no live
  * status, one that is not on the panel, has to be named by.
  */
 export function sessionTitle(session: Session, status?: TerminalSessionStatus | null): string {

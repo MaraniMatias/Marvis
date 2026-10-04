@@ -464,7 +464,7 @@ function errorText(error: unknown): string {
  *
  * Each is given an identity of its own, which the library keys its own reading of a window by instead
  * of by the text of that window. Two diffs of two checkouts hold the same path and often the very same
- * lines — the same run of placeholder newlines and the same hunk — and one cache would hand the
+ * lines (the same run of placeholder newlines and the same hunk) and one cache would hand the
  * second whatever it read for the first, which for the two of them is a different file's syntax. It is
  * an identity per hunk rather than per file because the key it replaces is the window's text, and two
  * hunks of one file are two different windows.
@@ -1093,7 +1093,7 @@ onUnmounted(() => {
                    The library draws the `@@` header itself and a click on it collapses the hunk, but
                    a table row is not a control: there is nothing on it for the keyboard to reach and
                    nothing for a screen reader to name. So the row keeps the click and this is the
-                   same action as a control next to it — out of the flow and out of sight while the
+                   same action as a control next to it: out of the flow and out of sight while the
                    hunk is open, because a header drawn here while the library draws one is the header
                    twice and a row of the diff spent on it. It is drawn over that header row only once
                    the keyboard has brought it there, which is the one state where a control of ours
@@ -1182,7 +1182,7 @@ onUnmounted(() => {
         <!-- The composer is a layer over the diff and not another row of it. Two reasons, and the
              second is the one that decides where it goes: a composer in the flow makes its row
              taller than the window's arithmetic counts, and a composer anchored to a row is gone
-             the moment that row scrolls out — which is what a range spanning more than a screen
+             the moment that row scrolls out, which is what a range spanning more than a screen
              does. Held here it survives the scroll that finishes the range. -->
         <ReviewComposer
           v-if="diff.large && !diff.tooLarge && draft"
@@ -1384,15 +1384,15 @@ onUnmounted(() => {
    when `diff-highlighter.ts` has no grammar for its language: the library falls back to its own
    highlighter for those, and these are the rules that give that output Marvis' palette rather than
    the GitHub one highlight.js ships. A diff whose grammar Marvis does have is highlighted by Shiki
-   instead and needs none of this — its tokens already name the CSS variables.
+   instead and needs none of this: its tokens already name the CSS variables.
    The seven added here are the classes those grammars emit that no rule above named, and which were
    therefore being painted in whatever the library's palette said. `hljs-function` is what wraps a
    call's parentheses and its callback's arrow together, so it takes the function color the call
    above it already has; `hljs-subst` is the `${…}` of a template literal and `hljs-class` the class
    a Scala or Elixir declaration is named by, both as the editor paints them. The rest are a list
    marker, emphasis, bold and strike-through, the last three styled as `marvisHighlightStyle` already
-   styles them. What stays plain here is what highlight.js never classifies at all — the name a line
-   declares, `=`, `!`, `||` — because it hands those back as text with no class to match. That is the
+   styles them. What stays plain here is what highlight.js never classifies at all (the name a line
+   declares, `=`, `!`, `||`) because it hands those back as text with no class to match. That is the
    fallback's own granularity, and the reason it is the fallback. */
 .diff-viewport
   :deep(
@@ -1475,7 +1475,7 @@ onUnmounted(() => {
  * while the eye does not see it, and it takes itself out of the pointer's way so the one pixel it
  * collapses to cannot swallow the click on the header row beside it. Nothing here depends on which
  * stylesheet came first: the rule carries a pseudo-class, so it outranks the `sr-only` it undoes,
- * which is why it clears the clip by hand — both the `clip` and the `clip-path` it may be hiding
+ * which is why it clears the clip by hand: both the `clip` and the `clip-path` it may be hiding
  * behind, since which of the two a given version of the utility uses is not ours to know.
  */
 .diff-hunk-toggle.sr-only {

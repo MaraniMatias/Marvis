@@ -4720,7 +4720,7 @@ mod tests {
     }
 
     /// D2-05, D2-09, D2-10 and D2-15 in one pass, against two real servers running in two
-    /// different checkouts — the shape the acceptance runbook asks for.
+    /// different checkouts: the shape the acceptance runbook asks for.
     ///
     /// What is proven here is the loop itself: one message carrying the whole review, a turn
     /// that ends, a line the agent actually rewrote, and a second checkout that stays out of

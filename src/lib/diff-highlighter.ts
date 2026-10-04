@@ -122,7 +122,7 @@ function firstLines(source: string, lines: number | undefined): string {
  * What `source` says, read into the lines a diff window is cut out of, or nothing.
  *
  * The whole of one side is read, not a hunk of it: a hunk is a fragment, and a fragment is read by
- * a grammar that never saw the file it came from — which for a `.vue` hunk inside
+ * a grammar that never saw the file it came from, which for a `.vue` hunk inside
  * `<script setup lang="ts">` means the TypeScript in it is markup, painted as markup. `lines` is how
  * far into the file the diff reaches, which is as far as a grammar is asked anything.
  */
@@ -169,11 +169,11 @@ function countLines(source: string): number {
  * side of that hunk out of the patch: the lines of the hunk at their own numbers, and a bare newline
  * in every line before it. Line N of what it hands over is line N of the file, which is what lets
  * tokens read from the whole file be cut to this window instead of the window being parsed as a
- * file of its own — and what makes the library's line cap, measured against those placeholders, a
+ * file of its own, and what makes the library's line cap, measured against those placeholders, a
  * limit on how deep in a file a change may be rather than on how much is worth reading.
  *
  * A window line the diff has no text for is one the library drew as an empty line, or one it drew
- * nothing at all, and both are drawn empty — so that is all it is given, whatever the file says at
+ * nothing at all, and both are drawn empty. So that is all it is given, whatever the file says at
  * that number. Every line it does have text for has to be the line the tokens were read from: a diff
  * draws its text from the patch and takes its colors from here, and the two were read from the same
  * file moments apart, so a file that is not the same one anymore is one whose lines these tokens are
@@ -213,7 +213,7 @@ function sideFor(fileName: string | undefined): "old" | "new" | undefined {
  * hold `src/App.vue` apart: the path a diff was opened for says nothing about which checkout it came
  * from, and two of those files are two answers to the same question. The library caches its own
  * reading of a window by the text of that window, so the `DiffFile`s a diff is drawn from also carry
- * an identity of their own — `FileDiff.vue` gives each set one — and this object's identity is the
+ * an identity of their own (`FileDiff.vue` gives each set one) and this object's identity is the
  * third thing that has to be its own, which is why there is one of these per diff rather than one.
  */
 function createHighlighter(sides: { old?: SideContext; new?: SideContext }): DiffFileHighlighter {

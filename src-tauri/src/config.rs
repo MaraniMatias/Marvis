@@ -211,8 +211,8 @@ fn read_document(path: &Path) -> Result<Option<String>, IpcError> {
 /// Writes the file, and refuses to write over one that cannot be read.
 ///
 /// The refusal is the point of this function. A file somebody edited by hand and got wrong is the
-/// only copy of the preferences they had, and an Apply — or a zoom step on the keyboard, which
-/// writes the same file — would replace a typo they could have found with a page of defaults they
+/// only copy of the preferences they had, and an Apply (or a zoom step on the keyboard, which
+/// writes the same file) would replace a typo they could have found with a page of defaults they
 /// never asked for. So the file is parsed first: it either says what it says, or it is left alone
 /// and the error names the line.
 pub fn save(path: &Path, settings: &AppSettings) -> Result<(), IpcError> {

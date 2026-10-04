@@ -117,8 +117,8 @@ export type RendererLevel = "webgl" | "dom";
  * half of that choice, and a program that asks for another shape through DECSCUSR is answered out
  * of this one rather than fought with it.
  *
- * It is two colors and not one per cell — a cell that arrives with a color of its own does not
- * hand it to the block — and the panel that is not holding the keyboard draws a frame rather than
+ * It is two colors and not one per cell (a cell that arrives with a color of its own does not
+ * hand it to the block) and the panel that is not holding the keyboard draws a frame rather than
  * the focused shape, which says so in shape rather than in a color that has to differ from the
  * focused one.
  */
@@ -166,7 +166,7 @@ let terminalFonts: Promise<unknown> | undefined;
  *
  * The request goes out when the app starts rather than when a panel mounts, and the answer is
  * kept: a panel that mounts later awaits a promise that is already settled, so the wait is a
- * microtask instead of a font parse. Callers still await it — the guarantee is that the faces
+ * microtask instead of a font parse. Callers still await it: the guarantee is that the faces
  * are ready before `open`, not that they were asked for early.
  */
 export function preloadTerminalFonts(): Promise<unknown> {

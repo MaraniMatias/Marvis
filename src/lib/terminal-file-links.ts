@@ -2,7 +2,7 @@
  * Paths in the terminal that open in the preview on ctrl+click.
  *
  * xterm.js has a link provider for exactly this: it asks, once per hovered line, what that line
- * offers, and underlines whatever comes back — but it has no way to know whether a path names a
+ * offers, and underlines whatever comes back. But it has no way to know whether a path names a
  * file, and it draws the underline the moment the mouse arrives. Both are wanted here, so the
  * provider answers asynchronously: it asks the backend whether each candidate is a file this
  * checkout holds and the preview can draw, and only hands xterm the ones that are. A path that
@@ -14,7 +14,7 @@
  * stutter as the mouse travels down a build log.
  *
  * Activation is deliberately narrow: xterm activates a link on any click, so `activate` opens
- * nothing unless ctrl or cmd is held. A plain click on a path stays what it was — a click that
+ * nothing unless ctrl or cmd is held. A plain click on a path stays what it was: a click that
  * selects nothing, which the selection copy already ignores.
  */
 import type { IDisposable, ILink, ILinkProvider, IMarker, Terminal } from "@xterm/xterm";

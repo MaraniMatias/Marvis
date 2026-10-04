@@ -45,8 +45,8 @@ const BINARY_SNIFF_BYTES: usize = 8_000;
 ///
 /// A grammar reads a file, not a hunk: the lines inside `<script setup lang="ts">` are markup to a
 /// grammar that never saw the opening tag, so a patch on its own highlights the wrong language or
-/// none at all. The text is what the grammar reads and not what the diff draws — the patch still
-/// draws every line — so the cap is a cap on the reading of one file, and past it the file is read
+/// none at all. The text is what the grammar reads and not what the diff draws (the patch still
+/// draws every line). So the cap is a cap on the reading of one file, and past it the file is read
 /// the way this app read every file before any of this. `SMALL_DIFF_BYTES` is the same size a patch
 /// is allowed to be, so a file that small in this repository is carried whole.
 const MAX_SYNTAX_CONTEXT_BYTES: usize = SMALL_DIFF_BYTES;
@@ -1275,8 +1275,8 @@ pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFil
         String::from_utf8_lossy(&scan.patch).into_owned()
     };
     // Only for a diff that is drawn: a patch nothing shows is not worth two more reads of the file.
-    // Each side is the text `diff_args` diffed, read the way it was diffed — the merge base's blob
-    // and the file as it is on disk — rather than the head's or the index's, which the patch of this
+    // Each side is the text `diff_args` diffed, read the way it was diffed (the merge base's blob
+    // and the file as it is on disk) rather than the head's or the index's, which the patch of this
     // diff never saw.
     let (old_content, new_content) = if patch.is_empty() {
         (None, None)
@@ -1338,7 +1338,7 @@ fn worktree_content(path: &Path) -> Option<String> {
 ///
 /// Read through a pipe under a cap rather than through `run_git`, which buffers all of whatever Git
 /// prints: a blob is the size of a file, and this one is read to color a diff rather than to show
-/// it. A merge base with no such path — an added file, an untracked one — fails here, which is the
+/// it. A merge base with no such path (an added file, an untracked one) fails here, which is the
 /// same answer as an old side with no lines to draw; the exit status is what says so, because a
 /// failure prints nothing on the pipe it would have been read from.
 fn merge_base_content(root: &Path, merge_base: &str, path: &str) -> Option<String> {

@@ -77,7 +77,7 @@ export interface CodeEditorOptions {
 const syntax = (token: string) => `var(--marvis-syntax-token-${token})`;
 
 /**
- * `defaultHighlightStyle` is a light palette — dark red keywords, mid-blue strings — laid over
+ * `defaultHighlightStyle` is a light palette (dark red keywords, mid-blue strings) laid over
  * whatever editor background is in effect, where the darker half of it is barely readable in the
  * light theme and washed out in the dark one. These are the tokens the read-only preview already
  * renders the same file with, so a file stops changing color when it becomes editable.
@@ -136,7 +136,7 @@ export const marvisHighlightStyle = HighlightStyle.define([
 
 /**
  * A gitignore is a list of bare globs, which the `properties` mode the other INI files use reads as
- * one very long key — and a leading `!` negation as a comment, which is backwards. Only two
+ * one very long key, and a leading `!` negation as a comment, which is backwards. Only two
  * characters carry meaning: `#` opens a comment and must sit at the start of the line, and `!` at
  * that same spot re-includes a pattern. The glob metacharacters are marked so a `*.log` reads as
  * glob syntax rather than prose; everything else is a path, and stays in the base color.
@@ -160,7 +160,7 @@ const gitignoreLanguage = StreamLanguage.define({
 /**
  * What the editor needs for itself: a height it does not grow past, and a scroller that scrolls.
  *
- * The two colors CodeMirror hardcodes for a light page — a lavender selection, a black caret —
+ * The two colors CodeMirror hardcodes for a light page (a lavender selection, a black caret)
  * are not here: `EditorView.theme` refuses the selectors its own base theme uses (`&dark`), and a
  * shorter selector loses to that theme anyway. They live in `DocumentPane`'s stylesheet, which can
  * out-specify it.
@@ -227,7 +227,7 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
         // This is `basicSetup` written out, minus the search panel, the linter and the completion
         // popup. Those three are the only reason the `codemirror` package was a dependency, and
         // none of them is a thing this editor does: it draws source and takes typed text. Two
-        // consequences worth keeping in mind before adding one back — the light palette
+        // consequences worth keeping in mind before adding one back: the light palette
         // `basicSetup` also injects as a fallback does not come with it (so every readable color is
         // named in `marvisHighlightStyle`), and a package that is not in `package.json` cannot be
         // imported here at all.
@@ -278,8 +278,8 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
 /**
  * The metadata a Markdown document opens with, read as the YAML it is.
  *
- * The Markdown grammar has no front matter of its own — it sees a rule, a paragraph and another rule
- * — so the block is parsed with the YAML grammar over its own range and the result is laid over the
+ * The Markdown grammar has no front matter of its own (it sees a rule, a paragraph and another rule),
+ * so the block is parsed with the YAML grammar over its own range and the result is laid over the
  * document as decorations. A grammar extension would have to be written into the Markdown parser,
  * which is where a mistake stops being a cosmetic one and starts being a broken editor; this cannot
  * do that, and it costs one parse of a handful of lines per edit.

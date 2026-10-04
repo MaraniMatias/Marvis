@@ -170,8 +170,8 @@ async function requestClose(sessionId: string) {
  * Hands a live terminal to another worktree of the same repository.
  *
  * The process is not restarted and its output is not lost: what moves is which checkout's layout
- * the pane belongs to, and the session row that says so. Both layouts are rewritten — the session
- * leaves the one it was in and opens as a tab in the one it moved to — because a layout that kept
+ * the pane belongs to, and the session row that says so. Both layouts are rewritten (the session
+ * leaves the one it was in and opens as a tab in the one it moved to) because a layout that kept
  * a pane for a session its checkout no longer holds is the layout the backend refuses to save.
  *
  * With `terminal.changeDirectoryOnMove` on, a shell sitting at a prompt is also told to `cd`. A
@@ -279,7 +279,7 @@ let answeredShellToken = 0;
 
 /**
  * A shell request names the workdir it is for, and the pane only has that workdir once its saved
- * UI state has been read — which for a workdir picked for the first time is after the request was
+ * UI state has been read, which for a workdir picked for the first time is after the request was
  * made. Keyed on the pair, so a request that arrives before its workdir is answered as soon as
  * the workdir lands instead of being dropped and needing a second click.
  */

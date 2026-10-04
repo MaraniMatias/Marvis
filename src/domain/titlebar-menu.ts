@@ -17,7 +17,7 @@ export interface TitlebarMenuItem {
   /** The one that is current, marked with a check. */
   checked?: boolean;
   /**
-   * That this row is one of a set of alternatives, of which exactly one is current — a mode, a
+   * That this row is one of a set of alternatives, of which exactly one is current (a mode, a
    * density, an alignment. It changes nothing about how the row looks and everything about how it
    * announces itself: a checkmark on its own says "this is true" and leaves a reader with no way to
    * know there were three answers, so these say `menuitemradio` and mean it. A check on a row that

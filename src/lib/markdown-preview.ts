@@ -81,7 +81,7 @@ function safeMarkdownLink(url: string): boolean {
  * This runs on the already-sanitized HTML, never before it: the Markdown allowlist has no
  * `style` and stays that way, so the only markup that can carry one is a Shiki fragment that
  * `highlightCodeBlock` sanitized on its own. Blocks are found by their `language-*` class in
- * the rendered document, which is what makes fences nested in blockquotes or lists work — those
+ * the rendered document, which is what makes fences nested in blockquotes or lists work: those
  * never reach the top level of the token stream.
  */
 async function highlightFencedCode(sanitizedHtml: string): Promise<string> {
@@ -129,7 +129,7 @@ type MarkdownParser = InstanceType<typeof MarkdownIt>;
  *
  * Two rules get it back, and neither can reach code. The block rule is registered after `code` and
  * `fence`, so a fence or an indented block is consumed before it is offered the line, and the
- * inline rule takes the comment out of the text run it sits in — a code span is already a token of
+ * inline rule takes the comment out of the text run it sits in: a code span is already a token of
  * its own by the time inline rules run, so `` `<!-- kept -->` `` keeps its comment.
  */
 function dropHtmlComments(markdown: MarkdownParser): void {
@@ -208,7 +208,7 @@ export async function renderMarkdownPreview(source: string, markdownPath: string
   };
 
   // A page of metadata is not the document: the block is dropped whole, fences and all, so nothing
-  // is left of it — not a rule, not a heading, not a table. The source view is where it is read.
+  // is left of it: not a rule, not a heading, not a table. The source view is where it is read.
   const sanitized = DOMPurify.sanitize(markdown.render(withoutFrontMatter(source)), {
     ALLOWED_TAGS: [
       "a",

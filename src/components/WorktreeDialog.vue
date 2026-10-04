@@ -158,7 +158,7 @@ async function submitRemove() {
  * Takes the worktree off the panel and keeps it, so the repo row can put it back.
  *
  * Nothing on disk moves: the branch, its commits and its files stay exactly where they
- * are. That is what the dialog has to say, because the row cannot — a cross with a box
+ * are. That is what the dialog has to say, because the row cannot: a cross with a box
  * around it reads as "delete" to anyone who has not read this comment.
  */
 async function submitArchive() {

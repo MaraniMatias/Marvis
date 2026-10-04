@@ -49,8 +49,8 @@ const emit = defineEmits<{ "update:open": [boolean] }>();
 const query = ref("");
 const sections = computed(() => visibleSections(props.sections, query.value));
 /**
- * What the search emptied, to say so. A menu that was never a list — one that only ever had a
- * note and an action — has nothing to report, and the actions at the foot never count as a hit.
+ * What the search emptied, to say so. A menu that was never a list (one that only ever had a
+ * note and an action) has nothing to report, and the actions at the foot never count as a hit.
  */
 const nothingMatched = computed(
   () =>

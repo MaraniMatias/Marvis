@@ -9,7 +9,7 @@
  * than through `img-src`.
  *
  * One flavour is read because Catppuccin's light and dark flavours are the same 656 drawings with
- * the palette swapped — verified shape by shape, and named the same way in the theme file — so the
+ * the palette swapped: verified shape by shape, and named the same way in the theme file. So the
  * colour is written as a `--marvis-icon-*` token rather than baked in, and `src/marvis.css` answers
  * with the palette the theme in effect asks for. Which palette a colour belongs to is Catppuccin's
  * own naming, and it is the same name in every flavour, so the token is that name. The three
@@ -131,7 +131,7 @@ function inner(icon) {
  *
  * A declaration rather than a presentation attribute: `var()` is not a value a `stroke` attribute
  * can hold. Whatever `style` an icon already carries is merged into rather than replaced, and the
- * tag is rebuilt with the self-closing form it came in with — in an inline `<svg>` the HTML parser
+ * tag is rebuilt with the self-closing form it came in with: in an inline `<svg>` the HTML parser
  * reads that slash, and dropping it nests one path inside another.
  */
 function paintAsTokens(svg) {

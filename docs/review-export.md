@@ -1,6 +1,6 @@
-# Phase 1 — Markdown export as a review destination
+# Phase 1: Markdown export as a review destination
 
-Status: **PARTIAL** — the Markdown export path is implemented. The available destinations are
+Status: **PARTIAL**. The Markdown export path is implemented. The available destinations are
 manual Markdown handoff and the existing OpenCode integration; Codex, Claude Code, and pi
 integrations are not implemented. Export support does not complete the broader multi-agent
 roadmap. Those adapters are separate follow-on work, not Phase 1 requirements.

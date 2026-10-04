@@ -169,8 +169,8 @@ const languageKeyboardNavigation = ref(false);
  * in CSS at all.
  *
  * The size, the ligatures and the blink go onto the host as custom properties because the editor's
- * theme is built once and the pane is not rebuilt when a preference changes — the blink included,
- * which is the one of the three CodeMirror draws itself: it blinks the whole cursor layer, so what
+ * theme is built once and the pane is not rebuilt when a preference changes (the blink included,
+ * which is the one of the three CodeMirror draws itself): it blinks the whole cursor layer, so what
  * it takes to stop it is one `animation-play-state` and nothing to reconfigure in the editor. The
  * indentation is an extension rather than a declaration, so it is reconfigured on the editor that
  * is already open, which is what keeps the document, the undo history and the scroll position
@@ -500,8 +500,8 @@ async function loadFile(preservePosition = false) {
   const previousPosition = preservePosition ? readingPosition.value : props.readingPosition;
   // Whatever is on screen already belongs to this same document, so a re-read leaves it where it
   // is: the checkout watcher re-reads the open file twice for every change anywhere in the
-  // workdir, and dropping back to "loading" — or to a blank page where the reason it cannot be
-  // read was — until the read lands is what blinks.
+  // workdir, and dropping back to "loading" (or to a blank page where the reason it cannot be
+  // read was) until the read lands is what blinks.
   const refreshing = contentIdentity.value === fileIdentity;
   if (!refreshing) {
     contentState.value = "loading";
@@ -767,7 +767,7 @@ function onMarkdownLink(event: MouseEvent) {
            rather than another segment inside it. -->
       <div class="flex shrink-0 items-center gap-1.5">
         <!-- The group is a plain div and not the PopoverRoot: reka's PopperRoot renders only its
-             slot with inheritAttrs off, so a label set on it is dropped. It carries no surface —
+             slot with inheritAttrs off, so a label set on it is dropped. It carries no surface:
              the picker is a crumb in the toolbar, and a pill around it is the one thing it must
              not look like. -->
         <div v-if="showsSource" role="group" aria-label="Highlight language" class="flex shrink-0 items-center">
@@ -781,8 +781,8 @@ function onMarkdownLink(event: MouseEvent) {
               <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
             </PopoverTrigger>
             <!-- The list is portalled out of the pane for the same reason the crumb menus are: it
-                 is absolutely positioned, and the Code view underneath it — CodeMirror's scroller
-                 is positioned and comes later in the document — paints over anything that is
+                 is absolutely positioned, and the Code view underneath it (CodeMirror's scroller
+                 is positioned and comes later in the document) paints over anything that is
                  still inside the toolbar. A z-index on the menu would only move that fight. -->
             <PopoverPortal>
               <PopoverContent
@@ -950,7 +950,7 @@ function onMarkdownLink(event: MouseEvent) {
          the scrolling viewport it sat wherever the reader had reached, and the one thing a control
          that writes the file must never do is move away from where they are looking. It cannot be
          positioned against the pane either: `relative` here outranks the `absolute inset-0` the
-         main pane hands this component, and the pane would end up sized by its content — the
+         main pane hands this component, and the pane would end up sized by its content: the
          editor would grow with the file instead of scrolling it. -->
     <footer
       v-if="isDirty && mode === 'code'"
@@ -1221,7 +1221,7 @@ function onMarkdownLink(event: MouseEvent) {
 /* CodeMirror paints the selection on its own layer, which the shell's `::selection` cannot reach,
    and it paints that layer for a light page: a lavender band, unreadable on this surface. Its base
    theme owns these selectors with more specificity than a theme module of ours could match, and it
-   is injected after this stylesheet, so these have to be *longer* than the ones they beat — a tie
+   is injected after this stylesheet, so these have to be *longer* than the ones they beat: a tie
    would go to CodeMirror. The lavender band is the thing to look for if a CodeMirror upgrade
    renames that layer. */
 .code-editor-host :deep(.cm-selectionBackground),
@@ -1234,12 +1234,12 @@ function onMarkdownLink(event: MouseEvent) {
 }
 
 /* The caret is a block, in the two colors the terminal draws its own with: `--marvis-cursor` for
-   the cell, and the surface behind the glyph — the swap Konsole makes, and the same two tokens
+   the cell, and the surface behind the glyph (the swap Konsole makes, and the same two tokens
    `marvisTerminalTheme` hands xterm.js.
 
    CodeMirror draws this element on a layer above the text and leaves its width unset for a caret
    (its own is `null`, and it only writes a width for a selected range), so one cell of the
-   editor's own `ch` is what fits it — and the character under the block is covered rather than
+   editor's own `ch` is what fits it. And the character under the block is covered rather than
    inverted, which is the whole of what a block cursor that is only a rectangle can be. */
 .code-editor-host :deep(.cm-focused .cm-scroller .cm-cursorLayer .cm-cursor) {
   border-left: none;

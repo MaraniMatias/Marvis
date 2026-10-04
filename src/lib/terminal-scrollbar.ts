@@ -5,7 +5,7 @@
  * sits in the middle of the pane and the fit measures the grid against that box, so a scrollbar
  * that reserves its 10px is 10px the terminal has to give back as columns. The rules that hide it
  * are in `style.css` and the reason they exist is written there. What is left is a terminal that
- * can be scrolled — by wheel, by keyboard, by dragging a selection past the top — with nothing on
+ * can be scrolled (by wheel, by keyboard, by dragging a selection past the top) with nothing on
  * screen to say how much scrollback there is or where in it you are.
  *
  * So the scrollbar is drawn here instead, as an overlay that covers the right edge without
@@ -15,7 +15,7 @@
  *
  * The maths is the scrollbar every desktop has had for thirty years. The thumb is as much of the
  * track as the viewport is of the buffer, never smaller than a thumb you can catch, and its
- * position along the rest of the track is the fraction of the scrollback that is behind you — the
+ * position along the rest of the track is the fraction of the scrollback that is behind you: the
  * same fraction, which is why dragging it moves the viewport by the right number of lines.
  */
 

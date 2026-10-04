@@ -4,7 +4,7 @@
  * The window is a webview, and a webview answers a right-click with a menu of its own: Reload,
  * Back, Forward, Look Up, and Inspect Element in a build with a debugger attached. Reload is the
  * one that costs something. The app keeps unsaved drafts in the code editor and writes into the
- * user's repositories, so a reload drops every open draft on the floor — and it does it from a
+ * user's repositories, so a reload drops every open draft on the floor. And it does it from a
  * right-click that landed on a sidebar row and did not look like it had hit anything at all.
  *
  * There is no way to take that menu away from the host. wry carries `with_default_context_menus`,
@@ -14,7 +14,7 @@
  * The native menu is worth keeping where it is a text menu: it is the one place Cut, Copy and
  * Paste arrive already wired to the right keys and already greyed out when there is nothing to act
  * on. So it is denied by default and granted on the surfaces where a right-click has work to do,
- * which is the same rule `style.css` applies to `user-select` and for the same reason — a
+ * which is the same rule `style.css` applies to `user-select` and for the same reason: a
  * right-click that lands on a row, a crumb or a pane header has nothing to offer, and offering
  * nothing is the honest answer.
  */

@@ -3,7 +3,7 @@
  * A list of choices, drawn by the app.
  *
  * A native `<select>` paints its own popup in the system colours, and on Linux that popup
- * arrives unstyled — no surface, no check, no app type — while the control itself is the one
+ * arrives unstyled (no surface, no check, no app type) while the control itself is the one
  * field the stylesheet cannot reach. Reka gives the list, the roles and the keyboard; the
  * classes give it the app's face, so the same thing looks the same on every platform.
  */

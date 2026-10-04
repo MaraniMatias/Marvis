@@ -70,8 +70,8 @@ pub fn begin_round(
 
 /// Records the same round, but waiting for the agent to become free.
 ///
-/// Everything is decided and stored up front — the notes, the marker, and the message
-/// itself — because the send happens later, possibly after a restart, and has to carry
+/// Everything is decided and stored up front (the notes, the marker, and the message
+/// itself) because the send happens later, possibly after a restart, and has to carry
 /// exactly what the user accepted.
 pub fn queue_round(
     database: &Database,
@@ -227,7 +227,7 @@ pub fn requeue_all(database: &Database, checkout_id: &str) -> Result<usize, IpcE
 /// Each round is checked against the transcript before it is sent: a marker that is already
 /// there means the message landed earlier, so the round is confirmed instead of sent again.
 /// That is what makes this safe to run after a reconnect has requeued a send which in fact
-/// went out — the duplicate is what this check exists to prevent.
+/// went out: the duplicate is what this check exists to prevent.
 ///
 /// Returns how many rounds were actually sent.
 pub fn flush_rounds(

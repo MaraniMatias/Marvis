@@ -15,7 +15,7 @@ The local `CI` workflow has two jobs; the `main` check-runs above confirm the ex
 - `checks` must stay fail-closed. The workflow documents the current moderate upstream GLib 0.18.5 advisory (`RUSTSEC-2024-0429` / `GHSA-WRW7-89JP-8Q8G`) as an expected blocker. Resolve it and get green required checks before release; do not suppress it, add an allowlist, or bypass the failed job. Any proposed risk acceptance needs explicit repository-owner approval recorded in the PR; it does not make a failed required check pass.
 - Release validation reuses `CI`, then builds macOS arm64 and Linux x86_64/arm64 artifacts; publish waits for all builds and creates a published GitHub release. `release.yml` grants `contents: write` only to `publish`; preserve that scope and do not add broad write secrets.
 
-## Owner/admin action — not performed
+## Owner/admin action, not performed
 
 Applying this recommended mitigation is opt-in and requires owner approval plus an operator with repository-admin authority; this guide does not apply it, so S4 remains unresolved until then, and it must not disable or bypass required audits or checks.
 

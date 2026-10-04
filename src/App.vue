@@ -265,7 +265,7 @@ const hasItemCrumb = computed(() => activeMainView.value.kind !== "terminal" || 
  *
  * A path is already a line of crumbs, so it is drawn as one: the directories and the file name
  * with the same separator the rest of the line uses, instead of one run of text with slashes
- * buried in it. A label that is not a path — a session, the whole change set — is one step.
+ * buried in it. A label that is not a path (a session, the whole change set) is one step.
  */
 const pathSteps = computed(() => activeViewLabel.value.split("/").filter(Boolean));
 
@@ -277,7 +277,7 @@ const pathElided = ref(false);
  * The path as the crumb draws it: every step, or the two ends with a rule where the rest was.
  *
  * One list either way, so the separators, their colour and their space are the same code for
- * the whole shape — the elided crumb is not a different crumb, it is the same crumb with less
+ * the whole shape: the elided crumb is not a different crumb, it is the same crumb with less
  * in it, and the two ends are what the reader came for.
  */
 const drawnSteps = computed(() => {
@@ -293,7 +293,7 @@ const drawnSteps = computed(() => {
  * The line is bounded by a share of the window, so the room is that share minus everything the
  * path does not get to keep: the workdir, the branch, their glyphs and the separators. The probe
  * is the path at its natural width and it is always mounted, so this weighs two numbers that do
- * not move when the shape on screen does — otherwise an elided path would measure itself as the
+ * not move when the shape on screen does. Otherwise an elided path would measure itself as the
  * one that fitted and the line could never come back.
  *
  * Only a path with something in the middle can lose it, and the two ends are what stay: the
@@ -328,8 +328,8 @@ watch(
 /**
  * The three crumb menus: the workdir line of the titlebar is the sidebar read sideways.
  *
- * Each crumb names one level of it — the workdir, its branch or worktree, and the item open
- * inside it — and each opens the list of the level it names. What is not in this window is a
+ * Each crumb names one level of it (the workdir, its branch or worktree, and the item open
+ * inside it) and each opens the list of the level it names. What is not in this window is a
  * matter of record, not of guessing, so a workdir whose directory is gone is listed dimmed
  * and cannot be picked.
  */
@@ -569,7 +569,7 @@ function enterSplitDrawer() {
   // The narrow focus drawer is this same element without the split layout, and a pointer over it
   // there says nothing about a strip that does not exist. A flag left set is a drawer that cannot
   // be closed: the close is refused while either is set, and a hidden drawer fires no leave to
-  // clear it — so the drawer opened for one arrangement stays up over the next.
+  // clear it. So the drawer opened for one arrangement stays up over the next.
   if (!isSplitLayout.value) return;
   pointerOverSplitDrawer.value = true;
   openSplitInspector();
@@ -661,7 +661,7 @@ let settingsRevision = 0;
  * It cannot wait for the write before drawing: the window's scale is a gesture, and a gesture
  * whose next step is computed from a value that has not landed yet is a gesture that only moves
  * once per release. So the setting is adopted immediately and the write follows, queued rather
- * than raced — two presses in a row have to reach the file in the order they were made, or the
+ * than raced. Two presses in a row have to reach the file in the order they were made, or the
  * older set lands last and the next launch opens at the wrong size.
  *
  * A rejected write puts the window back to what the file does carry and says why. That is what
@@ -731,8 +731,8 @@ watch(
 /**
  * The palette the window is drawn in, which is the preference resolved: `system` asks the operating
  * system, and the answer changes while the window is open, so this follows it rather than asking
- * once. The attribute is the whole of it for everything a stylesheet paints — the two palettes in
- * `src/marvis.css` are keyed off it — and `theme` carries the answer to the two things CSS cannot
+ * once. The attribute is the whole of it for everything a stylesheet paints (the two palettes in
+ * `src/marvis.css` are keyed off it) and `theme` carries the answer to the two things CSS cannot
  * reach, the terminal and the diff view.
  *
  * It is asked for and applied while `settings` still holds the defaults, because a first paint in
@@ -1084,8 +1084,8 @@ function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
 /**
  * Takes a checkout whose directory is gone off the list, and nothing else.
  *
- * A repo root — the primary checkout of a Git repository, and the only checkout of a plain
- * folder — is registered as the head of a list, so closing one takes that list with it; a
+ * A repo root (the primary checkout of a Git repository, and the only checkout of a plain
+ * folder) is registered as the head of a list, so closing one takes that list with it; a
  * worktree is an entry of its own. Marvis deletes no files either way, so the confirmation
  * only has to name the scope.
  */
@@ -1105,8 +1105,8 @@ async function closeMissingCheckout(checkoutId: string) {
  * Takes a workdir off the panel, and leaves the disk alone.
  *
  * This is the row's own action, so the confirmation has to say what the row cannot: nothing is
- * deleted, and the directory is still there to open. A repo root — the primary checkout of a
- * Git repository, and the only checkout of a plain folder — is registered as the head of a
+ * deleted, and the directory is still there to open. A repo root (the primary checkout of a
+ * Git repository, and the only checkout of a plain folder) is registered as the head of a
  * list, so closing one takes that list with it, exactly as closing a missing checkout does.
  */
 async function closeWorkdir(checkoutId: string) {
@@ -1325,8 +1325,8 @@ function applyWorkspace(next: WorkspaceState) {
   updateWorkspace(next);
 }
 
-// A worktree added by something other than this app — an agent running `git worktree add`, a
-// script — belongs in the panel the same way one added here does, and the only reading that can
+// A worktree added by something other than this app (an agent running `git worktree add`, a
+// script) belongs in the panel the same way one added here does, and the only reading that can
 // put it there is the one a launch takes.
 useWorktreeSync(() => workspace.value, applyWorkspace, reportCause);
 

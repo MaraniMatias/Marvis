@@ -3,7 +3,7 @@
  *
  * They are preferences rather than layout: a person sets them once and forgets they made them, so
  * they live in a file they can open and edit, not in the database that remembers which checkouts
- * exist and how wide a pane is. Everything a window remembers instead — the mode, the three widths —
+ * exist and how wide a pane is. Everything a window remembers instead (the mode, the three widths)
  * stays in `src/domain/ui-state.ts`.
  */
 import type { Zoom } from "./zoom";
@@ -362,7 +362,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
  *
  * `structuredClone` is not an option: the settings arrive as a reactive proxy, and a proxy is not
  * something the structured clone algorithm can walk. Copying the branches by hand is also what
- * keeps the type honest — a field added to `AppSettings` has to be named here rather than copied
+ * keeps the type honest: a field added to `AppSettings` has to be named here rather than copied
  * by accident and silently dropped.
  */
 export function cloneSettings(settings: AppSettings): AppSettings {
