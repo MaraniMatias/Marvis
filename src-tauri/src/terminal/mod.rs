@@ -13,7 +13,7 @@ use std::{
 
 use crate::domain::workspace::{TerminalProcessState, TerminalSessionStatus};
 
-mod process;
+pub(crate) mod process;
 
 pub type OutputSink = Box<dyn FnMut(&[u8]) -> Result<(), String> + Send + 'static>;
 
@@ -300,17 +300,28 @@ impl Session {
     }
 }
 
-impl Drop for TerminalBackend {
-    fn drop(&mut self) {
+impl TerminalBackend {
+    /// Stops every session, which is what leaves no PTY behind when the app goes away.
+    ///
+    /// It is called from the event loop rather than left to `Drop` below, because the loop never
+    /// unwinds: `App::run` hands the process to `std::process::exit` once the loop is done, so a
+    /// `Drop` in the managed state never runs and a `Drop` alone would leak every shell.
+    pub fn shutdown(&self) {
         let sessions = self
             .sessions
-            .get_mut()
+            .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        for (id, session) in sessions {
+        for (id, session) in &*sessions {
             if let Err(error) = terminate_session(session.session(), id) {
                 log::warn!("terminal {id} did not stop with the app: {error}");
             }
         }
+    }
+}
+
+impl Drop for TerminalBackend {
+    fn drop(&mut self) {
+        self.shutdown();
     }
 }
 
@@ -1282,6 +1293,49 @@ mod tests {
             std::io::Error::last_os_error().raw_os_error(),
             Some(libc::ESRCH)
         );
+    }
+
+    /// The exit hook is what ends a shell, because the app's exit never unwinds.
+    ///
+    /// `App::run` hands the process to `std::process::exit` once the loop is done, so the `Drop`
+    /// that used to be this code never runs in a shipped app and every terminal the app opened
+    /// outlived it. This is the call that replaced it, and it has to reach the shells rather than
+    /// only mark the sessions closed.
+    #[cfg(unix)]
+    #[test]
+    fn shutdown_ends_every_shell_the_app_started() {
+        let backend = TerminalBackend::default();
+        let (output, receiver) = sink();
+        spawn(&backend, "shutdown", "/bin/sh", &["-i"], output);
+        synchronize_shell(&backend, &receiver, "shutdown");
+        let group = {
+            let sessions = backend.sessions.lock().unwrap();
+            let group = sessions["shutdown"]
+                .session()
+                .master
+                .lock()
+                .unwrap()
+                .process_group_leader()
+                .unwrap();
+            group
+        };
+
+        backend.shutdown();
+
+        let deadline = Instant::now() + Duration::from_secs(3);
+        while unsafe { libc::kill(-group, 0) } == 0 {
+            assert!(
+                Instant::now() < deadline,
+                "the shell was still running after the app shut down"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+        // And it is safe to say it twice: the hook and the `Drop` can both reach it.
+        backend.shutdown();
     }
 
     #[cfg(unix)]

@@ -53,7 +53,7 @@ fn main() {
                 let _ = window.set_focus();
             }
         }));
-    with_menus(with_dev_plugins(builder))
+    let app = with_menus(with_dev_plugins(builder))
         .plugin(tauri_plugin_log::Builder::new().build())
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
@@ -144,6 +144,13 @@ fn main() {
             ));
             // One OpenCode server per checkout, owned for the app's lifetime so the
             // child process is stopped on exit rather than leaked.
+            //
+            // The servers a previous app left behind are ended first. `stop_child_processes` covers
+            // every exit the loop can take, but an app that was killed never reaches it, and its
+            // servers would otherwise keep running with nothing left to stop them. The single
+            // instance plugin above has already turned a second copy away, so anything still
+            // running here belongs to an app that is gone.
+            services::agent::reap_orphaned_servers();
             let agents = std::sync::Arc::new(services::agent::AgentService::new());
             let emitter = app.handle().clone();
             agents.set_event_sink(std::sync::Arc::new(
@@ -227,8 +234,30 @@ fn main() {
             commands::ui_state::review_target_load,
             commands::ui_state::review_target_save
         ])
-        .run(tauri::generate_context!())
-        .expect("failed to run Marvis");
+        .build(tauri::generate_context!())
+        .expect("failed to build Marvis");
+    app.run(|handle, event| {
+        // Nothing below runs on its own: the loop ends with `std::process::exit`, so a `Drop` in
+        // the managed state is never reached. This is the last callback the runtime makes.
+        if matches!(event, tauri::RunEvent::Exit) {
+            stop_child_processes(handle);
+        }
+    });
+}
+
+/// Ends the processes the app started, before the process itself ends.
+///
+/// Every agent server and every terminal is a child of this one, and both are meant to last as
+/// long as the window does. Leaving them behind is not a slow leak: an `opencode serve` with no
+/// parent holds its port for as long as it runs, and `Drop` cannot stop it because the event loop
+/// leaves through `std::process::exit` rather than by unwinding.
+fn stop_child_processes(handle: &tauri::AppHandle) {
+    if let Some(agents) = handle.try_state::<std::sync::Arc<services::agent::AgentService>>() {
+        agents.stop_all();
+    }
+    if let Some(terminal) = handle.try_state::<std::sync::Arc<terminal::TerminalBackend>>() {
+        terminal.shutdown();
+    }
 }
 
 #[cfg(test)]
@@ -509,6 +538,66 @@ mod startup_tests {
                  reaches it before anything can turn it away"
             );
         }
+    }
+
+    /// Every agent server and every terminal is stopped from the event loop, because there is no
+    /// other way to stop them.
+    ///
+    /// `App::run` never returns: the loop ends and the process is handed to `std::process::exit`,
+    /// so a `Drop` in the managed state is never reached. Both `Drop for AgentService` and
+    /// `Drop for TerminalBackend` were written for an exit that does not happen, which is how an
+    /// `opencode serve` and a shell outlived every single quit of the app.
+    #[test]
+    fn the_exit_hook_ends_the_children_the_app_started() {
+        let main = include_str!("main.rs");
+        let registered = main.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !registered.contains(".run(tauri::generate_context!())"),
+            "`App::run` leaves through `std::process::exit`, so nothing is unwound and the \
+             children are stopped by nothing at all"
+        );
+        assert!(
+            registered.contains("tauri::RunEvent::Exit"),
+            "the children are stopped from something the runtime no longer hands out"
+        );
+        let hook = registered
+            .split("fn stop_child_processes(")
+            .nth(1)
+            .and_then(|body| body.split("\n}").next())
+            .expect("the app has no function that stops its children any more");
+        for call in ["agents.stop_all()", "terminal.shutdown()"] {
+            assert!(
+                hook.contains(call),
+                "the exit hook stopped calling `{call}`"
+            );
+        }
+        // The states are read rather than taken: an exit that arrives before `setup` finished has
+        // neither of them managed, and panicking on the way out is worse than leaving it be.
+        assert!(
+            hook.matches("try_state").count() == 2,
+            "the exit hook reads the managed state instead of unwrapping it"
+        );
+    }
+
+    /// The servers an app that was killed left behind are ended before any bridge starts.
+    ///
+    /// This is the only moment at which every surviving server belongs to an app that is gone:
+    /// the single instance plugin has already turned a second copy away, and no bridge of this
+    /// one has started yet. Anywhere later, the sweep would find this app's own servers.
+    #[test]
+    fn the_servers_of_an_app_that_was_killed_are_ended_before_a_bridge_starts() {
+        let main = include_str!("main.rs");
+        let registered = main.split("#[cfg(test)]").next().unwrap();
+        let sweep = registered
+            .find("reap_orphaned_servers()")
+            .expect("the app never ends the servers it starts over from");
+        let first_bridge = registered
+            .find("AgentService::new()")
+            .expect("the app starts no bridges at all");
+        assert!(
+            sweep < first_bridge,
+            "a bridge can be started on a port an orphaned server still holds"
+        );
     }
 
     #[test]

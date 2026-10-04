@@ -36,6 +36,9 @@ static NEXT_PORT_ATTEMPT: AtomicU64 = AtomicU64::new(0);
 const SERVER_BOOT_TIMEOUT: Duration = Duration::from_secs(30);
 const JSON_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 const CHILD_REAP_POLL: Duration = Duration::from_millis(10);
+// The escalation budget for a server this app no longer owns. It is short because the sweep runs
+// before the window opens and the server is nobody's but ours to end.
+const ORPHAN_STOP_TIMEOUT: Duration = Duration::from_secs(1);
 // `stopAgent` is awaited by the UI.
 const STARTUP_STOP_WAIT: Duration = Duration::from_secs(3);
 // A waiter has to cover the launcher's wall time: its 30s shared budget plus the 3s child reap
@@ -1101,10 +1104,10 @@ fn agent_program() -> Option<PathBuf> {
 
 /// The window of ports a bridge may take, starting at `PORT_RANGE_START`.
 ///
-/// It is wide on purpose. A bridge that is killed with its parent cannot run its own cleanup,
-/// so the port it was given stays taken by a process nobody manages, and a narrow window fills
-/// up after a few crashes and leaves the next bridge with nowhere to start. A few hundred
-/// ports costs nothing and makes that recoverable without touching the leftovers.
+/// It is wide on purpose. A bridge that is killed with its parent cannot run its own cleanup, so
+/// the port it was given stays taken until `reap_orphaned_servers` ends it on a later launch, and
+/// a narrow window would fill up for as long as that takes. A few hundred ports costs nothing and
+/// buys every checkout a port to start on.
 const PORT_RANGE_START: u16 = 46000;
 const PORT_RANGE_LEN: u16 = 512;
 const MAX_START_ATTEMPTS: usize = 3;
@@ -1149,6 +1152,301 @@ fn first_available_port(
     candidates
         .into_iter()
         .find(|candidate| is_available(*candidate))
+}
+
+/// The last port in the window, exclusive.
+const PORT_RANGE_END: u16 = PORT_RANGE_START + PORT_RANGE_LEN;
+
+/// Ends the agent servers an earlier app left running, and returns how many it ended.
+///
+/// `stop_all` covers every exit the event loop can take and `Drop` covers none of them, so a
+/// server whose app was killed has nobody left to stop it and holds its port until something
+/// does. This runs before any bridge is started, which is the only moment at which every
+/// surviving server belongs to an app that is gone.
+///
+/// The match is narrow on purpose: it runs against every process on the machine and a wrong kill
+/// is not undoable. The program name, the `serve` subcommand, a port out of this app's window and
+/// a reparented parent all have to line up before anything is signalled.
+pub fn reap_orphaned_servers() -> usize {
+    let mut reaped = 0;
+    for pid in orphaned_agent_pids() {
+        log::warn!("ending the agent server left on pid {pid} by an app that is gone");
+        terminate_orphaned_server(pid);
+        reaped += 1;
+    }
+    reaped
+}
+
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn orphaned_agent_pids() -> Vec<libc::pid_t> {
+    system::pids()
+        .into_iter()
+        .filter(|pid| is_orphaned_agent(*pid))
+        .collect()
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn orphaned_agent_pids() -> Vec<libc::pid_t> {
+    Vec::new()
+}
+
+/// Whether a process is one of this app's agent servers with nothing left to look after it.
+///
+/// The name is the cheap gate: reading the arguments of every process on the machine would be
+/// the expensive way to find out, and `orphaned_agent_port` reads the name out of them anyway and
+/// has the last word.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn is_orphaned_agent(pid: libc::pid_t) -> bool {
+    let Ok(pid) = u32::try_from(pid) else {
+        return false;
+    };
+    if crate::terminal::process::executable_name(pid).as_deref() != Some(AGENT_PROGRAM) {
+        return false;
+    }
+    let Some(arguments) = system::arguments(pid as libc::pid_t) else {
+        return false;
+    };
+    orphaned_agent_port(&arguments, system::parent_pid(pid as libc::pid_t)).is_some()
+}
+
+/// The port a process serves, when the process is an agent server of this app's and has lost the
+/// app that owned it.
+///
+/// `arguments` is the argument vector itself, which the platforms frame differently but agree on
+/// in what it holds: the program path, then `serve --port <port>`. The parent has to be `init`,
+/// because reparenting is what an orphan looks like from in here and it is the only thing that
+/// separates a server nobody is left to stop from one that is still owned.
+fn orphaned_agent_port(arguments: &[u8], parent: Option<libc::pid_t>) -> Option<u16> {
+    if parent != Some(1) {
+        return None;
+    }
+    let mut arguments = arguments
+        .split(|byte| *byte == 0)
+        .filter(|argument| !argument.is_empty());
+    let program = std::str::from_utf8(arguments.next()?).ok()?;
+    if Path::new(program).file_name()?.to_str()? != AGENT_PROGRAM {
+        return None;
+    }
+    let arguments = arguments.collect::<Vec<_>>();
+    if arguments.first()? != b"serve" {
+        return None;
+    }
+    let port = arguments
+        .iter()
+        .position(|argument| *argument == b"--port")?
+        + 1;
+    let port = std::str::from_utf8(arguments.get(port)?)
+        .ok()?
+        .parse::<u16>()
+        .ok()?;
+    (PORT_RANGE_START..PORT_RANGE_END)
+        .contains(&port)
+        .then_some(port)
+}
+
+/// Ends an orphaned server the way `terminate_child` ends a live one: a signal, a bounded wait,
+/// and then the one signal that cannot be refused.
+///
+/// `Child::kill` is only available for a process this app started, so the escalation is spelled
+/// out over the same budget the terminal spends on its shells.
+fn terminate_orphaned_server(pid: libc::pid_t) {
+    // SAFETY: a pid and a signal, and neither of them is a pointer.
+    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
+        return;
+    }
+    let deadline = Instant::now() + ORPHAN_STOP_TIMEOUT;
+    while Instant::now() < deadline {
+        // SAFETY: signal 0 reports on a process without touching it, and a process that is gone
+        // is reported as an error rather than as a process to signal.
+        if unsafe { libc::kill(pid, 0) } != 0 {
+            return;
+        }
+        sleep(CHILD_REAP_POLL);
+    }
+    // SAFETY: as above.
+    unsafe {
+        libc::kill(pid, libc::SIGKILL);
+    }
+}
+
+/// The three things a process table can be asked for, which is all the sweep needs from the OS.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+mod system {
+    #[cfg(target_os = "macos")]
+    mod imp {
+        use std::{ffi::c_void, mem, ptr};
+
+        const PROC_ALL_PIDS: u32 = 1;
+        const PROC_PIDT_SHORTBSDINFO: libc::c_uint = 13;
+        /// `proc_pidinfo` answers `ENOMEM` to a buffer shorter than the structure it copies, and
+        /// how long that structure is belongs to the kernel rather than to this file, so it is
+        /// handed a page and reads the parent out of whatever length it answers with.
+        const BSD_INFO_BUFFER_LEN: usize = 4096;
+        const CTL_KERN: libc::c_int = 1;
+        const KERN_PROCARGS2: libc::c_int = 49;
+
+        extern "C" {
+            /// libproc: every pid on the machine, or the number of bytes they need.
+            fn proc_listpids(
+                type_: libc::c_uint,
+                typeinfo: libc::c_uint,
+                buffer: *mut c_void,
+                buffersize: libc::c_int,
+            ) -> libc::c_int;
+            /// libproc: one field of a process's BSD information, the parent among them.
+            fn proc_pidinfo(
+                pid: libc::c_int,
+                flavor: libc::c_uint,
+                arg: libc::c_ulong,
+                buffer: *mut c_void,
+                buffersize: libc::c_int,
+            ) -> libc::c_int;
+            /// libc: the kernel's own view of a process, which for `KERN_PROCARGS2` is the
+            /// argument vector it was launched with.
+            fn sysctl(
+                name: *mut libc::c_int,
+                namelen: libc::c_uint,
+                oldp: *mut c_void,
+                oldlenp: *mut libc::size_t,
+                newp: *mut c_void,
+                newlen: libc::size_t,
+            ) -> libc::c_int;
+        }
+
+        pub fn pids() -> Vec<libc::pid_t> {
+            let needed = unsafe { proc_listpids(PROC_ALL_PIDS, 0, ptr::null_mut(), 0) };
+            if needed <= 0 {
+                return Vec::new();
+            }
+            let mut buffer = vec![0 as libc::pid_t; needed as usize];
+            let written = unsafe {
+                proc_listpids(
+                    PROC_ALL_PIDS,
+                    0,
+                    buffer.as_mut_ptr().cast(),
+                    (buffer.len() * mem::size_of::<libc::pid_t>()) as libc::c_int,
+                )
+            };
+            if written <= 0 {
+                return Vec::new();
+            }
+            buffer.truncate(written as usize / mem::size_of::<libc::pid_t>());
+            buffer
+        }
+
+        /// The second word of `proc_bsdshortinfo`, which is the parent.
+        ///
+        /// The parent is the only word that says whether anything is left to stop a server, and it is
+        /// the second one: reading the first would report every process as its own parent and find
+        /// nothing at all to be wrong about.
+        pub fn parent_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
+            let mut info = [0_u32; BSD_INFO_BUFFER_LEN / mem::size_of::<u32>()];
+            // SAFETY: `info` is a live buffer of exactly the length the flavor copies, it is told
+            // that length, and the kernel writes no further than it was handed.
+            let written = unsafe {
+                proc_pidinfo(
+                    pid,
+                    PROC_PIDT_SHORTBSDINFO,
+                    0,
+                    info.as_mut_ptr().cast(),
+                    BSD_INFO_BUFFER_LEN as libc::c_int,
+                )
+            };
+            if (written as usize) < 2 * mem::size_of::<u32>() {
+                return None;
+            }
+            libc::pid_t::try_from(info[1]).ok()
+        }
+
+        pub fn arguments(pid: libc::pid_t) -> Option<Vec<u8>> {
+            let mut name = [CTL_KERN, KERN_PROCARGS2, pid];
+            let mut length = 0_usize;
+            // SAFETY: the query is the kernel's own with this process named as its subject, and
+            // a null output pointer with a length asks for the size of the answer rather than
+            // reading one.
+            if unsafe {
+                sysctl(
+                    name.as_mut_ptr(),
+                    name.len() as libc::c_uint,
+                    ptr::null_mut(),
+                    &raw mut length,
+                    ptr::null_mut(),
+                    0,
+                )
+            } != 0
+                || length == 0
+            {
+                return None;
+            }
+            let mut buffer = vec![0_u8; length];
+            // SAFETY: `buffer` is a live allocation of exactly the length the kernel asked for,
+            // and it is told how long it is.
+            if unsafe {
+                sysctl(
+                    name.as_mut_ptr(),
+                    name.len() as libc::c_uint,
+                    buffer.as_mut_ptr().cast(),
+                    &raw mut length,
+                    ptr::null_mut(),
+                    0,
+                )
+            } != 0
+            {
+                return None;
+            }
+            buffer.truncate(length);
+            argument_region(&buffer).map(<[u8]>::to_vec)
+        }
+
+        /// The arguments out of a `KERN_PROCARGS2` buffer: an argument count, the path the
+        /// program was launched with, padding, and then the arguments themselves. Reading the
+        /// first argument off the padding rather than off a fixed offset is what keeps this
+        /// independent of how wide the kernel happens to align it.
+        fn argument_region(buffer: &[u8]) -> Option<&[u8]> {
+            let path = buffer.get(4..)?;
+            let arguments = path.get(path.iter().position(|byte| *byte == 0)? + 1..)?;
+            arguments.get(
+                arguments
+                    .iter()
+                    .position(|byte| *byte != 0)
+                    .unwrap_or(arguments.len())..,
+            )
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    mod imp {
+        /// Every directory in `/proc` that is named like a pid, which is every process there is.
+        pub fn pids() -> Vec<libc::pid_t> {
+            let Ok(entries) = std::fs::read_dir("/proc") else {
+                return Vec::new();
+            };
+            entries
+                .flatten()
+                .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
+                .collect()
+        }
+
+        /// The fourth field of `/proc/<pid>/stat` is the parent. It is counted from the last `)`
+        /// because the second field is a program name in parentheses that may itself contain
+        /// spaces and parentheses, and `tail -f /dev/null` is one of them.
+        pub fn parent_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
+            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+            stat.rsplit_once(')')?
+                .1
+                .split_whitespace()
+                .nth(1)?
+                .parse()
+                .ok()
+        }
+
+        /// `/proc/<pid>/cmdline` is the argument vector, NUL-separated and NUL-terminated.
+        pub fn arguments(pid: libc::pid_t) -> Option<Vec<u8>> {
+            std::fs::read(format!("/proc/{pid}/cmdline")).ok()
+        }
+    }
+
+    pub use imp::*;
 }
 
 fn startup_timeout_error() -> BridgeError {
@@ -2376,14 +2674,14 @@ mod tests {
     use super::{
         agent_program, basic_credentials, discard_line, event_from_payload, event_stream,
         finish_credentials, first_available_port, free_port_with, generation_scoped_sink,
-        join_reader, no_startup_child_tracking, port_candidates, read_bounded_line,
-        read_credentials, read_sse_frame, remove_slot_if_current, same_directory, status_detail,
-        terminate_child, validate_session_id, AgentBridge, AgentEvent, AgentService, BridgeError,
-        BridgeState, BridgeStopper, ChildGuard, EventSink, PortHooks, RemovalState,
-        ServerCredentials, StartupChild, EARLY_EOF_MESSAGE, MAX_CREDENTIAL_LINE_BYTES,
-        MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES,
-        MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES, MAX_START_ATTEMPTS, PORT_RANGE_LEN,
-        PORT_RANGE_START,
+        join_reader, no_startup_child_tracking, orphaned_agent_port, port_candidates,
+        read_bounded_line, read_credentials, read_sse_frame, remove_slot_if_current,
+        same_directory, status_detail, terminate_child, terminate_orphaned_server,
+        validate_session_id, AgentBridge, AgentEvent, AgentService, BridgeError, BridgeState,
+        BridgeStopper, ChildGuard, EventSink, PortHooks, RemovalState, ServerCredentials,
+        StartupChild, EARLY_EOF_MESSAGE, MAX_CREDENTIAL_LINE_BYTES, MAX_EVENT_HEADERS_BYTES,
+        MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
+        MAX_START_ATTEMPTS, PORT_RANGE_END, PORT_RANGE_LEN, PORT_RANGE_START,
     };
 
     fn test_event_bridge(directory: &Path, port: u16) -> AgentBridge {
@@ -3558,6 +3856,181 @@ mod tests {
         assert_eq!(starts.load(Ordering::SeqCst), 2);
         assert_eq!(readers.load(Ordering::SeqCst), 0);
         assert_eq!(stops.load(Ordering::SeqCst), 2);
+    }
+
+    fn argument_vector(arguments: &[&str]) -> Vec<u8> {
+        let mut buffer = Vec::new();
+        for argument in arguments {
+            buffer.extend_from_slice(argument.as_bytes());
+            buffer.push(0);
+        }
+        buffer
+    }
+
+    fn agent_server_arguments(port: u16) -> Vec<u8> {
+        argument_vector(&[
+            "/Users/somebody/.opencode/bin/opencode",
+            "serve",
+            "--port",
+            &port.to_string(),
+            "--hostname",
+            "127.0.0.1",
+        ])
+    }
+
+    /// The sweep reads every process on the machine and signals what it finds, so this is the
+    /// claim the whole startup sweep rests on: the server the app itself launches, and nothing
+    /// else that runs `opencode`.
+    #[test]
+    fn an_orphaned_server_of_this_apps_is_the_one_it_reaps() {
+        let port = PORT_RANGE_START + 7;
+
+        assert_eq!(
+            orphaned_agent_port(&agent_server_arguments(port), Some(1)),
+            Some(port),
+            "a server of this app's that lost its app is not recognized"
+        );
+        // The window is a range and the far end is inside it. A bridge that started on the last
+        // port is as recoverable as one that started on the first.
+        assert_eq!(
+            orphaned_agent_port(&agent_server_arguments(PORT_RANGE_END - 1), Some(1)),
+            Some(PORT_RANGE_END - 1)
+        );
+    }
+
+    #[test]
+    fn a_server_that_still_has_an_owner_is_left_alone() {
+        let port = PORT_RANGE_START;
+
+        assert_eq!(
+            orphaned_agent_port(&agent_server_arguments(port), Some(4242)),
+            None,
+            "a server this app is still looking after was treated as an orphan"
+        );
+        // A parent that cannot be read is not a parent of one either. Skipping a process whose
+        // ownership cannot be established is the only safe answer, and it costs one lookup.
+        assert_eq!(
+            orphaned_agent_port(&agent_server_arguments(port), None),
+            None,
+            "a server with an unreadable parent was treated as an orphan"
+        );
+    }
+
+    /// Every rejection here is a process that would otherwise be killed for nothing.
+    #[test]
+    fn a_process_that_is_not_this_apps_agent_server_is_left_alone() {
+        let port = PORT_RANGE_START.to_string();
+        for (arguments, why) in [
+            (
+                vec!["/opt/homebrew/bin/node", "serve", "--port", &port],
+                "another program in the same window",
+            ),
+            (
+                vec![
+                    "/Users/somebody/.opencode/bin/opencode",
+                    "tui",
+                    "--port",
+                    &port,
+                ],
+                "another subcommand of the agent",
+            ),
+            (
+                vec![
+                    "/Users/somebody/.opencode/bin/opencode",
+                    "serve",
+                    "--port",
+                    "45999",
+                ],
+                "a port just below the window",
+            ),
+            (
+                vec![
+                    "/Users/somebody/.opencode/bin/opencode",
+                    "serve",
+                    "--port",
+                    "46512",
+                ],
+                "a port just past the window",
+            ),
+            (
+                vec!["/Users/somebody/.opencode/bin/opencode", "serve"],
+                "no port at all",
+            ),
+            (
+                vec!["/Users/somebody/.opencode/bin/opencode"],
+                "no arguments",
+            ),
+            (vec![], "nothing at all"),
+        ] {
+            assert_eq!(
+                orphaned_agent_port(&argument_vector(&arguments), Some(1)),
+                None,
+                "{why} was treated as this app's orphaned server"
+            );
+        }
+        assert_eq!(PORT_RANGE_END, PORT_RANGE_START + PORT_RANGE_LEN);
+    }
+
+    /// The escalation is the whole point of the sweep: a server that ignores the polite signal
+    /// ends anyway, and one that is already gone costs nothing.
+    #[test]
+    fn an_orphaned_server_is_ended_rather_than_left_running() {
+        let directory = tempfile::tempdir().unwrap();
+        let mut child = fixture_child(directory.path(), "exec tail -f /dev/null");
+        let pid = child.id() as libc::pid_t;
+
+        terminate_orphaned_server(pid);
+        // The fixture is this process's own child, so it is a zombie until it is waited for, and
+        // a zombie is still a process the OS reports as alive.
+        let _ = child.wait();
+
+        assert!(
+            fixture_pid_is_gone(pid as u32),
+            "the sweep reported an end and left the process running"
+        );
+        // u32::MAX is never a live pid, so the signal fails and there is nothing to escalate.
+        terminate_orphaned_server(libc::pid_t::MAX);
+    }
+
+    /// The sweep asks the kernel about a process and believes two things: that the second word
+    /// is the parent, and that the arguments come back as the argument vector.
+    ///
+    /// Both are read out of a kernel structure at a fixed offset in a structure this file cannot
+    /// compile against, and both are wrong in the same quiet way if they drift — a parent that is
+    /// really the process's own pid, or arguments that start at the kernel's argument count. So
+    /// they are read back out of this process, which is the one thing on the machine whose answer
+    /// is known without asking the kernel twice.
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn a_live_process_reads_back_as_itself_launched_by_its_parent() {
+        let pid = std::process::id() as libc::pid_t;
+
+        let parent =
+            super::system::parent_pid(pid).expect("the kernel refused to name a live process");
+        // SAFETY: `getppid` takes nothing and answers with the parent of this process.
+        assert_eq!(parent, unsafe { libc::getppid() });
+        assert_ne!(
+            parent, pid,
+            "the word read as the parent is this process's own pid, so every process reads as an \
+             orphan"
+        );
+
+        let arguments = super::system::arguments(pid)
+            .expect("the kernel refused the arguments of a live process");
+        let program = arguments
+            .split(|byte| *byte == 0)
+            .next()
+            .expect("the arguments start with the program");
+        let program = std::str::from_utf8(program).expect("a program path is UTF-8");
+        let name = Path::new(program)
+            .file_name()
+            .and_then(|name| name.to_str())
+            .expect("the arguments start with a path");
+        // Cargo suffixes the test binary, so the stem is the fixed part.
+        assert!(
+            name.starts_with("marvis"),
+            "the arguments do not start with this test binary: {name}"
+        );
     }
 
     fn fixture_child(directory: &Path, script: &str) -> Child {
