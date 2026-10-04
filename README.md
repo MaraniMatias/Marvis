@@ -29,7 +29,7 @@ Marvis keeps each checkout isolated and attaches notes to specific diff lines. N
 - File tree + simple editor (for quick edits)
 - Diffs (side-by-side or unified), mark files as viewed
 - Notes on diff lines → draft → sent → resolved. Auto-detects outdated ones
-- Multiple terminals per checkout (splits/layouts last for the current run; reset on restart)
+- Multiple terminals per checkout; Marvis resets their splits and layouts on restart
 - Optional OpenCode integration: sessions, prompts, send review rounds ([test notes](docs/agent-live-tests.md))
 - Works with any CLI agent (Claude Code, Codex, pi, …) or none
 
@@ -76,7 +76,7 @@ Optional: install [OpenCode](https://opencode.ai) if you want the built-in agent
 4. Open **Changes** → click a line in a diff → write a note
 5. Open a **terminal** in that checkout and run your agent
 6. Send notes:
-   - OpenCode → “send review round”
+   - OpenCode → "Send to opencode"
    - Other agent → export Markdown and paste
 
 ---
@@ -86,13 +86,58 @@ Optional: install [OpenCode](https://opencode.ai) if you want the built-in agent
 Everything stays on your machine. No telemetry.
 What an agent sends to a model provider is up to that agent.
 
+---
+
 ## Workspace data
 
-Marvis stores repository registrations, review notes and rounds, and workspace state in `marvis.sqlite3` under the OS-specific app-data directory for `dev.marvis.workspace`. Repository and worktree files are separate. Terminal processes cannot survive app exit, so startup clears terminal sessions and their layouts; window geometry and UI state persist.
+Marvis keeps repository registrations, review notes and rounds, and workspace state in `marvis.sqlite3`, in the app-data directory for `dev.marvis.workspace`. Repository and worktree files stay where they are. Terminal processes cannot outlive the app, so Marvis clears terminal sessions and their layouts on startup; window size and UI state survive a restart.
 
-Missing folders remain registered and are marked missing. If the original path returns, Marvis restores that registration and its attached metadata. If a directory was moved or renamed, the Sidebar offers no relocation action: opening the new path creates a separate checkout identity and does not merge the missing checkout's history. Keep the old missing registration if you need that history. **Close missing** removes the Marvis registration and associated metadata (including notes and rounds); its confirmation that no files are deleted refers to repository/worktree files. Marvis does not back up the database for you: quit the app and make a separate backup before confirming that action or manually deleting the database.
+Missing folders stay registered and are marked missing. If the path comes back, Marvis restores that registration with its metadata.
 
-This unreleased integration retains main's current app version `0.13.2` but uses database schema 13; main `v0.13.2` uses schema 11, which this source deliberately refuses, as it refuses schema 12. Pre-1.0 releases do not migrate schemas. Do not run this integration against a workspace database you need. Any version bump is reserved for main after the user manually verifies the app and explicitly approves. Details: [docs/development.md](docs/development.md).
+If a directory was moved or renamed, the Sidebar offers no way to point the old registration at the new path. Opening the new path creates a separate checkout, and the two histories do not merge. Keep the old registration if you need its notes.
+
+**Close missing** removes the registration and everything attached to it, notes and rounds included. The confirmation says no files are deleted, and that holds for repository and worktree files only.
+
+Marvis does not back up the database. Quit the app and make your own copy before confirming that action or deleting the file yourself.
+
+---
+
+## Troubleshooting
+
+### Marvis does not start
+
+Check the database first. Marvis does not migrate its schema. A build refuses a database stamped with a schema version it does not know, by name, rather than reshaping a file it did not write, and losing the repositories someone registered is worse than opening empty.
+
+1. **Read the log.** It names the refusal.
+
+   ```sh
+   tail -n 60 "$HOME/Library/Logs/dev.marvis.workspace/Marvis.log"                        # macOS
+   tail -n 60 "${XDG_DATA_HOME:-$HOME/.local/share}/dev.marvis.workspace/logs/Marvis.log" # Linux
+   ```
+
+2. **Ask the database which schema it holds.**
+
+   ```sh
+   DB="$HOME/Library/Application Support/dev.marvis.workspace/marvis.sqlite3"     # macOS
+   DB="${XDG_DATA_HOME:-$HOME/.local/share}/dev.marvis.workspace/marvis.sqlite3"  # Linux
+   sqlite3 "$DB" 'pragma user_version;'   # compare with SCHEMA_VERSION in src-tauri/src/persistence/mod.rs
+   ```
+
+3. **Reset it.** Quit Marvis first: a running copy holds the file, and a second launch is turned away by the single-instance plugin.
+
+   ```sh
+   pkill -f -i marvis                                # quit every Marvis copy
+   cp -v "$DB" "${DB%.sqlite3}.$(date +%s).sqlite3"   # keep a copy before removing it
+   rm -v "$DB" "$DB"-wal "$DB"-shm "$DB"-journal
+   ```
+
+The next launch writes a fresh schema and opens an empty workspace.
+
+This removes repository and checkout registrations, review notes and rounds, viewed files, per-checkout UI state, and the saved window size and position. It does not touch repository or worktree files, `~/.marvis/config.yml` (UI, terminal and editor settings), or `~/.marvis/tmp/code-reviews/` (review exports).
+
+On Linux the log lives inside the database directory, so copy it out before removing anything.
+
+---
 
 ## Building
 
