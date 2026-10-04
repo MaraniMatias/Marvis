@@ -16,6 +16,7 @@ import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "nod
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { CARGO_REGISTRY_SOURCE } from "./audit-rust.mjs";
+import { isPatchedGlibMetadata } from "./patched-glib.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const CARGO_MANIFEST = join(ROOT, "src-tauri/Cargo.toml");
@@ -183,7 +184,10 @@ function addPackage(records, packageInfo, kind) {
   }
   const label = `${name}@${version}`;
   const installedFiles = packageLicenseFiles(directory, licenseFile);
-  const sourceFiles = kind === "Rust production" ? pinnedSourceLicenseFiles({ name, version, source }) : [];
+  const sourceFiles =
+    kind === "Rust production" && source === CARGO_REGISTRY_SOURCE
+      ? pinnedSourceLicenseFiles({ name, version, source })
+      : [];
   const files = [...installedFiles, ...sourceFiles];
   const textSource =
     installedFiles.length > 0
@@ -256,7 +260,8 @@ function installedRustPackages() {
   for (const id of reachable) {
     if (workspaceMembers.has(id)) continue;
     const pkg = packages.get(id);
-    if (!pkg || pkg.source !== CARGO_REGISTRY_SOURCE) {
+    const patchedGlib = pkg && isPatchedGlibMetadata(pkg);
+    if (!pkg || (pkg.source !== CARGO_REGISTRY_SOURCE && !patchedGlib)) {
       const label = pkg ? `${pkg.name}@${pkg.version}` : id;
       throw new Error(`unsupported Cargo dependency source for ${label}`);
     }

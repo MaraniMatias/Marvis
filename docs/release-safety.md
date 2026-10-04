@@ -11,8 +11,8 @@
 The local `CI` workflow has two jobs; the `main` check-runs above confirm the exact check names to select in GitHub: **`checks`** and **`linux-build`** (not `CI / checks`). Recheck the PR's check-run names after the workflow changes merge, and require both before merge.
 
 - `checks` (macOS): release-manifest check, formatting, lint, typecheck, full tests, security tests, coverage, app build, then mandatory `pnpm audit:security`. Coverage uploads with `if: always()` so failures still retain it.
-- `linux-build` (Ubuntu 22.04): full tests, Debian build, then `pnpm audit:rust`.
-- `checks` must stay fail-closed. The workflow documents the current moderate upstream GLib 0.18.5 advisory (`RUSTSEC-2024-0429` / `GHSA-WRW7-89JP-8Q8G`) as an expected blocker. Resolve it and get green required checks before release; do not suppress it, add an allowlist, or bypass the failed job. Any proposed risk acceptance needs explicit repository-owner approval recorded in the PR; it does not make a failed required check pass.
+- `linux-build` (Ubuntu 22.04): full tests (including the optimized vendored GLib iterator regression tests), Debian build, then `pnpm audit:rust`.
+- `checks` must stay fail-closed. The upstream GLib 0.18.5 advisory (`RUSTSEC-2024-0429` / `GHSA-WRW7-89JP-8Q8G`) is considered fixed only when Cargo resolves the exact vendored backport and its complete source tree passes the pinned SHA-256 check. This is source verification, not an allowlist; every other finding, including new aliases or advisories, keeps the normal blocking policy. Never suppress or bypass a failed audit.
 - Release validation reuses `CI`, then builds macOS arm64 and Linux x86_64/arm64 artifacts; publish waits for all builds and creates a published GitHub release. `release.yml` grants `contents: write` only to `publish`; preserve that scope and do not add broad write secrets.
 
 ## Owner/admin action, not performed

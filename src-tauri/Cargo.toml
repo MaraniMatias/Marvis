@@ -39,6 +39,10 @@ libc = "0.2"
 # feature, so release builds never include it.
 tauri-plugin-mcp-bridge = { version = "0.13", optional = true }
 
+[patch.crates-io]
+# Backport gtk-rs/gtk-rs-core#1343 to the GTK 0.18-compatible glib release.
+glib = { path = "vendor/glib-0.18.5" }
+
 [features]
 default = []
 dev-bridge = ["dep:tauri-plugin-mcp-bridge"]

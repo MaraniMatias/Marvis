@@ -1,6 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { auditedPatchedGlib, isAuditedPatchedGlib, PATCHED_GLIB_ADVISORY_IDS } from "./patched-glib.mjs";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const MANIFEST = resolve(ROOT, "src-tauri/Cargo.toml");
@@ -46,8 +47,14 @@ export function parseCargoMetadata(json) {
       packages.set(key, { name: pkg.name, version: pkg.version, source: pkg.source });
     } else if (pkg.source !== null) {
       throw new Error(`unsupported external dependency source for ${label}`);
-    } else if (!workspaceMembers.has(pkg.id)) {
-      throw new Error(`unsupported external path dependency for ${label}`);
+    } else {
+      const patchedGlib = auditedPatchedGlib(pkg);
+      if (patchedGlib) {
+        const key = `patched\0${pkg.name}@${pkg.version}`;
+        packages.set(key, patchedGlib);
+      } else if (!workspaceMembers.has(pkg.id)) {
+        throw new Error(`unsupported external path dependency for ${label}`);
+      }
     }
   }
   return [...packages.values()].sort((a, b) => `${a.name}@${a.version}`.localeCompare(`${b.name}@${b.version}`));
@@ -98,14 +105,26 @@ export function classifySeverity(vulnerability) {
 const severityRank = { INFO: 0, LOW: 1, UNKNOWN: 1.5, MODERATE: 2, HIGH: 3, CRITICAL: 4 };
 
 export function isBlocking(advisory) {
-  return advisory.severity === "UNKNOWN" || severityRank[advisory.severity] >= severityRank.MODERATE;
+  return (
+    advisory.status !== "FIXED" &&
+    (advisory.severity === "UNKNOWN" || severityRank[advisory.severity] >= severityRank.MODERATE)
+  );
+}
+
+function isVerifiedGlibBackport(vulnerability, packages) {
+  if (!packages.length || !packages.every(isAuditedPatchedGlib)) return false;
+  const identifiers = new Set([vulnerability.id, ...(vulnerability.aliases ?? [])].map((id) => id.toUpperCase()));
+  return (
+    identifiers.size === PATCHED_GLIB_ADVISORY_IDS.length &&
+    PATCHED_GLIB_ADVISORY_IDS.every((id) => identifiers.has(id))
+  );
 }
 
 function mergeAdvisories(records) {
   const groups = [];
   const byIdentifier = new Map();
 
-  for (const { vulnerability, packages } of records) {
+  for (const { vulnerability, packages, verifiedFix } of records) {
     if (!vulnerability || typeof vulnerability.id !== "string" || !vulnerability.id.trim()) {
       throw new Error("OSV returned an advisory without an identifier");
     }
@@ -126,6 +145,7 @@ function mergeAdvisories(records) {
       packages: new Set(),
       severity: "INFO",
       active: true,
+      verifiedFix,
     };
     if (matches.length === 0) groups.push(group);
     for (const duplicate of matches.slice(1)) {
@@ -134,8 +154,10 @@ function mergeAdvisories(records) {
       if (severityRank[duplicate.severity] > severityRank[group.severity]) {
         group.severity = duplicate.severity;
       }
+      group.verifiedFix &&= duplicate.verifiedFix;
       duplicate.active = false;
     }
+    group.verifiedFix &&= verifiedFix;
     for (const id of identifiers) {
       group.identifiers.add(id);
       byIdentifier.set(id, group);
@@ -151,6 +173,7 @@ function mergeAdvisories(records) {
       identifiers: [...group.identifiers].sort(),
       packages: [...group.packages].sort(),
       severity: group.severity,
+      status: group.verifiedFix ? "FIXED" : "ACTIVE",
     }));
 }
 
@@ -229,7 +252,12 @@ export async function auditPackages(packages, { fetchImpl = globalThis.fetch, ti
         ) {
           throw new Error("OSV returned malformed advisory details");
         }
-        records[index] = { vulnerability, packages: [...affected] };
+        const affectedPackages = [...affected];
+        records[index] = {
+          vulnerability,
+          packages: affectedPackages,
+          verifiedFix: isVerifiedGlibBackport(vulnerability, affectedPackages),
+        };
       }
     }),
   );
@@ -266,28 +294,31 @@ function safe(value) {
 }
 
 function report(packages, advisories) {
-  console.log(`Rust audit: queried ${packages.length} locked registry package versions against OSV.`);
+  console.log(`Rust audit: queried ${packages.length} locked Cargo package versions against OSV.`);
   for (const advisory of advisories) {
     const ids = advisory.identifiers;
     const primary = ids.find((id) => id.startsWith("RUSTSEC-")) ?? ids[0];
     const aliases = ids.filter((id) => id !== primary);
     const label = `${safe(primary)}${aliases.length ? ` (${aliases.map(safe).join(", ")})` : ""}`;
     const line = `${advisory.severity} ${label}: ${advisory.packages.map(safe).join(", ")}`;
-    if (isBlocking(advisory)) console.error(`BLOCK ${line}`);
+    if (advisory.status === "FIXED") console.log(`FIXED ${line} (pinned glib backport verified)`);
+    else if (isBlocking(advisory)) console.error(`BLOCK ${line}`);
     else console.warn(`WARN ${line}`);
   }
 
   const blocking = advisories.filter(isBlocking).length;
-  const informational = advisories.length - blocking;
+  const fixed = advisories.filter(({ status }) => status === "FIXED").length;
+  const informational = advisories.length - blocking - fixed;
   if (blocking) {
     console.error(`Rust audit blocked: ${blocking} security advisory/advisories require resolution.`);
     return false;
   }
+  if (fixed) console.log(`Rust audit verified ${fixed} fixed upstream advisory/advisories in pinned source.`);
   if (informational) {
     console.log(
       `Rust audit completed with ${informational} informational/low advisory/advisories; none were silently suppressed.`,
     );
-  } else {
+  } else if (!fixed) {
     console.log("Rust audit completed: no advisories found.");
   }
   return true;

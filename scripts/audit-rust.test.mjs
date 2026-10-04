@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { auditPackages, cargoMetadataArgs, isBlocking, loadLockedPackages, parseCargoMetadata } from "./audit-rust.mjs";
+import { isAuditedPatchedGlib, PATCHED_GLIB_ADVISORY_IDS, PATCHED_GLIB_DIR } from "./patched-glib.mjs";
 
 function response(results, ok = true, status = 200) {
   return { ok, status, json: async () => ({ results }) };
@@ -23,6 +24,22 @@ function queryResult(ids) {
 
 const APP_ID = "path+file:///fixture#app@0.1.0";
 const CRATES_IO_SOURCE = "registry+https://github.com/rust-lang/crates.io-index";
+
+function patchedGlibPackage() {
+  const manifestPath = join(PATCHED_GLIB_DIR, "Cargo.toml");
+  return parseCargoMetadata({
+    workspace_members: [APP_ID],
+    packages: [
+      {
+        id: `path+file://${manifestPath}#glib@0.18.5`,
+        name: "glib",
+        version: "0.18.5",
+        source: null,
+        manifest_path: manifestPath,
+      },
+    ],
+  })[0];
+}
 
 test("malformed Cargo.lock fails before any advisory lookup", (t) => {
   const directory = mkdtempSync(join(tmpdir(), "marvis-audit-lock-"));
@@ -101,6 +118,30 @@ test("external git and path packages fail closed", () => {
   );
 });
 
+test("only the hash-pinned local glib backport is accepted as an external path package", () => {
+  const glib = patchedGlibPackage();
+  assert.equal(glib.name, "glib");
+  assert.equal(glib.version, "0.18.5");
+  assert.ok(isAuditedPatchedGlib(glib));
+
+  assert.throws(
+    () =>
+      parseCargoMetadata({
+        workspace_members: [APP_ID],
+        packages: [
+          {
+            id: "path+file:///external/glib#glib@0.18.5",
+            name: "glib",
+            version: "0.18.5",
+            source: null,
+            manifest_path: "/external/glib/Cargo.toml",
+          },
+        ],
+      }),
+    /unsupported external path dependency for glib@0\.18\.5/,
+  );
+});
+
 test("network timeout fails closed", async () => {
   const fetchImpl = (_url, { signal }) =>
     new Promise((_resolve, reject) => {
@@ -152,6 +193,31 @@ test("moderate advisories block the audit", async () => {
         : jsonResponse(vuln("RUSTSEC-2024-0429", ["GHSA-aaaa-bbbb-cccc"])),
   });
   assert.equal(advisories[0].severity, "MODERATE");
+  assert.equal(isBlocking(advisories[0]), true);
+});
+
+test("the exact patched glib advisory is reported fixed only for the pinned backport", async () => {
+  const glib = patchedGlibPackage();
+  const [id, alias] = PATCHED_GLIB_ADVISORY_IDS;
+  const advisories = await auditPackages([glib], {
+    fetchImpl: async (_url, { method }) => (method === "POST" ? queryResult([id]) : jsonResponse(vuln(id, [alias]))),
+  });
+
+  assert.equal(advisories.length, 1);
+  assert.equal(advisories[0].severity, "MODERATE");
+  assert.equal(advisories[0].status, "FIXED");
+  assert.equal(isBlocking(advisories[0]), false);
+});
+
+test("other advisories in the patched glib version remain blocking", async () => {
+  const glib = patchedGlibPackage();
+  const advisories = await auditPackages([glib], {
+    fetchImpl: async (_url, { method }) =>
+      method === "POST" ? queryResult(["RUSTSEC-2025-9999"]) : jsonResponse(vuln("RUSTSEC-2025-9999", [])),
+  });
+
+  assert.equal(advisories.length, 1);
+  assert.equal(advisories[0].status, "ACTIVE");
   assert.equal(isBlocking(advisories[0]), true);
 });
 
