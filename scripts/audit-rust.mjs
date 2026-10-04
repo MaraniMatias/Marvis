@@ -237,18 +237,27 @@ export async function auditPackages(packages, { fetchImpl = globalThis.fetch, ti
 }
 
 async function requestJson(url, init, fetchImpl, timeoutMs) {
-  const signal = AbortSignal.timeout(timeoutMs);
-  let response;
+  // An owned timer rather than AbortSignal.timeout, whose timer is unref-ed and so holds no handle: a
+  // request still waiting on the timeout would let the event loop drain, and the CLI would exit 0
+  // having audited nothing.
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const signal = controller.signal;
   try {
-    response = await fetchImpl(url, { ...init, signal });
-  } catch {
-    throw new Error(signal.aborted ? "OSV request timed out" : "OSV request failed (network or TLS error)");
-  }
-  if (!response.ok) throw new Error(`OSV request failed (HTTP ${response.status})`);
-  try {
-    return await response.json();
-  } catch {
-    throw new Error("OSV returned invalid JSON");
+    let response;
+    try {
+      response = await fetchImpl(url, { ...init, signal });
+    } catch {
+      throw new Error(signal.aborted ? "OSV request timed out" : "OSV request failed (network or TLS error)");
+    }
+    if (!response.ok) throw new Error(`OSV request failed (HTTP ${response.status})`);
+    try {
+      return await response.json();
+    } catch {
+      throw new Error("OSV returned invalid JSON");
+    }
+  } finally {
+    clearTimeout(timer);
   }
 }
 
