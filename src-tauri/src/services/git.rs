@@ -406,6 +406,14 @@ impl GitWatcherManager {
 /// checkout can speak for: it is answered by naming the repository, and the workspace is read
 /// again to find the worktree that joined or the one that left.
 fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<WatchUpdate> {
+    // Reading a path is not a change to it, and on Linux it is reported as an event of its own
+    // for every open of every watched file. Every `git` command reads `.git/HEAD` before it does
+    // anything, so answering reads as ref writes made the whole repository be read again on every
+    // command in it. Only the other platforms are silent about this because only Linux reports a
+    // read at all.
+    if matches!(event.kind, notify::EventKind::Access(_)) {
+        return None;
+    }
     let mut status: BTreeSet<String> = BTreeSet::new();
     let mut activity: BTreeSet<String> = BTreeSet::new();
     let mut worktrees: BTreeSet<String> = BTreeSet::new();
@@ -2751,6 +2759,39 @@ line.txt";
 
         assert!(update.status.is_empty());
         assert_eq!(update.worktrees, ["repo"]);
+    }
+
+    #[test]
+    fn reading_a_ref_or_an_index_is_not_a_change_in_one() {
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(PathBuf::from("/repo"), "main".to_owned())]
+                .into_iter()
+                .collect(),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned()],
+            ..RepoWatchPlan::default()
+        };
+        // A path alone cannot tell a read from a write, and Linux reports every open of a watched
+        // path as an event of its own. Every Git command opens the HEAD and the refs it reads
+        // before it changes anything, so answering those as the writes they resemble refreshed the
+        // whole repository on every command run inside it.
+        for path in [
+            "/repo/.git/HEAD",
+            "/repo/.git/index",
+            "/repo/.git/refs/heads/trunk",
+            "/repo/base.txt",
+        ] {
+            let read = notify::Event {
+                kind: notify::EventKind::Access(notify::event::AccessKind::Open(
+                    notify::event::AccessMode::Any,
+                )),
+                paths: vec![PathBuf::from(path)],
+                attrs: Default::default(),
+            };
+
+            assert_eq!(affected_checkouts(&plan, &read), None, "{path}");
+        }
     }
 
     #[test]

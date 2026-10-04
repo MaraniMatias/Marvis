@@ -6,7 +6,15 @@ the part a reader should read and the generated list is the part they can skip. 
 under `Unreleased` and rename that heading to the version when you tag it; a version with no section
 here still gets its generated notes.
 
-## Unreleased
+## 0.13.2
+
+- **A Git command no longer makes every checkout be read again.** Marvis watches each repository to
+  know when the files of a checkout moved, and on Linux the watcher reports every _read_ of a
+  watched file as an event of its own. Git reads `.git/HEAD` before it does anything, so any command
+  run inside a watched repository — a `git status` in a terminal, an agent asking what changed — was
+  answered as though a branch had moved: the numbers on every checkout were dropped and recomputed,
+  and the sidebar refreshed, for a repository nothing had changed in. A read is no longer taken for a
+  change, so only a real write says anything now.
 
 - **The terminal cursor is a block you can change.** It is drawn in a color of its own: a lavender on
   the dark palette and the page's own ink on the light one, which is the ink a cell has to be
