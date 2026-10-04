@@ -24,7 +24,7 @@
     "test:coverage": "vitest run --coverage",
     "test:security": "vitest run -t SEC- && cargo test --locked --manifest-path src-tauri/Cargo.toml sec_",
     "test:audit": "node --test scripts/audit-rust.test.mjs",
-    "test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml && if [ \"$(uname -s)\" = Linux ]; then cargo test --release --locked --manifest-path src-tauri/vendor/glib-0.18.5/Cargo.toml test_variant_str_iter; fi",
+    "test:rust": "cargo test --locked --manifest-path src-tauri/Cargo.toml && if [ \"$(uname -s)\" = Linux ]; then CARGO_TARGET_DIR=src-tauri/target cargo test --release --locked --manifest-path src-tauri/vendor/glib-0.18.5/Cargo.toml test_variant_str_iter; fi",
     "test:release": "node --test scripts/release.test.mjs",
     "test:artifacts": "pnpm build && node --test scripts/artifacts.test.mjs scripts/build-third-party-notices.test.mjs scripts/build-app.test.mjs scripts/xterm-debug-log-plugin.test.mjs",
     "test": "pnpm test:frontend && pnpm test:release && pnpm test:audit && pnpm test:rust && pnpm test:artifacts",
