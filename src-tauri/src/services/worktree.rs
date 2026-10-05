@@ -964,9 +964,15 @@ mod tests {
     use tempfile::tempdir;
 
     use crate::{
-        domain::workspace::{Session, SessionStatus, SessionType},
+        domain::{
+            agent::AgentSession,
+            workspace::{Session, SessionStatus, SessionType},
+        },
         persistence::Database,
-        services::{agent::AgentService, workspace},
+        services::{
+            agent::{is_interrupted_request, AgentService},
+            workspace,
+        },
         terminal::{SpawnOptions, TerminalBackend},
     };
 
@@ -974,6 +980,9 @@ mod tests {
         create, defaults, register_created_worktree, removal_info, remove,
         WorktreeRemovalConfirmation, WorktreeRemovalInfo,
     };
+
+    /// How many times a test asks again after a signal ended its request.
+    const INTERRUPTED_REQUEST_ATTEMPTS: u32 = 3;
 
     fn git(cwd: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
@@ -1189,6 +1198,31 @@ mod tests {
         }
     }
 
+    /// Creates a session, asking again if a signal ended the request.
+    ///
+    /// This suite forks thousands of children, and every one of them delivers a SIGCHLD that can
+    /// end the syscall a concurrent request is sitting in. Production reports that instead of
+    /// repeating the request, because repeating a prompt reaches the server twice; the mock hands
+    /// back the same session for every `POST /api/session`, so asking again here asks the same
+    /// question and what the assertions say is unchanged.
+    fn create_session_asking_again_if_interrupted(
+        agents: &AgentService,
+        checkout_id: &str,
+        directory: &Path,
+        title: &str,
+    ) -> AgentSession {
+        for _ in 0..INTERRUPTED_REQUEST_ATTEMPTS {
+            match agents.create_session(checkout_id, directory, title) {
+                Ok(session) => return session,
+                Err(error) if is_interrupted_request(&error) => continue,
+                Err(error) => {
+                    panic!("the mock agent server could not be asked for a session: {error:?}")
+                }
+            }
+        }
+        panic!("the request to the mock agent server stayed interrupted");
+    }
+
     fn prompt_agent(
         agents: Arc<AgentService>,
         checkout_id: String,
@@ -1224,9 +1258,12 @@ mod tests {
         let directory = PathBuf::from(&checkout.canonical_path);
         let mut server = mock_agent_api(directory.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(server.port));
-        let created = agents
-            .create_session(&checkout_id, &directory, "coding agent")
-            .unwrap();
+        let created = create_session_asking_again_if_interrupted(
+            &agents,
+            &checkout_id,
+            &directory,
+            "coding agent",
+        );
 
         // A fresh conversation has no turn-start event and must not look busy just because
         // OpenCode also reports no idle timestamp for it.
@@ -1315,9 +1352,12 @@ mod tests {
         let directory = PathBuf::from(&checkout.canonical_path);
         let server = mock_agent_api(directory.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(server.port));
-        agents
-            .create_session(&checkout_id, &directory, "coding agent")
-            .unwrap();
+        create_session_asking_again_if_interrupted(
+            &agents,
+            &checkout_id,
+            &directory,
+            "coding agent",
+        );
 
         let info = removal_info(&database, &agents, &checkout_id).unwrap();
         assert!(info.active_agent_sessions.is_empty());
@@ -1353,9 +1393,12 @@ mod tests {
         let (database, root, primary_id, _, _) = repo_with_sibling(temp.path());
         let mut server = mock_agent_api(root.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(server.port));
-        let created = agents
-            .create_session(&primary_id, &root, "primary agent")
-            .unwrap();
+        let created = create_session_asking_again_if_interrupted(
+            &agents,
+            &primary_id,
+            &root,
+            "primary agent",
+        );
         fs::remove_dir_all(&root).unwrap();
 
         let prompt_agents = Arc::clone(&agents);
@@ -1411,9 +1454,12 @@ mod tests {
         let server = mock_agent_api(root.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(server.port));
         let stale_generation = agents.checkout_generation(&primary_id).unwrap();
-        agents
-            .create_session(&primary_id, &root, "idle primary agent")
-            .unwrap();
+        create_session_asking_again_if_interrupted(
+            &agents,
+            &primary_id,
+            &root,
+            "idle primary agent",
+        );
         let stale_directory = root.clone();
         fs::remove_dir_all(&root).unwrap();
 
@@ -1453,9 +1499,7 @@ mod tests {
         let server = mock_agent_api(directory.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(server.port));
         let generation = agents.checkout_generation(&checkout_id).unwrap();
-        agents
-            .create_session(&checkout_id, &directory, "idle agent")
-            .unwrap();
+        create_session_asking_again_if_interrupted(&agents, &checkout_id, &directory, "idle agent");
         let bridge = agents.bridge(&checkout_id, &directory).unwrap();
 
         Connection::open(temp.path().join("workspace.sqlite3"))
@@ -1497,9 +1541,12 @@ mod tests {
         let agents = Arc::new(AgentService::with_test_server(server.port));
         let stale_directory = root.clone();
         let stale_generation = agents.checkout_generation(&primary_id).unwrap();
-        let session = agents
-            .create_session(&primary_id, &root, "pre-close session")
-            .unwrap();
+        let session = create_session_asking_again_if_interrupted(
+            &agents,
+            &primary_id,
+            &root,
+            "pre-close session",
+        );
         fs::remove_dir_all(&root).unwrap();
 
         workspace::close_missing_checkout(
@@ -1561,9 +1608,12 @@ mod tests {
         let server = mock_agent_api(old_directory.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(server.port));
         let generation = agents.checkout_generation(&checkout_id).unwrap();
-        agents
-            .create_session(&checkout_id, &old_directory, "idle agent")
-            .unwrap();
+        create_session_asking_again_if_interrupted(
+            &agents,
+            &checkout_id,
+            &old_directory,
+            "idle agent",
+        );
         let bridge = agents.bridge(&checkout_id, &old_directory).unwrap();
         let moved_directory = temp.path().join("unrepaired worktree");
         fs::rename(&old_directory, &moved_directory).unwrap();
@@ -1602,9 +1652,7 @@ mod tests {
         let server = mock_agent_api(directory.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(server.port));
         let generation = agents.checkout_generation(&checkout_id).unwrap();
-        agents
-            .create_session(&checkout_id, &directory, "idle agent")
-            .unwrap();
+        create_session_asking_again_if_interrupted(&agents, &checkout_id, &directory, "idle agent");
         let bridge = agents.bridge(&checkout_id, &directory).unwrap();
         let removal = agents.reserve_worktree_removal(&checkout_id).unwrap();
         add_worktree(&database, &root, temp.path(), "late-locate");
@@ -1642,9 +1690,12 @@ mod tests {
         let _server = mock_agent_api(old_directory.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(_server.port));
         let stale_generation = agents.checkout_generation(&checkout_id).unwrap();
-        let session = agents
-            .create_session(&checkout_id, &old_directory, "old checkout agent")
-            .unwrap();
+        let session = create_session_asking_again_if_interrupted(
+            &agents,
+            &checkout_id,
+            &old_directory,
+            "old checkout agent",
+        );
         let old_bridge = agents.bridge(&checkout_id, &old_directory).unwrap();
         fs::rename(&old_directory, &moved_directory).unwrap();
 
@@ -1717,9 +1768,12 @@ mod tests {
             repo_with_sibling(temp.path());
         let mut server = mock_agent_api(sibling_directory.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(server.port));
-        let created = agents
-            .create_session(&sibling_id, &sibling_directory, "sibling agent")
-            .unwrap();
+        let created = create_session_asking_again_if_interrupted(
+            &agents,
+            &sibling_id,
+            &sibling_directory,
+            "sibling agent",
+        );
         prompt_agent(
             Arc::clone(&agents),
             sibling_id.clone(),
@@ -1753,9 +1807,12 @@ mod tests {
         let (database, root, primary_id, _, _) = repo_with_sibling(temp.path());
         let server = mock_agent_api_with_session_list_status(root.display().to_string(), 503);
         let agents = Arc::new(AgentService::with_test_server(server.port));
-        agents
-            .create_session(&primary_id, &root, "agent with unavailable status")
-            .unwrap();
+        create_session_asking_again_if_interrupted(
+            &agents,
+            &primary_id,
+            &root,
+            "agent with unavailable status",
+        );
         fs::remove_dir_all(&root).unwrap();
 
         let error = workspace::close_missing_checkout(
@@ -1778,9 +1835,8 @@ mod tests {
         let (database, root, checkout_id) = plain_fixture(temp.path());
         let mut server = mock_agent_api(root.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(server.port));
-        let session = agents
-            .create_session(&checkout_id, &root, "plain agent")
-            .unwrap();
+        let session =
+            create_session_asking_again_if_interrupted(&agents, &checkout_id, &root, "plain agent");
         prompt_agent(
             Arc::clone(&agents),
             checkout_id.clone(),
@@ -1808,9 +1864,7 @@ mod tests {
         let (database, root, checkout_id) = plain_fixture(temp.path());
         let server = mock_agent_api_with_session_list_status(root.display().to_string(), 503);
         let agents = Arc::new(AgentService::with_test_server(server.port));
-        agents
-            .create_session(&checkout_id, &root, "plain agent")
-            .unwrap();
+        create_session_asking_again_if_interrupted(&agents, &checkout_id, &root, "plain agent");
         fs::remove_dir_all(&root).unwrap();
 
         let error = workspace::close_missing_checkout(
@@ -1832,9 +1886,12 @@ mod tests {
         let server = mock_agent_api(root.display().to_string());
         let agents = Arc::new(AgentService::with_test_server(server.port));
         let stale_generation = agents.checkout_generation(&checkout_id).unwrap();
-        let session = agents
-            .create_session(&checkout_id, &root, "old plain agent")
-            .unwrap();
+        let session = create_session_asking_again_if_interrupted(
+            &agents,
+            &checkout_id,
+            &root,
+            "old plain agent",
+        );
         let old_bridge = agents.bridge(&checkout_id, &root).unwrap();
         fs::remove_dir_all(&root).unwrap();
 

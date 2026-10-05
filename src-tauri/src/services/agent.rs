@@ -1644,6 +1644,20 @@ fn is_interrupted(error: &ureq::Error) -> bool {
     matches!(error, ureq::Error::Io(error) if error.kind() == io::ErrorKind::Interrupted)
 }
 
+/// How an interrupted request is reported, kept as one wording so a caller can recognize it.
+const INTERRUPTED_REQUEST: &str = "an agent request was interrupted by a signal";
+
+/// Whether this failure is a signal ending the syscall rather than a server that could not answer.
+///
+/// Asking again is the caller's call and not always safe: a repeated prompt reaches the server
+/// twice, so the routes that cannot absorb that report this instead of retrying. No route can
+/// today, which is why this is test-only; it is here so the caller that can is written against a
+/// predicate rather than against the wording.
+#[cfg(test)]
+pub(crate) fn is_interrupted_request(error: &BridgeError) -> bool {
+    matches!(error, BridgeError::Unavailable(message) if message.starts_with(INTERRUPTED_REQUEST))
+}
+
 /// Parses the `{data: …}` envelope every route replies with.
 fn send_json<T: serde::de::DeserializeOwned>(
     response: Result<ureq::http::Response<ureq::Body>, ureq::Error>,
@@ -1669,6 +1683,11 @@ fn send_json<T: serde::de::DeserializeOwned>(
         Err(ureq::Error::Timeout(_)) => Err(BridgeError::Unavailable(
             "the agent server request timed out".into(),
         )),
+        // A signal ended the syscall. Nothing was answered, so this says so rather than claiming
+        // the server is gone, and keeps the cause for whoever reads it.
+        Err(error) if is_interrupted(&error) => Err(BridgeError::Unavailable(format!(
+            "{INTERRUPTED_REQUEST}: {error}"
+        ))),
         Err(error) => Err(BridgeError::Unavailable(format!(
             "the agent server is not reachable: {error}"
         ))),
@@ -2704,15 +2723,15 @@ mod tests {
     use super::{
         agent_program, basic_credentials, discard_line, event_from_payload, event_stream,
         finish_credentials, first_available_port, free_port_with, generation_scoped_sink,
-        is_interrupted, join_reader, no_startup_child_tracking, orphaned_agent_port,
-        port_candidates, read_bounded_line, read_credentials, read_sse_frame,
+        is_interrupted, is_interrupted_request, join_reader, no_startup_child_tracking,
+        orphaned_agent_port, port_candidates, read_bounded_line, read_credentials, read_sse_frame,
         remove_slot_if_current, retry_interrupted, same_directory, status_detail, terminate_child,
         terminate_orphaned_server, validate_session_id, AgentBridge, AgentEvent, AgentService,
         BridgeError, BridgeState, BridgeStopper, ChildGuard, EventSink, PortHooks, RemovalState,
         ServerCredentials, StartupChild, EARLY_EOF_MESSAGE, INTERRUPTED_READ_ATTEMPTS,
-        MAX_CREDENTIAL_LINE_BYTES, MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES,
-        MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES, MAX_START_ATTEMPTS,
-        PORT_RANGE_END, PORT_RANGE_LEN, PORT_RANGE_START,
+        INTERRUPTED_REQUEST, MAX_CREDENTIAL_LINE_BYTES, MAX_EVENT_HEADERS_BYTES,
+        MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
+        MAX_START_ATTEMPTS, PORT_RANGE_END, PORT_RANGE_LEN, PORT_RANGE_START,
     };
 
     fn test_event_bridge(directory: &Path, port: u16) -> AgentBridge {
@@ -5408,5 +5427,23 @@ mod tests {
             attempts, 1,
             "a failure repeating cannot fix is not repeated"
         );
+    }
+
+    #[test]
+    fn only_an_interrupted_syscall_is_reported_as_one() {
+        let interrupted = BridgeError::Unavailable(format!(
+            "{INTERRUPTED_REQUEST}: {}",
+            io::Error::from(io::ErrorKind::Interrupted)
+        ));
+        assert!(is_interrupted_request(&interrupted));
+        assert!(
+            !is_interrupted_request(&BridgeError::Unavailable(
+                "the agent server is not reachable: connection refused".into()
+            )),
+            "a server that could not answer is not something a caller may ask again"
+        );
+        assert!(!is_interrupted_request(&BridgeError::Failed(
+            "could not read the reply".into()
+        )));
     }
 }
