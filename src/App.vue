@@ -474,10 +474,24 @@ const activeCheckoutUiState = computed(() => {
   return checkoutId ? checkoutUiStates.value[checkoutId] : undefined;
 });
 
-/** Shows one view in the main panel and saves it as this checkout's restored view. */
-function showView(checkoutId: string, view: MainView) {
+/**
+ * Shows one view in the main panel and saves it as this checkout's restored view.
+ *
+ * `giveBackToTerminal` is the close button's own claim on that first refusal. A split layout keeps
+ * the terminal on screen beside the preview, so a row in the sidebar asking for the terminal is
+ * answered by leaving the preview alone; the close button is the reader saying the preview is done
+ * with, and it takes the whole panel back to the terminal whether or not one was already showing.
+ */
+function showView(checkoutId: string, view: MainView, { giveBackToTerminal = false } = {}) {
   const previous = mainViews.value[checkoutId];
-  if (isSplitLayout.value && view.kind === "terminal" && previous && previous.kind !== "terminal") return;
+  if (
+    !giveBackToTerminal &&
+    isSplitLayout.value &&
+    view.kind === "terminal" &&
+    previous &&
+    previous.kind !== "terminal"
+  )
+    return;
   mainViews.value = { ...mainViews.value, [checkoutId]: view };
   updateCheckoutUiState(checkoutId, {
     ...mainViewToState(view, checkoutId),
@@ -489,6 +503,19 @@ function showView(checkoutId: string, view: MainView) {
 function viewPath(view: MainView | undefined): string | null {
   if (!view || view.kind === "terminal") return null;
   return view.kind === "document" ? `${view.origin}\0${view.path}` : view.path;
+}
+
+/**
+ * The close button on a file or a change set: the main panel goes back to the terminal.
+ *
+ * The session it returns to is the one the panel already had, which `activeSession` resolves the
+ * same way the rest of the window does — the selected session, or the newest one this checkout
+ * has. Nothing is started here: a checkout that has no terminal lands on the pane's own empty
+ * state, which is the honest answer for a workdir nobody has opened a terminal in yet.
+ */
+function closePreview(checkoutId: string) {
+  if (mainViews.value[checkoutId]?.kind === "terminal") return;
+  showView(checkoutId, { kind: "terminal", sessionId: activeSession.value?.id ?? null }, { giveBackToTerminal: true });
 }
 
 function openFileDocument(selection: { checkoutId: string; path: string }) {
@@ -1660,6 +1687,7 @@ function reportWarning(message: string) {
           @reading-position-changed="activeCheckout && updateDocumentReadingPosition(activeCheckout.id, $event)"
           @diff-position-changed="activeCheckout && updateDiffReadingPosition(activeCheckout.id, $event)"
           @resize-preview="resizeAppPreview"
+          @close-preview="activeCheckout && closePreview(activeCheckout.id)"
           @open-markdown-link="activeCheckout && openFileDocument({ checkoutId: activeCheckout.id, path: $event })"
           @open-file="activeCheckout && openFileDocument({ checkoutId: activeCheckout.id, path: $event })"
         />

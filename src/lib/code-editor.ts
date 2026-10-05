@@ -21,15 +21,25 @@ import {
   bracketMatching,
   type StringStream,
 } from "@codemirror/language";
-import { Compartment, EditorState, RangeSetBuilder, StateField, type Extension } from "@codemirror/state";
+import {
+  Compartment,
+  EditorState,
+  RangeSet,
+  RangeSetBuilder,
+  StateField,
+  type Extension,
+  type Text,
+} from "@codemirror/state";
 import { closeBrackets, closeBracketsKeymap } from "@codemirror/autocomplete";
 import { history, defaultKeymap, historyKeymap, indentWithTab, temporarilySetTabFocusMode } from "@codemirror/commands";
 import {
   Decoration,
   EditorView,
+  GutterMarker,
   crosshairCursor,
   drawSelection,
   dropCursor,
+  gutter,
   highlightActiveLine,
   highlightActiveLineGutter,
   highlightSpecialChars,
@@ -56,6 +66,7 @@ import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { swift } from "@codemirror/legacy-modes/mode/swift";
 import { toml } from "@codemirror/legacy-modes/mode/toml";
 import { frontMatterLineCount } from "./front-matter";
+import type { LineRange } from "./changed-lines";
 import type { IndentationSettings } from "../domain/settings";
 
 export interface CodeEditorOptions {
@@ -200,6 +211,94 @@ const tabKeymap: Extension = keymap.of([indentWithTab, { key: "Escape", run: tem
 /** The one compartment per editor, so the preference can change without rebuilding the document. */
 const indentationCompartments = new WeakMap<EditorView, Compartment>();
 
+/** The same for the lines Git says are changed, which arrive as the file is edited elsewhere. */
+const changedLineCompartments = new WeakMap<EditorView, Compartment>();
+
+/**
+ * The gutter dot on a changed line.
+ *
+ * One marker for every line, drawn in whichever gutter cell the mark's position falls in. It is a
+ * single shared instance on purpose: a gutter redraws itself whenever the document changes, and a
+ * marker that built a fresh node each time would repaint every dot on every keystroke.
+ */
+class ChangedLineMarker extends GutterMarker {
+  override toDOM(): HTMLElement {
+    const dot = document.createElement("span");
+    dot.className = "marvis-changed-line-marker";
+    return dot;
+  }
+}
+
+const changedLineMarker = new ChangedLineMarker();
+
+/**
+ * The class a changed line wears, named in one place because the stylesheet, the editor and the
+ * read-only renderer all have to agree on it — and a test has to ask for it by name.
+ */
+export const CHANGED_LINE_CLASS = "marvis-changed-line";
+
+/**
+ * One set of marks, drawn two ways: as the gutter dot and as the line's tint.
+ *
+ * They come out of one field because they have to mean the same line. The marks are positions in
+ * the document rather than the line numbers Git reported, and the field maps them through every
+ * transaction — so typing above a change moves its dot and its tint down with the text instead of
+ * leaving them behind on whatever slid into their place. The tint is read as a function of the view
+ * for the same reason: a set captured when the ranges arrived would be a snapshot of a document that
+ * has since been edited.
+ */
+function changedLinesExtension(ranges: readonly LineRange[]): Extension {
+  const marks = StateField.define<RangeSet<GutterMarker>>({
+    create: (state) => changedLineMarks(state.doc, ranges),
+    update(markers, transaction) {
+      // The ranges are a fact about the file as Git last read it, so an edit does not change them.
+      return transaction.docChanged ? markers.map(transaction.changes) : markers;
+    },
+  });
+  return [
+    marks,
+    gutter({ class: "marvis-changed-gutter", markers: (view) => view.state.field(marks) }),
+    EditorView.decorations.of((view) => changedLineTint(view.state.doc, view.state.field(marks))),
+  ];
+}
+
+function changedLineMarks(doc: Text, ranges: readonly LineRange[]): RangeSet<GutterMarker> {
+  if (ranges.length === 0) return RangeSet.empty;
+  const builder = new RangeSetBuilder<GutterMarker>();
+  for (const range of ranges) {
+    // A file can have been shortened since Git counted it, so both ends are pinned to the document
+    // rather than trusted: a line number past its end has no position to be a mark at.
+    const last = Math.min(doc.lines, range.end);
+    for (let number = Math.max(1, range.start); number <= last; number++) {
+      const line = doc.line(number);
+      builder.add(line.from, line.from, changedLineMarker);
+    }
+  }
+  return builder.finish();
+}
+
+function changedLineTint(doc: Text, marks: RangeSet<GutterMarker>): DecorationSet {
+  if (marks.size === 0) return Decoration.none;
+  const builder = new RangeSetBuilder<Decoration>();
+  marks.between(0, doc.length, (from) => {
+    builder.add(from, from, Decoration.line({ class: CHANGED_LINE_CLASS }));
+  });
+  return builder.finish();
+}
+
+/**
+ * Marks the lines this checkout has changed in the file this editor is showing.
+ *
+ * A compartment rather than a new editor for the same reason `setEditorIndentation` is one: the
+ * alternative throws away the undo history, the scroll position and the cursor of a document
+ * somebody is in the middle of reading, to repaint a gutter.
+ */
+export function setEditorChangedLines(view: EditorView, ranges: readonly LineRange[]): void {
+  const compartment = changedLineCompartments.get(view);
+  if (!compartment) return;
+  view.dispatch({ effects: compartment.reconfigure(changedLinesExtension(ranges)) });
+}
+
 /**
  * Applies a new indentation to an editor that is already open.
  *
@@ -220,6 +319,7 @@ export function setEditorIndentation(view: EditorView, indentation: IndentationS
  */
 export function createCodeEditor(options: CodeEditorOptions): EditorView {
   const indentation = new Compartment();
+  const changedLines = new Compartment();
   const view = new EditorView({
     state: EditorState.create({
       doc: options.content,
@@ -254,6 +354,9 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
         EditorView.darkTheme.of(true),
         marvisTheme,
         indentation.of(indentationExtension(options.indentation ?? { useSpaces: true, size: 2 })),
+        // Empty until the pane says which lines Git has changed, which it only asks about for a
+        // file the checkout actually has open.
+        changedLines.of(changedLinesExtension([])),
         languageExtension(options.language),
         syntaxHighlighting(marvisHighlightStyle),
         EditorView.updateListener.of((update) => {
@@ -272,6 +375,7 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
   view.scrollDOM.scrollTop = options.readingPosition.top;
   view.scrollDOM.scrollLeft = options.readingPosition.left;
   indentationCompartments.set(view, indentation);
+  changedLineCompartments.set(view, changedLines);
   return view;
 }
 
