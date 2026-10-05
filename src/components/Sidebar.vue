@@ -1144,6 +1144,27 @@ function isRepoCollapsed(group: Group): boolean {
   return collapsedRepos.value.has(group.id);
 }
 
+/**
+ * Running is blue, a failure is red, anything else is quiet.
+ *
+ * Red comes from either end of a session's life. A shell that ended with a non-zero code failed on
+ * its way out. A *live* shell whose last command failed is the far more common case and the backend
+ * cannot see it at all: the command did not kill the shell, so it is a grandchild of the process the
+ * app spawns and no `waitpid` reaches it. That answer arrives from the OSC 133 hook
+ * (`services/terminal.rs`) as `lastCommandExit`, and it is checked before the live-session return
+ * below because a running session with a failed command behind it is exactly the row that must be red.
+ *
+ * The hook clears the field when the next command starts, so red means "the last command you ran
+ * failed" and running blue means one is in front of you now. `exitCode` is read defensively: a
+ * terminal that reports neither is idle rather than wrongly accused.
+ */
+function sessionTone(session: Session): SessionTone {
+  if (props.sessionRuntimeStatuses[session.id]?.lastCommandExit) return "error";
+  if (sessionState(session) !== "exited") return "running";
+  const status = props.sessionRuntimeStatuses[session.id] as { exitCode?: number | null } | undefined;
+  return status?.exitCode ? "error" : "idle";
+}
+
 function toggleRepo(group: Group) {
   const next = new Set(collapsedRepos.value);
   if (!next.delete(group.id)) next.add(group.id);

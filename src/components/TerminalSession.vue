@@ -23,8 +23,9 @@ import {
 } from "../lib/marvis-terminal";
 import { registerFilePathLinks } from "../lib/terminal-file-links";
 import { watchKeyboardProtocol } from "../lib/terminal-keys";
-import { createPtyOutputWriter } from "../lib/terminal-renderer";
+import { createPtyOutputWriter, renderPtyOutput } from "../lib/terminal-renderer";
 import type { PtyOutputWriter } from "../lib/terminal-renderer";
+import { registerShellIntegration } from "../lib/terminal-shell-integration";
 import { scrollbarOffsetForTop, terminalScrollbarGeometry } from "../lib/terminal-scrollbar";
 import type { TerminalScrollbarGeometry } from "../lib/terminal-scrollbar";
 import { theme } from "../presentation/theme";
@@ -89,6 +90,17 @@ const scrollbarVisible = computed(() => props.scrollbar === "always" || scrollba
 
 let sessionId: string | null = null;
 let terminalTitle: string | null = null;
+/**
+ * What the shell's last command exited with, and the only failure signal a live session has.
+ *
+ * Held outside `state` and merged back into every status because `updateStatus` replaces the whole
+ * object on each 750ms poll, which is exactly what `terminalTitle` above does and for the same
+ * reason: a field the backend never sends has to survive the poll that replaces the backend's answer
+ * with it. `undefined` is a real value here and not the same as absent — it is what says "the last
+ * command is running", which is what puts the sidebar bar back to blue.
+ */
+let lastCommandExit: number | undefined;
+let shellIntegration: { dispose(): void } | undefined;
 let channel: Channel<ArrayBuffer> | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let statusTimer: number | undefined;
@@ -372,7 +384,12 @@ function syncStatusPolling() {
 }
 
 function updateStatus(status: TerminalSessionStatus) {
-  state.value = { ...status, ...(terminalTitle !== null && { terminalTitle }) };
+  // Preserve the shell integration result across status polls, whose payload omits it.
+  state.value = {
+    ...status,
+    ...(terminalTitle !== null && { terminalTitle }),
+    ...(lastCommandExit !== undefined && { lastCommandExit }),
+  };
   emit("statusChanged", state.value);
   if (status.state !== "exited") return;
   // Nothing left to poll for, and asking anyway would only produce errors for a session the backend
@@ -820,6 +837,19 @@ terminal.onTitleChange((title) => {
   emit("statusChanged", state.value);
 });
 terminal.onResize(({ cols, rows }) => queueResize(cols, rows));
+// Registered at setup rather than in `onMounted` because the hook the backend installed is already
+// answering from the shell's very first prompt, and output is delivered over the channel from the
+// moment the session is created: a handler registered after the first paint would miss the exit code
+// of whatever ran first.
+shellIntegration = registerShellIntegration(terminal, (event) => {
+  // A command starting clears the failure on purpose: red means "the last command you ran failed",
+  // and once another command is in front of you that is no longer what the row is telling you. The
+  // field is always assigned, including as `undefined`, because the merge spreads the previous state
+  // and a stale exit code left in it would keep the bar red for a command that never failed.
+  lastCommandExit = event.kind === "command-finished" ? event.exitCode : undefined;
+  state.value = { ...state.value, lastCommandExit };
+  emit("statusChanged", state.value);
+});
 // xterm fires this whenever the viewport moves, whether a wheel, a drag, Shift+PageUp or output
 // arriving at the bottom caused it, and it does not promise what the payload is (some paths send
 // the new position, some send an object wrapping it). So the position is read back off the buffer
@@ -944,6 +974,7 @@ onUnmounted(() => {
   fileLinks?.dispose();
   rendererRecovery?.dispose();
   outputWriter?.dispose();
+  shellIntegration?.dispose();
   if (sessionId) {
     // Nothing is going to parse this session's output any more, so the reader behind it is told
     // so: it lets go of the gate rather than holding the PTY until its own timeout, and it stops

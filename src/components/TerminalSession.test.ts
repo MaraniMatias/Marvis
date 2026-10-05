@@ -27,6 +27,8 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     titles: [] as Array<(title: string) => void>,
     scrolls: [] as Array<() => void>,
     customKeyHandlers: [] as Array<(event: KeyboardEvent) => boolean>,
+    /** What the shell's OSC 133 hook said, by ident: the parser hands each marker to the handler. */
+    oscHandlers: new Map<number, (data: string) => boolean>(),
     output: [] as number[][],
     /**
      * The callbacks xterm owes the writer, one per write handed over and not parsed yet. A test
@@ -121,6 +123,17 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     registerLinkProvider() {
       return { dispose: () => {} };
     }
+    /** The OSC handlers the shell-integration module registers, so a test can deliver a marker. */
+    parser = {
+      registerOscHandler: (ident: number, callback: (data: string) => boolean) => {
+        terminalMock.oscHandlers.set(ident, callback);
+        return {
+          dispose: () => {
+            terminalMock.oscHandlers.delete(ident);
+          },
+        };
+      },
+    };
     registerMarker() {
       return { dispose: () => {} };
     }
@@ -258,6 +271,7 @@ describe("TerminalSession UI", () => {
     terminalMock.titles = [];
     terminalMock.scrolls = [];
     terminalMock.customKeyHandlers = [];
+    terminalMock.oscHandlers.clear();
     terminalMock.output = [];
     terminalMock.writeCallbacks = [];
     terminalMock.openCalls = 0;
@@ -387,6 +401,41 @@ describe("TerminalSession UI", () => {
     terminalMock.titles[0]?.("  ");
     expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({ terminalTitle: null });
     wrapper.unmount();
+  });
+
+  it("publishes the shell's last command exit code, and keeps it across the status poll", async () => {
+    vi.useFakeTimers();
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    // The backend cannot supply this: a command that fails does not end the shell, so the answer
+    // arrives from the OSC 133 hook the session was started with.
+    terminalMock.oscHandlers.get(133)?.("D;1");
+    expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({
+      state: "running",
+      lastCommandExit: 1,
+    });
+
+    // A command that succeeds is not a failure, and the field is published either way so the sidebar
+    // has something to stop treating the session as red.
+    terminalMock.oscHandlers.get(133)?.("D;0");
+    expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({ lastCommandExit: 0 });
+
+    // The poll replaces the whole status object every 750ms with an answer that carries no exit code
+    // at all, so without the re-merge in `updateStatus` this value would be gone by the next tick and
+    // the sidebar bar would flicker blue between polls.
+    terminalMock.oscHandlers.get(133)?.("D;2");
+    await vi.advanceTimersByTimeAsync(1_500);
+    expect(getTerminalStatus).toHaveBeenCalled();
+    expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({ lastCommandExit: 2 });
+
+    // A command starting clears it, and the clear survives the poll too rather than coming back.
+    terminalMock.oscHandlers.get(133)?.("A");
+    await vi.advanceTimersByTimeAsync(750);
+    const cleared = wrapper.emitted("statusChanged")?.at(-1)?.[0] as { lastCommandExit?: number };
+    expect(cleared.lastCommandExit).toBeUndefined();
+    wrapper.unmount();
+    vi.useRealTimers();
   });
 
   it("waits for every bundled face before opening xterm", async () => {

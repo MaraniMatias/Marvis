@@ -1127,6 +1127,10 @@ impl OutputGate {
     }
 }
 
+/// Reached by `services::terminal`'s shell-integration test, which needs the same "wait for a prompt,
+/// then wait for a marker" pair rather than a second copy of it.
+#[cfg(test)]
+pub(crate) use tests::{synchronize_shell, wait_for_output};
 #[cfg(test)]
 mod tests {
     use std::{
@@ -1185,14 +1189,45 @@ mod tests {
         )
     }
 
-    fn synchronize_shell(backend: &TerminalBackend, receiver: &mpsc::Receiver<Vec<u8>>, id: &str) {
+    struct PausingWriter {
+        entered: Option<mpsc::Sender<()>>,
+        release: mpsc::Receiver<()>,
+    }
+
+    impl Write for PausingWriter {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.entered.take().unwrap().send(()).map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "test writer receiver dropped")
+            })?;
+            self.release.recv().map_err(|_| {
+                io::Error::new(io::ErrorKind::BrokenPipe, "test writer release dropped")
+            })?;
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    // Shared with `services::terminal`, whose shell-integration test drives a real shell through the
+    // same two steps: get it to a prompt, then look for a marker in what it printed.
+    pub(crate) fn synchronize_shell(
+        backend: &TerminalBackend,
+        receiver: &mpsc::Receiver<Vec<u8>>,
+        id: &str,
+    ) {
         backend
             .write(id, b"printf '\\036MARVIS_READY\\037\\n'\n")
             .unwrap();
         wait_for_output(receiver, b"\x1eMARVIS_READY\x1f", Duration::from_secs(5));
     }
 
-    fn wait_for_output(receiver: &mpsc::Receiver<Vec<u8>>, marker: &[u8], timeout: Duration) {
+    pub(crate) fn wait_for_output(
+        receiver: &mpsc::Receiver<Vec<u8>>,
+        marker: &[u8],
+        timeout: Duration,
+    ) {
         let deadline = Instant::now() + timeout;
         let mut actual = Vec::new();
         while !actual.windows(marker.len()).any(|window| window == marker) {

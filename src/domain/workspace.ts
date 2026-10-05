@@ -13,6 +13,15 @@ export interface TerminalSessionStatus {
   foregroundApp?: string;
   /** Title most recently set by the PTY via OSC 0/2, if any. */
   terminalTitle?: string | null;
+  /**
+   * `$?` of the last command the shell ran, from the OSC 133 hook in `services/terminal.rs`.
+   *
+   * A frontend-only field like `terminalTitle`, and for the same reason: the backend cannot know it,
+   * because a command that fails does not exit the shell and is a grandchild of the process it
+   * spawns. Absent when the shell has not reported one yet, which is every shell with no integration
+   * installed and the moment before the first command finishes.
+   */
+  lastCommandExit?: number;
 }
 
 export interface Repo {

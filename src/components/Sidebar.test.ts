@@ -507,6 +507,56 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.emitted("closeSession")).toEqual([["session:exited"]]);
   });
 
+  it("paints a live terminal red when its last command failed, and blue once one is running", async () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:tone" }),
+                sessions: [
+                  session("session:failed", "zsh", "checkout:tone"),
+                  session("session:passed", "zsh", "checkout:tone"),
+                  session("session:idle", "zsh", "checkout:tone"),
+                ],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:tone",
+        activeSessionId: null,
+        isOpening: false,
+        sessionRuntimeStatuses: {
+          // All three shells are alive. A command that fails does not end the shell, so the only thing
+          // that separates them is the exit code the OSC 133 hook read out of `$?`.
+          "session:failed": { state: "running", foregroundProcess: false, lastCommandExit: 1 },
+          "session:passed": { state: "running", foregroundProcess: false, lastCommandExit: 0 },
+          "session:idle": { state: "running", foregroundProcess: false },
+        },
+      },
+    });
+
+    const rows = wrapper.findAll(".workdir-child");
+    expect(rows[0]!.classes()).toContain("tone-error");
+    // A command that succeeded, and a shell that has reported nothing yet, are both just running.
+    expect(rows[1]!.classes()).toContain("tone-running");
+    expect(rows[2]!.classes()).toContain("tone-running");
+    expect(rows.every((row) => !row.classes().includes("tone-error") || row === rows[0])).toBe(true);
+
+    // The hook clears the field when the next command starts, and the bar goes with it: red means
+    // "the last command you ran failed", not "this shell has ever failed".
+    await wrapper.setProps({
+      sessionRuntimeStatuses: {
+        "session:failed": { state: "running", foregroundProcess: true, foregroundApp: "cargo" },
+        "session:passed": { state: "running", foregroundProcess: false, lastCommandExit: 0 },
+        "session:idle": { state: "running", foregroundProcess: false },
+      },
+    });
+    expect(wrapper.findAll(".workdir-child")[0]!.classes()).toContain("tone-running");
+    wrapper.unmount();
+  });
+
   it("names the program in front of the shell, and the shell with its directory when nothing is", () => {
     const wrapper = mount(Sidebar, {
       props: {
