@@ -1144,7 +1144,15 @@ mod tests {
                 reader.read_line(&mut request).unwrap();
                 let mut parts = request.split_whitespace();
                 let method = parts.next().unwrap_or_default();
-                let path = parts.next().unwrap_or_default().to_string();
+                // The query is stripped: every request now carries `?directory=…`, and these
+                // mocks match on the route.
+                let path = parts
+                    .next()
+                    .unwrap_or_default()
+                    .split('?')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
                 let mut content_length = 0;
                 loop {
                     let mut header = String::new();
@@ -1166,6 +1174,9 @@ mod tests {
                         server_session_lists.fetch_add(1, Ordering::SeqCst);
                         serde_json::json!([session.clone()])
                     }
+                    // The service's own running answer. Empty here, so the session reads as idle
+                    // unless a test makes it otherwise, which is what an idle mock should say.
+                    ("GET", "/api/session/active") => serde_json::json!({}),
                     ("GET", "/api/session/ses_integrated") => session.clone(),
                     ("POST", "/api/session/ses_integrated/prompt") => {
                         let _ = prompt_started_tx.send(());
@@ -2259,7 +2270,7 @@ mod tests {
             "dirty",
         )
         .unwrap();
-        let info = removal_info(&database, &AgentService::default(), &checkout_id).unwrap();
+        let info = removal_info(&database, &AgentService::without_service(), &checkout_id).unwrap();
         assert_eq!(info.dirty_files, ["untracked.txt"]);
 
         let backend = TerminalBackend::default();
@@ -2267,7 +2278,7 @@ mod tests {
         assert!(remove(
             &database,
             &backend,
-            &AgentService::default(),
+            &AgentService::without_service(),
             &checkout_id,
             &unconfirmed
         )
@@ -2281,18 +2292,18 @@ mod tests {
         let stale = remove(
             &database,
             &backend,
-            &AgentService::default(),
+            &AgentService::without_service(),
             &checkout_id,
             &stale_confirmation,
         )
         .unwrap_err();
         assert!(stale.message.contains("changes changed"));
-        let info = removal_info(&database, &AgentService::default(), &checkout_id).unwrap();
+        let info = removal_info(&database, &AgentService::without_service(), &checkout_id).unwrap();
         let confirmed = confirmation(&info, true, info.dirty_files.clone(), vec![], false);
         let result = remove(
             &database,
             &backend,
-            &AgentService::default(),
+            &AgentService::without_service(),
             &checkout_id,
             &confirmed,
         )
@@ -2321,14 +2332,14 @@ mod tests {
         fs::write(path.join("ahead.txt"), "ahead\n").unwrap();
         git(path, &["add", "ahead.txt"]);
         git(path, &["commit", "-m", "ahead"]);
-        let info = removal_info(&database, &AgentService::default(), &checkout_id).unwrap();
+        let info = removal_info(&database, &AgentService::without_service(), &checkout_id).unwrap();
         assert_eq!(info.unmerged_commits, 1);
 
         let confirmed = confirmation(&info, false, vec![], vec![], true);
         remove(
             &database,
             &TerminalBackend::default(),
-            &AgentService::default(),
+            &AgentService::without_service(),
             &checkout_id,
             &confirmed,
         )
@@ -2342,13 +2353,13 @@ mod tests {
         let temp = tempdir().unwrap();
         let (database, _, primary_id) = fixture(temp.path());
         let backend = TerminalBackend::default();
-        let info = removal_info(&database, &AgentService::default(), &primary_id).unwrap();
+        let info = removal_info(&database, &AgentService::without_service(), &primary_id).unwrap();
         let confirmation = confirmation(&info, true, vec![], vec![], false);
 
         assert!(remove(
             &database,
             &backend,
-            &AgentService::default(),
+            &AgentService::without_service(),
             &primary_id,
             &confirmation
         )
@@ -2394,13 +2405,13 @@ mod tests {
             })
             .unwrap();
 
-        let info = removal_info(&database, &AgentService::default(), &checkout_id).unwrap();
+        let info = removal_info(&database, &AgentService::without_service(), &checkout_id).unwrap();
         assert_eq!(info.active_sessions[0].id, session_id);
         let no_session_confirmation = confirmation(&info, false, vec![], vec![], false);
         assert!(remove(
             &database,
             &backend,
-            &AgentService::default(),
+            &AgentService::without_service(),
             &checkout_id,
             &no_session_confirmation
         )
@@ -2409,7 +2420,7 @@ mod tests {
         let result = remove(
             &database,
             &backend,
-            &AgentService::default(),
+            &AgentService::without_service(),
             &checkout_id,
             &confirmed,
         )
@@ -2439,14 +2450,14 @@ mod tests {
         git(&root, &["worktree", "prune", "--expire", "now"]);
         git(&root, &["branch", "-D", "--", "missing-feature"]);
 
-        let info = removal_info(&database, &AgentService::default(), &checkout_id).unwrap();
+        let info = removal_info(&database, &AgentService::without_service(), &checkout_id).unwrap();
         assert!(info.is_missing);
         assert_eq!(info.branch, None);
         let confirmed = confirmation(&info, false, vec![], vec![], false);
         let result = remove(
             &database,
             &TerminalBackend::default(),
-            &AgentService::default(),
+            &AgentService::without_service(),
             &checkout_id,
             &confirmed,
         )

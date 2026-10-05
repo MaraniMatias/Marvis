@@ -583,13 +583,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(retried.status, "queued");
+        // Compared on the route: each request also carries `?directory=…`, which is what scopes
+        // the answer to this checkout. See the scoping test in `services::agent`.
         assert_eq!(
-            server.join().expect("mock server should finish"),
+            server
+                .join()
+                .expect("mock server should finish")
+                .iter()
+                .map(|line| line.split('?').next().unwrap_or_default().to_string())
+                .collect::<Vec<_>>(),
             [
-                "GET /api/session/ses_target HTTP/1.1",
-                "GET /api/session/ses_target/message HTTP/1.1",
-                "GET /api/session/ses_target HTTP/1.1",
-                "GET /api/session/ses_target/message HTTP/1.1",
+                "GET /api/session/ses_target",
+                "GET /api/session/ses_target/message",
+                "GET /api/session/ses_target",
+                "GET /api/session/ses_target/message",
             ]
         );
     }
@@ -689,7 +696,7 @@ mod tests {
         // It has nothing to send. It must not be guessed from the notes, and it must not be
         // dropped either.
 
-        let agents = AgentService::new();
+        let agents = AgentService::without_service();
         // The directory does not exist, so reaching a server would fail loudly if tried.
         let sent = flush_rounds(
             &database,
@@ -727,7 +734,7 @@ mod tests {
         let (database, checkout_id, other_checkout_id) = database_with_two_checkouts(&temp);
         add_note(&database, &checkout_id, "a");
         add_note(&database, &other_checkout_id, "foreign");
-        let agents = AgentService::new();
+        let agents = AgentService::without_service();
 
         assert!(begin_round(
             &database,
@@ -798,7 +805,7 @@ mod tests {
         let (database, checkout_id, _) = database_with_two_checkouts(&temp);
         add_note(&database, &checkout_id, "a");
 
-        let agents = AgentService::new();
+        let agents = AgentService::without_service();
         let session = agents
             .create_session(&checkout_id, &directory, "queue probe")
             .expect("create a session on the real server");

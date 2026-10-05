@@ -376,6 +376,13 @@ vi.mock("./presentation/agent-sessions", async () => {
         return turns.value;
       },
     }),
+    // The sidebar rows read this, keyed by checkout. Empty here: these tests are about the rest
+    // of the app, and a row with no agent behind it is drawn without a chip.
+    useTerminalAgentRows: () => ({
+      byCheckout: {},
+      row: () => ({ agent: null, running: false }),
+      reload: vi.fn(),
+    }),
   };
 });
 

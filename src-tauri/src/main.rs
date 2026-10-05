@@ -143,16 +143,10 @@ fn main() {
             app.manage(std::sync::Arc::new(
                 services::git::GitWatcherManager::default(),
             ));
-            // One OpenCode server per checkout, owned for the app's lifetime so the
-            // child process is stopped on exit rather than leaked.
-            //
-            // The servers a previous app left behind are ended first. `stop_child_processes` covers
-            // every exit the loop can take, but an app that was killed never reaches it, and its
-            // servers would otherwise keep running with nothing left to stop them. The single
-            // instance plugin above has already turned a second copy away, so anything still
-            // running here belongs to an app that is gone.
-            services::agent::reap_orphaned_servers();
-            let agents = std::sync::Arc::new(services::agent::AgentService::new());
+            // The OpenCode service belongs to whoever started it, so nothing here starts or stops
+            // one: `AgentService` connects to the service the user is already running and reports
+            // itself disconnected while there is none.
+            let agents = std::sync::Arc::new(services::agent::AgentService::new(home.clone()));
             let emitter = app.handle().clone();
             agents.set_event_sink(std::sync::Arc::new(
                 move |event: services::agent::AgentEvent| {
@@ -547,15 +541,14 @@ mod startup_tests {
         }
     }
 
-    /// Every agent server and every terminal is stopped from the event loop, because there is no
-    /// other way to stop them.
+    /// Every terminal is stopped from the event loop, and this app's own event readers are detached,
+    /// because there is no other way to stop them.
     ///
-    /// `App::run` never returns: the loop ends and the process is handed to `std::process::exit`,
-    /// so a `Drop` in the managed state is never reached. Both `Drop for AgentService` and
-    /// `Drop for TerminalBackend` were written for an exit that does not happen, which is how an
-    /// `opencode serve` and a shell outlived every single quit of the app.
+    /// `App::run` never returns: the loop ends and the process is handed to `std::process::exit`, so a
+    /// `Drop` in the managed state is never reached. A `Drop` in the managed state was written for an
+    /// exit that does not happen, which is how a shell outlived every single quit of the app.
     #[test]
-    fn the_exit_hook_ends_the_children_the_app_started() {
+    fn the_exit_hook_ends_what_the_app_started() {
         let main = include_str!("main.rs");
         let registered = main.split("#[cfg(test)]").next().unwrap();
         assert!(
@@ -592,27 +585,58 @@ mod startup_tests {
         );
     }
 
-    /// The servers an app that was killed left behind are ended before any bridge starts.
+    /// Nothing here starts or stops an OpenCode service, because the person using the app owns it.
     ///
-    /// This is the only moment at which every surviving server belongs to an app that is gone:
-    /// the single instance plugin has already turned a second copy away, and no bridge of this
-    /// one has started yet. Anywhere later, the sweep would find this app's own servers.
+    /// This is what makes the app usable alongside someone else's OpenCode already running: the service
+    /// registers itself, this app connects to it, and every path out of the app leaves it alone. A
+    /// sweep for servers to end, or an `exit(0)` from inside a close request, would end the service out
+    /// from under whatever is still running it.
     #[test]
-    fn the_servers_of_an_app_that_was_killed_are_ended_before_a_bridge_starts() {
+    fn the_app_never_starts_or_ends_an_opencode_service() {
         let main = include_str!("main.rs");
         let registered = main.split("#[cfg(test)]").next().unwrap();
-        let sweep = registered
-            .find("reap_orphaned_servers()")
-            .expect("the app never ends the servers it starts over from");
-        let first_bridge = registered
-            .find("AgentService::new()")
-            .expect("the app starts no bridges at all");
+        let command = include_str!("commands/app.rs");
+        let bridge = include_str!("services/agent.rs")
+            .split("#[cfg(test)]")
+            .next()
+            .unwrap();
+
+        for forbidden in ["\"serve\"", "reap_orphaned_servers", "orphan"] {
+            assert!(
+                !bridge.contains(forbidden),
+                "a bridge no longer owns an OpenCode process, but it still refers to `{forbidden}`"
+            );
+        }
         assert!(
-            sweep < first_bridge,
-            "a bridge can be started on a port an orphaned server still holds"
+            !registered.contains("reap_orphaned_servers"),
+            "the app must not search the process table for services to end"
         );
+        // The service a person started outlives the app, so the sweep before exit only disconnects
+        // this app's own reader and stops the terminals it started.
+        assert!(
+            command.contains("agents.stop_all()"),
+            "the sweep is what closes this app's side of the connection"
+        );
+        assert!(
+        !registered.contains("exit(0)"),
+        "ending the app while a close request is being handled takes the webview away from the \
+         write the window is still waiting for"
+    );
     }
 
+    /// The service registers itself under the user's home, and the app already resolved that once.
+    ///
+    /// Discovery reads the home it is given rather than the environment, so where the service is
+    /// looked for is decided where the app resolves its other per-user paths.
+    #[test]
+    fn the_service_is_found_under_the_users_own_home() {
+        let main = include_str!("main.rs");
+        let registered = main.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            registered.contains("AgentService::new(home.clone())"),
+            "the service registration is looked for under a home the app did not resolve"
+        );
+    }
     #[test]
     fn the_menu_bar_is_the_app_menu_and_the_one_macos_requires() {
         // Tauri builds a menu of its own when the builder is given none, so the way to have a

@@ -1,20 +1,38 @@
-//! A minimal OpenCode bridge: one `opencode serve` child per checkout.
+//! A minimal OpenCode bridge: a client of the service the person running OpenCode started.
 //!
-//! Everything Marvis needs from the agent is scoped to the checkout that owns it, so the
-//! server is started with that directory as its working directory and every response is
-//! checked against the expected path before it is trusted. A `ses_…` id from one checkout
-//! is meaningless in another checkout's server, and `agent_session` is what enforces that.
+//! Everything Marvis needs from the agent is scoped to the checkout that owns it, so every
+//! request names that checkout's directory and every response is checked against the expected
+//! path before it is trusted. A `ses_…` id from one checkout is meaningless in another's
+//! directory, and `agent_session` is what enforces that.
+//!
+//! The service is the user's, not this app's. Nothing here starts one and nothing here ends one:
+//! `services::opencode` finds the service that is already running, and the absence of one leaves
+//! the app disconnected rather than leaving a server behind.
+//!
+//! # What the service cannot tell us
+//!
+//! JSON requests carry the checkout's directory twice, because the service reads the scope two
+//! ways: the `x-opencode-directory` header decides which location answers, and the `directory`
+//! query parameter filters session lists. Sending the header alone leaves `/api/session`
+//! answering for every location the service knows, and sending the query alone leaves `/api/agent`
+//! answering for the service's own working directory. The SSE request carries the header too;
+//! each event is additionally filtered by its reported location when one is present.
+//!
+//! OpenCode 2.0.22 has no client registry. There is no route that reports which TUI process is
+//! attached to which session, the `x-opencode-client` header is only ever sent *out* to model
+//! providers, and `/api/session/active` answers for the whole service rather than for one
+//! connection. So a session cannot be attributed to the terminal that is showing it. What *is*
+//! available per terminal is the directory it runs in, which is what `terminal_agent_rows` uses:
+//! it reports each terminal's own directory scope instead of guessing which session that
+//! terminal has selected. Guessing from `time.viewed` or from recency would misattribute the
+//! moment two TUIs share a checkout, which is the case this has to be right for.
 
 use std::{
     collections::{HashMap, HashSet},
     io::{self, BufRead, BufReader, Read, Write},
-    net::{Shutdown, SocketAddr, TcpListener, TcpStream},
+    net::{Shutdown, SocketAddr, TcpStream},
     path::{Path, PathBuf},
-    process::{Child, Command, Stdio},
-    sync::{
-        atomic::{AtomicU64, Ordering},
-        mpsc, Arc, Condvar, Mutex,
-    },
+    sync::{atomic::Ordering, Arc, Condvar, Mutex},
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -26,45 +44,42 @@ use crate::{
         agent::{agent_event_kind, AgentAgent, AgentSession},
         ipc::{IpcError, IpcErrorCode},
     },
-    services::executable,
+    services::opencode::{self, ServiceEndpoint},
 };
 
 pub use crate::domain::agent::AgentEvent;
 
-static NEXT_PORT_ATTEMPT: AtomicU64 = AtomicU64::new(0);
-
-const SERVER_BOOT_TIMEOUT: Duration = Duration::from_secs(30);
+/// The HTTP requests a bridge makes, which a service that is busy answering a turn can delay.
 const JSON_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
-const CHILD_REAP_POLL: Duration = Duration::from_millis(10);
-// The escalation budget for a server this app no longer owns. It is short because the sweep runs
-// before the window opens and the server is nobody's but ours to end.
-const ORPHAN_STOP_TIMEOUT: Duration = Duration::from_secs(1);
+/// How long a freshly found service is given to answer for this checkout before the app says it
+/// is not there yet.
+const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(5);
 // `stopAgent` is awaited by the UI.
 const STARTUP_STOP_WAIT: Duration = Duration::from_secs(3);
-// A waiter has to cover the launcher's wall time: its 30s shared budget plus the 3s child reap
-// and 3s reader cleanup, which is the one path that spends both. It is only an inert caller-wait
-// bound: expiry does not cancel a healthy startup, and bounded retries share that same 30s launch
-// budget.
-const STARTUP_WAIT_TIMEOUT: Duration = Duration::from_secs(36);
+// A waiter has to cover the launcher's wall time: its discovery budget plus the 3s reader cleanup.
+// It is only an inert caller-wait bound: expiry does not cancel a healthy connect, which does not
+// hold the slot open.
+const STARTUP_WAIT_TIMEOUT: Duration = Duration::from_secs(9);
 const MAX_RECONNECT_BACKOFF: Duration = Duration::from_secs(30);
-const AGENT_PROGRAM: &str = "opencode";
-const EARLY_EOF_MESSAGE: &str = "the agent server reached EOF before reporting credentials";
-/// The server is a loopback child, so basic auth with a per-child password is the
-/// whole trust boundary. See `sec_09`.
+/// The service is a loopback process guarded by its own password, so basic auth is the whole
+/// trust boundary. See `sec_09`.
 const MAX_PROMPT_BYTES: usize = 512 * 1024;
 // Bound both each response header line and the aggregate (status + headers).
 const MAX_EVENT_HEADERS_BYTES: usize = 32 * 1024;
 const MAX_EVENT_HEADER_LINE_BYTES: usize = 8 * 1024;
-const MAX_CREDENTIAL_LINE_BYTES: usize = 8 * 1024;
 // SSE event payloads can include long transcript text; bound all wire bytes per event.
 const MAX_SSE_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_SSE_FRAME_LINES: usize = 16 * 1024;
+/// The header the service reads to decide which location answers a request.
+///
+/// It scopes the answer; the `directory` query parameter filters session lists. JSON requests
+/// carry both; the SSE request carries this header and filters event locations locally.
+const DIRECTORY_HEADER: &str = "x-opencode-directory";
 
-/// `opencode` prints two lines on startup; the second is the only place the password exists.
+/// The service a bridge talks to, and the directory it is scoped to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ServerCredentials {
-    port: u16,
-    password: String,
+    endpoint: ServiceEndpoint,
     directory: PathBuf,
 }
 
@@ -122,6 +137,16 @@ impl ApiModel {
             None => base,
         }
     }
+}
+
+/// One entry of `GET /api/session/active`, keyed by session id.
+///
+/// `running` is the only value the route writes, and it is the whole point of the route: a session
+/// that is absent is one that is not working. Nothing else about the turn is described here.
+#[derive(Debug, Deserialize)]
+struct ApiActiveSession {
+    #[serde(default, rename = "type")]
+    kind: String,
 }
 
 /// One entry of `GET /api/agent`, which is where the color an agent is painted with lives.
@@ -201,13 +226,10 @@ impl BridgeError {
 
 pub struct AgentBridge {
     checkout_id: String,
-    child: Mutex<Option<Child>>,
     credentials: ServerCredentials,
-    /// Drains stdout after credentials arrive, so later child output cannot fill the pipe.
-    output_reader: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// A clone of the event socket, used to interrupt a blocking read during stop.
     event_socket: Mutex<Option<TcpStream>>,
-    /// Set once the server is up, so the event reader can be told to stop.
+    /// Set once the service is reached, so the event reader can be told to stop.
     reader: Mutex<Option<std::thread::JoinHandle<()>>>,
     /// The reader loop reconnects forever, so it needs its own exit condition.
     stopped: std::sync::atomic::AtomicBool,
@@ -216,237 +238,44 @@ pub struct AgentBridge {
 /// Where normalized events go. Injected so the service does not depend on Tauri.
 pub type EventSink = Arc<dyn Fn(AgentEvent) + Send + Sync>;
 
-#[derive(Clone)]
-struct StartupChild(Arc<Mutex<Option<Child>>>);
-
-impl StartupChild {
-    fn new(child: Child) -> Self {
-        Self(Arc::new(Mutex::new(Some(child))))
-    }
-
-    fn with_mut<R>(&self, operation: impl FnOnce(&mut Child) -> R) -> R {
-        let mut child = self
-            .0
-            .lock()
-            .expect("the startup child lock should not be poisoned");
-        operation(
-            child
-                .as_mut()
-                .expect("the startup child should still be owned"),
-        )
-    }
-
-    fn take(&self) -> Option<Child> {
-        self.0
-            .lock()
-            .expect("the startup child lock should not be poisoned")
-            .take()
-    }
-}
-
-struct ChildGuard(Option<StartupChild>);
-
-/// Startup port hooks: the retry predicate is only consulted after the failed child is
-/// terminated, and a retry still requires the exact `EARLY_EOF_MESSAGE` result. `track_child`
-/// is only a test seam for retaining a cleanup handle to the same startup child.
-struct PortHooks<FindPort, IsAvailable, TrackChild> {
-    find_port: FindPort,
-    is_available: IsAvailable,
-    track_child: TrackChild,
-}
-
-impl ChildGuard {
-    fn new(child: impl Into<StartupChild>) -> Self {
-        Self(Some(child.into()))
-    }
-
-    fn with_mut<R>(&self, operation: impl FnOnce(&mut Child) -> R) -> R {
-        self.0
-            .as_ref()
-            .expect("the startup child should still be owned")
-            .with_mut(operation)
-    }
-
-    fn take(&mut self) -> Option<StartupChild> {
-        self.0.take()
-    }
-}
-
-impl From<Child> for StartupChild {
-    fn from(child: Child) -> Self {
-        Self::new(child)
-    }
-}
-
-impl Drop for ChildGuard {
-    fn drop(&mut self) {
-        if let Some(child) = self.take().and_then(|child| child.take()) {
-            terminate_child(child, Instant::now() + STARTUP_STOP_WAIT);
-        }
-    }
-}
-
 impl AgentBridge {
-    /// Starts a server for `directory` and waits until it prints its credentials.
-    fn start(checkout_id: &str, directory: &Path) -> Result<Self, BridgeError> {
-        Self::start_with_timeout(checkout_id, directory, SERVER_BOOT_TIMEOUT)
-    }
-
-    fn start_with_timeout(
-        checkout_id: &str,
-        directory: &Path,
-        startup_timeout: Duration,
-    ) -> Result<Self, BridgeError> {
-        let deadline = Instant::now() + startup_timeout;
-        let program = agent_program()
-            .ok_or_else(|| BridgeError::Unavailable(OPENCODE_UNAVAILABLE.to_string()))?;
-        Self::start_with_deadline(
-            checkout_id,
-            directory,
-            deadline,
-            PortHooks {
-                find_port: free_port,
-                is_available: is_port_available,
-                track_child: no_startup_child_tracking,
-            },
-            |port| {
-                Command::new(&program)
-                    .args([
-                        "serve",
-                        "--port",
-                        &port.to_string(),
-                        "--hostname",
-                        "127.0.0.1",
-                    ])
-                    .current_dir(directory)
-                    .stdin(Stdio::null())
-                    .stdout(Stdio::piped())
-                    .stderr(Stdio::null())
-                    .spawn()
-                    .map_err(|error| {
-                        BridgeError::Unavailable(format!("could not start OpenCode: {error}"))
-                    })
-            },
-            read_credentials,
-            finish_credentials,
-        )
-    }
-
-    /// Runs startup through injected seams so collision handling can be tested without real
-    /// ports. Only an exact early-EOF read error plus a post-termination unavailable port retries.
-    fn start_with_deadline<FindPort, IsAvailable, TrackChild, Launch, Read, Finish>(
-        checkout_id: &str,
-        directory: &Path,
-        deadline: Instant,
-        mut ports: PortHooks<FindPort, IsAvailable, TrackChild>,
-        mut launch: Launch,
-        mut read: Read,
-        mut finish: Finish,
-    ) -> Result<Self, BridgeError>
-    where
-        FindPort: FnMut() -> Result<u16, BridgeError>,
-        IsAvailable: FnMut(u16) -> bool,
-        TrackChild: FnMut(&StartupChild),
-        Launch: FnMut(u16) -> Result<Child, BridgeError>,
-        Read: FnMut(
-            &mut Child,
-            &Path,
-            u16,
-            Instant,
-        )
-            -> Result<(ServerCredentials, std::thread::JoinHandle<()>), BridgeError>,
-        Finish: FnMut(ServerCredentials, Instant) -> Result<ServerCredentials, BridgeError>,
-    {
-        for attempt in 0..MAX_START_ATTEMPTS {
-            // A retry shares the original deadline; do not spend a fresh startup budget on it.
-            if attempt > 0 && Instant::now() >= deadline {
-                return Err(startup_timeout_error());
-            }
-            let port = (ports.find_port)()?;
-            let child = StartupChild::new(launch(port)?);
-            (ports.track_child)(&child);
-            let mut child = ChildGuard::new(child);
-
-            let read_result = child.with_mut(|child| read(child, directory, port, deadline));
-            let (credentials, output_reader) = match read_result {
-                Ok(credentials) => credentials,
-                Err(error) => {
-                    let early_eof = is_early_eof(&error);
-                    let failed_child = child
-                        .take()
-                        .expect("the startup child should still be owned");
-                    terminate_child(
-                        failed_child
-                            .take()
-                            .expect("the startup child should still be owned"),
-                        Instant::now() + STARTUP_STOP_WAIT,
-                    );
-                    // The availability probe is intentionally repeated after EOF: the initial
-                    // bind is only a check, so another process may win the bind-to-spawn race.
-                    if early_eof && !(ports.is_available)(port) {
-                        if Instant::now() >= deadline {
-                            return Err(startup_timeout_error());
-                        }
-                        if attempt + 1 == MAX_START_ATTEMPTS {
-                            return Err(BridgeError::Unavailable(format!(
-                                "another process took the selected agent port; exhausted {MAX_START_ATTEMPTS} startup attempts"
-                            )));
-                        }
-                        continue;
-                    }
-                    return Err(error);
-                }
-            };
-            if Instant::now() >= deadline {
-                terminate_child(
-                    child
-                        .take()
-                        .expect("the startup child should still be owned")
-                        .take()
-                        .expect("the startup child should still be owned"),
-                    Instant::now() + STARTUP_STOP_WAIT,
-                );
-                join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
-                return Err(startup_timeout_error());
-            }
-            if let Err(error) = finish(credentials.clone(), deadline) {
-                terminate_child(
-                    child
-                        .take()
-                        .expect("the startup child should still be owned")
-                        .take()
-                        .expect("the startup child should still be owned"),
-                    Instant::now() + STARTUP_STOP_WAIT,
-                );
-                join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
-                return Err(error);
-            }
-            let child = child
-                .take()
-                .expect("the startup child should still be owned")
-                .take()
-                .expect("the startup child should still be owned");
-            return Ok(Self {
-                checkout_id: checkout_id.to_string(),
-                child: Mutex::new(Some(child)),
-                credentials,
-                output_reader: Mutex::new(Some(output_reader)),
-                event_socket: Mutex::new(None),
-                reader: Mutex::new(None),
-                stopped: std::sync::atomic::AtomicBool::new(false),
-            });
-        }
-        Err(BridgeError::Unavailable(
-            "could not start the agent server after exhausting startup attempts".into(),
-        ))
+    /// Reaches the service the user started, if there is one.
+    ///
+    /// Discovery is the whole of startup: there is no port to pick and no process to wait for, so
+    /// this either has a service to talk to or reports that there is not one yet.
+    fn connect(home: &Path, checkout_id: &str, directory: &Path) -> Result<Self, BridgeError> {
+        let endpoint = opencode::discover(home).map_err(BridgeError::Unavailable)?;
+        let credentials = ServerCredentials {
+            endpoint,
+            directory: directory.to_path_buf(),
+        };
+        let credentials = ready(credentials, Instant::now() + SERVER_READY_TIMEOUT)?;
+        Ok(Self {
+            checkout_id: checkout_id.to_string(),
+            credentials,
+            event_socket: Mutex::new(None),
+            reader: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        })
     }
 
     fn base_url(&self) -> String {
-        format!("http://127.0.0.1:{}", self.credentials.port)
+        self.credentials.endpoint.url.clone()
     }
 
     fn auth_header(&self) -> String {
-        format!("Basic {}", basic_credentials(&self.credentials.password))
+        opencode::authorization(&self.credentials.endpoint.password)
+    }
+
+    fn directory_header(&self) -> io::Result<String> {
+        let directory = self.directory().to_string_lossy().into_owned();
+        if directory.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the checkout path cannot be represented in an HTTP header",
+            ));
+        }
+        Ok(directory)
     }
 
     /// Starts the event reader for this checkout's server, once.
@@ -511,7 +340,12 @@ impl AgentBridge {
         let envelope: ApiEnvelope<T> = send_json(retry_interrupted(|| {
             json_client(timeout)
                 .get(&url)
+                .query("directory", self.directory().to_string_lossy().as_ref())
                 .header("authorization", self.auth_header())
+                .header(
+                    DIRECTORY_HEADER,
+                    self.directory().to_string_lossy().as_ref(),
+                )
                 .header("accept", "application/json")
                 .call()
         }))?;
@@ -527,10 +361,31 @@ impl AgentBridge {
         let envelope: ApiEnvelope<T> = send_json(
             json_client(JSON_REQUEST_TIMEOUT)
                 .post(&format!("{}{path}", self.base_url()))
+                .query("directory", self.directory().to_string_lossy().as_ref())
                 .header("authorization", self.auth_header())
+                .header(
+                    DIRECTORY_HEADER,
+                    self.directory().to_string_lossy().as_ref(),
+                )
                 .send_json(body),
         )?;
         envelope.into_scoped(self.directory())
+    }
+
+    /// The session ids the service is draining a turn for, as its own answer rather than an
+    /// inference from idle times.
+    ///
+    /// This is the only signal in the API that a turn is running, and it is the only one that
+    /// covers a turn a person started in their own TUI. It answers for the whole service, so the
+    /// caller is what narrows it to one directory.
+    fn running_sessions(&self) -> Result<HashSet<String>, BridgeError> {
+        let active: HashMap<String, ApiActiveSession> =
+            self.get_json_with_timeout("/api/session/active", JSON_REQUEST_TIMEOUT)?;
+        Ok(active
+            .into_iter()
+            .filter(|(_, session)| session.kind == "running")
+            .map(|(session_id, _)| session_id)
+            .collect())
     }
 
     /// Resolves a session id inside this bridge only, then hands back the raw session.
@@ -556,7 +411,7 @@ impl AgentBridge {
             .map_err(|error| BridgeError::Failed(format!("could not read the transcript: {error}")))
     }
 
-    fn to_agent_session(&self, raw: &ApiSession) -> AgentSession {
+    fn to_agent_session(&self, raw: &ApiSession, running: bool) -> AgentSession {
         AgentSession {
             id: raw.id.clone(),
             checkout_id: self.checkout_id.clone(),
@@ -570,6 +425,7 @@ impl AgentBridge {
             agent: raw.agent.clone(),
             model: raw.model.as_ref().map(ApiModel::label),
             parent_id: raw.parent_id.clone(),
+            running,
             outcome: raw.outcome.clone(),
             created_at: raw.time.created,
             updated_at: raw.time.updated,
@@ -585,41 +441,18 @@ impl AgentBridge {
         // killing the server: otherwise joining it would never return.
         self.signal_stop();
         let deadline = Instant::now() + timeout;
-        if let Some(socket) = self
-            .event_socket
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
-        {
-            let _ = socket.shutdown(Shutdown::Both);
-        }
-        if let Some(child) = self.child.lock().ok().and_then(|mut slot| slot.take()) {
-            terminate_child(child, deadline);
-        }
-        if let Some(handle) = self
-            .output_reader
-            .lock()
-            .ok()
-            .and_then(|mut slot| slot.take())
-        {
-            join_reader(handle, deadline);
-        }
+        self.clear_event_socket();
         if let Some(handle) = self.reader.lock().ok().and_then(|mut slot| slot.take()) {
             join_reader(handle, deadline);
         }
     }
 
-    /// Sends the child termination signal without waiting for process or reader cleanup.
+    /// Stops this bridge without waiting: the reader is told to end and the socket it is blocked
+    /// on is closed, which is all that ending this app's half of the connection takes. The service
+    /// on the other side is the user's and keeps running.
     fn signal_stop(&self) {
-        if let Ok(mut slot) = self.child.lock() {
-            if !self.stopped.swap(true, Ordering::SeqCst) {
-                if let Some(child) = slot.as_mut() {
-                    let _ = child.kill();
-                }
-            }
-        } else {
-            self.stopped.store(true, Ordering::SeqCst);
-        }
+        self.stopped.store(true, Ordering::SeqCst);
+        self.clear_event_socket();
     }
 }
 
@@ -677,25 +510,6 @@ fn read_bounded_line(
         }
         if complete {
             return Ok(line.len());
-        }
-    }
-}
-
-fn discard_line(reader: &mut impl BufRead) -> io::Result<()> {
-    loop {
-        let (length, complete) = {
-            let available = reader.fill_buf()?;
-            if available.is_empty() {
-                return Ok(());
-            }
-            match available.iter().position(|byte| *byte == b'\n') {
-                Some(index) => (index + 1, true),
-                None => (available.len(), false),
-            }
-        };
-        reader.consume(length);
-        if complete {
-            return Ok(());
         }
     }
 }
@@ -893,16 +707,18 @@ impl Read for SseReader {
 }
 
 fn event_stream(bridge: &AgentBridge) -> io::Result<SseReader> {
-    let address = SocketAddr::from(([127, 0, 0, 1], bridge.credentials.port));
+    let port = bridge.credentials.endpoint.port;
+    let directory = bridge.directory_header()?;
+    let address = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))?;
     let interrupt_socket = stream.try_clone()?;
     stream.set_nodelay(true)?;
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     write!(
         stream,
-        "GET /api/event HTTP/1.1\r\nHost: 127.0.0.1:{}\r\nAuthorization: {}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
-        bridge.credentials.port,
-        bridge.auth_header()
+        "GET /api/event HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: {}\r\n{}: {directory}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+        bridge.auth_header(),
+        DIRECTORY_HEADER
     )?;
     if !bridge.install_event_socket(interrupt_socket) {
         return Err(io::Error::new(
@@ -1011,35 +827,6 @@ fn sleep_unless_stopped(bridge: &AgentBridge, total: Duration) -> bool {
     !bridge.is_stopped()
 }
 
-/// Kills only the child owned by this bridge and reaps it. If the bounded poll cannot observe
-/// exit, a detached reaper owns the child and performs the final wait without extending the
-/// caller's deadline.
-fn terminate_child(mut child: Child, deadline: Instant) {
-    let _ = child.kill();
-    reap_child(child, deadline);
-}
-
-fn reap_child(mut child: Child, deadline: Instant) {
-    loop {
-        match child.try_wait() {
-            Ok(Some(_)) => return,
-            Err(_) => return reap_child_in_background(child),
-            Ok(None) if Instant::now() >= deadline => break,
-            Ok(None) => {
-                sleep(CHILD_REAP_POLL.min(deadline.saturating_duration_since(Instant::now())))
-            }
-        }
-    }
-    reap_child_in_background(child);
-}
-
-fn reap_child_in_background(child: Child) {
-    let _ = std::thread::spawn(move || {
-        let mut child = child;
-        let _ = child.wait();
-    });
-}
-
 /// Reader I/O is interruptible, so the normal path finishes before the deadline. If an
 /// unexpected reader does not finish, dropping its handle detaches it rather than blocking the
 /// caller. Joining the current event thread would panic; it is already on the return path.
@@ -1052,7 +839,7 @@ fn join_reader(handle: std::thread::JoinHandle<()>, deadline: Instant) {
         if remaining.is_zero() {
             break;
         }
-        sleep(CHILD_REAP_POLL.min(remaining));
+        sleep(Duration::from_millis(10).min(remaining));
     }
     if handle.is_finished() {
         let _ = handle.join();
@@ -1074,9 +861,6 @@ impl Drop for AgentBridge {
     }
 }
 
-const OPENCODE_UNAVAILABLE: &str =
-    "OpenCode is unavailable. Install it and make its command available on PATH.";
-
 /// An OpenCode session id is `ses_` plus an opaque suffix. Rejecting anything else keeps a
 /// WebView-supplied value from reaching a path we would otherwise interpolate.
 fn validate_session_id(session_id: &str) -> Result<(), BridgeError> {
@@ -1094,503 +878,19 @@ fn validate_session_id(session_id: &str) -> Result<(), BridgeError> {
     }
 }
 
-fn basic_credentials(password: &str) -> String {
-    use base64::Engine as _;
-    base64::engine::general_purpose::STANDARD.encode(format!("opencode:{password}"))
-}
-
-fn agent_program() -> Option<PathBuf> {
-    executable::find_executable(AGENT_PROGRAM)
-}
-
-/// The window of ports a bridge may take, starting at `PORT_RANGE_START`.
-///
-/// It is wide on purpose. A bridge that is killed with its parent cannot run its own cleanup, so
-/// the port it was given stays taken until `reap_orphaned_servers` ends it on a later launch, and
-/// a narrow window would fill up for as long as that takes. A few hundred ports costs nothing and
-/// buys every checkout a port to start on.
-const PORT_RANGE_START: u16 = 46000;
-const PORT_RANGE_LEN: u16 = 512;
-const MAX_START_ATTEMPTS: usize = 3;
-
-/// Checks candidates by briefly binding each port and releasing it before the child starts. The
-/// port is not reserved until the child binds it; the startup loop may rescan the window after a
-/// bind-to-spawn race.
-fn free_port() -> Result<u16, BridgeError> {
-    free_port_with(is_port_available)
-}
-
-/// Applies the injected availability predicate to candidates from `port_candidates`; the
-/// corresponding post-failure hook must be checked only after child termination.
-fn free_port_with(is_available: impl FnMut(u16) -> bool) -> Result<u16, BridgeError> {
-    first_available_port(
-        port_candidates(NEXT_PORT_ATTEMPT.fetch_add(1, Ordering::Relaxed)),
-        is_available,
-    )
-    .ok_or_else(|| {
-        BridgeError::Unavailable("could not find a free port for the agent server".into())
-    })
-}
-
-fn is_port_available(candidate: u16) -> bool {
-    TcpListener::bind(("127.0.0.1", candidate)).is_ok()
-}
-
-fn no_startup_child_tracking(_: &StartupChild) {}
-
-fn port_candidates(start_offset: u64) -> impl Iterator<Item = u16> {
-    let range_len = u64::from(PORT_RANGE_LEN);
-    let start_offset = start_offset % range_len;
-    (0..PORT_RANGE_LEN).map(move |attempt| {
-        PORT_RANGE_START + ((start_offset + u64::from(attempt)) % range_len) as u16
-    })
-}
-
-fn first_available_port(
-    candidates: impl IntoIterator<Item = u16>,
-    mut is_available: impl FnMut(u16) -> bool,
-) -> Option<u16> {
-    candidates
-        .into_iter()
-        .find(|candidate| is_available(*candidate))
-}
-
-/// The last port in the window, exclusive.
-const PORT_RANGE_END: u16 = PORT_RANGE_START + PORT_RANGE_LEN;
-
-/// Ends the agent servers an earlier app left running, and returns how many it ended.
-///
-/// `stop_all` covers every exit the event loop can take and `Drop` covers none of them, so a
-/// server whose app was killed has nobody left to stop it and holds its port until something
-/// does. This runs before any bridge is started, which is the only moment at which every
-/// surviving server belongs to an app that is gone.
-///
-/// The match is narrow on purpose: it runs against every process on the machine and a wrong kill
-/// is not undoable. The program name, the `serve` subcommand, a port out of this app's window and
-/// a reparented parent all have to line up before anything is signalled.
-pub fn reap_orphaned_servers() -> usize {
-    let mut reaped = 0;
-    for pid in orphaned_agent_pids() {
-        log::warn!("ending the agent server left on pid {pid} by an app that is gone");
-        terminate_orphaned_server(pid);
-        reaped += 1;
-    }
-    reaped
-}
-
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn orphaned_agent_pids() -> Vec<libc::pid_t> {
-    system::pids()
-        .into_iter()
-        .filter(|pid| is_orphaned_agent(*pid))
-        .collect()
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "linux")))]
-fn orphaned_agent_pids() -> Vec<libc::pid_t> {
-    Vec::new()
-}
-
-/// Whether a process is one of this app's agent servers with nothing left to look after it.
-///
-/// The name is the cheap gate: reading the arguments of every process on the machine would be
-/// the expensive way to find out, and `orphaned_agent_port` reads the name out of them anyway and
-/// has the last word.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-fn is_orphaned_agent(pid: libc::pid_t) -> bool {
-    let Ok(pid) = u32::try_from(pid) else {
-        return false;
-    };
-    if crate::terminal::process::executable_name(pid).as_deref() != Some(AGENT_PROGRAM) {
-        return false;
-    }
-    let Some(arguments) = system::arguments(pid as libc::pid_t) else {
-        return false;
-    };
-    orphaned_agent_port(&arguments, system::parent_pid(pid as libc::pid_t)).is_some()
-}
-
-/// The port a process serves, when the process is an agent server of this app's and has lost the
-/// app that owned it.
-///
-/// `arguments` is the argument vector itself, which the platforms frame differently but agree on
-/// in what it holds: the program path, then `serve --port <port>`. The parent has to be `init`,
-/// because reparenting is what an orphan looks like from in here and it is the only thing that
-/// separates a server nobody is left to stop from one that is still owned.
-fn orphaned_agent_port(arguments: &[u8], parent: Option<libc::pid_t>) -> Option<u16> {
-    if parent != Some(1) {
-        return None;
-    }
-    let mut arguments = arguments
-        .split(|byte| *byte == 0)
-        .filter(|argument| !argument.is_empty());
-    let program = std::str::from_utf8(arguments.next()?).ok()?;
-    if Path::new(program).file_name()?.to_str()? != AGENT_PROGRAM {
-        return None;
-    }
-    let arguments = arguments.collect::<Vec<_>>();
-    if arguments.first()? != b"serve" {
-        return None;
-    }
-    let port = arguments
-        .iter()
-        .position(|argument| *argument == b"--port")?
-        + 1;
-    let port = std::str::from_utf8(arguments.get(port)?)
-        .ok()?
-        .parse::<u16>()
-        .ok()?;
-    (PORT_RANGE_START..PORT_RANGE_END)
-        .contains(&port)
-        .then_some(port)
-}
-
-/// Ends an orphaned server the way `terminate_child` ends a live one: a signal, a bounded wait,
-/// and then the one signal that cannot be refused.
-///
-/// `Child::kill` is only available for a process this app started, so the escalation is spelled
-/// out over the same budget the terminal spends on its shells.
-fn terminate_orphaned_server(pid: libc::pid_t) {
-    // SAFETY: a pid and a signal, and neither of them is a pointer.
-    if unsafe { libc::kill(pid, libc::SIGTERM) } != 0 {
-        return;
-    }
-    let deadline = Instant::now() + ORPHAN_STOP_TIMEOUT;
-    while Instant::now() < deadline {
-        // SAFETY: signal 0 reports on a process without touching it, and a process that is gone
-        // is reported as an error rather than as a process to signal.
-        if unsafe { libc::kill(pid, 0) } != 0 {
-            return;
-        }
-        sleep(CHILD_REAP_POLL);
-    }
-    // SAFETY: as above.
-    unsafe {
-        libc::kill(pid, libc::SIGKILL);
-    }
-}
-
-/// The three things a process table can be asked for, which is all the sweep needs from the OS.
-#[cfg(any(target_os = "macos", target_os = "linux"))]
-mod system {
-    #[cfg(target_os = "macos")]
-    mod imp {
-        use std::{ffi::c_void, mem, ptr};
-
-        const PROC_ALL_PIDS: u32 = 1;
-        const PROC_PIDT_SHORTBSDINFO: libc::c_uint = 13;
-        /// `proc_pidinfo` answers `ENOMEM` to a buffer shorter than the structure it copies, and
-        /// how long that structure is belongs to the kernel rather than to this file, so it is
-        /// handed a page and reads the parent out of whatever length it answers with.
-        const BSD_INFO_BUFFER_LEN: usize = 4096;
-        const CTL_KERN: libc::c_int = 1;
-        const KERN_PROCARGS2: libc::c_int = 49;
-
-        extern "C" {
-            /// libproc: every pid on the machine, or the number of bytes they need.
-            fn proc_listpids(
-                type_: libc::c_uint,
-                typeinfo: libc::c_uint,
-                buffer: *mut c_void,
-                buffersize: libc::c_int,
-            ) -> libc::c_int;
-            /// libproc: one field of a process's BSD information, the parent among them.
-            fn proc_pidinfo(
-                pid: libc::c_int,
-                flavor: libc::c_uint,
-                arg: libc::c_ulong,
-                buffer: *mut c_void,
-                buffersize: libc::c_int,
-            ) -> libc::c_int;
-            /// libc: the kernel's own view of a process, which for `KERN_PROCARGS2` is the
-            /// argument vector it was launched with.
-            fn sysctl(
-                name: *mut libc::c_int,
-                namelen: libc::c_uint,
-                oldp: *mut c_void,
-                oldlenp: *mut libc::size_t,
-                newp: *mut c_void,
-                newlen: libc::size_t,
-            ) -> libc::c_int;
-        }
-
-        pub fn pids() -> Vec<libc::pid_t> {
-            let needed = unsafe { proc_listpids(PROC_ALL_PIDS, 0, ptr::null_mut(), 0) };
-            if needed <= 0 {
-                return Vec::new();
-            }
-            let mut buffer = vec![0 as libc::pid_t; needed as usize];
-            let written = unsafe {
-                proc_listpids(
-                    PROC_ALL_PIDS,
-                    0,
-                    buffer.as_mut_ptr().cast(),
-                    (buffer.len() * mem::size_of::<libc::pid_t>()) as libc::c_int,
-                )
-            };
-            if written <= 0 {
-                return Vec::new();
-            }
-            buffer.truncate(written as usize / mem::size_of::<libc::pid_t>());
-            buffer
-        }
-
-        /// The second word of `proc_bsdshortinfo`, which is the parent.
-        ///
-        /// The parent is the only word that says whether anything is left to stop a server, and it is
-        /// the second one: reading the first would report every process as its own parent and find
-        /// nothing at all to be wrong about.
-        pub fn parent_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
-            let mut info = [0_u32; BSD_INFO_BUFFER_LEN / mem::size_of::<u32>()];
-            // SAFETY: `info` is a live buffer of exactly the length the flavor copies, it is told
-            // that length, and the kernel writes no further than it was handed.
-            let written = unsafe {
-                proc_pidinfo(
-                    pid,
-                    PROC_PIDT_SHORTBSDINFO,
-                    0,
-                    info.as_mut_ptr().cast(),
-                    BSD_INFO_BUFFER_LEN as libc::c_int,
-                )
-            };
-            if (written as usize) < 2 * mem::size_of::<u32>() {
-                return None;
-            }
-            libc::pid_t::try_from(info[1]).ok()
-        }
-
-        pub fn arguments(pid: libc::pid_t) -> Option<Vec<u8>> {
-            let mut name = [CTL_KERN, KERN_PROCARGS2, pid];
-            let mut length = 0_usize;
-            // SAFETY: the query is the kernel's own with this process named as its subject, and
-            // a null output pointer with a length asks for the size of the answer rather than
-            // reading one.
-            if unsafe {
-                sysctl(
-                    name.as_mut_ptr(),
-                    name.len() as libc::c_uint,
-                    ptr::null_mut(),
-                    &raw mut length,
-                    ptr::null_mut(),
-                    0,
-                )
-            } != 0
-                || length == 0
-            {
-                return None;
-            }
-            let mut buffer = vec![0_u8; length];
-            // SAFETY: `buffer` is a live allocation of exactly the length the kernel asked for,
-            // and it is told how long it is.
-            if unsafe {
-                sysctl(
-                    name.as_mut_ptr(),
-                    name.len() as libc::c_uint,
-                    buffer.as_mut_ptr().cast(),
-                    &raw mut length,
-                    ptr::null_mut(),
-                    0,
-                )
-            } != 0
-            {
-                return None;
-            }
-            buffer.truncate(length);
-            argument_region(&buffer).map(<[u8]>::to_vec)
-        }
-
-        /// The arguments out of a `KERN_PROCARGS2` buffer: an argument count, the path the
-        /// program was launched with, padding, and then the arguments themselves. Reading the
-        /// first argument off the padding rather than off a fixed offset is what keeps this
-        /// independent of how wide the kernel happens to align it.
-        fn argument_region(buffer: &[u8]) -> Option<&[u8]> {
-            let path = buffer.get(4..)?;
-            let arguments = path.get(path.iter().position(|byte| *byte == 0)? + 1..)?;
-            arguments.get(
-                arguments
-                    .iter()
-                    .position(|byte| *byte != 0)
-                    .unwrap_or(arguments.len())..,
-            )
-        }
-    }
-
-    #[cfg(target_os = "linux")]
-    mod imp {
-        /// Every directory in `/proc` that is named like a pid, which is every process there is.
-        pub fn pids() -> Vec<libc::pid_t> {
-            let Ok(entries) = std::fs::read_dir("/proc") else {
-                return Vec::new();
-            };
-            entries
-                .flatten()
-                .filter_map(|entry| entry.file_name().to_str()?.parse().ok())
-                .collect()
-        }
-
-        /// The fourth field of `/proc/<pid>/stat` is the parent. It is counted from the last `)`
-        /// because the second field is a program name in parentheses that may itself contain
-        /// spaces and parentheses, and `tail -f /dev/null` is one of them.
-        pub fn parent_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
-            let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
-            stat.rsplit_once(')')?
-                .1
-                .split_whitespace()
-                .nth(1)?
-                .parse()
-                .ok()
-        }
-
-        /// `/proc/<pid>/cmdline` is the argument vector, NUL-separated and NUL-terminated.
-        pub fn arguments(pid: libc::pid_t) -> Option<Vec<u8>> {
-            std::fs::read(format!("/proc/{pid}/cmdline")).ok()
-        }
-    }
-
-    pub use imp::*;
-}
-
-fn startup_timeout_error() -> BridgeError {
-    BridgeError::Unavailable("the agent server timed out while starting".into())
-}
-
-fn is_early_eof(error: &BridgeError) -> bool {
-    matches!(
-        error,
-        BridgeError::Unavailable(message)
-            if message == EARLY_EOF_MESSAGE
-    )
-}
-
-/// Reads the password the child prints. The reader remains alive after the password so stdout
-/// written later cannot block the server. The port is the one we asked for, and
-/// `finish_credentials` proves the child actually bound it.
-fn read_credentials(
-    child: &mut Child,
-    directory: &Path,
-    port: u16,
-    deadline: Instant,
-) -> Result<(ServerCredentials, std::thread::JoinHandle<()>), BridgeError> {
-    let stdout = child
-        .stdout
-        .take()
-        .ok_or_else(|| BridgeError::Unavailable("the agent server produced no output".into()))?;
-
-    let (credentials_tx, credentials_rx) = mpsc::channel();
-    let output_reader = std::thread::spawn(move || {
-        let mut lines = BufReader::with_capacity(MAX_CREDENTIAL_LINE_BYTES, stdout);
-        let mut line = Vec::new();
-        let mut reported = false;
-        loop {
-            match read_bounded_line(&mut lines, &mut line, MAX_CREDENTIAL_LINE_BYTES) {
-                Ok(0) => {
-                    if !reported {
-                        let _ = credentials_tx.send(Ok(None));
-                    }
-                    break;
-                }
-                Ok(_) => {
-                    let text = match std::str::from_utf8(trim_line_ending(&line)) {
-                        Ok(text) => text,
-                        Err(_) if !reported => {
-                            let _ = credentials_tx.send(Err(io::Error::new(
-                                io::ErrorKind::InvalidData,
-                                "agent server output is not UTF-8",
-                            )));
-                            break;
-                        }
-                        Err(_) => continue,
-                    };
-                    if !reported {
-                        if let Some(password) = text.strip_prefix("server password ") {
-                            reported = true;
-                            let _ = credentials_tx.send(Ok(Some(password.trim().to_string())));
-                        }
-                    }
-                }
-                Err(error)
-                    if error.kind() == io::ErrorKind::InvalidData
-                        && line.starts_with(b"server password ")
-                        && !reported =>
-                {
-                    let _ = credentials_tx.send(Err(io::Error::new(
-                        io::ErrorKind::InvalidData,
-                        "agent credential line exceeds configured limit",
-                    )));
-                    break;
-                }
-                Err(error) if error.kind() == io::ErrorKind::InvalidData => {
-                    if discard_line(&mut lines).is_err() {
-                        break;
-                    }
-                }
-                Err(error) => {
-                    if !reported {
-                        let _ = credentials_tx.send(Err(error));
-                    }
-                    break;
-                }
-            }
-        }
-    });
-
-    let result = credentials_rx.recv_timeout(deadline.saturating_duration_since(Instant::now()));
-    let password = match result {
-        Ok(Ok(Some(password))) => password,
-        Ok(Ok(None)) => {
-            let _ = child.kill();
-            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
-            return Err(BridgeError::Unavailable(EARLY_EOF_MESSAGE.into()));
-        }
-        Ok(Err(error)) => {
-            let _ = child.kill();
-            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
-            return Err(BridgeError::Unavailable(format!(
-                "could not read the agent server output: {error}"
-            )));
-        }
-        Err(mpsc::RecvTimeoutError::Timeout) => {
-            let _ = child.kill();
-            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
-            return Err(BridgeError::Unavailable(
-                "timed out waiting for the agent server credentials".into(),
-            ));
-        }
-        Err(mpsc::RecvTimeoutError::Disconnected) => {
-            let _ = child.kill();
-            join_reader(output_reader, Instant::now() + STARTUP_STOP_WAIT);
-            return Err(BridgeError::Unavailable(EARLY_EOF_MESSAGE.into()));
-        }
-    };
-
-    Ok((
-        ServerCredentials {
-            port,
-            password,
-            directory: directory.to_path_buf(),
-        },
-        output_reader,
-    ))
-}
-
-/// Confirms the server is really up on the port we asked for, and really scoped to this
-/// checkout, before the bridge is handed out.
+/// Waits until the discovered service answers for this checkout, before the bridge is handed out.
 ///
 /// Ready means "the agent catalog has something in it", not merely "a route answered":
-/// `/api/agent` is empty for the first moments after the password is printed, while the
-/// server is still loading its configuration. A bridge that returned from that window would
-/// tell every later reader that the project has no agents at all, and the colors the sidebar
-/// paints come from that list. Waiting here costs about a second of boot, once per checkout,
-/// and no later call has to wonder.
-fn finish_credentials(
+/// `/api/agent` is empty for the first moments after the service starts, while it is still loading
+/// its configuration. A bridge that returned from that window would tell every later reader that
+/// the project has no agents at all, and the colors the sidebar paints come from that list.
+fn ready(
     credentials: ServerCredentials,
     deadline: Instant,
 ) -> Result<ServerCredentials, BridgeError> {
     let probe = AgentBridge {
         checkout_id: String::new(),
-        child: Mutex::new(None),
         credentials: credentials.clone(),
-        output_reader: Mutex::new(None),
         event_socket: Mutex::new(None),
         reader: Mutex::new(None),
         stopped: std::sync::atomic::AtomicBool::new(false),
@@ -1599,7 +899,7 @@ fn finish_credentials(
         let remaining = deadline.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
             return Err(BridgeError::Unavailable(
-                "the agent server timed out while waiting for readiness".into(),
+                "the OpenCode service did not become ready in time".into(),
             ));
         }
         // /api/agent is cheap and confirms reachability, directory scoping and readiness at
@@ -1951,10 +1251,12 @@ pub struct AgentService {
 }
 
 impl AgentService {
-    pub fn new() -> Self {
+    /// Finds the service the user runs. `home` is where that service registers itself, and it is
+    /// kept for the life of the app so every later connect looks in the same place.
+    pub fn new(home: PathBuf) -> Self {
         let mut service = Self::with_lifecycle(
-            Arc::new(|checkout_id, directory| {
-                AgentBridge::start(checkout_id, directory).map(Arc::new)
+            Arc::new(move |checkout_id, directory| {
+                AgentBridge::connect(&home, checkout_id, directory).map(Arc::new)
             }),
             Arc::new(|bridge, sink| bridge.start_reader(sink)),
             Arc::new(|bridge, timeout| bridge.stop_with_timeout(timeout)),
@@ -1988,13 +1290,14 @@ impl AgentService {
             Arc::new(move |checkout_id, directory| {
                 Ok(Arc::new(AgentBridge {
                     checkout_id: checkout_id.to_string(),
-                    child: Mutex::new(None),
                     credentials: ServerCredentials {
-                        port,
-                        password: "test".into(),
+                        endpoint: ServiceEndpoint {
+                            url: format!("http://127.0.0.1:{port}"),
+                            port,
+                            password: "test".into(),
+                        },
                         directory: directory.to_path_buf(),
                     },
-                    output_reader: Mutex::new(None),
                     event_socket: Mutex::new(None),
                     reader: Mutex::new(None),
                     stopped: std::sync::atomic::AtomicBool::new(false),
@@ -2058,6 +1361,13 @@ impl AgentService {
         if let Ok(mut slot) = self.sink.lock() {
             *slot = Some(sink);
         }
+    }
+
+    /// A service that finds no OpenCode, for the tests that need a holder for generations and
+    /// removal state without talking to anything.
+    #[cfg(test)]
+    pub(crate) fn without_service() -> Self {
+        Self::new(PathBuf::from("/marvis-no-opencode-service"))
     }
 
     fn checkout_operation_lock(&self, checkout_id: &str) -> Arc<Mutex<()>> {
@@ -2239,9 +1549,9 @@ impl AgentService {
             }
             seen.insert(raw.id.clone());
             match tracked.get(&raw.id) {
-                Some(TrackedTurn::Pending) => active.push(bridge.to_agent_session(&raw)),
+                Some(TrackedTurn::Pending) => active.push(bridge.to_agent_session(&raw, true)),
                 Some(TrackedTurn::Started) if raw.time.idle.is_none() => {
-                    active.push(bridge.to_agent_session(&raw));
+                    active.push(bridge.to_agent_session(&raw, true));
                 }
                 Some(TrackedTurn::Started) => {
                     idle.insert(raw.id.clone());
@@ -2260,6 +1570,7 @@ impl AgentService {
                     agent: None,
                     model: None,
                     parent_id: None,
+                    running: true,
                     outcome: None,
                     created_at: 0,
                     updated_at: 0,
@@ -2421,7 +1732,7 @@ impl AgentService {
         }
     }
 
-    /// Every session the checkout's server knows about.
+    /// Every session the checkout's server knows about, with the service's own running answer.
     pub fn sessions(
         &self,
         checkout_id: &str,
@@ -2429,12 +1740,15 @@ impl AgentService {
     ) -> Result<Vec<AgentSession>, BridgeError> {
         let bridge = self.bridge(checkout_id, directory)?;
         let listed: Vec<ApiSession> = bridge.get_json("/api/session")?;
+        // Asked once per list rather than per session: the route answers for the whole service,
+        // so membership is what scopes it to this directory.
+        let running = bridge.running_sessions()?;
         let mut sessions = Vec::new();
         for raw in listed {
             // The list spans every directory the server knows, so foreign sessions are
             // filtered out here. Addressing one by id is what rejects them, below.
             if raw.check_scope(directory).is_ok() {
-                sessions.push(bridge.to_agent_session(&raw));
+                sessions.push(bridge.to_agent_session(&raw, running.contains(&raw.id)));
             }
         }
         Ok(sessions)
@@ -2472,7 +1786,9 @@ impl AgentService {
         session_id: &str,
     ) -> Result<AgentSession, BridgeError> {
         let bridge = self.bridge(checkout_id, directory)?;
-        Ok(bridge.to_agent_session(&bridge.session(session_id)?))
+        let raw = bridge.session(session_id)?;
+        let running = bridge.running_sessions()?.contains(session_id);
+        Ok(bridge.to_agent_session(&raw, running))
     }
 
     pub fn create_session(
@@ -2515,7 +1831,7 @@ impl AgentService {
         let created: ApiSession =
             bridge.post_json("/api/session", &serde_json::json!({ "title": title }))?;
         created.check_scope(directory)?;
-        Ok(bridge.to_agent_session(&created))
+        Ok(bridge.to_agent_session(&created, bridge.running_sessions()?.contains(&created.id)))
     }
 
     /// Sends the review as one message. v2.0.18 wants {"text": …} on this route.
@@ -2583,7 +1899,8 @@ impl AgentService {
             &format!("/api/session/{session_id}/prompt"),
             &serde_json::json!({ "text": text }),
         )?;
-        Ok(bridge.to_agent_session(&bridge.session(session_id)?))
+        let raw = bridge.session(session_id)?;
+        Ok(bridge.to_agent_session(&raw, bridge.running_sessions()?.contains(session_id)))
     }
 
     /// Whether the session's transcript mentions `marker`.
@@ -2682,12 +1999,6 @@ impl AgentService {
     }
 }
 
-impl Default for AgentService {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl Drop for AgentService {
     fn drop(&mut self) {
         self.stop_all();
@@ -2704,9 +2015,7 @@ mod tests {
         collections::HashMap,
         io::{self, BufRead, BufReader, Cursor, Read, Write},
         net::{Shutdown, TcpListener},
-        panic::{catch_unwind, AssertUnwindSafe},
         path::{Path, PathBuf},
-        process::{Child, Command, Stdio},
         sync::{
             atomic::{AtomicUsize, Ordering},
             mpsc, Arc, Mutex,
@@ -2721,29 +2030,27 @@ mod tests {
     };
 
     use super::{
-        agent_program, basic_credentials, discard_line, event_from_payload, event_stream,
-        finish_credentials, first_available_port, free_port_with, generation_scoped_sink,
-        is_interrupted, is_interrupted_request, join_reader, no_startup_child_tracking,
-        orphaned_agent_port, port_candidates, read_bounded_line, read_credentials, read_sse_frame,
-        remove_slot_if_current, retry_interrupted, same_directory, status_detail, terminate_child,
-        terminate_orphaned_server, validate_session_id, AgentBridge, AgentEvent, AgentService,
-        BridgeError, BridgeState, BridgeStopper, ChildGuard, EventSink, PortHooks, RemovalState,
-        ServerCredentials, StartupChild, EARLY_EOF_MESSAGE, INTERRUPTED_READ_ATTEMPTS,
-        INTERRUPTED_REQUEST, MAX_CREDENTIAL_LINE_BYTES, MAX_EVENT_HEADERS_BYTES,
+        event_from_payload, event_stream, generation_scoped_sink, is_interrupted,
+        is_interrupted_request, join_reader, read_bounded_line, read_sse_frame, ready,
+        remove_slot_if_current, retry_interrupted, same_directory, status_detail,
+        validate_session_id, AgentBridge, AgentEvent, AgentService, BridgeError, BridgeState,
+        BridgeStopper, EventSink, RemovalState, ServerCredentials, DIRECTORY_HEADER,
+        INTERRUPTED_READ_ATTEMPTS, INTERRUPTED_REQUEST, MAX_EVENT_HEADERS_BYTES,
         MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
-        MAX_START_ATTEMPTS, PORT_RANGE_END, PORT_RANGE_LEN, PORT_RANGE_START,
     };
+    use crate::services::opencode::ServiceEndpoint;
 
     fn test_event_bridge(directory: &Path, port: u16) -> AgentBridge {
         AgentBridge {
             checkout_id: "test-checkout".into(),
-            child: Mutex::new(None),
             credentials: ServerCredentials {
-                port,
-                password: "test-secret".into(),
+                endpoint: ServiceEndpoint {
+                    url: format!("http://127.0.0.1:{port}"),
+                    port,
+                    password: "test-secret".into(),
+                },
                 directory: directory.to_path_buf(),
             },
-            output_reader: Mutex::new(None),
             event_socket: Mutex::new(None),
             reader: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
@@ -2753,29 +2060,76 @@ mod tests {
     fn mock_event_response(
         directory: &Path,
         response: Vec<u8>,
-    ) -> (AgentBridge, std::thread::JoinHandle<()>) {
+    ) -> (AgentBridge, std::thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock server should bind");
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut request = Vec::new();
-                let mut buffer = [0; 512];
-                while request.len() < 2048 && !request.windows(4).any(|part| part == b"\r\n\r\n") {
-                    let Ok(read) = stream.read(&mut buffer) else {
-                        return;
-                    };
-                    if read == 0 {
-                        return;
-                    }
-                    request.extend_from_slice(&buffer[..read]);
+            let Ok((mut stream, _)) = listener.accept() else {
+                return Vec::new();
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0; 512];
+            while request.len() < 2048 && !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let Ok(read) = stream.read(&mut buffer) else {
+                    break;
+                };
+                if read == 0 {
+                    break;
                 }
-                let _ = stream.write_all(&response);
+                request.extend_from_slice(&buffer[..read]);
             }
+            let _ = stream.write_all(&response);
+            request
         });
         (test_event_bridge(directory, port), server)
     }
 
-    type CapturedJsonRequest = (String, String, Vec<u8>);
+    /// A service that answers every request with an empty agent catalog.
+    ///
+    /// The thread is left running rather than joined: it ends when the test binary does, and a
+    /// listener waiting for a request nobody makes is not something to wait on. Its port is
+    /// returned because that is all a caller needs to point a bridge at it.
+    fn serving_empty_catalog(directory: &Path) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock service should bind");
+        let port = listener.local_addr().unwrap().port();
+        let body = serde_json::to_vec(&serde_json::json!({
+            "data": [],
+            "location": { "directory": directory.to_string_lossy() },
+        }))
+        .expect("the catalog envelope should encode");
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                }
+                if write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .is_err()
+                {
+                    return;
+                }
+                if stream.write_all(&body).is_err() {
+                    return;
+                }
+            }
+        });
+        port
+    }
+
+    /// What one request looked like on the wire: its request line, its Basic auth header, its
+    /// body, and every header it carried so a scope can be asserted on.
+    type CapturedJsonRequest = (String, String, Vec<u8>, Vec<(String, String)>);
 
     fn mock_json_responses(
         responses: Vec<serde_json::Value>,
@@ -2794,6 +2148,7 @@ mod tests {
                         .expect("request line should be readable");
                     let mut authorization = String::new();
                     let mut content_length = 0;
+                    let mut headers = Vec::new();
                     loop {
                         let mut line = String::new();
                         reader.read_line(&mut line).expect("headers should be readable");
@@ -2801,6 +2156,7 @@ mod tests {
                             break;
                         }
                         if let Some((name, value)) = line.trim_end().split_once(':') {
+                            headers.push((name.trim().to_string(), value.trim().to_string()));
                             if name.eq_ignore_ascii_case("authorization") {
                                 authorization = value.trim().to_string();
                             } else if name.eq_ignore_ascii_case("content-length") {
@@ -2820,7 +2176,7 @@ mod tests {
                     stream
                         .write_all(&response)
                         .expect("response body should be writable");
-                    (request_line.trim().to_string(), authorization, body)
+                    (request_line.trim().to_string(), authorization, body, headers)
                 })
                 .collect()
         });
@@ -2838,7 +2194,19 @@ mod tests {
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         bridge.clear_event_socket();
-        server.join().expect("mock server should finish");
+        let request = server.join().expect("mock server should finish");
+        let request_text = String::from_utf8_lossy(&request);
+        let directory_header = request_text
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case(DIRECTORY_HEADER))
+            .map(|(_, value)| value.trim().to_string());
+        let expected_directory = directory.to_string_lossy().into_owned();
+        assert_eq!(
+            directory_header.as_deref(),
+            Some(expected_directory.as_str()),
+            "the SSE stream must be scoped to its checkout"
+        );
     }
 
     #[test]
@@ -2863,21 +2231,25 @@ mod tests {
     }
 
     #[test]
-    fn oversized_stdout_line_is_bounded_and_its_tail_is_consumed() {
-        let input = vec![b'x'; MAX_CREDENTIAL_LINE_BYTES * 2 + 7];
+    fn an_oversized_line_is_bounded() {
+        let input = vec![b'x'; MAX_EVENT_HEADER_LINE_BYTES * 2 + 7];
         let mut reader = std::io::BufReader::with_capacity(1024, Cursor::new(input));
         let mut line = Vec::new();
 
-        let error = read_bounded_line(&mut reader, &mut line, MAX_CREDENTIAL_LINE_BYTES)
-            .expect_err("an oversized credential output line must be rejected");
+        let error = read_bounded_line(&mut reader, &mut line, MAX_EVENT_HEADER_LINE_BYTES)
+            .expect_err("an oversized line must be rejected");
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
-        assert_eq!(line.len(), MAX_CREDENTIAL_LINE_BYTES);
+        assert_eq!(line.len(), MAX_EVENT_HEADER_LINE_BYTES);
 
-        discard_line(&mut reader).expect("the oversized line tail should be drained");
+        // The rejected bytes stay unconsumed, so the same line is rejected again rather than
+        // being handed to the caller a second time as if it had been read.
         assert_eq!(
-            read_bounded_line(&mut reader, &mut line, MAX_CREDENTIAL_LINE_BYTES).unwrap(),
-            0
+            read_bounded_line(&mut reader, &mut line, MAX_EVENT_HEADER_LINE_BYTES)
+                .expect_err("an oversized line must stay rejected")
+                .kind(),
+            io::ErrorKind::InvalidData
         );
+        assert_eq!(line.len(), MAX_EVENT_HEADER_LINE_BYTES);
     }
 
     #[test]
@@ -3042,9 +2414,12 @@ mod tests {
                 "location": {"directory": first_directory}
             }),
             serde_json::json!({"data": [owned_session.clone(), foreign_session]}),
+            // The service's own running answer for the list read just above.
+            serde_json::json!({"data": {"ses_owned": {"type": "running"}}}),
             serde_json::json!({"data": owned_session.clone()}),
             serde_json::json!({"data": {"accepted": true}}),
             serde_json::json!({"data": owned_session.clone()}),
+            serde_json::json!({"data": {"ses_owned": {"type": "running"}}}),
         ]);
         let (second_port, second_server) = mock_json_responses(vec![serde_json::json!({
             "data": {
@@ -3062,6 +2437,9 @@ mod tests {
         let sessions = agents.sessions("first", first.path()).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "ses_owned");
+        // `running` is the service's own answer from `/api/session/active`, not an inference
+        // from an idle time, so a turn this client never prompted still reads as running.
+        assert!(sessions[0].running);
         let prompted = agents
             .prompt("first", first.path(), "ses_owned", "  send one prompt  ")
             .unwrap();
@@ -3075,26 +2453,40 @@ mod tests {
         let first_requests = first_server
             .join()
             .expect("first mock server should finish");
-        assert_eq!(first_requests.len(), 5);
+        assert_eq!(first_requests.len(), 7);
+        // Compared on the route only: the query carries this checkout's own temporary path,
+        // which differs on every run and is asserted on in the scoping test below.
+        let route = |line: &str| line.split('?').next().unwrap_or_default().to_string();
         assert_eq!(
             first_requests
                 .iter()
-                .map(|request| request.0.as_str())
+                .map(|request| route(&request.0))
                 .collect::<Vec<_>>(),
             [
-                "GET /api/agent HTTP/1.1",
-                "GET /api/session HTTP/1.1",
-                "GET /api/session/ses_owned HTTP/1.1",
-                "POST /api/session/ses_owned/prompt HTTP/1.1",
-                "GET /api/session/ses_owned HTTP/1.1",
+                "GET /api/agent",
+                "GET /api/session",
+                "GET /api/session/active",
+                "GET /api/session/ses_owned",
+                "POST /api/session/ses_owned/prompt",
+                "GET /api/session/ses_owned",
+                "GET /api/session/active",
             ]
         );
-        let first_authorization = format!("Basic {}", basic_credentials("test"));
+        // Every one of them is scoped, which is what makes the answers above this checkout's.
+        assert!(first_requests
+            .iter()
+            .all(|request| request.0.contains("directory=") && request.0.ends_with(" HTTP/1.1")));
+        assert!(first_requests.iter().all(|request| request
+            .3
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case(DIRECTORY_HEADER)
+                && value == &first_directory)));
+        let first_authorization = crate::services::opencode::authorization("test");
         assert!(first_requests
             .iter()
             .all(|request| request.1 == first_authorization));
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&first_requests[3].2).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&first_requests[4].2).unwrap(),
             serde_json::json!({"text": "send one prompt"})
         );
 
@@ -3102,8 +2494,42 @@ mod tests {
             .join()
             .expect("second mock server should finish");
         assert_eq!(second_requests.len(), 1);
-        assert_eq!(second_requests[0].0, "GET /api/session/ses_owned HTTP/1.1");
+        assert_eq!(route(&second_requests[0].0), "GET /api/session/ses_owned");
         assert_eq!(second_requests[0].1, first_authorization);
+    }
+
+    /// Every request names the directory twice, because the service reads the scope two ways.
+    ///
+    /// This is not redundancy: with only the header, `/api/session` answers for every location
+    /// the service knows (50 sessions where the checkout has 2), and with only the query,
+    /// `/api/agent` answers for the service's own working directory. A row scoped to a terminal's
+    /// worktree is built out of these answers, so a missing half of it is a wrong row.
+    #[test]
+    fn every_request_carries_the_directory_as_a_header_and_as_a_query_parameter() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_string_lossy().into_owned();
+        let (port, server) = mock_json_responses(vec![serde_json::json!({
+            "data": [{"id": "build", "name": "Build", "mode": "primary"}],
+            "location": {"directory": path}
+        })]);
+        let bridge = test_event_bridge(directory.path(), port);
+        let catalog: Vec<serde_json::Value> = bridge.get_json("/api/agent").unwrap();
+        assert_eq!(catalog.len(), 1);
+
+        let requests = server.join().expect("mock server should finish");
+        let request_line = &requests[0].0;
+        assert!(
+            request_line.starts_with("GET /api/agent?directory="),
+            "{request_line}"
+        );
+        // The value is percent-encoded, so the path cannot be read as a second query parameter.
+        assert!(!request_line.contains("?directory=/"), "{request_line}");
+        let header = requests[0]
+            .3
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(DIRECTORY_HEADER))
+            .expect("every request should name the directory it is scoped to");
+        assert_eq!(header.1, path);
     }
 
     #[test]
@@ -3150,16 +2576,17 @@ mod tests {
     }
 
     fn fake_bridge(checkout_id: &str) -> Arc<AgentBridge> {
-        // These tests cover the service lifecycle, not OS child-process behavior.
+        // These tests cover the service lifecycle, not any connection to a service.
         Arc::new(AgentBridge {
             checkout_id: checkout_id.to_string(),
-            child: Mutex::new(None),
             credentials: ServerCredentials {
-                port: 1,
-                password: "test".into(),
+                endpoint: ServiceEndpoint {
+                    url: "http://127.0.0.1:1".into(),
+                    port: 1,
+                    password: "test".into(),
+                },
                 directory: PathBuf::new(),
             },
-            output_reader: Mutex::new(None),
             event_socket: Mutex::new(None),
             reader: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
@@ -3618,6 +3045,14 @@ mod tests {
         assert!(matches!(*slot.state.lock().unwrap(), BridgeState::Stopped));
     }
 
+    fn error_message(error: &BridgeError) -> &str {
+        match error {
+            BridgeError::Unavailable(message)
+            | BridgeError::Foreign(message)
+            | BridgeError::Failed(message) => message,
+        }
+    }
+
     #[test]
     fn waiting_for_a_start_is_bounded() {
         let slot = super::BridgeSlot::starting();
@@ -3907,444 +3342,6 @@ mod tests {
         assert_eq!(readers.load(Ordering::SeqCst), 0);
         assert_eq!(stops.load(Ordering::SeqCst), 2);
     }
-
-    fn argument_vector(arguments: &[&str]) -> Vec<u8> {
-        let mut buffer = Vec::new();
-        for argument in arguments {
-            buffer.extend_from_slice(argument.as_bytes());
-            buffer.push(0);
-        }
-        buffer
-    }
-
-    fn agent_server_arguments(port: u16) -> Vec<u8> {
-        argument_vector(&[
-            "/Users/somebody/.opencode/bin/opencode",
-            "serve",
-            "--port",
-            &port.to_string(),
-            "--hostname",
-            "127.0.0.1",
-        ])
-    }
-
-    /// The sweep reads every process on the machine and signals what it finds, so this is the
-    /// claim the whole startup sweep rests on: the server the app itself launches, and nothing
-    /// else that runs `opencode`.
-    #[test]
-    fn an_orphaned_server_of_this_apps_is_the_one_it_reaps() {
-        let port = PORT_RANGE_START + 7;
-
-        assert_eq!(
-            orphaned_agent_port(&agent_server_arguments(port), Some(1)),
-            Some(port),
-            "a server of this app's that lost its app is not recognized"
-        );
-        // The window is a range and the far end is inside it. A bridge that started on the last
-        // port is as recoverable as one that started on the first.
-        assert_eq!(
-            orphaned_agent_port(&agent_server_arguments(PORT_RANGE_END - 1), Some(1)),
-            Some(PORT_RANGE_END - 1)
-        );
-    }
-
-    #[test]
-    fn a_server_that_still_has_an_owner_is_left_alone() {
-        let port = PORT_RANGE_START;
-
-        assert_eq!(
-            orphaned_agent_port(&agent_server_arguments(port), Some(4242)),
-            None,
-            "a server this app is still looking after was treated as an orphan"
-        );
-        // A parent that cannot be read is not a parent of one either. Skipping a process whose
-        // ownership cannot be established is the only safe answer, and it costs one lookup.
-        assert_eq!(
-            orphaned_agent_port(&agent_server_arguments(port), None),
-            None,
-            "a server with an unreadable parent was treated as an orphan"
-        );
-    }
-
-    /// Every rejection here is a process that would otherwise be killed for nothing.
-    #[test]
-    fn a_process_that_is_not_this_apps_agent_server_is_left_alone() {
-        let port = PORT_RANGE_START.to_string();
-        for (arguments, why) in [
-            (
-                vec!["/opt/homebrew/bin/node", "serve", "--port", &port],
-                "another program in the same window",
-            ),
-            (
-                vec![
-                    "/Users/somebody/.opencode/bin/opencode",
-                    "tui",
-                    "--port",
-                    &port,
-                ],
-                "another subcommand of the agent",
-            ),
-            (
-                vec![
-                    "/Users/somebody/.opencode/bin/opencode",
-                    "serve",
-                    "--port",
-                    "45999",
-                ],
-                "a port just below the window",
-            ),
-            (
-                vec![
-                    "/Users/somebody/.opencode/bin/opencode",
-                    "serve",
-                    "--port",
-                    "46512",
-                ],
-                "a port just past the window",
-            ),
-            (
-                vec!["/Users/somebody/.opencode/bin/opencode", "serve"],
-                "no port at all",
-            ),
-            (
-                vec!["/Users/somebody/.opencode/bin/opencode"],
-                "no arguments",
-            ),
-            (vec![], "nothing at all"),
-        ] {
-            assert_eq!(
-                orphaned_agent_port(&argument_vector(&arguments), Some(1)),
-                None,
-                "{why} was treated as this app's orphaned server"
-            );
-        }
-        assert_eq!(PORT_RANGE_END, PORT_RANGE_START + PORT_RANGE_LEN);
-    }
-
-    /// The escalation is the whole point of the sweep: a server that ignores the polite signal
-    /// ends anyway, and one that is already gone costs nothing.
-    #[test]
-    fn an_orphaned_server_is_ended_rather_than_left_running() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut child = fixture_child(directory.path(), "exec tail -f /dev/null");
-        let pid = child.id() as libc::pid_t;
-
-        terminate_orphaned_server(pid);
-        // The fixture is this process's own child, so it is a zombie until it is waited for, and
-        // a zombie is still a process the OS reports as alive.
-        let _ = child.wait();
-
-        assert!(
-            fixture_pid_is_gone(pid as u32),
-            "the sweep reported an end and left the process running"
-        );
-        // u32::MAX is never a live pid, so the signal fails and there is nothing to escalate.
-        terminate_orphaned_server(libc::pid_t::MAX);
-    }
-
-    /// The sweep asks the kernel about a process and believes two things: that the second word
-    /// is the parent, and that the arguments come back as the argument vector.
-    ///
-    /// Both are read out of a kernel structure at a fixed offset in a structure this file cannot
-    /// compile against, and both are wrong in the same quiet way if they drift — a parent that is
-    /// really the process's own pid, or arguments that start at the kernel's argument count. So
-    /// they are read back out of this process, which is the one thing on the machine whose answer
-    /// is known without asking the kernel twice.
-    #[cfg(any(target_os = "macos", target_os = "linux"))]
-    #[test]
-    fn a_live_process_reads_back_as_itself_launched_by_its_parent() {
-        let pid = std::process::id() as libc::pid_t;
-
-        let parent =
-            super::system::parent_pid(pid).expect("the kernel refused to name a live process");
-        // SAFETY: `getppid` takes nothing and answers with the parent of this process.
-        assert_eq!(parent, unsafe { libc::getppid() });
-        assert_ne!(
-            parent, pid,
-            "the word read as the parent is this process's own pid, so every process reads as an \
-             orphan"
-        );
-
-        let arguments = super::system::arguments(pid)
-            .expect("the kernel refused the arguments of a live process");
-        let program = arguments
-            .split(|byte| *byte == 0)
-            .next()
-            .expect("the arguments start with the program");
-        let program = std::str::from_utf8(program).expect("a program path is UTF-8");
-        let name = Path::new(program)
-            .file_name()
-            .and_then(|name| name.to_str())
-            .expect("the arguments start with a path");
-        // Cargo suffixes the test binary, so the stem is the fixed part.
-        assert!(
-            name.starts_with("marvis"),
-            "the arguments do not start with this test binary: {name}"
-        );
-    }
-
-    fn fixture_child(directory: &Path, script: &str) -> Child {
-        Command::new("sh")
-            .args(["-c", script])
-            .current_dir(directory)
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .spawn()
-            .expect("the POSIX test fixture should start")
-    }
-
-    fn fixture_pid_is_gone(pid: u32) -> bool {
-        let result = unsafe { libc::kill(pid as libc::pid_t, 0) };
-        result == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-    }
-
-    struct FixtureChildCleanup(Arc<Mutex<Vec<StartupChild>>>);
-
-    impl FixtureChildCleanup {
-        fn new() -> Self {
-            Self(Arc::new(Mutex::new(Vec::new())))
-        }
-
-        fn tracker(&self) -> Arc<Mutex<Vec<StartupChild>>> {
-            Arc::clone(&self.0)
-        }
-    }
-
-    impl Drop for FixtureChildCleanup {
-        fn drop(&mut self) {
-            let children = self
-                .0
-                .lock()
-                .expect("fixture cleanup lock should not be poisoned")
-                .drain(..)
-                .collect::<Vec<_>>();
-            for child in children {
-                if let Some(child) = child.take() {
-                    terminate_child(child, Instant::now() + Duration::from_secs(1));
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn child_guard_reaps_the_child_when_startup_unwinds() {
-        let directory = tempfile::tempdir().unwrap();
-        let child = fixture_child(directory.path(), "exec tail -f /dev/null");
-        let pid = child.id() as libc::pid_t;
-        let result = catch_unwind(AssertUnwindSafe(|| {
-            let _guard = ChildGuard::new(child);
-            panic!("injected startup panic");
-        }));
-
-        assert!(result.is_err());
-        assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
-        assert_eq!(
-            std::io::Error::last_os_error().raw_os_error(),
-            Some(libc::ESRCH)
-        );
-    }
-
-    #[test]
-    fn credential_wait_times_out_when_stdout_stays_open_without_output() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut child = fixture_child(directory.path(), "exec tail -f /dev/null");
-        let error = read_credentials(
-            &mut child,
-            directory.path(),
-            1,
-            Instant::now() + Duration::from_millis(50),
-        )
-        .expect_err("a silent child must not satisfy startup");
-
-        assert!(error_message(&error).contains("timed out"));
-        assert!(
-            child.try_wait().unwrap().is_some(),
-            "fixture child was not reaped"
-        );
-    }
-
-    #[test]
-    fn credential_wait_times_out_on_a_partial_line() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut child = fixture_child(directory.path(), "printf partial; exec tail -f /dev/null");
-        let error = read_credentials(
-            &mut child,
-            directory.path(),
-            1,
-            Instant::now() + Duration::from_millis(50),
-        )
-        .expect_err("a partial line without EOF must not satisfy startup");
-
-        assert!(error_message(&error).contains("timed out"));
-        assert!(
-            child.try_wait().unwrap().is_some(),
-            "fixture child was not reaped"
-        );
-    }
-
-    #[test]
-    fn credential_wait_distinguishes_early_eof() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut child = fixture_child(directory.path(), "printf 'server is starting\\n'");
-        let error = read_credentials(
-            &mut child,
-            directory.path(),
-            1,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .expect_err("a child that exits before credentials must fail");
-
-        assert!(error_message(&error).contains("EOF"));
-        assert!(
-            child.try_wait().unwrap().is_some(),
-            "fixture child was not reaped"
-        );
-    }
-
-    #[test]
-    fn oversized_stdout_log_is_skipped_before_the_password_line() {
-        let directory = tempfile::tempdir().unwrap();
-        let script = format!(
-            "printf '%{}s\n' x; printf 'server password fixture-secret\n'; exec tail -f /dev/null",
-            MAX_CREDENTIAL_LINE_BYTES + 1
-        );
-        let mut child = fixture_child(directory.path(), &script);
-        let (credentials, output_reader) = read_credentials(
-            &mut child,
-            directory.path(),
-            1,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .expect("an oversized unrelated log line should be discarded");
-
-        assert_eq!(credentials.password, "fixture-secret");
-        terminate_child(child, Instant::now() + Duration::from_secs(1));
-        join_reader(output_reader, Instant::now() + Duration::from_secs(1));
-    }
-
-    #[test]
-    fn exact_limit_password_line_at_eof_is_accepted() {
-        let directory = tempfile::tempdir().unwrap();
-        let password_width = MAX_CREDENTIAL_LINE_BYTES - "server password ".len();
-        let script = format!("printf 'server password '; printf '%{}s' x", password_width);
-        let mut child = fixture_child(directory.path(), &script);
-        let (credentials, output_reader) = read_credentials(
-            &mut child,
-            directory.path(),
-            1,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .expect("an EOF-terminated credential at the exact byte limit is valid");
-
-        assert_eq!(credentials.password, "x");
-        terminate_child(child, Instant::now() + Duration::from_secs(1));
-        join_reader(output_reader, Instant::now() + Duration::from_secs(1));
-    }
-
-    #[test]
-    fn oversized_password_line_is_rejected_without_exposing_its_contents() {
-        let directory = tempfile::tempdir().unwrap();
-        let script = format!(
-            "printf 'server password %{}s\n' x; exec tail -f /dev/null",
-            MAX_CREDENTIAL_LINE_BYTES
-        );
-        let mut child = fixture_child(directory.path(), &script);
-        let error = read_credentials(
-            &mut child,
-            directory.path(),
-            1,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .expect_err("an oversized password line must fail startup");
-
-        assert!(error_message(&error).contains("credential line exceeds configured limit"));
-        let kill_deadline = Instant::now() + Duration::from_secs(1);
-        loop {
-            if child.try_wait().unwrap().is_some() {
-                break;
-            }
-            assert!(Instant::now() < kill_deadline, "child should be stopped");
-            sleep(Duration::from_millis(5));
-        }
-    }
-
-    #[test]
-    fn continuous_oversized_stdout_cannot_extend_the_startup_deadline() {
-        let directory = tempfile::tempdir().unwrap();
-        let script = format!(
-            "while :; do printf '%{}s' x; done",
-            MAX_CREDENTIAL_LINE_BYTES + 1
-        );
-        let mut child = fixture_child(directory.path(), &script);
-        let started = Instant::now();
-        let error = read_credentials(
-            &mut child,
-            directory.path(),
-            1,
-            started + Duration::from_millis(50),
-        )
-        .expect_err("a child streaming an unterminated log line must time out");
-
-        assert!(error_message(&error).contains("timed out"));
-        assert!(started.elapsed() < Duration::from_secs(2));
-        assert!(
-            child.try_wait().unwrap().is_some(),
-            "child should be stopped"
-        );
-    }
-
-    #[test]
-    fn credential_reader_drains_stdout_after_startup() {
-        let directory = tempfile::tempdir().unwrap();
-        let mut child = fixture_child(
-            directory.path(),
-            "printf 'server password secret\\nstdout after boot\\n'; exec tail -f /dev/null",
-        );
-        let (credentials, output_reader) = read_credentials(
-            &mut child,
-            directory.path(),
-            1,
-            Instant::now() + Duration::from_secs(1),
-        )
-        .expect("the fixture credentials should be read");
-
-        assert_eq!(credentials.password, "secret");
-        terminate_child(child, Instant::now() + Duration::from_secs(1));
-        join_reader(output_reader, Instant::now() + Duration::from_secs(1));
-    }
-
-    #[test]
-    fn readiness_request_times_out_when_the_child_never_answers_http() {
-        let directory = tempfile::tempdir().unwrap();
-        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
-        let port = listener.local_addr().unwrap().port();
-        let (accepted_tx, accepted_rx) = mpsc::channel();
-        let (release_tx, release_rx) = mpsc::channel();
-        let server = std::thread::spawn(move || {
-            let (mut stream, _) = listener.accept().expect("test request should connect");
-            accepted_tx.send(()).unwrap();
-            let _ = release_rx.recv();
-            let _ = stream.write_all(b"");
-        });
-        let error = finish_credentials(
-            ServerCredentials {
-                port,
-                password: "secret".into(),
-                directory: directory.path().to_path_buf(),
-            },
-            Instant::now() + Duration::from_millis(100),
-        )
-        .expect_err("an HTTP server that never answers must time out");
-
-        accepted_rx
-            .recv_timeout(Duration::from_secs(1))
-            .expect("the readiness request should reach the fixture");
-        release_tx.send(()).unwrap();
-        server.join().unwrap();
-        assert!(error_message(&error).contains("timed out"));
-    }
-
     #[test]
     fn stopping_interrupts_an_idle_sse_reader() {
         let directory = tempfile::tempdir().unwrap();
@@ -4362,20 +3359,7 @@ mod tests {
             accepted_tx.send(()).unwrap();
             let _ = release_rx.recv();
         });
-        let child = fixture_child(directory.path(), "exec tail -f /dev/null");
-        let bridge = Arc::new(AgentBridge {
-            checkout_id: "idle-sse".into(),
-            child: Mutex::new(Some(child)),
-            credentials: ServerCredentials {
-                port,
-                password: "secret".into(),
-                directory: directory.path().to_path_buf(),
-            },
-            output_reader: Mutex::new(None),
-            event_socket: Mutex::new(None),
-            reader: Mutex::new(None),
-            stopped: std::sync::atomic::AtomicBool::new(false),
-        });
+        let bridge = Arc::new(bridge_at("idle-sse", directory.path(), port));
         let (reader_done_tx, reader_done_rx) = mpsc::channel();
         let reader_exit = ReaderExitSignal(Some(reader_done_tx));
         let sink: EventSink = Arc::new(move |_: AgentEvent| {
@@ -4396,6 +3380,25 @@ mod tests {
             .expect("the SSE reader should terminate after stop");
         release_tx.send(()).unwrap();
         server.join().unwrap();
+    }
+
+    /// A bridge pointed at a loopback port that is serving an event stream, for the tests that cover
+    /// the reader's own behaviour rather than how a service was found.
+    fn bridge_at(checkout_id: &str, directory: &Path, port: u16) -> AgentBridge {
+        AgentBridge {
+            checkout_id: checkout_id.to_string(),
+            credentials: ServerCredentials {
+                endpoint: ServiceEndpoint {
+                    url: format!("http://127.0.0.1:{port}"),
+                    port,
+                    password: "secret".into(),
+                },
+                directory: directory.to_path_buf(),
+            },
+            event_socket: Mutex::new(None),
+            reader: Mutex::new(None),
+            stopped: std::sync::atomic::AtomicBool::new(false),
+        }
     }
 
     #[test]
@@ -4421,19 +3424,7 @@ mod tests {
                 .unwrap();
             let _ = stream.shutdown(Shutdown::Write);
         });
-        let bridge = AgentBridge {
-            checkout_id: "truncated-sse".into(),
-            child: Mutex::new(None),
-            credentials: ServerCredentials {
-                port,
-                password: "secret".into(),
-                directory: directory.path().to_path_buf(),
-            },
-            output_reader: Mutex::new(None),
-            event_socket: Mutex::new(None),
-            reader: Mutex::new(None),
-            stopped: std::sync::atomic::AtomicBool::new(false),
-        };
+        let bridge = bridge_at("truncated-sse", directory.path(), port);
         let mut reader = event_stream(&bridge).expect("the truncated stream should connect");
         let started = Instant::now();
         let mut body = Vec::new();
@@ -4505,14 +3496,6 @@ mod tests {
         server.join().expect("mock server should finish");
     }
 
-    fn error_message(error: &BridgeError) -> &str {
-        match error {
-            BridgeError::Unavailable(message)
-            | BridgeError::Foreign(message)
-            | BridgeError::Failed(message) => message,
-        }
-    }
-
     #[test]
     fn a_panicking_reader_starter_does_not_poison_the_slot() {
         let starts = Arc::new(AtomicUsize::new(0));
@@ -4544,19 +3527,6 @@ mod tests {
         assert_eq!(readers.load(Ordering::SeqCst), 2);
         service.stop("checkout");
         assert_eq!(stops.load(Ordering::SeqCst), 2);
-    }
-
-    #[test]
-    fn resolves_the_opencode_binary_without_a_shell() {
-        // None is acceptable on a machine without OpenCode; a shell string is not.
-        if let Some(program) = agent_program() {
-            assert!(!program.to_string_lossy().contains(" -"), "{program:?}");
-        }
-    }
-
-    #[test]
-    fn builds_basic_credentials_for_the_server_password() {
-        assert_eq!(basic_credentials("abc"), "b3BlbmNvZGU6YWJj");
     }
 
     #[test]
@@ -4592,397 +3562,6 @@ mod tests {
     }
 
     #[test]
-    fn a_port_range_full_of_leftovers_still_leaves_room_to_start() {
-        const HELD: u16 = 24;
-        let end = PORT_RANGE_START + PORT_RANGE_LEN;
-        // u64::MAX normalizes to the last slot, so this sequence wraps immediately and
-        // also verifies that offset handling cannot overflow.
-        let candidates = port_candidates(u64::MAX).collect::<Vec<_>>();
-        assert_eq!(candidates.len(), PORT_RANGE_LEN as usize);
-        assert_eq!(candidates[0], end - 1);
-        assert_eq!(candidates[1], PORT_RANGE_START);
-        let mut sorted = candidates.clone();
-        sorted.sort_unstable();
-        assert_eq!(sorted, (PORT_RANGE_START..end).collect::<Vec<_>>());
-
-        let occupied = &candidates[..HELD as usize];
-        let mut tried = Vec::new();
-        let found = first_available_port(candidates.iter().copied(), |candidate| {
-            tried.push(candidate);
-            !occupied.contains(&candidate)
-        })
-        .expect("a partly occupied window is enough to start");
-
-        assert_eq!(found, candidates[HELD as usize]);
-        assert_eq!(tried, candidates[..=HELD as usize]);
-
-        let mut tried = Vec::new();
-        let last_port = *candidates.last().expect("the port window is non-empty");
-        assert_eq!(
-            first_available_port(candidates.iter().copied(), |candidate| {
-                tried.push(candidate);
-                candidate == last_port
-            }),
-            Some(last_port),
-            "the final candidate must still be reachable"
-        );
-        assert_eq!(tried, candidates);
-
-        let mut tried = Vec::new();
-        assert_eq!(
-            first_available_port(candidates.iter().copied(), |candidate| {
-                tried.push(candidate);
-                false
-            }),
-            None,
-            "a fully occupied window must be exhausted"
-        );
-        assert_eq!(tried, candidates);
-        assert!(tried
-            .iter()
-            .all(|candidate| { *candidate >= PORT_RANGE_START && *candidate < end }));
-    }
-
-    #[test]
-    fn retries_a_collision_and_leaves_only_the_final_child_running() {
-        let directory = tempfile::tempdir().unwrap();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let failed_pid = Arc::new(AtomicUsize::new(0));
-        let fixture_cleanup = FixtureChildCleanup::new();
-        let tracked_fixtures = fixture_cleanup.tracker();
-        let occupied = Arc::new(Mutex::new(Vec::<u16>::new()));
-        let launch_directory = directory.path().to_path_buf();
-        let selected = Arc::new(Mutex::new(Vec::<u16>::new()));
-
-        let finder_occupied = Arc::clone(&occupied);
-        let mut finder_probe =
-            move |candidate| !finder_occupied.lock().unwrap().contains(&candidate);
-        let find_port = move || free_port_with(&mut finder_probe);
-
-        let post_collision_occupied = Arc::clone(&occupied);
-        let is_available =
-            move |candidate| !post_collision_occupied.lock().unwrap().contains(&candidate);
-
-        let launch_attempts = Arc::clone(&attempts);
-        let launch_failed_pid = Arc::clone(&failed_pid);
-        let launch_occupied = Arc::clone(&occupied);
-        let launch_selected = Arc::clone(&selected);
-        let launch = move |port| {
-            let attempt = launch_attempts.fetch_add(1, Ordering::SeqCst);
-            launch_selected.lock().unwrap().push(port);
-            if attempt == 0 {
-                // The fake availability probe passed; model a third party winning the gap
-                // before this child could bind, without binding any real port.
-                launch_occupied.lock().unwrap().push(port);
-                let child = fixture_child(&launch_directory, "exec 1>&-; exec sleep 300");
-                launch_failed_pid.store(child.id() as usize, Ordering::SeqCst);
-                Ok(child)
-            } else {
-                Ok(fixture_child(
-                    &launch_directory,
-                    "printf 'server password secret\\n'; exec tail -f /dev/null",
-                ))
-            }
-        };
-
-        let read_attempts = Arc::new(AtomicUsize::new(0));
-        let read = move |_child: &mut Child, path: &Path, port, _deadline| {
-            if read_attempts.fetch_add(1, Ordering::SeqCst) == 0 {
-                // stdout is closed, but the fixture remains alive so this assertion exercises
-                // production termination/reaping rather than the test waiting for an exited child.
-                Err(BridgeError::Unavailable(EARLY_EOF_MESSAGE.into()))
-            } else {
-                Ok((
-                    ServerCredentials {
-                        port,
-                        password: "secret".into(),
-                        directory: path.to_path_buf(),
-                    },
-                    std::thread::spawn(|| {}),
-                ))
-            }
-        };
-
-        let bridge = AgentBridge::start_with_deadline(
-            "collision",
-            directory.path(),
-            Instant::now() + Duration::from_secs(2),
-            PortHooks {
-                find_port,
-                is_available,
-                track_child: move |child: &StartupChild| {
-                    tracked_fixtures.lock().unwrap().push(child.clone())
-                },
-            },
-            launch,
-            read,
-            |credentials, _| Ok(credentials),
-        )
-        .expect("the second candidate should start");
-
-        let selected = selected.lock().unwrap().clone();
-        assert_eq!(attempts.load(Ordering::SeqCst), 2);
-        let failed_pid = failed_pid.load(Ordering::SeqCst) as u32;
-        assert_ne!(failed_pid, 0);
-        assert!(
-            fixture_pid_is_gone(failed_pid),
-            "the failed startup fixture must be terminated and reaped"
-        );
-        assert_eq!(selected.len(), 2);
-        assert_ne!(selected[0], selected[1]);
-        assert!(selected
-            .iter()
-            .all(|port| *port >= PORT_RANGE_START && *port < PORT_RANGE_START + PORT_RANGE_LEN));
-        assert_eq!(bridge.credentials.port, selected[1]);
-        assert!(bridge
-            .child
-            .lock()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .try_wait()
-            .unwrap()
-            .is_none());
-        drop(bridge);
-    }
-
-    #[test]
-    fn bind_to_spawn_collisions_have_a_bounded_retry_limit() {
-        let directory = tempfile::tempdir().unwrap();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let failed_children_observed_exit = Arc::new(AtomicUsize::new(0));
-        let occupied = Arc::new(Mutex::new(Vec::<u16>::new()));
-        let launch_directory = directory.path().to_path_buf();
-
-        let finder_occupied = Arc::clone(&occupied);
-        let mut finder_probe =
-            move |candidate| !finder_occupied.lock().unwrap().contains(&candidate);
-        let find_port = move || free_port_with(&mut finder_probe);
-        let post_collision_occupied = Arc::clone(&occupied);
-        let is_available =
-            move |candidate| !post_collision_occupied.lock().unwrap().contains(&candidate);
-
-        let launch_attempts = Arc::clone(&attempts);
-        let launch_occupied = Arc::clone(&occupied);
-        let launch = move |port| {
-            launch_attempts.fetch_add(1, Ordering::SeqCst);
-            launch_occupied.lock().unwrap().push(port);
-            Ok(fixture_child(
-                &launch_directory,
-                "printf 'server is starting\\n'",
-            ))
-        };
-
-        // This counter observes fixture exit with the test's handle; the collision regression
-        // above checks production cleanup independently by pid.
-        let exited = Arc::clone(&failed_children_observed_exit);
-        let read = move |child: &mut Child, path: &Path, port, deadline| {
-            let result = read_credentials(child, path, port, deadline);
-            if result.is_err() && child.try_wait().unwrap().is_some() {
-                exited.fetch_add(1, Ordering::SeqCst);
-            }
-            result
-        };
-
-        let error = AgentBridge::start_with_deadline(
-            "collision-limit",
-            directory.path(),
-            Instant::now() + Duration::from_secs(2),
-            PortHooks {
-                find_port,
-                is_available,
-                track_child: no_startup_child_tracking,
-            },
-            launch,
-            read,
-            |credentials, _| Ok(credentials),
-        )
-        .err()
-        .expect("the collision retry limit must be enforced");
-
-        assert!(error_message(&error).contains("another process took the selected agent port"));
-        assert!(error_message(&error).contains("exhausted 3 startup attempts"));
-        assert_eq!(attempts.load(Ordering::SeqCst), MAX_START_ATTEMPTS);
-        assert_eq!(
-            failed_children_observed_exit.load(Ordering::SeqCst),
-            MAX_START_ATTEMPTS
-        );
-    }
-
-    #[test]
-    fn an_eof_with_a_free_port_is_not_retried() {
-        let directory = tempfile::tempdir().unwrap();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let fixture_cleanup = FixtureChildCleanup::new();
-        let tracked_fixtures = fixture_cleanup.tracker();
-        let launch_directory = directory.path().to_path_buf();
-        let mut finder_probe = |_| true;
-        let find_port = move || free_port_with(&mut finder_probe);
-
-        let launch_attempts = Arc::clone(&attempts);
-        let launch = move |_| {
-            launch_attempts.fetch_add(1, Ordering::SeqCst);
-            Ok(fixture_child(&launch_directory, "exec tail -f /dev/null"))
-        };
-        let read = |_child: &mut Child, _path: &Path, _port, _deadline| {
-            Err(BridgeError::Unavailable(EARLY_EOF_MESSAGE.into()))
-        };
-
-        let error = AgentBridge::start_with_deadline(
-            "no-collision",
-            directory.path(),
-            Instant::now() + Duration::from_secs(1),
-            PortHooks {
-                find_port,
-                is_available: |_| true,
-                track_child: move |child: &StartupChild| {
-                    tracked_fixtures.lock().unwrap().push(child.clone())
-                },
-            },
-            launch,
-            read,
-            |credentials, _| Ok(credentials),
-        )
-        .err()
-        .expect("an EOF with an available port must fail immediately");
-
-        assert!(error_message(&error).contains("EOF"));
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn a_non_eof_read_error_with_an_occupied_port_is_not_retried() {
-        let directory = tempfile::tempdir().unwrap();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let fixture_cleanup = FixtureChildCleanup::new();
-        let tracked_fixtures = fixture_cleanup.tracker();
-        let launch_directory = directory.path().to_path_buf();
-        let mut finder_probe = |_| true;
-        let find_port = move || free_port_with(&mut finder_probe);
-
-        let launch_attempts = Arc::clone(&attempts);
-        let launch = move |_| {
-            launch_attempts.fetch_add(1, Ordering::SeqCst);
-            Ok(fixture_child(&launch_directory, "exec tail -f /dev/null"))
-        };
-        let read = |_child: &mut Child, _path: &Path, _port, _deadline| {
-            Err(BridgeError::Unavailable(
-                "could not read the agent server output: injected error".into(),
-            ))
-        };
-
-        let error = AgentBridge::start_with_deadline(
-            "non-eof-error",
-            directory.path(),
-            Instant::now() + Duration::from_secs(1),
-            PortHooks {
-                find_port,
-                is_available: |_| false,
-                track_child: move |child: &StartupChild| {
-                    tracked_fixtures.lock().unwrap().push(child.clone())
-                },
-            },
-            launch,
-            read,
-            |credentials, _| Ok(credentials),
-        )
-        .err()
-        .expect("a non-EOF read error must fail immediately");
-
-        assert!(error_message(&error).contains("could not read the agent server output"));
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn rejected_credentials_are_not_retried() {
-        let directory = tempfile::tempdir().unwrap();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let fixture_cleanup = FixtureChildCleanup::new();
-        let tracked_fixtures = fixture_cleanup.tracker();
-        let launch_directory = directory.path().to_path_buf();
-        let mut finder_probe = |_| true;
-        let find_port = move || free_port_with(&mut finder_probe);
-
-        let launch_attempts = Arc::clone(&attempts);
-        let launch = move |_| {
-            launch_attempts.fetch_add(1, Ordering::SeqCst);
-            Ok(fixture_child(&launch_directory, "exec tail -f /dev/null"))
-        };
-        let read = move |_child: &mut Child, path: &Path, port, _deadline| {
-            Ok((
-                ServerCredentials {
-                    port,
-                    password: "secret".into(),
-                    directory: path.to_path_buf(),
-                },
-                std::thread::spawn(|| {}),
-            ))
-        };
-
-        let error = AgentBridge::start_with_deadline(
-            "rejected",
-            directory.path(),
-            Instant::now() + Duration::from_secs(1),
-            PortHooks {
-                find_port,
-                is_available: |_| false,
-                track_child: move |child: &StartupChild| {
-                    tracked_fixtures.lock().unwrap().push(child.clone())
-                },
-            },
-            launch,
-            read,
-            |_, _| Err(BridgeError::Failed(status_detail(401))),
-        )
-        .err()
-        .expect("rejected credentials must fail without a port retry");
-
-        assert!(error_message(&error).contains("rejected Marvis's credentials"));
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
-    fn collision_retries_do_not_reset_the_startup_deadline() {
-        let directory = tempfile::tempdir().unwrap();
-        let attempts = Arc::new(AtomicUsize::new(0));
-        let fixture_cleanup = FixtureChildCleanup::new();
-        let tracked_fixtures = fixture_cleanup.tracker();
-        let launch_directory = directory.path().to_path_buf();
-        let mut finder_probe = |_| true;
-        let find_port = move || free_port_with(&mut finder_probe);
-
-        let launch_attempts = Arc::clone(&attempts);
-        let launch = move |_| {
-            launch_attempts.fetch_add(1, Ordering::SeqCst);
-            Ok(fixture_child(&launch_directory, "exec tail -f /dev/null"))
-        };
-        let read = |_child: &mut Child, _path: &Path, _port, _deadline| {
-            Err(BridgeError::Unavailable(EARLY_EOF_MESSAGE.into()))
-        };
-
-        let error = AgentBridge::start_with_deadline(
-            "expired",
-            directory.path(),
-            Instant::now(),
-            PortHooks {
-                find_port,
-                is_available: |_| false,
-                track_child: move |child: &StartupChild| {
-                    tracked_fixtures.lock().unwrap().push(child.clone())
-                },
-            },
-            launch,
-            read,
-            |credentials, _| Ok(credentials),
-        )
-        .err()
-        .expect("an exhausted shared deadline must report timeout");
-
-        assert!(error_message(&error).contains("timed out while starting"));
-        assert_eq!(attempts.load(Ordering::SeqCst), 1);
-    }
-
-    #[test]
     fn keeps_prompt_limits_and_reports_unavailable_agents_distinctly() {
         // A review larger than this is rejected instead of being split: the contract is
         // that one round is one message.
@@ -5001,6 +3580,41 @@ mod tests {
         );
     }
 
+    /// The service the person running the tests already has open.
+    ///
+    /// The live tests talk to that one rather than to a service of their own, because this app does
+    /// not start one; a person running them is expected to have OpenCode running for them to pass.
+    fn live_service() -> AgentService {
+        let home = std::env::var_os("HOME").expect("a live test needs a home to find OpenCode in");
+        AgentService::new(PathBuf::from(home))
+    }
+
+    #[test]
+    fn a_service_with_no_agents_yet_is_given_until_the_deadline_and_no_longer() {
+        let directory = tempfile::tempdir().unwrap();
+        // A service that answers for this checkout with an empty catalog, which is what the first
+        // moments after someone starts OpenCode look like. It keeps answering, because how many
+        // times a readiness loop asks is a function of how fast it answers, not something a test
+        // should have to predict; the loop is bounded by the deadline instead.
+        let port = serving_empty_catalog(directory.path());
+        let credentials = ServerCredentials {
+            endpoint: ServiceEndpoint {
+                url: format!("http://127.0.0.1:{port}"),
+                port,
+                password: "secret".into(),
+            },
+            directory: directory.path().to_path_buf(),
+        };
+
+        let error = ready(credentials, Instant::now() + Duration::from_millis(100))
+            .expect_err("an empty catalog must not pass as a ready service");
+
+        assert!(
+            error_message(&error).contains("did not become ready"),
+            "{error:?}"
+        );
+    }
+
     #[test]
     fn reports_rejected_credentials_distinctly() {
         assert!(status_detail(401).contains("rejected Marvis's credentials"));
@@ -5014,7 +3628,7 @@ mod tests {
     #[test]
     fn a_round_marker_reaches_the_real_session() {
         let directory = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
-        let agents = AgentService::new();
+        let agents = live_service();
         let created = agents
             .create_session("checkout:marker", &directory, "marker probe")
             .expect("create a session on the real server");
@@ -5057,16 +3671,16 @@ mod tests {
 
     /// Proves what the server can and cannot report about a turn.
     ///
-    /// v2.0.18 has no turn-completed event, and `idle` is absent both for a session that
-    /// never ran and for one that is working. Only the client, which saw the turn start, can
-    /// tell those apart, so the wire contract is `idle_at` and this test pins the ambiguity.
+    /// The session's `idle` field is absent both for a session that never ran and one that is
+    /// working; `/api/session/active` is the separate running signal. This test pins the
+    /// ambiguity of `idle_at` alone while checking how that timestamp changes after a turn.
     ///
     /// `cargo test a_turn_is_observable_through_the_idle_time -- --ignored --nocapture`
     #[ignore = "live OpenCode integration; requires a configured provider and sends a prompt"]
     #[test]
     fn a_turn_is_observable_through_the_idle_time() {
         let directory = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
-        let agents = AgentService::new();
+        let agents = live_service();
         let created = agents
             .create_session("checkout:turn", &directory, "turn probe")
             .expect("create a session on the real server");
@@ -5076,8 +3690,8 @@ mod tests {
                 .owned_session("checkout:turn", &directory, id)
                 .map(|session| session.idle_at)
         };
-        // A session that never ran reports no idle time. This is why `idle_at` cannot be
-        // turned into a `busy` flag on the server's side.
+        // A session that never ran reports no idle time. `idle_at` alone cannot distinguish it
+        // from an active turn; the separate `/api/session/active` answer does that.
         assert_eq!(
             idle_at(&created.id).ok().flatten(),
             None,
@@ -5118,7 +3732,7 @@ mod tests {
     #[test]
     fn the_agent_catalog_is_readable_from_a_real_server() {
         let directory = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
-        let agents = AgentService::new();
+        let agents = live_service();
         let agents_for_catalog = agents
             .agents("checkout:catalog", &directory)
             .expect("read the agent catalog");
@@ -5171,7 +3785,7 @@ mod tests {
     fn bridge_talks_to_a_real_server() {
         let first = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
         let second = required_live_directory("MARVIS_AGENT_BRIDGE_OTHER_DIR");
-        let agents = AgentService::new();
+        let agents = live_service();
 
         // Collect normalized events so the SSE reader is exercised, not just the requests.
         let seen: Arc<Mutex<Vec<AgentEvent>>> = Arc::new(Mutex::new(Vec::new()));
@@ -5262,7 +3876,7 @@ mod tests {
         std::fs::write(&target, original).expect("write the file under review");
         std::fs::write(&second_file, "one\ntwo\n").expect("write the second file under review");
 
-        let agents = AgentService::new();
+        let agents = live_service();
         let mine = agents
             .create_session("checkout:loop", &first, "loop")
             .expect("session in the first checkout");

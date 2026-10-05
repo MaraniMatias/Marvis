@@ -7,13 +7,13 @@ export interface AgentSession {
   checkoutId: string;
   title: string;
   /**
-   * True while a turn is running.
+   * True while the service is draining a turn for this session.
    *
-   * Derived, not reported: the server only says when a session last went idle, and "no idle
-   * time yet" covers both a session that never ran and one working right now. Only a turn
-   * this client saw start can be called working.
+   * Reported, not derived: `/api/session/active` is the service's own answer, so it covers a
+   * turn a person started in their own TUI. A turn only this client saw start cannot say that,
+   * which is why the busy state is read rather than inferred from `idleAt`.
    */
-  busy: boolean;
+  running: boolean;
   /** When the server last saw this session go idle, if ever. */
   idleAt: number | null;
   /** Set when a permission arrived that this server version cannot answer. */
@@ -60,7 +60,7 @@ export type AgentAttention = "none" | "busy" | "blocked" | "failed";
 export function agentAttention(session: AgentSession | undefined): AgentAttention {
   if (!session) return "none";
   if (session.blockedOnPermission) return "blocked";
-  if (session.busy) return "busy";
+  if (session.running) return "busy";
   // A turn the server ended badly is the last word, so it outranks a quiet session.
   return session.outcome === "failed" ? "failed" : "none";
 }

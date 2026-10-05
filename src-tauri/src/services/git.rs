@@ -3543,7 +3543,7 @@ line.txt";
 
         workspace::sync_repo(
             &database,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &repo_id,
         )
         .unwrap();
@@ -4100,7 +4100,7 @@ line.txt";
 
         workspace::archive_checkout(
             &database,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &checkout_id,
         )
         .unwrap();
@@ -4117,7 +4117,7 @@ line.txt";
         fs::write(worktree.join("after-archive.txt"), "changed\n").unwrap();
         workspace::restore_archived_worktrees(
             &database,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &repo_id,
         )
         .unwrap();
