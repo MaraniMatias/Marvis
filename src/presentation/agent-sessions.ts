@@ -57,6 +57,13 @@ const MAX_EVENTS = 200;
  * is the cost. Polling stops the moment nothing is busy, so an idle app is not polled.
  */
 const BUSY_POLL_MS = 2000;
+/**
+ * How often the service is asked about again while it is not there.
+ *
+ * Nothing is started on these ticks: this app is a client of a service the person runs, so the
+ * only way to notice one is to ask. See `DISCONNECTED_POLL_MS` at its use.
+ */
+const DISCONNECTED_POLL_MS = 5000;
 
 function errorText(cause: unknown): string {
   return isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
@@ -279,7 +286,24 @@ export function useAgentSessions(
   }
 
   const pollTimer = setInterval(() => void pollBusySessions(), BUSY_POLL_MS);
-  onScopeDispose(() => clearInterval(pollTimer));
+
+  /**
+   * Asks again while there is no service to talk to.
+   *
+   * The service belongs to whoever started it, so this app does not start one: it waits here until
+   * that person runs OpenCode, and connects on the first read that answers. The interval is slower
+   * than the busy poll because a person starts OpenCode on their own schedule, not between two
+   * turns, and every one of these is a request that answers nothing.
+   */
+  const disconnectedTimer = setInterval(() => {
+    if (state.state !== "error") return;
+    void reload();
+  }, DISCONNECTED_POLL_MS);
+
+  onScopeDispose(() => {
+    clearInterval(pollTimer);
+    clearInterval(disconnectedTimer);
+  });
 
   // One subscription for the app's lifetime: events are filtered by checkout, so a single
   // listener is cheaper than one per checkout and cannot be left dangling.

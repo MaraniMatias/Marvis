@@ -314,6 +314,35 @@ describe("useAgentSessions", () => {
     expect(mocks.listAgentAgents).toHaveBeenCalledTimes(1);
   });
 
+  it("asks again while there is no service, and connects when one appears", async () => {
+    vi.useFakeTimers();
+    mocks.listAgentSessions.mockRejectedValue(new Error("OpenCode is not running."));
+
+    const state = useAgentSessions(
+      computed(() => checkout),
+      computed(() => gitRepo),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.state).toBe("error");
+    const whileDisconnected = mocks.listAgentSessions.mock.calls.length;
+    expect(whileDisconnected).toBeGreaterThan(0);
+
+    // Nothing is started on Marvis's side, so the only way to notice a service is to ask again.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mocks.listAgentSessions.mock.calls.length).toBeGreaterThan(whileDisconnected);
+
+    mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_one", title: "later" })]);
+    await vi.advanceTimersByTimeAsync(5000);
+
+    expect(state.state).toBe("ready");
+    expect(state.sessions.map((entry) => entry.title)).toEqual(["later"]);
+
+    // Connected, it stops asking about a service that is not missing.
+    const onceConnected = mocks.listAgentSessions.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(10000);
+    expect(mocks.listAgentSessions.mock.calls.length).toBe(onceConnected);
+  });
+
   it("keeps a row on the accent when the catalog cannot be read at all", async () => {
     mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_one", agent: "plan" })]);
     mocks.listAgentAgents.mockRejectedValue(new Error("no such route"));

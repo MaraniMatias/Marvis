@@ -689,7 +689,7 @@ mod tests {
         // It has nothing to send. It must not be guessed from the notes, and it must not be
         // dropped either.
 
-        let agents = AgentService::new();
+        let agents = AgentService::without_service();
         // The directory does not exist, so reaching a server would fail loudly if tried.
         let sent = flush_rounds(
             &database,
@@ -727,7 +727,7 @@ mod tests {
         let (database, checkout_id, other_checkout_id) = database_with_two_checkouts(&temp);
         add_note(&database, &checkout_id, "a");
         add_note(&database, &other_checkout_id, "foreign");
-        let agents = AgentService::new();
+        let agents = AgentService::without_service();
 
         assert!(begin_round(
             &database,
@@ -798,7 +798,7 @@ mod tests {
         let (database, checkout_id, _) = database_with_two_checkouts(&temp);
         add_note(&database, &checkout_id, "a");
 
-        let agents = AgentService::new();
+        let agents = AgentService::without_service();
         let session = agents
             .create_session(&checkout_id, &directory, "queue probe")
             .expect("create a session on the real server");

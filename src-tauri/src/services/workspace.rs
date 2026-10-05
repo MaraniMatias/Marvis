@@ -1587,7 +1587,7 @@ mod tests {
 
         let synced = sync_repo(
             &db,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &repo_id,
         )
         .unwrap()
@@ -1614,7 +1614,7 @@ mod tests {
 
         let synced = sync_repo(
             &db,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &opened.repos[0].id,
         )
         .unwrap();
@@ -1744,7 +1744,7 @@ mod tests {
             .unwrap()
             .id
             .clone();
-        let agents = crate::services::agent::AgentService::default();
+        let agents = crate::services::agent::AgentService::without_service();
         let snapshot = super::git_repo_sync_snapshot(&db, &agents, &repo_id)
             .unwrap()
             .expect("the Git repository registration snapshot");
@@ -1773,7 +1773,7 @@ mod tests {
         let opened = register_folder(&db, &primary).unwrap();
         let repo_id = opened.repos[0].id.clone();
         let checkout_id = opened.repos[0].checkouts[0].id.clone();
-        let agents = crate::services::agent::AgentService::default();
+        let agents = crate::services::agent::AgentService::without_service();
         let snapshot = super::git_repo_sync_snapshot(&db, &agents, &repo_id)
             .unwrap()
             .expect("the Git repository registration snapshot");
@@ -1816,7 +1816,7 @@ mod tests {
 
         let result = sync_repo(
             &db,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &opened.repos[0].id,
         );
 
@@ -1850,7 +1850,7 @@ mod tests {
 
         let synced = sync_repo(
             &db,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &repo_id,
         )
         .unwrap()
@@ -1890,7 +1890,7 @@ mod tests {
         let worktree_id = opened.repos[0].checkouts[1].id.clone();
         archive_checkout(
             &db,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &worktree_id,
         )
         .unwrap();
@@ -1901,7 +1901,7 @@ mod tests {
 
         let synced = sync_repo(
             &db,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &repo_id,
         )
         .unwrap()
@@ -1944,7 +1944,7 @@ mod tests {
                 stale_worktree.to_str().unwrap(),
             ],
         );
-        let agents = crate::services::agent::AgentService::default();
+        let agents = crate::services::agent::AgentService::without_service();
         let snapshot = super::git_repo_sync_snapshot(&db, &agents, &repo_id)
             .unwrap()
             .expect("the repository is still registered");
@@ -2005,7 +2005,7 @@ mod tests {
 
         archive_checkout(
             &db,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &worktree_id,
         )
         .unwrap();
@@ -2168,7 +2168,7 @@ mod tests {
 
         let located = locate_missing_checkout(
             &database,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &old_id,
             &moved_to,
         )
@@ -2253,14 +2253,14 @@ mod tests {
 
         assert!(locate_missing_checkout(
             &database,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &checkout_id,
             &other
         )
         .is_err());
         let restored = locate_missing_checkout(
             &database,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &checkout_id,
             &path,
         )
@@ -2293,7 +2293,7 @@ mod tests {
 
         let relocated = locate_missing_checkout(
             &database,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &old_id,
             &new_path,
         )
@@ -2334,7 +2334,7 @@ mod tests {
         let closed = close_missing_checkout(
             &database,
             &crate::terminal::TerminalBackend::default(),
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &checkout_id,
         )
         .unwrap();
@@ -2381,7 +2381,7 @@ mod tests {
         let refused = close_missing_checkout(
             &database,
             &backend,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &linked_id,
         )
         .unwrap_err();
@@ -2395,7 +2395,7 @@ mod tests {
         let closed = close_missing_checkout(
             &database,
             &backend,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &linked_id,
         )
         .unwrap();
@@ -2426,7 +2426,7 @@ mod tests {
         let error = close_missing_checkout(
             &database,
             &crate::terminal::TerminalBackend::default(),
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &checkout_id,
         )
         .unwrap_err();
@@ -2466,7 +2466,7 @@ mod tests {
         let closed = close_checkout(
             &database,
             &backend,
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &linked_id,
         )
         .unwrap();
@@ -2530,7 +2530,7 @@ mod tests {
         let refused = close_checkout(
             &database,
             &crate::terminal::TerminalBackend::default(),
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &linked_id,
         )
         .unwrap_err();
@@ -2572,7 +2572,7 @@ mod tests {
         let closed = close_checkout(
             &database,
             &crate::terminal::TerminalBackend::default(),
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &linked_id,
         )
         .unwrap();
@@ -2610,7 +2610,7 @@ mod tests {
         let error = close_missing_checkout(
             &database,
             &crate::terminal::TerminalBackend::default(),
-            &crate::services::agent::AgentService::default(),
+            &crate::services::agent::AgentService::without_service(),
             &checkout_id,
         )
         .unwrap_err();
