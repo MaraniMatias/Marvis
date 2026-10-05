@@ -15,7 +15,7 @@ function session(overrides: Partial<AgentSession> = {}): AgentSession {
     id: "ses_one",
     checkoutId: "checkout:first",
     title: "review",
-    busy: false,
+    running: false,
     idleAt: 1,
     blockedOnPermission: false,
     agent: null,
@@ -44,8 +44,8 @@ describe("agent session helpers", () => {
   it("reports a blocked session ahead of a busy one, and neither when absent", () => {
     expect(agentAttention(undefined)).toBe("none");
     expect(agentAttention(session())).toBe("none");
-    expect(agentAttention(session({ busy: true }))).toBe("busy");
-    expect(agentAttention(session({ busy: true, blockedOnPermission: true }))).toBe("blocked");
+    expect(agentAttention(session({ running: true }))).toBe("busy");
+    expect(agentAttention(session({ running: true, blockedOnPermission: true }))).toBe("blocked");
     expect(agentAttention(session({ blockedOnPermission: true }))).toBe("blocked");
   });
 
@@ -54,7 +54,7 @@ describe("agent session helpers", () => {
     expect(agentAttention(session({ outcome: "interrupted" }))).toBe("none");
     expect(agentAttention(session({ outcome: "succeeded" }))).toBe("none");
     // Working right now outranks a failure that already happened.
-    expect(agentAttention(session({ busy: true, outcome: "failed" }))).toBe("busy");
+    expect(agentAttention(session({ running: true, outcome: "failed" }))).toBe("busy");
   });
 
   it("takes the agent's color only when it is a hex a stylesheet can use", () => {
@@ -88,7 +88,7 @@ describe("agent session helpers", () => {
 
   it("names the loudest session for a row, and the round's target when nothing is loud", () => {
     const quiet = [session({ id: "ses_quiet", updatedAt: 9, agent: "plan" })];
-    const busy = session({ id: "ses_busy", updatedAt: 1, busy: true, agent: "coder" });
+    const busy = session({ id: "ses_busy", updatedAt: 1, running: true, agent: "coder" });
 
     // Attention outranks recency: the row's news is the busy turn, not the newest idle one.
     expect(headlineSession([...quiet, busy], null)?.id).toBe("ses_busy");

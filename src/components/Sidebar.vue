@@ -24,7 +24,7 @@ import {
 } from "reka-ui";
 import type { ArchivedCheckout, Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
 import { sessionTitle, workdirIconKind, workdirTitle } from "../domain/workspace";
-import type { AgentHeadline } from "../presentation/agent-sessions";
+import type { AgentHeadline, TerminalAgentRow } from "../presentation/agent-sessions";
 import { useDiffStats } from "../presentation/diff-stats";
 import { WORKDIR_ICONS } from "../presentation/workdir-icons";
 
@@ -39,25 +39,26 @@ const props = withDefaults(
     isOpening: boolean;
     sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
     /**
+     * The OpenCode state of each checkout that has terminals, keyed by checkout id.
+     *
+     * Keyed by checkout rather than handed over as one headline because a row is about one
+     * terminal in one worktree: two terminals in different worktrees are different rows, and each
+     * reads only its own. OpenCode 2.0.22 cannot report which session a given terminal has open,
+     * so a row speaks for its worktree's sessions and its tooltip says exactly that.
+     */
+    agentRows?: Record<string, TerminalAgentRow>;
+    /**
      * The worktrees that were archived, so a repo root can offer its own back.
      *
      * The sidebar draws the list of what is on the panel; this is what is behind it.
      */
     archivedWorktrees?: ArchivedCheckout[];
-    /**
-     * The agent of the active checkout, which is the only one with a server behind it.
-     *
-     * It is a property of the checkout, not of any one terminal, so the rows under the active
-     * workdir all repeat it; the `title` on the chip says so rather than implying a link that
-     * OpenCode does not offer.
-     */
-    agent?: AgentHeadline | null;
   }>(),
   {
     homeCheckoutId: null,
     sessionRuntimeStatuses: () => ({}),
+    agentRows: () => ({}),
     archivedWorktrees: () => [],
-    agent: null,
   },
 );
 
@@ -362,6 +363,8 @@ interface WorkdirItem {
   title: string;
   /** The agent this terminal runs, and only when it is the one running it. */
   agent: AgentHeadline | null;
+  /** Whether a turn is running in this terminal's worktree, per the service's own answer. */
+  running: boolean;
 }
 
 interface Workdir {
@@ -558,10 +561,15 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
          */
         title: sessionTitle(session, status),
         /**
-         * The agent this terminal is running, and only that: the checkout's agent belongs to a
-         * row whose foreground process is the agent, and to no other row in the workdir.
+         * The agent behind this terminal, read from this terminal's own worktree.
+         *
+         * Keyed by checkout, so a terminal in a worktree nobody has selected still gets its own
+         * answer instead of the active checkout's, and two worktrees never share one. It is
+         * shown only where the foreground process is the agent: an idle shell row has no OpenCode
+         * behind it, and painting one would claim a turn that is not this row's.
          */
-        agent: app === AGENT_APP && checkout.id === props.activeCheckoutId ? (props.agent ?? null) : null,
+        agent: app === AGENT_APP ? (props.agentRows[checkout.id]?.agent ?? null) : null,
+        running: app === AGENT_APP ? (props.agentRows[checkout.id]?.running ?? false) : false,
       };
     }),
   };
@@ -587,10 +595,20 @@ function rowPinnedForAttention(item: { agent: AgentHeadline | null }): boolean {
   return item.agent !== null && item.agent.attention !== "none" && item.agent.attention !== undefined;
 }
 
-/** Says whose agent it is, which the row cannot know on its own: it is the checkout's. */
-const agentTitle = computed(() =>
-  props.agent ? `OpenCode agent: ${props.agent.label}` : "No OpenCode agent in this workdir",
-);
+/**
+ * Says whose agent it is, which the row cannot work out on its own.
+ *
+ * It names the workdir rather than this terminal, because that is the scope the service can
+ * answer in: OpenCode 2.0.22 exposes no route, header or event that maps a TUI process to a
+ * session, so "the session this terminal has open" is not a question with an answer to read.
+ * Claiming one from the last-viewed session would be wrong the moment two TUIs share a checkout.
+ */
+function agentTitle(item: WorkdirItem): string {
+  if (!item.agent) return "No OpenCode agent running in this workdir";
+  return item.running
+    ? `OpenCode agent: ${item.agent.label} (running in this workdir)`
+    : `OpenCode agent: ${item.agent.label} (in this workdir)`;
+}
 </script>
 
 <template>
@@ -834,7 +852,7 @@ const agentTitle = computed(() =>
                       'workdir-meta-pinned': rowPinnedForAttention(item),
                     }"
                   >
-                    <span class="agent-chip" :title="agentTitle">
+                    <span class="agent-chip" :title="agentTitle(item)">
                       <span
                         class="agent-dot"
                         :style="{ background: item.agent.color ?? 'var(--marvis-accent)' }"

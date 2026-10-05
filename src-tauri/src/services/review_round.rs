@@ -583,13 +583,20 @@ mod tests {
         )
         .unwrap();
         assert_eq!(retried.status, "queued");
+        // Compared on the route: each request also carries `?directory=…`, which is what scopes
+        // the answer to this checkout. See the scoping test in `services::agent`.
         assert_eq!(
-            server.join().expect("mock server should finish"),
+            server
+                .join()
+                .expect("mock server should finish")
+                .iter()
+                .map(|line| line.split('?').next().unwrap_or_default().to_string())
+                .collect::<Vec<_>>(),
             [
-                "GET /api/session/ses_target HTTP/1.1",
-                "GET /api/session/ses_target/message HTTP/1.1",
-                "GET /api/session/ses_target HTTP/1.1",
-                "GET /api/session/ses_target/message HTTP/1.1",
+                "GET /api/session/ses_target",
+                "GET /api/session/ses_target/message",
+                "GET /api/session/ses_target",
+                "GET /api/session/ses_target/message",
             ]
         );
     }

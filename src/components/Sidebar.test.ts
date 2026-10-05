@@ -512,7 +512,7 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
   });
 
-  it("paints the active workdir's agent in OpenCode's own color, and spins only while it works", () => {
+  it("paints the terminal's own workdir agent in OpenCode's own color, and spins while it works", () => {
     const wrapper = mount(Sidebar, {
       props: {
         repos: [
@@ -532,7 +532,12 @@ describe("Sidebar workdir rows", () => {
         activeCheckoutId: "checkout:agent",
         activeSessionId: null,
         isOpening: false,
-        agent: { label: "plan", color: "#FF966C", attention: "busy" },
+        agentRows: {
+          "checkout:agent": {
+            agent: { label: "plan", color: "#FF966C", attention: "busy" },
+            running: true,
+          },
+        },
         sessionRuntimeStatuses: {
           "session:one": { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
         },
@@ -546,7 +551,8 @@ describe("Sidebar workdir rows", () => {
     // Working is the only state with a spinner, and it survives a hover like an error does.
     expect(wrapper.find(".agent-spinner").exists()).toBe(true);
     expect(wrapper.get(".workdir-child .workdir-meta").classes()).toContain("workdir-meta-pinned");
-    expect(chip.attributes("title")).toBe("OpenCode agent: plan");
+    // The tooltip names the workdir, because that is the scope the service can answer in.
+    expect(chip.attributes("title")).toBe("OpenCode agent: plan (running in this workdir)");
     wrapper.unmount();
   });
 
@@ -570,7 +576,12 @@ describe("Sidebar workdir rows", () => {
         activeCheckoutId: "checkout:agent",
         activeSessionId: null,
         isOpening: false,
-        agent: { label: "coder", color: null, attention: "none" },
+        agentRows: {
+          "checkout:agent": {
+            agent: { label: "coder", color: null, attention: "none" },
+            running: false,
+          },
+        },
         sessionRuntimeStatuses: {
           "session:agent": { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
           "session:editing": { state: "running", foregroundProcess: true, foregroundApp: "nvim" },
@@ -598,7 +609,12 @@ describe("Sidebar workdir rows", () => {
         activeCheckoutId: "checkout:agent",
         activeSessionId: null,
         isOpening: false,
-        agent: { label: "coder", color: null, attention: "none" },
+        agentRows: {
+          "checkout:agent": {
+            agent: { label: "coder", color: null, attention: "none" },
+            running: false,
+          },
+        },
         sessionRuntimeStatuses: {
           s: { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
         },
@@ -611,10 +627,12 @@ describe("Sidebar workdir rows", () => {
     expect(chip.get(".agent-dot").attributes("style")).toContain("--marvis-accent");
     expect(quiet.find(".agent-spinner").exists()).toBe(false);
     expect(quiet.get(".workdir-child .workdir-meta").classes()).not.toContain("workdir-meta-pinned");
+    expect(chip.attributes("title")).toBe("OpenCode agent: coder (in this workdir)");
     quiet.unmount();
 
-    // The agent belongs to a checkout, so a row under a workdir that is not the active one
-    // has nothing to say: only the active checkout has a server behind it.
+    // Two worktrees, two terminals, two agents. Each row reads its own worktree, so the one in a
+    // worktree nobody has selected is still named — and named from its own answer, not the
+    // selected worktree's. This is the case a single active-checkout answer got wrong.
     const elsewhere = mount(Sidebar, {
       props: {
         repos: [
@@ -637,7 +655,16 @@ describe("Sidebar workdir rows", () => {
         activeCheckoutId: "checkout:two",
         activeSessionId: null,
         isOpening: false,
-        agent: { label: "plan", color: "#FF966C", attention: "busy" },
+        agentRows: {
+          "checkout:one": {
+            agent: { label: "coder", color: "#4ED6BF", attention: "none" },
+            running: false,
+          },
+          "checkout:two": {
+            agent: { label: "plan", color: "#FF966C", attention: "busy" },
+            running: true,
+          },
+        },
         sessionRuntimeStatuses: {
           a: { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
           b: { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
@@ -645,12 +672,69 @@ describe("Sidebar workdir rows", () => {
       },
     });
     await flushPromises();
-    // One chip, and it hangs off the active workdir: the other checkout has no server behind it.
-    expect(elsewhere.findAll(".agent-chip")).toHaveLength(1);
+    expect(elsewhere.findAll(".agent-chip")).toHaveLength(2);
     const [firstItems, activeItems] = elsewhere.findAll(".workdir-items");
-    expect(firstItems!.find(".agent-chip").exists()).toBe(false);
-    expect(activeItems!.find(".agent-chip").exists()).toBe(true);
+    // The unselected worktree names its own agent, and the selected one names its own: neither
+    // row is painted with the other worktree's agent.
+    expect(firstItems!.get(".agent-chip").text()).toBe("coder");
+    expect(activeItems!.get(".agent-chip").text()).toBe("plan");
+    expect(elsewhere.findAll(".agent-spinner")).toHaveLength(1);
     elsewhere.unmount();
+  });
+
+  it("gives each terminal in its own worktree its own agent and busy state", async () => {
+    // The reported case: several Marvis terminals, `opencode` run in each, independently. Both
+    // rows are live, and each says what its own worktree is doing.
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:one" }),
+                sessions: [session("a", "zsh", "checkout:one")],
+              },
+              {
+                ...checkout({
+                  id: "checkout:two",
+                  path: "/two",
+                  canonicalPath: "/two",
+                  isPrimary: false,
+                  branch: "two",
+                }),
+                sessions: [session("b", "zsh", "checkout:two")],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:one",
+        activeSessionId: null,
+        isOpening: false,
+        agentRows: {
+          "checkout:one": {
+            agent: { label: "coder", color: "#4ED6BF", attention: "busy" },
+            running: true,
+          },
+          "checkout:two": {
+            agent: { label: "plan", color: "#FF966C", attention: "none" },
+            running: false,
+          },
+        },
+        sessionRuntimeStatuses: {
+          a: { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
+          b: { state: "running", foregroundProcess: true, foregroundApp: "opencode" },
+        },
+      },
+    });
+    await flushPromises();
+
+    const [working, idle] = wrapper.findAll(".workdir-items");
+    // Busy in one worktree is not busy in the other: they are separate services' sessions.
+    expect(working!.get(".agent-chip").text()).toBe("coder");
+    expect(working!.find(".agent-spinner").exists()).toBe(true);
+    expect(idle!.get(".agent-chip").text()).toBe("plan");
+    expect(idle!.find(".agent-spinner").exists()).toBe(false);
+    wrapper.unmount();
   });
 
   it("renames a session in place, and only when the name actually changed", async () => {

@@ -1,8 +1,24 @@
 # Agent integration tests
 
-Marvis starts one OpenCode server per checkout. The Rust tests separate local contract and
-lifecycle checks from tests that start a real OpenCode process or send prompts to a provider.
-The six live checks remain `#[ignore]`; default tests and CI do not run them.
+Marvis is a client of the OpenCode service the user starts; it never starts or stops one. The
+Rust tests separate local contract and lifecycle checks from tests that reach a real OpenCode
+service or send prompts to a provider. The six live checks remain `#[ignore]`; default tests and
+CI do not run them.
+
+## Per-terminal identity
+
+OpenCode 2.0.22 exposes no way to attribute a session to the TUI showing it. There is no route
+that lists connected clients, `x-opencode-client` is only ever sent _out_ to model providers, and
+`/api/session/active` answers for the whole service rather than for one connection. `session.view`
+sets one global `viewed` timestamp per session, so with two TUIs sharing a checkout the last one to
+look wins.
+
+What a terminal row can therefore be drawn from is the directory that terminal runs in, which is
+what `useTerminalAgentRows` and the sidebar's `agentRows` are scoped by. A row names its own
+worktree's agent and busy state and never claims a session id for itself. Inferring one from the
+last-viewed session, the newest session, or the process name would misattribute as soon as two
+TUIs share a checkout, so nothing here does that. See the note at the top of
+[`services/agent.rs`](../src-tauri/src/services/agent.rs) for the same limit on the native side.
 
 ## Hermetic checks
 
@@ -27,11 +43,15 @@ cargo clippy --locked --manifest-path src-tauri/Cargo.toml --all-targets -- -D w
 | Session ownership, stale event/request epochs, idle SSE parsing and reader stop                  | Agent service tests; the two targeted worktree generation tests above                               | `bridge_talks_to_a_real_server`, `a_turn_is_observable_through_the_idle_time`       |
 | Review marker persisted in the prompt; retry decision from a transcript response                 | Review-round tests, including `reconciliation_confirms_a_present_marker_and_requeues_an_absent_one` | `a_round_marker_reaches_the_real_session`, `a_queued_round_goes_out_when_flushed`   |
 | Model-driven review editing across two checkouts                                                 | Not covered hermetically                                                                            | `two_checkouts_run_the_review_loop`                                                 |
+| JSON requests scoped by directory; SSE carries the checkout header                               | `every_request_carries_the_directory_as_a_header_and_as_a_query_parameter`, SSE response checks     | —                                                                                   |
+| Running state read from the service, not inferred from an idle time                              | `owned_loopback_api_auth_scopes_catalog_and_prompt_contract_to_checkout`                            | —                                                                                   |
+| Two terminals in different worktrees diverge; a terminal only reads its own worktree             | `useTerminalAgentRows` and `Sidebar workdir rows` vitest suites                                     | —                                                                                   |
 
-The source comments refer to OpenCode **v2.0.18** for the prompt `{ "text": ... }` body,
-session/agent catalog fields, and idle/completion-event behavior. These are source-level
-versioned expectations, not a verified compatibility range or a claim that this release was
-observed. No live OpenCode/provider test was run for this change.
+The directory scoping, `/api/session/active` running answer, and the absence of any per-client
+identity were checked against a running OpenCode **2.0.22** service with read-only requests
+(`/openapi.json`, `/api/info`, `/api/session`, `/api/agent`, `/api/session/active`, `/api/event`).
+No service was started or stopped for this, and no prompt was sent. The prompt `{ "text": ... }`
+body is a source-level expectation that no live test here has confirmed.
 
 ## Opt-in live checks
 

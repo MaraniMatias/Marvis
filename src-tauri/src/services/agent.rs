@@ -8,6 +8,24 @@
 //! The service is the user's, not this app's. Nothing here starts one and nothing here ends one:
 //! `services::opencode` finds the service that is already running, and the absence of one leaves
 //! the app disconnected rather than leaving a server behind.
+//!
+//! # What the service cannot tell us
+//!
+//! JSON requests carry the checkout's directory twice, because the service reads the scope two
+//! ways: the `x-opencode-directory` header decides which location answers, and the `directory`
+//! query parameter filters session lists. Sending the header alone leaves `/api/session`
+//! answering for every location the service knows, and sending the query alone leaves `/api/agent`
+//! answering for the service's own working directory. The SSE request carries the header too;
+//! each event is additionally filtered by its reported location when one is present.
+//!
+//! OpenCode 2.0.22 has no client registry. There is no route that reports which TUI process is
+//! attached to which session, the `x-opencode-client` header is only ever sent *out* to model
+//! providers, and `/api/session/active` answers for the whole service rather than for one
+//! connection. So a session cannot be attributed to the terminal that is showing it. What *is*
+//! available per terminal is the directory it runs in, which is what `terminal_agent_rows` uses:
+//! it reports each terminal's own directory scope instead of guessing which session that
+//! terminal has selected. Guessing from `time.viewed` or from recency would misattribute the
+//! moment two TUIs share a checkout, which is the case this has to be right for.
 
 use std::{
     collections::{HashMap, HashSet},
@@ -52,6 +70,11 @@ const MAX_EVENT_HEADER_LINE_BYTES: usize = 8 * 1024;
 // SSE event payloads can include long transcript text; bound all wire bytes per event.
 const MAX_SSE_FRAME_BYTES: usize = 1024 * 1024;
 const MAX_SSE_FRAME_LINES: usize = 16 * 1024;
+/// The header the service reads to decide which location answers a request.
+///
+/// It scopes the answer; the `directory` query parameter filters session lists. JSON requests
+/// carry both; the SSE request carries this header and filters event locations locally.
+const DIRECTORY_HEADER: &str = "x-opencode-directory";
 
 /// The service a bridge talks to, and the directory it is scoped to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,6 +137,16 @@ impl ApiModel {
             None => base,
         }
     }
+}
+
+/// One entry of `GET /api/session/active`, keyed by session id.
+///
+/// `running` is the only value the route writes, and it is the whole point of the route: a session
+/// that is absent is one that is not working. Nothing else about the turn is described here.
+#[derive(Debug, Deserialize)]
+struct ApiActiveSession {
+    #[serde(default, rename = "type")]
+    kind: String,
 }
 
 /// One entry of `GET /api/agent`, which is where the color an agent is painted with lives.
@@ -234,6 +267,17 @@ impl AgentBridge {
         opencode::authorization(&self.credentials.endpoint.password)
     }
 
+    fn directory_header(&self) -> io::Result<String> {
+        let directory = self.directory().to_string_lossy().into_owned();
+        if directory.bytes().any(|byte| byte.is_ascii_control()) {
+            return Err(io::Error::new(
+                io::ErrorKind::InvalidInput,
+                "the checkout path cannot be represented in an HTTP header",
+            ));
+        }
+        Ok(directory)
+    }
+
     /// Starts the event reader for this checkout's server, once.
     fn start_reader(self: &Arc<Self>, sink: &EventSink) {
         let mut slot = match self.reader.lock() {
@@ -295,7 +339,12 @@ impl AgentBridge {
         let envelope: ApiEnvelope<T> = send_json(
             json_client(timeout)
                 .get(&format!("{}{path}", self.base_url()))
+                .query("directory", self.directory().to_string_lossy().as_ref())
                 .header("authorization", self.auth_header())
+                .header(
+                    DIRECTORY_HEADER,
+                    self.directory().to_string_lossy().as_ref(),
+                )
                 .header("accept", "application/json")
                 .call(),
         )?;
@@ -311,10 +360,31 @@ impl AgentBridge {
         let envelope: ApiEnvelope<T> = send_json(
             json_client(JSON_REQUEST_TIMEOUT)
                 .post(&format!("{}{path}", self.base_url()))
+                .query("directory", self.directory().to_string_lossy().as_ref())
                 .header("authorization", self.auth_header())
+                .header(
+                    DIRECTORY_HEADER,
+                    self.directory().to_string_lossy().as_ref(),
+                )
                 .send_json(body),
         )?;
         envelope.into_scoped(self.directory())
+    }
+
+    /// The session ids the service is draining a turn for, as its own answer rather than an
+    /// inference from idle times.
+    ///
+    /// This is the only signal in the API that a turn is running, and it is the only one that
+    /// covers a turn a person started in their own TUI. It answers for the whole service, so the
+    /// caller is what narrows it to one directory.
+    fn running_sessions(&self) -> Result<HashSet<String>, BridgeError> {
+        let active: HashMap<String, ApiActiveSession> =
+            self.get_json_with_timeout("/api/session/active", JSON_REQUEST_TIMEOUT)?;
+        Ok(active
+            .into_iter()
+            .filter(|(_, session)| session.kind == "running")
+            .map(|(session_id, _)| session_id)
+            .collect())
     }
 
     /// Resolves a session id inside this bridge only, then hands back the raw session.
@@ -340,7 +410,7 @@ impl AgentBridge {
             .map_err(|error| BridgeError::Failed(format!("could not read the transcript: {error}")))
     }
 
-    fn to_agent_session(&self, raw: &ApiSession) -> AgentSession {
+    fn to_agent_session(&self, raw: &ApiSession, running: bool) -> AgentSession {
         AgentSession {
             id: raw.id.clone(),
             checkout_id: self.checkout_id.clone(),
@@ -354,6 +424,7 @@ impl AgentBridge {
             agent: raw.agent.clone(),
             model: raw.model.as_ref().map(ApiModel::label),
             parent_id: raw.parent_id.clone(),
+            running,
             outcome: raw.outcome.clone(),
             created_at: raw.time.created,
             updated_at: raw.time.updated,
@@ -636,6 +707,7 @@ impl Read for SseReader {
 
 fn event_stream(bridge: &AgentBridge) -> io::Result<SseReader> {
     let port = bridge.credentials.endpoint.port;
+    let directory = bridge.directory_header()?;
     let address = SocketAddr::from(([127, 0, 0, 1], port));
     let mut stream = TcpStream::connect_timeout(&address, Duration::from_secs(10))?;
     let interrupt_socket = stream.try_clone()?;
@@ -643,8 +715,9 @@ fn event_stream(bridge: &AgentBridge) -> io::Result<SseReader> {
     stream.set_write_timeout(Some(Duration::from_secs(10)))?;
     write!(
         stream,
-        "GET /api/event HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: {}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
-        bridge.auth_header()
+        "GET /api/event HTTP/1.1\r\nHost: 127.0.0.1:{port}\r\nAuthorization: {}\r\n{}: {directory}\r\nAccept: text/event-stream\r\nConnection: keep-alive\r\n\r\n",
+        bridge.auth_header(),
+        DIRECTORY_HEADER
     )?;
     if !bridge.install_event_socket(interrupt_socket) {
         return Err(io::Error::new(
@@ -1427,9 +1500,9 @@ impl AgentService {
             }
             seen.insert(raw.id.clone());
             match tracked.get(&raw.id) {
-                Some(TrackedTurn::Pending) => active.push(bridge.to_agent_session(&raw)),
+                Some(TrackedTurn::Pending) => active.push(bridge.to_agent_session(&raw, true)),
                 Some(TrackedTurn::Started) if raw.time.idle.is_none() => {
-                    active.push(bridge.to_agent_session(&raw));
+                    active.push(bridge.to_agent_session(&raw, true));
                 }
                 Some(TrackedTurn::Started) => {
                     idle.insert(raw.id.clone());
@@ -1448,6 +1521,7 @@ impl AgentService {
                     agent: None,
                     model: None,
                     parent_id: None,
+                    running: true,
                     outcome: None,
                     created_at: 0,
                     updated_at: 0,
@@ -1609,7 +1683,7 @@ impl AgentService {
         }
     }
 
-    /// Every session the checkout's server knows about.
+    /// Every session the checkout's server knows about, with the service's own running answer.
     pub fn sessions(
         &self,
         checkout_id: &str,
@@ -1617,12 +1691,15 @@ impl AgentService {
     ) -> Result<Vec<AgentSession>, BridgeError> {
         let bridge = self.bridge(checkout_id, directory)?;
         let listed: Vec<ApiSession> = bridge.get_json("/api/session")?;
+        // Asked once per list rather than per session: the route answers for the whole service,
+        // so membership is what scopes it to this directory.
+        let running = bridge.running_sessions()?;
         let mut sessions = Vec::new();
         for raw in listed {
             // The list spans every directory the server knows, so foreign sessions are
             // filtered out here. Addressing one by id is what rejects them, below.
             if raw.check_scope(directory).is_ok() {
-                sessions.push(bridge.to_agent_session(&raw));
+                sessions.push(bridge.to_agent_session(&raw, running.contains(&raw.id)));
             }
         }
         Ok(sessions)
@@ -1660,7 +1737,9 @@ impl AgentService {
         session_id: &str,
     ) -> Result<AgentSession, BridgeError> {
         let bridge = self.bridge(checkout_id, directory)?;
-        Ok(bridge.to_agent_session(&bridge.session(session_id)?))
+        let raw = bridge.session(session_id)?;
+        let running = bridge.running_sessions()?.contains(session_id);
+        Ok(bridge.to_agent_session(&raw, running))
     }
 
     pub fn create_session(
@@ -1703,7 +1782,7 @@ impl AgentService {
         let created: ApiSession =
             bridge.post_json("/api/session", &serde_json::json!({ "title": title }))?;
         created.check_scope(directory)?;
-        Ok(bridge.to_agent_session(&created))
+        Ok(bridge.to_agent_session(&created, bridge.running_sessions()?.contains(&created.id)))
     }
 
     /// Sends the review as one message. v2.0.18 wants {"text": …} on this route.
@@ -1771,7 +1850,8 @@ impl AgentService {
             &format!("/api/session/{session_id}/prompt"),
             &serde_json::json!({ "text": text }),
         )?;
-        Ok(bridge.to_agent_session(&bridge.session(session_id)?))
+        let raw = bridge.session(session_id)?;
+        Ok(bridge.to_agent_session(&raw, bridge.running_sessions()?.contains(session_id)))
     }
 
     /// Whether the session's transcript mentions `marker`.
@@ -1904,8 +1984,9 @@ mod tests {
         event_from_payload, event_stream, generation_scoped_sink, join_reader, read_bounded_line,
         read_sse_frame, ready, remove_slot_if_current, same_directory, status_detail,
         validate_session_id, AgentBridge, AgentEvent, AgentService, BridgeError, BridgeState,
-        BridgeStopper, EventSink, RemovalState, ServerCredentials, MAX_EVENT_HEADERS_BYTES,
-        MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
+        BridgeStopper, EventSink, RemovalState, ServerCredentials, DIRECTORY_HEADER,
+        MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES,
+        MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
     };
     use crate::services::opencode::ServiceEndpoint;
 
@@ -1929,24 +2010,26 @@ mod tests {
     fn mock_event_response(
         directory: &Path,
         response: Vec<u8>,
-    ) -> (AgentBridge, std::thread::JoinHandle<()>) {
+    ) -> (AgentBridge, std::thread::JoinHandle<Vec<u8>>) {
         let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock server should bind");
         let port = listener.local_addr().unwrap().port();
         let server = std::thread::spawn(move || {
-            if let Ok((mut stream, _)) = listener.accept() {
-                let mut request = Vec::new();
-                let mut buffer = [0; 512];
-                while request.len() < 2048 && !request.windows(4).any(|part| part == b"\r\n\r\n") {
-                    let Ok(read) = stream.read(&mut buffer) else {
-                        return;
-                    };
-                    if read == 0 {
-                        return;
-                    }
-                    request.extend_from_slice(&buffer[..read]);
+            let Ok((mut stream, _)) = listener.accept() else {
+                return Vec::new();
+            };
+            let mut request = Vec::new();
+            let mut buffer = [0; 512];
+            while request.len() < 2048 && !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let Ok(read) = stream.read(&mut buffer) else {
+                    break;
+                };
+                if read == 0 {
+                    break;
                 }
-                let _ = stream.write_all(&response);
+                request.extend_from_slice(&buffer[..read]);
             }
+            let _ = stream.write_all(&response);
+            request
         });
         (test_event_bridge(directory, port), server)
     }
@@ -1994,7 +2077,9 @@ mod tests {
         port
     }
 
-    type CapturedJsonRequest = (String, String, Vec<u8>);
+    /// What one request looked like on the wire: its request line, its Basic auth header, its
+    /// body, and every header it carried so a scope can be asserted on.
+    type CapturedJsonRequest = (String, String, Vec<u8>, Vec<(String, String)>);
 
     fn mock_json_responses(
         responses: Vec<serde_json::Value>,
@@ -2013,6 +2098,7 @@ mod tests {
                         .expect("request line should be readable");
                     let mut authorization = String::new();
                     let mut content_length = 0;
+                    let mut headers = Vec::new();
                     loop {
                         let mut line = String::new();
                         reader.read_line(&mut line).expect("headers should be readable");
@@ -2020,6 +2106,7 @@ mod tests {
                             break;
                         }
                         if let Some((name, value)) = line.trim_end().split_once(':') {
+                            headers.push((name.trim().to_string(), value.trim().to_string()));
                             if name.eq_ignore_ascii_case("authorization") {
                                 authorization = value.trim().to_string();
                             } else if name.eq_ignore_ascii_case("content-length") {
@@ -2039,7 +2126,7 @@ mod tests {
                     stream
                         .write_all(&response)
                         .expect("response body should be writable");
-                    (request_line.trim().to_string(), authorization, body)
+                    (request_line.trim().to_string(), authorization, body, headers)
                 })
                 .collect()
         });
@@ -2057,7 +2144,19 @@ mod tests {
         };
         assert_eq!(error.kind(), io::ErrorKind::InvalidData);
         bridge.clear_event_socket();
-        server.join().expect("mock server should finish");
+        let request = server.join().expect("mock server should finish");
+        let request_text = String::from_utf8_lossy(&request);
+        let directory_header = request_text
+            .lines()
+            .filter_map(|line| line.split_once(':'))
+            .find(|(name, _)| name.eq_ignore_ascii_case(DIRECTORY_HEADER))
+            .map(|(_, value)| value.trim().to_string());
+        let expected_directory = directory.to_string_lossy().into_owned();
+        assert_eq!(
+            directory_header.as_deref(),
+            Some(expected_directory.as_str()),
+            "the SSE stream must be scoped to its checkout"
+        );
     }
 
     #[test]
@@ -2265,9 +2364,12 @@ mod tests {
                 "location": {"directory": first_directory}
             }),
             serde_json::json!({"data": [owned_session.clone(), foreign_session]}),
+            // The service's own running answer for the list read just above.
+            serde_json::json!({"data": {"ses_owned": {"type": "running"}}}),
             serde_json::json!({"data": owned_session.clone()}),
             serde_json::json!({"data": {"accepted": true}}),
             serde_json::json!({"data": owned_session.clone()}),
+            serde_json::json!({"data": {"ses_owned": {"type": "running"}}}),
         ]);
         let (second_port, second_server) = mock_json_responses(vec![serde_json::json!({
             "data": {
@@ -2285,6 +2387,9 @@ mod tests {
         let sessions = agents.sessions("first", first.path()).unwrap();
         assert_eq!(sessions.len(), 1);
         assert_eq!(sessions[0].id, "ses_owned");
+        // `running` is the service's own answer from `/api/session/active`, not an inference
+        // from an idle time, so a turn this client never prompted still reads as running.
+        assert!(sessions[0].running);
         let prompted = agents
             .prompt("first", first.path(), "ses_owned", "  send one prompt  ")
             .unwrap();
@@ -2298,26 +2403,40 @@ mod tests {
         let first_requests = first_server
             .join()
             .expect("first mock server should finish");
-        assert_eq!(first_requests.len(), 5);
+        assert_eq!(first_requests.len(), 7);
+        // Compared on the route only: the query carries this checkout's own temporary path,
+        // which differs on every run and is asserted on in the scoping test below.
+        let route = |line: &str| line.split('?').next().unwrap_or_default().to_string();
         assert_eq!(
             first_requests
                 .iter()
-                .map(|request| request.0.as_str())
+                .map(|request| route(&request.0))
                 .collect::<Vec<_>>(),
             [
-                "GET /api/agent HTTP/1.1",
-                "GET /api/session HTTP/1.1",
-                "GET /api/session/ses_owned HTTP/1.1",
-                "POST /api/session/ses_owned/prompt HTTP/1.1",
-                "GET /api/session/ses_owned HTTP/1.1",
+                "GET /api/agent",
+                "GET /api/session",
+                "GET /api/session/active",
+                "GET /api/session/ses_owned",
+                "POST /api/session/ses_owned/prompt",
+                "GET /api/session/ses_owned",
+                "GET /api/session/active",
             ]
         );
+        // Every one of them is scoped, which is what makes the answers above this checkout's.
+        assert!(first_requests
+            .iter()
+            .all(|request| request.0.contains("directory=") && request.0.ends_with(" HTTP/1.1")));
+        assert!(first_requests.iter().all(|request| request
+            .3
+            .iter()
+            .any(|(name, value)| name.eq_ignore_ascii_case(DIRECTORY_HEADER)
+                && value == &first_directory)));
         let first_authorization = crate::services::opencode::authorization("test");
         assert!(first_requests
             .iter()
             .all(|request| request.1 == first_authorization));
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&first_requests[3].2).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&first_requests[4].2).unwrap(),
             serde_json::json!({"text": "send one prompt"})
         );
 
@@ -2325,8 +2444,42 @@ mod tests {
             .join()
             .expect("second mock server should finish");
         assert_eq!(second_requests.len(), 1);
-        assert_eq!(second_requests[0].0, "GET /api/session/ses_owned HTTP/1.1");
+        assert_eq!(route(&second_requests[0].0), "GET /api/session/ses_owned");
         assert_eq!(second_requests[0].1, first_authorization);
+    }
+
+    /// Every request names the directory twice, because the service reads the scope two ways.
+    ///
+    /// This is not redundancy: with only the header, `/api/session` answers for every location
+    /// the service knows (50 sessions where the checkout has 2), and with only the query,
+    /// `/api/agent` answers for the service's own working directory. A row scoped to a terminal's
+    /// worktree is built out of these answers, so a missing half of it is a wrong row.
+    #[test]
+    fn every_request_carries_the_directory_as_a_header_and_as_a_query_parameter() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().to_string_lossy().into_owned();
+        let (port, server) = mock_json_responses(vec![serde_json::json!({
+            "data": [{"id": "build", "name": "Build", "mode": "primary"}],
+            "location": {"directory": path}
+        })]);
+        let bridge = test_event_bridge(directory.path(), port);
+        let catalog: Vec<serde_json::Value> = bridge.get_json("/api/agent").unwrap();
+        assert_eq!(catalog.len(), 1);
+
+        let requests = server.join().expect("mock server should finish");
+        let request_line = &requests[0].0;
+        assert!(
+            request_line.starts_with("GET /api/agent?directory="),
+            "{request_line}"
+        );
+        // The value is percent-encoded, so the path cannot be read as a second query parameter.
+        assert!(!request_line.contains("?directory=/"), "{request_line}");
+        let header = requests[0]
+            .3
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case(DIRECTORY_HEADER))
+            .expect("every request should name the directory it is scoped to");
+        assert_eq!(header.1, path);
     }
 
     #[test]
@@ -3468,9 +3621,9 @@ mod tests {
 
     /// Proves what the server can and cannot report about a turn.
     ///
-    /// v2.0.18 has no turn-completed event, and `idle` is absent both for a session that
-    /// never ran and for one that is working. Only the client, which saw the turn start, can
-    /// tell those apart, so the wire contract is `idle_at` and this test pins the ambiguity.
+    /// The session's `idle` field is absent both for a session that never ran and one that is
+    /// working; `/api/session/active` is the separate running signal. This test pins the
+    /// ambiguity of `idle_at` alone while checking how that timestamp changes after a turn.
     ///
     /// `cargo test a_turn_is_observable_through_the_idle_time -- --ignored --nocapture`
     #[ignore = "live OpenCode integration; requires a configured provider and sends a prompt"]
@@ -3487,8 +3640,8 @@ mod tests {
                 .owned_session("checkout:turn", &directory, id)
                 .map(|session| session.idle_at)
         };
-        // A session that never ran reports no idle time. This is why `idle_at` cannot be
-        // turned into a `busy` flag on the server's side.
+        // A session that never ran reports no idle time. `idle_at` alone cannot distinguish it
+        // from an active turn; the separate `/api/session/active` answer does that.
         assert_eq!(
             idle_at(&created.id).ok().flatten(),
             None,

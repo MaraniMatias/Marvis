@@ -313,7 +313,7 @@ function session(id: string, overrides: Partial<AgentSession> = {}): AgentSessio
     id,
     checkoutId: checkout.id,
     title: id,
-    busy: false,
+    running: false,
     idleAt: 1,
     blockedOnPermission: false,
     agent: null,
@@ -1028,7 +1028,7 @@ describe("FileDiff", () => {
   });
 
   it("exports the notes as markdown without a session, a busy dialog, or a round count", async () => {
-    const busy = session("ses_one", { title: "review one", busy: true, idleAt: null });
+    const busy = session("ses_one", { title: "review one", running: true, idleAt: null });
     const stub = senderStub([busy], "ses_one", 3, "markdown");
     const wrapper = mountDiff({ review: reviewApi([note()]) }, stub.sender);
     await flushPromises();
@@ -1246,7 +1246,7 @@ describe("FileDiff", () => {
   });
 
   it("asks what to do when the target is mid-task, and can be talked out of it", async () => {
-    const busy = session("ses_one", { title: "review one", busy: true, idleAt: null });
+    const busy = session("ses_one", { title: "review one", running: true, idleAt: null });
     const stub = senderStub([busy]);
     const wrapper = mountDiff({ review: reviewApi([note()]) }, stub.sender);
     await flushPromises();

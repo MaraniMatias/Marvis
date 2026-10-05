@@ -48,7 +48,7 @@ import { useGitWatchers } from "./presentation/git-watchers";
 import { useWorktreeSync } from "./presentation/worktree-sync";
 import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
 import type { ReviewSender } from "./presentation/review-notes";
-import { useAgentSessions } from "./presentation/agent-sessions";
+import { useAgentSessions, useTerminalAgentRows } from "./presentation/agent-sessions";
 import { useToasts } from "./presentation/toasts";
 import { WORKDIR_ICONS } from "./presentation/workdir-icons";
 import { theme } from "./presentation/theme";
@@ -140,6 +140,21 @@ const gitSnapshot = useActiveGitSnapshot(
 );
 const review = useReviewNotes(activeCheckout, activeRepo);
 const agent = useAgentSessions(activeCheckout, activeRepo);
+/**
+ * The OpenCode state of every checkout that has a terminal, for the sidebar rows.
+ *
+ * Separate from `agent`, which follows the active checkout for the review surface: a row is about
+ * one terminal in one worktree, and it must be able to answer for a worktree nobody has selected.
+ */
+const terminalAgents = useTerminalAgentRows(
+  computed(() => [
+    ...new Set(
+      workspace.value.repos.flatMap((repo) =>
+        repo.checkouts.filter((checkout) => checkout.sessions.length > 0).map((checkout) => checkout.id),
+      ),
+    ),
+  ]),
+);
 const reviewTarget = ref<ReviewTarget>("markdown");
 let reviewTargetLoadGeneration = 0;
 watch(
@@ -1580,7 +1595,7 @@ function reportWarning(message: string) {
           :active-checkout-id="workspace.activeCheckoutId"
           :active-session-id="workspace.activeSessionId"
           :session-runtime-statuses="sessionRuntimeStatuses"
-          :agent="agent.headline"
+          :agent-rows="terminalAgents.byCheckout"
           :is-opening="isOpening"
           :archived-worktrees="workspace.archivedWorktrees"
           @open-folder="chooseFolder"

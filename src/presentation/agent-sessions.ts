@@ -38,8 +38,8 @@ export interface ActiveAgentSessions {
   /** Live events for the active checkout, newest last. */
   events: AgentEvent[];
   /**
-   * Increments once per turn that was seen to finish. This is the only completion signal
-   * v2.0.18 offers, so consumers that need to re-check a finished turn watch this.
+   * Increments once per turn that was seen to finish. The service announces no completion, so
+   * consumers that need to re-check a finished turn watch this.
    */
   turnsCompleted: number;
   reload(): Promise<boolean>;
@@ -50,11 +50,11 @@ export interface ActiveAgentSessions {
 
 const MAX_EVENTS = 200;
 /**
- * How often a working session is re-read while the agent is busy.
+ * How often a working session is re-read while the service reports a turn running.
  *
- * v2.0.18 has no turn-completed event: a successful turn ends in silence, and idleness is
- * only visible as `time.idle` on the session. So a turn ending has to be observed, and this
- * is the cost. Polling stops the moment nothing is busy, so an idle app is not polled.
+ * The service announces no turn-completed event: a turn ends in silence and only
+ * `/api/session/active` stops reporting it. So an ending has to be observed, and this is the
+ * cost. Polling stops the moment nothing is running, so an idle app is not polled.
  */
 const BUSY_POLL_MS = 2000;
 /**
@@ -70,10 +70,50 @@ function errorText(cause: unknown): string {
 }
 
 /**
+ * Counts the turns that ended since the last read, and leaves `wasRunning` holding what is
+ * running now.
+ *
+ * `wasRunning` is updated in place because it is the only record of what the previous read said:
+ * a session that was running and is not has finished, and one that was not and is has started.
+ */
+function settledTurns(sessions: AgentSession[], wasRunning: Set<string>): number {
+  let settled = 0;
+  for (const session of sessions) {
+    if (session.running) {
+      wasRunning.add(session.id);
+    } else if (wasRunning.delete(session.id)) {
+      settled += 1;
+    }
+  }
+  // A session the service no longer lists cannot be running, so it cannot still be owed a turn.
+  const listed = new Set(sessions.map((session) => session.id));
+  for (const sessionId of [...wasRunning]) {
+    if (!listed.has(sessionId)) wasRunning.delete(sessionId);
+  }
+  return settled;
+}
+
+/**
+ * Records what the service reports without counting anything, for the first read of a checkout.
+ *
+ * The first read has nothing to compare against, so it only seeds the record. Skipping this would
+ * leave a turn that was already running when the checkout was opened looking like it had never
+ * run, and its ending would go unnoticed.
+ */
+function recordRunning(sessions: AgentSession[], wasRunning: Set<string>): void {
+  wasRunning.clear();
+  for (const session of sessions) {
+    if (session.running) wasRunning.add(session.id);
+  }
+}
+
+/**
  * Applies one event to the session list.
  *
- * The server's own truth is authoritative: a turn that started or failed is applied as-is.
- * Idleness is not inferred, because v2.0.18 has no idle event; the list is re-read instead.
+ * The server's own truth is authoritative and is re-read on every turn event, because
+ * `/api/session/active` is what decides `running`. An event only moves the row between reads:
+ * a turn that started shows as working at once instead of at the next poll, and one that ended
+ * is left to the re-read rather than being declared finished here.
  */
 export function applyAgentEvent(sessions: AgentSession[], event: AgentEvent): AgentSession[] {
   if (!event.sessionId) return sessions;
@@ -81,32 +121,15 @@ export function applyAgentEvent(sessions: AgentSession[], event: AgentEvent): Ag
     if (session.id !== event.sessionId) return session;
     switch (event.kind) {
       case "turnStarted":
-        return { ...session, busy: true };
-      case "turnFailed":
-        return { ...session, busy: false };
+        return { ...session, running: true };
       case "permissionAsked":
         // This server version cannot answer a permission, so the turn is stuck until the
         // policy changes. Say so instead of pretending the agent is working.
-        return { ...session, busy: false, blockedOnPermission: true };
+        return { ...session, running: false, blockedOnPermission: true };
       default:
         return session;
     }
   });
-}
-
-/**
- * A session counts as working only once a turn start has been seen for it.
- *
- * A session that has never run has no idle time either, so `idleAt === null` alone would
- * report every fresh session as working and never settle.
- */
-function isWorking(session: AgentSession, startedTurns: ReadonlySet<string>): boolean {
-  return startedTurns.has(session.id) && session.idleAt === null;
-}
-
-/** Recomputes `busy` from the server's idle time and the turns this client saw start. */
-function withBusy(sessions: AgentSession[], startedTurns: ReadonlySet<string>): AgentSession[] {
-  return sessions.map((session) => ({ ...session, busy: isWorking(session, startedTurns) }));
 }
 
 export function useAgentSessions(
@@ -114,8 +137,14 @@ export function useAgentSessions(
   repo: ComputedRef<Repo | null>,
 ): ActiveAgentSessions {
   let generation = 0;
-  /** Sessions whose turn this client saw start and has not yet seen go idle. */
-  const startedTurns = new Set<string>();
+  /**
+   * Sessions the service reported as running at the previous read.
+   *
+   * A turn ending is the transition out of that set, which is how a finished turn is noticed:
+   * the service announces no completion event, and this also counts a turn the person ran in
+   * their own TUI, which no event on this stream would ever have carried.
+   */
+  const wasRunning = new Set<string>();
   const state = reactive<Omit<ActiveAgentSessions, "reload" | "createSession" | "selectTarget" | "stop">>({
     checkoutId: null,
     sessions: [],
@@ -180,11 +209,8 @@ export function useAgentSessions(
     try {
       const sessions = await listAgentSessions(checkoutId);
       if (state.checkoutId !== checkoutId || request !== generation) return false;
-      // A turn this client saw start, that the server now reports as idle, has finished.
-      for (const session of sessions) {
-        if (session.idleAt !== null && startedTurns.delete(session.id)) state.turnsCompleted += 1;
-      }
-      state.sessions = withBusy(sessions, startedTurns);
+      state.turnsCompleted += settledTurns(sessions, wasRunning);
+      state.sessions = sessions;
       // Keep an explicit choice only while it still exists; otherwise follow the newest.
       if (!state.targetId || !state.sessions.some((session) => session.id === state.targetId)) {
         state.targetId = defaultAgentSession(state.sessions)?.id ?? null;
@@ -246,7 +272,7 @@ export function useAgentSessions(
       state.agents = [];
       state.targetId = null;
       state.events = [];
-      startedTurns.clear();
+      wasRunning.clear();
       state.error = "";
       state.state = "ready";
       if (!checkoutId || isMissing || repoKind !== "git") return;
@@ -261,6 +287,8 @@ export function useAgentSessions(
         if (!current || requestGeneration !== generation) return;
         state.agents = agents;
         state.sessions = sessions;
+        // Seeded rather than counted: there is no previous read for this checkout to differ from.
+        recordRunning(sessions, wasRunning);
         state.targetId = defaultAgentSession(sessions)?.id ?? null;
         state.state = "ready";
         await refreshAgentsBehind(sessions);
@@ -275,17 +303,18 @@ export function useAgentSessions(
   );
 
   /**
-   * Re-reads the sessions while a turn this client saw start is still running.
+   * Re-reads the sessions while the service reports one of them running.
    *
-   * This is the only completion signal v2.0.18 offers, so it is polled rather than
-   * announced, and only while there is something to wait for.
+   * The service announces no completion event, so a turn ending is a transition seen between two
+   * reads. This polls only while something is running, so an idle app is not polled, and it
+   * covers a turn started in the person's own TUI, which is the common case here.
    */
-  async function pollBusySessions() {
-    if (startedTurns.size === 0) return;
+  async function pollRunningSessions() {
+    if (!state.sessions.some((session) => session.running)) return;
     await reload();
   }
 
-  const pollTimer = setInterval(() => void pollBusySessions(), BUSY_POLL_MS);
+  const pollTimer = setInterval(() => void pollRunningSessions(), BUSY_POLL_MS);
 
   /**
    * Asks again while there is no service to talk to.
@@ -311,18 +340,9 @@ export function useAgentSessions(
     const checkoutId = state.checkoutId;
     if (!checkoutId || payload.checkoutId !== checkoutId) return;
     state.events = [...state.events, payload].slice(-MAX_EVENTS);
-    if (payload.kind === "turnStarted" && payload.sessionId) {
-      startedTurns.add(payload.sessionId);
-      state.sessions = state.sessions.map((session) =>
-        session.id === payload.sessionId ? { ...session, busy: true } : session,
-      );
-      // The turn is known to be running, so start watching for it to end.
-      void reload();
-      return;
-    }
     if (isTurnEvent(payload.kind)) {
-      // The server's own view is the authority, and it lags the event, so the list is
-      // re-read and that transition is what settles a finished turn.
+      // `/api/session/active` is the authority on whether a turn is running and it lags the
+      // event, so the list is re-read and that read is what settles a finished turn.
       void reload();
       return;
     }
@@ -330,4 +350,124 @@ export function useAgentSessions(
   });
 
   return Object.assign(state, { reload, createSession, selectTarget, stop });
+}
+
+/** What one terminal row says about the OpenCode running behind it. */
+export interface TerminalAgentRow {
+  /**
+   * The agent running in this directory, with the color OpenCode paints it with.
+   *
+   * Absent when no OpenCode TUI is running here, or when the service cannot be reached, which
+   * are the same thing to a row: there is nothing behind it to speak for.
+   */
+  agent: AgentHeadline | null;
+  /** Whether a turn is running in this directory right now. */
+  running: boolean;
+}
+
+export interface TerminalAgentRows {
+  /** Keyed by checkout id, which is what a terminal row knows about itself. */
+  readonly byCheckout: Record<string, TerminalAgentRow>;
+  row(checkoutId: string): TerminalAgentRow;
+  reload(): Promise<void>;
+}
+
+/**
+ * Reads the agent state of every checkout that has terminals, keyed by checkout.
+ *
+ * `useAgentSessions` follows the *active* checkout, while a sidebar row is about one terminal in
+ * one worktree: two terminals in different worktrees are different rows and must not share one
+ * checkout's answer. Each checkout is read on its own and never merged, so a row can only ever be
+ * drawn from its own worktree's sessions.
+ *
+ * It deliberately does not decide which session a given terminal has open. OpenCode 2.0.22 has no
+ * route, header or event mapping a TUI process to a session, so that question has no answer to
+ * read; see the note at the top of `services/agent.rs`. What *is* per terminal is the directory it
+ * runs in, and that is what is scoped here.
+ */
+export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): TerminalAgentRows {
+  let generation = 0;
+  const byCheckout = reactive<Record<string, TerminalAgentRow>>({});
+  /** Checkouts with a turn running, so the poll knows there is something to wait for. */
+  const busy = new Set<string>();
+
+  const row = (checkoutId: string): TerminalAgentRow => byCheckout[checkoutId] ?? { agent: null, running: false };
+
+  async function read(checkoutId: string): Promise<TerminalAgentRow> {
+    const sessions = await listAgentSessions(checkoutId);
+    const agents = await listAgentAgents(checkoutId).catch(() => [] as AgentAgent[]);
+    // The review target is deliberately not consulted: this is not a review surface, so the
+    // loudest session in the directory is what a row speaks for.
+    const session = headlineSession(sessions, null);
+    const label = agentLabel(agents, session?.agent);
+    return {
+      agent:
+        session && label
+          ? {
+              label,
+              color: agentColor(agents, session.agent),
+              attention: agentAttention(session),
+            }
+          : null,
+      running: sessions.some((candidate) => candidate.running),
+    };
+  }
+
+  async function reload() {
+    const request = ++generation;
+    // A checkout that went away must stop answering, or a closed worktree keeps its row.
+    const wanted = [...new Set(checkoutIds.value)];
+    for (const checkoutId of Object.keys(byCheckout)) {
+      if (!wanted.includes(checkoutId)) delete byCheckout[checkoutId];
+    }
+    const read_ = await Promise.all(
+      wanted.map(async (checkoutId) => {
+        try {
+          return [checkoutId, await read(checkoutId)] as const;
+        } catch {
+          // A service that is not run leaves the row without an agent, which is the state to
+          // wait in rather than a failure to report.
+          return [checkoutId, { agent: null, running: false }] as const;
+        }
+      }),
+    );
+    // A reload that was superseded mid-flight must not publish over the newer one.
+    if (request !== generation) return;
+    for (const [checkoutId, entry] of read_) byCheckout[checkoutId] = entry;
+    busy.clear();
+    for (const [checkoutId, entry] of read_) {
+      if (entry.running) busy.add(checkoutId);
+    }
+  }
+
+  watch(checkoutIds, () => void reload(), { immediate: true });
+
+  /**
+   * Re-reads while anything is running.
+   *
+   * The service announces no turn-completed event, so this is how a row notices a turn ending,
+   * and it covers a turn the person started in their own TUI. It stops the moment every row is
+   * idle, so an idle app is not polled.
+   */
+  const pollTimer = setInterval(() => {
+    if (busy.size > 0) void reload();
+  }, BUSY_POLL_MS);
+
+  /**
+   * Asks again while no checkout has an agent to show.
+   *
+   * The service belongs to whoever started it, so this app does not start one: it waits here
+   * until that person runs OpenCode, and connects on the first read that answers.
+   */
+  const disconnectedTimer = setInterval(() => {
+    if (Object.values(byCheckout).some((entry) => entry.agent !== null)) return;
+    void reload();
+  }, DISCONNECTED_POLL_MS);
+
+  onScopeDispose(() => {
+    clearInterval(pollTimer);
+    clearInterval(disconnectedTimer);
+  });
+
+  return { byCheckout, row, reload };
 }

@@ -1135,7 +1135,15 @@ mod tests {
                 reader.read_line(&mut request).unwrap();
                 let mut parts = request.split_whitespace();
                 let method = parts.next().unwrap_or_default();
-                let path = parts.next().unwrap_or_default().to_string();
+                // The query is stripped: every request now carries `?directory=…`, and these
+                // mocks match on the route.
+                let path = parts
+                    .next()
+                    .unwrap_or_default()
+                    .split('?')
+                    .next()
+                    .unwrap_or_default()
+                    .to_string();
                 let mut content_length = 0;
                 loop {
                     let mut header = String::new();
@@ -1157,6 +1165,9 @@ mod tests {
                         server_session_lists.fetch_add(1, Ordering::SeqCst);
                         serde_json::json!([session.clone()])
                     }
+                    // The service's own running answer. Empty here, so the session reads as idle
+                    // unless a test makes it otherwise, which is what an idle mock should say.
+                    ("GET", "/api/session/active") => serde_json::json!({}),
                     ("GET", "/api/session/ses_integrated") => session.clone(),
                     ("POST", "/api/session/ses_integrated/prompt") => {
                         let _ = prompt_started_tx.send(());

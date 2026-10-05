@@ -11,8 +11,8 @@ pub struct AgentSession {
     /// When the server last saw this session go idle, if ever.
     ///
     /// Absent means "no turn has finished yet", which covers both a session that never ran
-    /// and one that is working right now. Only the client, which has seen a turn start, can
-    /// tell those apart, so this is the fact rather than a derived verdict.
+    /// and one that is working right now. `/api/session/active` reports the latter separately;
+    /// this remains the timestamp fact rather than a derived verdict.
     pub idle_at: Option<i64>,
     /// Set when a permission request arrived and Marvis could not answer it.
     pub blocked_on_permission: bool,
@@ -23,6 +23,11 @@ pub struct AgentSession {
     pub model: Option<String>,
     /// The session this one was spawned from, which is how a subagent is tied to its parent.
     pub parent_id: Option<String>,
+    /// The service reports this session as draining a turn right now.
+    ///
+    /// This is the server's own answer from `/api/session/active`, so it covers a turn a person
+    /// started in their own TUI, which no event this client watched would ever announce.
+    pub running: bool,
     /// How the last turn ended: `succeeded`, `failed` or `interrupted`.
     pub outcome: Option<String>,
     pub created_at: i64,
