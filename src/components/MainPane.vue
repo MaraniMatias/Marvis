@@ -63,6 +63,7 @@ const emit = defineEmits<{
   openMarkdownLink: [path: string];
   openFile: [path: string];
   resizePreview: [width: number];
+  closePreview: [];
 }>();
 
 const sessionPane = ref<InstanceType<typeof SessionPane> | null>(null);
@@ -177,6 +178,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
             @update-mode="$emit('updateDocumentMode', $event)"
             @reading-position-changed="$emit('readingPositionChanged', $event)"
             @open-markdown-link="$emit('openMarkdownLink', $event)"
+            @close="$emit('closePreview')"
           />
         </section>
         <section v-show="diffView" id="main-view-diff" class="absolute inset-0">
@@ -196,6 +198,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
             :scroll-top="diffScrollTop"
             :editor-settings="editorSettings"
             @scroll-position-changed="$emit('diffPositionChanged', $event)"
+            @close="$emit('closePreview')"
           />
         </section>
       </div>

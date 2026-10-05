@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-indent, vue/html-closing-bracket-newline, vue/html-self-closing */
-import { Check as CheckIcon, ChevronDown as ChevronDownIcon } from "@lucide/vue";
+import { Check as CheckIcon, ChevronDown as ChevronDownIcon, X as XIcon } from "@lucide/vue";
 import { DiffFile, DiffModeEnum, DiffViewWithMultiSelect, updateSelectionVisual_Unified } from "@git-diff-view/vue";
 import type { DiffFileHighlighter, LineRange } from "@git-diff-view/vue";
 import "@git-diff-view/vue/styles/diff-view-pure.css";
@@ -48,6 +48,8 @@ const props = withDefaults(
 const emit = defineEmits<{
   ready: [path: string];
   scrollPositionChanged: [top: number];
+  /** The toolbar's close button: the main panel goes back to the terminal it was showing. */
+  close: [];
 }>();
 
 const diff = shallowRef<GitFileDiff | null>(null);
@@ -807,6 +809,18 @@ onUnmounted(() => {
             {{ branch }}
           </p>
         </div>
+        <!-- The way back to the terminal, on the title's own row rather than beside the review
+             composer below it: it is about the panel, and the composer is about the change. The
+             file preview's toolbar carries the same button in the same place. -->
+        <button
+          type="button"
+          aria-label="Close preview"
+          data-testid="close-preview"
+          class="toolbar-icon-button shrink-0"
+          @click="emit('close')"
+        >
+          <XIcon class="icon-xs" aria-hidden="true" />
+        </button>
       </div>
       <div v-if="sender" class="mt-1.5 flex flex-col items-end gap-1">
         <div class="flex flex-wrap items-center justify-end gap-1.5">

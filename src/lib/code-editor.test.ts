@@ -4,7 +4,7 @@ import { forceParsing, syntaxTree } from "@codemirror/language";
 import { redo, undo } from "@codemirror/commands";
 import type { EditorView } from "@codemirror/view";
 import type { IndentationSettings } from "../domain/settings";
-import { createCodeEditor, setEditorIndentation } from "./code-editor";
+import { createCodeEditor, setEditorChangedLines, setEditorIndentation, CHANGED_LINE_CLASS } from "./code-editor";
 
 const views = new Set<EditorView>();
 const hosts = new Set<HTMLElement>();
@@ -277,5 +277,81 @@ describe("indentation", () => {
     // The compartment is per editor, so an editor from elsewhere has none to reconfigure and the
     // call is a no-op rather than a throw from a component that has no way to know.
     expect(() => setEditorIndentation({} as EditorView, { useSpaces: false, size: 4 })).not.toThrow();
+  });
+});
+
+describe("the lines the checkout has changed", () => {
+  /** The text of every line the editor painted as changed, which is what a reader looks for. */
+  function changedTexts(view: EditorView): string[] {
+    return Array.from(view.contentDOM.querySelectorAll(`.${CHANGED_LINE_CLASS}`)).map((line) => line.textContent ?? "");
+  }
+
+  it("marks the lines it is given, and no others", () => {
+    const view = mount("typescript", ["const a = 1;", "const b = 2;", "const c = 3;", "const d = 4;"].join("\n"));
+
+    setEditorChangedLines(view, [{ start: 2, end: 3 }]);
+
+    expect(changedTexts(view)).toEqual(["const b = 2;", "const c = 3;"]);
+  });
+
+  it("marks nothing before it is told about anything", () => {
+    // The preview asks Git about a file separately from reading it, and usually after the editor
+    // is already up. An editor that marked something on its own would be inventing a change.
+    const view = mount("typescript", "const a = 1;\nconst b = 2;");
+
+    expect(changedTexts(view)).toEqual([]);
+  });
+
+  it("carries the mark into the gutter as well as onto the line", () => {
+    const view = mount("typescript", "const a = 1;\nconst b = 2;");
+
+    setEditorChangedLines(view, [{ start: 2, end: 2 }]);
+
+    // The line itself can lose the tint to the editor's active-line background, so the dot is what
+    // carries the mark on the line somebody is standing on.
+    expect(view.dom.querySelector(".marvis-changed-line-marker")).not.toBeNull();
+  });
+
+  it("keeps a mark on its own line as the text above it is edited", () => {
+    const view = mount("typescript", ["const a = 1;", "const b = 2;", "const c = 3;"].join("\n"));
+    setEditorChangedLines(view, [{ start: 3, end: 3 }]);
+
+    view.dispatch({ changes: { from: 0, insert: "const z = 0;\n" } });
+
+    // The mark is a position in the document, so inserting above it has to move it down rather than
+    // leave it sitting on whatever slid into its place.
+    expect(changedTexts(view)).toEqual(["const c = 3;"]);
+  });
+
+  it("leaves off a mark for a line the file no longer has", () => {
+    // Git counted the file before it was shortened, so a range can outrun the document. Asking the
+    // builder for a line that is not there would throw in the middle of a paint.
+    const view = mount("typescript", "const a = 1;");
+
+    expect(() => setEditorChangedLines(view, [{ start: 1, end: 90 }])).not.toThrow();
+    expect(changedTexts(view)).toEqual(["const a = 1;"]);
+  });
+
+  it("replaces the marks it had with the ones it is given", () => {
+    const view = mount("typescript", ["const a = 1;", "const b = 2;", "const c = 3;"].join("\n"));
+    setEditorChangedLines(view, [{ start: 1, end: 1 }]);
+
+    setEditorChangedLines(view, [{ start: 3, end: 3 }]);
+
+    expect(changedTexts(view)).toEqual(["const c = 3;"]);
+  });
+
+  it("takes the marks away when the file turns out to be unchanged", () => {
+    const view = mount("typescript", "const a = 1;\nconst b = 2;");
+    setEditorChangedLines(view, [{ start: 2, end: 2 }]);
+
+    setEditorChangedLines(view, []);
+
+    expect(changedTexts(view)).toEqual([]);
+    expect(view.dom.querySelector(".marvis-changed-line-marker")).toBeNull();
+  });
+
+  it("does nothing to a view this build did not build", () => {
+    expect(() => setEditorChangedLines({} as EditorView, [{ start: 1, end: 1 }])).not.toThrow();
   });
 });

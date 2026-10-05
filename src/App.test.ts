@@ -487,7 +487,7 @@ const InspectorPaneStub = defineComponent({
 const DocumentPaneStub = defineComponent({
   name: "DocumentPane",
   props: { path: String },
-  emits: ["readingPositionChanged"],
+  emits: ["readingPositionChanged", "close"],
   setup(props, { emit }) {
     return () =>
       h("div", [
@@ -496,6 +496,9 @@ const DocumentPaneStub = defineComponent({
           "data-testid": "document-scroll",
           onClick: () => emit("readingPositionChanged", { top: 240, left: 12 }),
         }),
+        // The real pane's toolbar close button. What is under test here is what the shell does with
+        // it, so the button stands in for the one the pane draws.
+        h("button", { "data-testid": "close-preview", onClick: () => emit("close") }),
       ]);
   },
 });
@@ -505,13 +508,15 @@ const DocumentPaneStub = defineComponent({
 const FileDiffStub = defineComponent({
   name: "FileDiff",
   props: { path: String },
-  emits: ["scrollPositionChanged"],
+  emits: ["scrollPositionChanged", "close"],
   setup(props, { emit }) {
     const sender = inject<ReviewSender | null>(REVIEW_SENDER, null);
     return () =>
       h("div", [
         h("span", { "data-testid": "file-diff" }, props.path ?? "all"),
         h("button", { "data-testid": "diff-scroll", onClick: () => emit("scrollPositionChanged", 132) }),
+        // The diff's own close button, for the same reason the document stub carries one.
+        h("button", { "data-testid": "close-preview", onClick: () => emit("close") }),
         h("button", {
           "data-testid": "send-review",
           onClick: () =>
@@ -1752,6 +1757,81 @@ describe("App UI integration", () => {
       } finally {
         wrapper.unmount();
       }
+    });
+
+    it("gives the main panel back to the terminal when a preview is closed", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
+
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+      expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
+      expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).toBe("none");
+
+      await wrapper.get('[data-testid="close-preview"]').trigger("click");
+      await flushPromises();
+
+      // The focus layout has no terminal beside the preview, so closing one used to leave the only
+      // way back inside the sidebar's row list.
+      expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).not.toBe("none");
+      expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
+      wrapper.unmount();
+    });
+
+    it("closes a preview onto the session the panel already had, starting nothing", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+
+      await wrapper.get('[data-testid="close-preview"]').trigger("click");
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+
+      // The view goes back to a terminal rather than to nothing, and it is the one this checkout
+      // already had: a close that started a session would spawn a shell nobody asked for, and the
+      // pane that holds terminals is mounted once for the window and never again.
+      expect(mocks.sessionPaneMounts).toBe(1);
+      expect(mocks.saveCheckoutUiState).toHaveBeenLastCalledWith(
+        "checkout:one",
+        expect.objectContaining({ mainView: "terminal", document: null, diffAllFiles: false }),
+      );
+      wrapper.unmount();
+    });
+
+    it("gives the whole panel back to the terminal when a split preview is closed", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])), {
+        ...DEFAULT_APP_LAYOUT,
+        mode: "split",
+      });
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+      await flushPromises();
+
+      // A split layout already keeps the terminal on screen, and this is the one place that refuses
+      // to give it the panel: the close button is the reader saying the preview is done with, which
+      // a sidebar row asking for a terminal is not.
+      expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
+      await wrapper.get('[data-testid="close-preview"]').trigger("click");
+      await flushPromises();
+
+      expect((wrapper.get("#main-view-terminal").element as HTMLElement).style.display).not.toBe("none");
+      expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
+      wrapper.unmount();
+    });
+
+    it("does not re-save a view that is already the terminal", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+      await wrapper.get('[data-testid="close-preview"]').trigger("click");
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+      mocks.saveCheckoutUiState.mockClear();
+
+      // Closing a panel that is already the terminal would write the same view back to disk. The
+      // button is still in the DOM — the pane is hidden rather than unmounted, so a terminal can
+      // come back without a fresh editor — but it answers to nothing.
+      await wrapper.get('[data-testid="close-preview"]').trigger("click");
+      await vi.advanceTimersByTimeAsync(300);
+      await flushPromises();
+
+      expect(mocks.saveCheckoutUiState).not.toHaveBeenCalled();
+      wrapper.unmount();
     });
   });
 

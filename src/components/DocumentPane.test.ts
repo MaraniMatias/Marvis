@@ -605,6 +605,177 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("offers a way back to the terminal from the toolbar", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/example.ts", content: "const a = 1;" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/example.ts", "code") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    const close = wrapper.get('[data-testid="close-preview"]');
+    expect(close.attributes("aria-label")).toBe("Close preview");
+    await close.trigger("click");
+
+    expect(wrapper.emitted("close")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("puts the close button on the toolbar, past the controls that read the file", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "docs/readme.md", content: "# Marvis" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("docs/readme.md", "view") });
+    await vi.waitFor(() => expect(wrapper.find(".markdown-preview").exists()).toBe(true));
+
+    // The last control of the row, so the controls that change what this file is read as stay
+    // together on its own side of the toolbar and the way out of it does not join them.
+    const controls = wrapper.get(".document-toolbar").findAll("button, [role='group']");
+    expect(controls.at(-1)?.attributes("data-testid")).toBe("close-preview");
+    wrapper.unmount();
+  });
+
+  it("marks the lines the checkout has changed, and only those", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "src/example.ts",
+      content: ["const a = 1;", "const b = 2;", "const c = 3;", "const d = 4;"].join("\n"),
+    });
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/example.ts",
+      // A three-line window whose middle line is the one this change wrote.
+      patch: [
+        "diff --git a/src/example.ts b/src/example.ts",
+        "@@ -1,3 +1,3 @@",
+        " const a = 1;",
+        "+const b = 2;",
+        " const c = 3;",
+      ].join("\n"),
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 5,
+      hunks: [{ startLine: 0, endLine: 5, title: "@@ -1,3 +1,3 @@" }],
+    });
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps(
+        "src/example.ts",
+        "code",
+        checkout("checkout:one"),
+        snapshot("checkout:one", [{ path: "src/example.ts", status: "M" }]),
+      ),
+    });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    await vi.waitFor(() =>
+      expect(wrapper.findAll(".marvis-changed-line").map((line) => line.text())).toEqual(["const b = 2;"]),
+    );
+    expect(wrapper.find(".marvis-changed-line-marker").exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("asks Git about nothing when the file is not one it has changed", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/example.ts", content: "const a = 1;" });
+    // A clean file is not in the status at all, and asking about it would be answered with a refusal.
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/example.ts", "code") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    expect(mocks.getGitDiff).not.toHaveBeenCalled();
+    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("does not mark every line of an untracked file", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/new.ts", content: "const a = 1;\nconst b = 2;" });
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps(
+        "src/new.ts",
+        "code",
+        checkout("checkout:one"),
+        snapshot("checkout:one", [{ path: "src/new.ts", status: "??" }]),
+      ),
+    });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    // Every line of a new file is an added line, so the marks would cover all of it and say nothing
+    // the path in the toolbar does not.
+    expect(mocks.getGitDiff).not.toHaveBeenCalled();
+    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("marks the lines in the read-only view too, where there is no editor", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "src/example.ts",
+      content: ["const a = 1;", "const b = 2;", "const c = 3;"].join("\n"),
+    });
+    mocks.getGitDiff.mockResolvedValue({
+      path: "src/example.ts",
+      patch: [
+        "diff --git a/src/example.ts b/src/example.ts",
+        "@@ -2,2 +2,3 @@",
+        " const b = 2;",
+        "+const c = 3;",
+        " const d = 4;",
+      ].join("\n"),
+      isBinary: false,
+      large: false,
+      tooLarge: false,
+      totalLines: 5,
+      hunks: [],
+    });
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps(
+        "src/example.ts",
+        "view",
+        checkout("checkout:one"),
+        snapshot("checkout:one", [{ path: "src/example.ts", status: "M" }]),
+      ),
+    });
+    await vi.waitFor(() => expect(wrapper.findAll(".shiki .line").length).toBeGreaterThan(0));
+
+    await vi.waitFor(() =>
+      expect(wrapper.findAll(".marvis-changed-line").map((row) => row.text().replace(/^\d+/, ""))).toEqual([
+        "const c = 3;",
+      ]),
+    );
+    wrapper.unmount();
+  });
+
+  it("keeps a file readable when Git cannot say anything about it", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/example.ts", content: "const a = 1;" });
+    mocks.getGitDiff.mockRejectedValue(new Error("git exploded"));
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps(
+        "src/example.ts",
+        "code",
+        checkout("checkout:one"),
+        snapshot("checkout:one", [{ path: "src/example.ts", status: "M" }]),
+      ),
+    });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    // The marks are an addition to a file that reads perfectly well without them, so a failure to
+    // get them is not a failure to open the file.
+    expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
+    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("says nothing about a path Git refuses, which is a file it has not changed", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/example.ts", content: "const a = 1;" });
+    mocks.getGitDiff.mockRejectedValue(Object.assign(new Error("not a changed file"), { code: "invalid_path" }));
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps(
+        "src/example.ts",
+        "code",
+        checkout("checkout:one"),
+        snapshot("checkout:one", [{ path: "src/example.ts", status: "M" }]),
+      ),
+    });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+    await flushPromises();
+
+    // The one refusal that is an answer rather than a fault, so it is not worth a toast either.
+    expect(toasts.value).toHaveLength(0);
+    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    wrapper.unmount();
+  });
+
   it("highlights the read view with Shiki and displays line numbers", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "src/example.ts",

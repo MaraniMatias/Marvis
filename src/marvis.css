@@ -807,6 +807,48 @@
   transition: color 120ms ease;
 }
 
+/* A control on a pane's own toolbar, as opposed to one on the window's. Same job as `.icon-button`
+   and sized to the 40px row it stands in rather than to a titlebar's 32px, so it is a fixed box
+   and not a padded one: the row's other controls are measured, and a button that took its height
+   from its icon would be a different height on a different icon. Global because the file preview
+   and the diff share one toolbar and one close button. */
+.toolbar-icon-button {
+  display: inline-flex;
+  width: 24px;
+  height: 24px;
+  align-items: center;
+  justify-content: center;
+  border-radius: 0;
+  color: var(--marvis-text-secondary);
+}
+
+.toolbar-icon-button:hover {
+  background: var(--marvis-control-hover);
+  color: var(--marvis-text);
+}
+
+/* A line this checkout has changed, as the file preview marks it.
+   The tint is the diff's own green at the same strength, because this is the same fact the diff
+   draws and a reader coming from one to the other should not have to relearn the colour. It is
+   one colour for edits that both add and remove: a mark here says the line is part of a change,
+   not which way the change went, and the sign is the diff's job to say.
+
+   `.cm-line` is named alongside the class so the mark outranks the editor's own active-line
+   background on specificity rather than on which rule happens to be written later. The gutter dot
+   below does not have that fight, and it is what carries the mark on the line you are standing on. */
+.marvis-changed-line,
+.cm-line.marvis-changed-line {
+  background: color-mix(in srgb, var(--marvis-content-added) 14%, var(--marvis-content-bg-0));
+}
+
+.marvis-changed-line-marker {
+  display: block;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--marvis-content-added);
+}
+
 /* A menu over the app: roomy type and a shadow, so it reads as floating rather than as a
    surface of the pane it opened over. Global because reka-ui portals it out of the shell, which
    is also why the focus rules above are written without a scope. The column it stands in
