@@ -178,7 +178,7 @@ describe("the form's schema", () => {
     // Someone turning it off is giving up a thing, and the label has to say which. Both halves matter:
     // the line that appears in the terminal, and the row that stops going red without it.
     const description = field && "description" in field ? field.description : "";
-    expect(description).toMatch(/echoed into a terminal/i);
+    expect(description).toMatch(/script/i);
     expect(description).toMatch(/red/i);
   });
 

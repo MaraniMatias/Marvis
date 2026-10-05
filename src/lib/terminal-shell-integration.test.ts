@@ -6,7 +6,7 @@ import { registerShellIntegration, type ShellIntegrationEvent } from "./terminal
  * A terminal whose only job is to hand back the OSC handler it was given, so the parsing can be
  * exercised without a DOM, a renderer or a PTY behind it. What is worth pinning is the payload
  * grammar the shell writes and this reads — the shell is the producer and cannot be mocked here, so
- * the payloads below are the ones `shell_integration_hook` in `services/terminal.rs` really sends.
+ * the payloads below are the ones the script in `services/terminal.rs` really writes.
  */
 function stubTerminal() {
   const handlers = new Map<number, (data: string) => boolean>();

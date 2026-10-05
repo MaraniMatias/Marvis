@@ -1,5 +1,5 @@
 use std::{
-    env,
+    env, fs,
     path::{Path, PathBuf},
     sync::atomic::{AtomicU64, Ordering},
 };
@@ -55,7 +55,15 @@ pub fn create_with_options(
     options: TerminalOptions,
     output: OutputSink,
 ) -> Result<CreatedTerminal, String> {
-    create_with_settings(database, backend, checkout_id, options, &None, output)
+    create_with_settings(
+        database,
+        backend,
+        checkout_id,
+        options,
+        &None,
+        &None,
+        output,
+    )
 }
 
 /// `shell_integration` is read from the settings file rather than passed from the frontend, so that
@@ -64,12 +72,17 @@ pub fn create_with_options(
 /// `None` means "no settings file was reachable", which is treated as the default: the feature ships
 /// on, and a settings file that cannot be read is a settings dialog problem rather than a reason to
 /// start every terminal uninstrumented.
+///
+/// `script_dir` is where the shell-integration script is written, and is `None` when this app has no
+/// folder in the user's home to write it into — a terminal opened then is simply uninstrumented
+/// rather than pointed at a file that is not there.
 pub fn create_with_settings(
     database: &Database,
     backend: &TerminalBackend,
     checkout_id: &str,
     options: TerminalOptions,
     shell_integration: &Option<bool>,
+    script_dir: &Option<PathBuf>,
     output: OutputSink,
 ) -> Result<CreatedTerminal, String> {
     let TerminalOptions { cols, rows, prompt } = options;
@@ -99,8 +112,13 @@ pub fn create_with_settings(
     // property of the shell that is being started rather than of the PTY that is about to exist.
     // Read here rather than at the prompt so that turning the setting off leaves every terminal that
     // is already open exactly as it was, and turning it on does not retrofit one.
+    //
+    // The script is written here, before the spawn, and not at launch: that is what makes turning the
+    // setting on part-way through a session work, without the file having to exist for a setting that
+    // was off when the app started. A failure is swallowed — a terminal with no markers is still a
+    // usable terminal, which is the whole fallback.
     let startup_line = if shell_integration.unwrap_or(true) {
-        shell_integration_hook(&program)
+        install_shell_integration(&program, script_dir.as_deref())
     } else {
         None
     };
@@ -178,16 +196,14 @@ fn inherited_shell_args(program: &Path) -> Vec<String> {
     args
 }
 
-/// The OSC 133 markers the hook below makes the shell print, spelled once.
+/// The OSC 133 markers the sourced script below makes the shell print, spelled once.
 ///
 /// `D;<code>` after every command is the shell's own `$?`, and `A` when the next one starts is what
 /// tells the row to stop being red. OSC 133 is the ident every shell-integration script uses, and
 /// xterm.js ships no handler for it, so nothing else contends for these bytes.
 ///
-/// `print -P` rather than `printf`, because zsh's `print` takes the escapes as two characters where
-/// `printf` needs four: `\e` against `\033` and `\a` against `\007`. The line is written to an 80
-/// column terminal and every character of it is drawn twice over (see `install_shell_integration`),
-/// so the difference is two rows of scrollback for free.
+/// `print -P` rather than `printf` for zsh, which takes the escapes as two characters where `printf`
+/// needs four: `\e` against `\033` and `\a` against `\007`.
 const OSC_EXIT: &str = r"\e]133;D;$?\a";
 const OSC_STARTED: &str = r"\e]133;A\a";
 
@@ -195,55 +211,159 @@ const OSC_STARTED: &str = r"\e]133;A\a";
 const OSC_EXIT_BASH: &str = r"\033]133;D;%s\007";
 const OSC_STARTED_BASH: &str = r"\033]133;A\007";
 
-/// The one line of shell input that makes this shell report how its commands ended.
+/// Up to the rows the `. <script>` line was drawn on, erase them, then back down to where the prompt
+/// is about to be drawn. The column is preserved throughout, so the prompt lands where it would have.
 ///
-/// Written as input to the PTY rather than added to a startup file, on purpose. Touching
-/// `.zshrc`/`.zshenv`/`.zprofile` would edit something the user owns and that every other terminal
-/// and app also reads, and pointing `ZDOTDIR` elsewhere would move the whole startup path: the test
-/// `enables_native_zsh_menu_completion_and_leaves_startup_files_untouched` pins that those semantics
-/// stay as they are. Input reaches this one shell and nothing else.
+/// It has to be the shell that emits this. Bytes written to the pty master are INPUT: zsh's line
+/// editor would consume them, and a bare erase sent that way comes back as the visual bell rather
+/// than as an erase. That was measured, and it is the whole reason the hook body lives in a file
+/// that the shell sources instead of being typed at it.
 ///
-/// `None` means no integration: `sh` has no prompt hook that fires after a command with `$?` still
-/// intact, and a terminal under it keeps today's behaviour rather than half a hook.
+/// Two rows, and the erases are cumulative rather than repeated: `up, erase, down` once per row puts
+/// the cursor back where it started every time, so it clears the same row N times and leaves the rest
+/// of a wrapped line on screen. That was measured too — with the repeat form, a line that wrapped left
+/// its first row behind in a login zsh whose prompt was three rows tall.
 ///
-/// The line is echoed into the scrollback. That much is accepted — the bytes written to the master are
-/// INPUT to the shell, so an ANSI erase would be eaten by zsh's ZLE and ring the bell rather than
-/// reach the screen, and clearing `ECHO` on the master does not work on macOS, where master and slave
-/// carry separate termios. It is drawn *once*, because the line waits for the shell to be at a prompt
-/// before it is written; see `install_shell_integration` in `terminal/mod.rs`.
-fn shell_integration_hook(program: &Path) -> Option<String> {
+/// The second row is only reached when the line wrapped, which needs the prompt plus the line to
+/// exceed the terminal's width; the row above is the prompt's own middle, which the shell redraws a
+/// line lower down anyway.
+const ERASE_INVOKING_ROW: &str = r"\033[A\033[2K\033[A\033[2K\033[B\033[B";
+
+/// The script a terminal sources, per shell.
+///
+/// Two bodies rather than one that dispatches, because they are genuinely different shells' work and
+/// a `case` over `$0` inside a sourced file is a way for one of them to be wrong without the other
+/// being noticed.
+///
+/// zsh appends to the hook arrays by name. `add-zsh-hook` is not used because it is not a builtin but
+/// an autoloadable *function*, so it exists only once something has loaded it — usually an rc file,
+/// because frameworks like oh-my-zsh do. In a zsh with no rc files nothing has, and calling it fails
+/// with `command not found: add-zsh-hook`: the line is already echoed by then, so the shell looks
+/// fine, no hook is registered, and every session in that terminal silently never reports an exit
+/// code. Appending to the arrays is the whole of what `add-zsh-hook` does underneath, and
+/// `precmd_functions` and `preexec_functions` are ordinary zsh parameters, so there is nothing to
+/// load and nothing that can be missing.
+///
+/// Each entry is the *name* of a function rather than a command: zsh looks an entry up and runs it,
+/// it does not eval it. That was measured, not assumed, and it is why the two definitions exist —
+/// `precmd_functions+=('print -Pn "…"')` registers nothing and emits no marker at all.
+///
+/// bash gets a function rather than an inline `PROMPT_COMMAND` string because `$?` has to be read
+/// before anything else in the command resets it, and an existing `PROMPT_COMMAND` is kept because
+/// dropping it would take a person's own prompt work with it. `trap … DEBUG` stands in for zsh's
+/// `preexec`, which bash has no equivalent of.
+fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
     match program.file_name().and_then(|name| name.to_str()) {
-        // The hook arrays are appended to by name rather than through `add-zsh-hook`, which is what
-        // `add-zsh-hook` itself does and the whole of what it does — so this is the same
-        // registration without the dependency.
-        //
-        // `add-zsh-hook` is not a builtin but an autoloadable *function*, so it exists only once
-        // something has loaded it, usually an rc file because frameworks like oh-my-zsh do. In a zsh
-        // with no rc files nothing has, and calling it fails with `command not found: add-zsh-hook`:
-        // the line is already echoed by then, so the shell looks fine, no hook is registered, and every
-        // session in that terminal silently never reports an exit code. That was measured, and it is
-        // why the arrays are written to directly. `precmd_functions` and `preexec_functions` are
-        // ordinary zsh parameters, so there is nothing to load and nothing to be missing.
-        //
-        // Each entry is the *name* of a function rather than a command: zsh looks the entry up and
-        // runs it, it does not eval it, so `precmd_functions+=('print -Pn "..."')` registers nothing
-        // and silently emits no marker at all. That was measured too, which is what the two
-        // definitions below are for.
-        Some("zsh") => Some(format!(
-            "marvis_pc() {{ print -Pn \"{OSC_EXIT}\"; }}; precmd_functions+=(marvis_pc); \
-             marvis_px() {{ print -Pn \"{OSC_STARTED}\"; }}; preexec_functions+=(marvis_px)"
+        Some("zsh") => Some((
+            "hook.zsh",
+            format!(
+                "# Written by Marvis and sourced by every terminal it opens. Nothing here is read by \
+                 anything else, and it is safe to delete once those terminals are closed.\n\
+                 #\n\
+                 # The last line erases the `. …` row that sourced this, so the setup leaves nothing \
+                 behind on screen.\n\
+                 marvis_pc() {{ print -Pn \"{OSC_EXIT}\"; }}\n\
+                 precmd_functions+=(marvis_pc)\n\
+                 marvis_px() {{ print -Pn \"{OSC_STARTED}\"; }}\n\
+                 preexec_functions+=(marvis_px)\n\
+                 printf '{ERASE_INVOKING_ROW}'\n"
+            ),
         )),
-        // A function rather than an inline `PROMPT_COMMAND` string because `$?` has to be read before
-        // anything else in the command resets it, and an existing `PROMPT_COMMAND` is kept because
-        // dropping it would take a user's own prompt work with it. `trap … DEBUG` stands in for zsh's
-        // `preexec`, which bash has no equivalent of.
-        Some("bash") => Some(format!(
-            "__marvis_prompt_command() {{ printf '{OSC_EXIT_BASH}' \"$?\"; }}; \
-             PROMPT_COMMAND=\"__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}\"; \
-             trap 'printf \"{OSC_STARTED_BASH}\"' DEBUG"
+        Some("bash") => Some((
+            "hook.bash",
+            format!(
+                "# Written by Marvis and sourced by every terminal it opens. Nothing here is read by \
+                 anything else, and it is safe to delete once those terminals are closed.\n\
+                 #\n\
+                 # The last line erases the `. …` row that sourced this, so the setup leaves nothing \
+                 behind on screen.\n\
+                 __marvis_prompt_command() {{ printf '{OSC_EXIT_BASH}' \"$?\"; }}\n\
+                 PROMPT_COMMAND=\"__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}\"\n\
+                 trap 'printf \"{OSC_STARTED_BASH}\"' DEBUG\n\
+                 printf '{ERASE_INVOKING_ROW}'\n"
+            ),
         )),
+        // `sh` has no prompt hook that fires after a command with `$?` still intact, and a terminal
+        // under it keeps the behaviour it has today rather than half a hook.
         _ => None,
     }
+}
+
+/// The one line of input that installs the script, or `None` when there is nothing to install.
+///
+/// Kept to one short row on purpose. The erase above can only reach one row, and a line long enough
+/// to wrap would leave its first row behind — which is how this was drawn as 146 characters wrapping
+/// over three, and then as one line a person opened a terminal and did not want to look at.
+fn shell_integration_line(script: &Path) -> String {
+    // Quoted the way `TerminalSession.vue`'s `changeDirectory` quotes a path it types at a shell:
+    // single quotes, with an embedded one closed, escaped and reopened. A home directory may contain
+    // a space — this app's own folder is `~/.marvis`, but a person's `$HOME` is whatever they chose —
+    // and an unquoted path is a terminal with no hook and an error nobody reads.
+    format!(". '{}'", script.to_string_lossy().replace('\'', "'\\''"))
+}
+
+/// Writes the script if it is not already there, and returns the line that sources it.
+///
+/// The file is written before the spawn and is never deleted while a session is live, so it outlives
+/// the shell that reads it: the shell is a separate process with its own cwd and environment, and the
+/// only thing it needs from this one is that the file is on disk when it gets there. Nothing here
+/// depends on this process still running.
+///
+/// Written per terminal rather than once at launch, because the setting is read per terminal: that
+/// is what makes turning it on part-way through a session work without the file having to exist for a
+/// setting that was off when the app started. Rewriting is avoided by comparing first, so opening a
+/// dozen terminals touches the disk once.
+fn install_shell_integration(program: &Path, script_dir: Option<&Path>) -> Option<String> {
+    let (name, contents) = shell_integration_script(program)?;
+    let dir = script_dir?;
+    let script = dir.join(name);
+    let already_there = fs::read_to_string(&script).is_ok_and(|existing| existing == contents);
+    if !already_there {
+        if let Err(error) = fs::create_dir_all(dir) {
+            log::warn!(
+                "terminal {} could not be integrated: {error}",
+                program.display()
+            );
+            return None;
+        }
+        let written = crate::services::files::atomic_write(
+            &script,
+            contents.as_bytes(),
+            script_permissions(&script),
+        );
+        if let Err(error) = written {
+            log::warn!(
+                "terminal {} could not be integrated: {}",
+                program.display(),
+                error.message
+            );
+            return None;
+        }
+    }
+    Some(shell_integration_line(&script))
+}
+
+/// The mode the script is written with, or the one it already has.
+///
+/// Private to its owner, like `config.yml` and for the same reason: the script is code this app asks
+/// somebody's shell to run, so it is not a file to leave readable by anyone else. One the person
+/// chose is left alone, because a write is not a reason to undo a decision made outside this app.
+fn script_permissions(script: &Path) -> fs::Permissions {
+    if let Ok(metadata) = fs::metadata(script) {
+        return metadata.permissions();
+    }
+    private_permissions()
+}
+
+#[cfg(unix)]
+fn private_permissions() -> fs::Permissions {
+    use std::os::unix::fs::PermissionsExt;
+    fs::Permissions::from_mode(0o600)
+}
+
+#[cfg(not(unix))]
+fn private_permissions() -> fs::Permissions {
+    fs::Permissions::default()
 }
 
 /// Terminals take no prompt any more: the review goes to the agent bridge, not a PTY.
@@ -256,7 +376,12 @@ fn reject_prompt(prompt: Option<&str>) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, process::Command, time::Duration};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        process::Command,
+        time::Duration,
+    };
 
     use tempfile::tempdir;
 
@@ -267,8 +392,9 @@ mod tests {
     };
 
     use super::{
-        create, create_with_options, create_with_settings, inherited_shell_args, rename,
-        shell_integration_hook, TerminalOptions,
+        create_with_options, create_with_settings, inherited_shell_args, install_shell_integration,
+        rename, shell_integration_line, shell_integration_script, TerminalOptions,
+        ERASE_INVOKING_ROW,
     };
 
     fn plain_repo(path: &Path) -> Repo {
@@ -323,20 +449,35 @@ mod tests {
         }
     }
 
-    /// Spawns a real shell with the real hook, through the real spawn path, and asks a command to
+    /// Where the sourced script is written for a test, and the line that sources it.
+    ///
+    /// The real directory name is used where the test is about a real path, and a space is put in it
+    /// by the caller that wants one, because a `$HOME` with a space in it is a person's machine rather
+    /// than an edge case and the quoting has to survive it.
+    fn script_in(directory: &Path, shell: &str) -> String {
+        let line = install_shell_integration(Path::new(shell), Some(directory))
+            .unwrap_or_else(|| panic!("{shell} was expected to be integrated"));
+        line
+    }
+
+    /// Spawns a real shell with the real script, through the real spawn path, and asks a command to
     /// fail.
     ///
     /// Everything about this is a real shell rather than a stub because the whole subject is what a
-    /// shell *accepts*: a hook line that is syntactically valid, calls functions that exist, and ends
-    /// up registered. A test that only compared the string would have shipped both the missing
+    /// shell *accepts*: a script that is syntactically valid, calls things that exist, and ends up
+    /// registered. A test that only compared the string would have shipped both the missing
     /// `autoload -Uz add-zsh-hook` and an `add-zsh-hook` that nothing had loaded.
     ///
     /// The line goes in as `startup_line` rather than being written by the test, so this exercises the
     /// same timing production does: the backend decides when the shell is ready for it.
     fn assert_shell_reports_a_failing_command(shell: &str, args: &[&str], session: &str) {
-        let Some(hook) = shell_integration_hook(Path::new(shell)) else {
-            panic!("{shell} was expected to be integrated");
-        };
+        assert_script_installs(shell, args, session, tempdir().unwrap().path());
+    }
+
+    /// Opens a real shell with the script written where `script_dir` says, and checks that a failing
+    /// command is reported.
+    fn assert_script_installs(shell: &str, args: &[&str], session: &str, script_dir: &Path) {
+        let line = script_in(script_dir, shell);
         let backend = TerminalBackend::default();
         let (sender, receiver) = std::sync::mpsc::channel();
         let output: OutputSink =
@@ -350,14 +491,14 @@ mod tests {
                     cwd: std::env::current_dir().unwrap(),
                     cols: 80,
                     rows: 24,
-                    startup_line: Some(hook),
+                    startup_line: Some(line),
                 },
                 output,
             )
             .unwrap();
 
-        // The hook's own statements report a clean exit, so this wait also proves the hook was
-        // accepted by the shell rather than typed into a broken line.
+        // The script's own last command reports a clean exit, so this wait also proves the shell read
+        // the file rather than being handed a line it could not find.
         wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(15));
 
         backend.write(session, b"false\n").unwrap();
@@ -368,11 +509,11 @@ mod tests {
 
     /// A failed command is what the sidebar bar is for, and it is invisible to the backend: `clang`
     /// failing does not kill the shell, so no `waitpid` ever has a code to read. This is the only
-    /// source of one — the shell's own `$?`, printed by the hook — so it runs the shells the app
+    /// source of one — the shell's own `$?`, printed by the script — so it runs the shells the app
     /// actually spawns and asserts on the bytes that come back.
     ///
-    /// Every shell with no integration (`sh`) is skipped rather than faked, because a hook written for
-    /// a shell that does not answer would make this pass for the wrong reason.
+    /// Every shell with no integration (`sh`) is skipped rather than faked, because a script written
+    /// for a shell that does not answer would make this pass for the wrong reason.
     #[test]
     fn a_failing_command_in_a_live_shell_reports_its_exit_code_over_osc_133() {
         for shell in ["/bin/zsh", "/bin/bash"] {
@@ -383,7 +524,7 @@ mod tests {
         }
     }
 
-    /// The regression this pins: the hook used to call `add-zsh-hook` with nothing having loaded it.
+    /// The regression this pins: the script used to call `add-zsh-hook` with nothing having loaded it.
     ///
     /// It is an autoloadable zsh *function*, not a builtin, so it only exists if something loaded it
     /// first — usually an rc file, because oh-my-zsh and friends do. Under `-l` on a developer's
@@ -392,147 +533,221 @@ mod tests {
     /// registered, no OSC 133, ever, and no error anywhere because the line was already echoed.
     ///
     /// `zsh -f` is that user. `-f` skips every rc file, so whatever the machine running this has
-    /// installed cannot be what makes the hook work — only what the hook line does for itself. The
-    /// hook now writes to `precmd_functions` directly, which is what `add-zsh-hook` does underneath,
-    /// so there is no longer anything that can be missing.
+    /// installed cannot be what makes the hook work — only what the script does for itself. It now
+    /// appends to `precmd_functions` directly, which is what `add-zsh-hook` does underneath, so there
+    /// is no longer anything that can be missing.
     #[test]
-    fn the_zsh_hook_reports_a_failure_in_a_zsh_with_no_startup_files() {
+    fn the_zsh_script_reports_a_failure_in_a_zsh_with_no_startup_files() {
         if Command::new("/bin/zsh").arg("--version").output().is_err() {
             return;
         }
-        assert_shell_reports_a_failing_command("/bin/zsh", &["-f", "-i"], "session:zsh-no-rc");
+        assert_script_installs(
+            "/bin/zsh",
+            &["-f", "-i"],
+            "session:zsh-no-rc",
+            tempdir().unwrap().path(),
+        );
     }
 
-    /// What a shell hook has to be, and is not allowed to be, anything else.
+    /// A `$HOME` with a space in it is somebody's machine, and an unquoted path there is a terminal
+    /// with no hook and an error nobody reads.
+    ///
+    /// Live rather than string-compared because the whole failure is what the *shell* makes of the
+    /// quoting: a path with a space in it, sourced for real, has to report a failing command.
+    #[test]
+    fn a_path_with_a_space_in_it_still_installs_the_script() {
+        if Command::new("/bin/zsh").arg("--version").output().is_err() {
+            return;
+        }
+        let directory = tempdir().unwrap();
+        let with_a_space = directory.path().join("a folder of mine");
+        fs::create_dir(&with_a_space).unwrap();
+        assert_script_installs("/bin/zsh", &["-l", "-i"], "session:spaced", &with_a_space);
+    }
+
+    /// A quote in the path is the other half of the same quoting rule: single quotes are closed,
+    /// escaped and reopened, the way `TerminalSession.vue`'s `changeDirectory` does it.
+    #[test]
+    fn a_path_with_a_quote_in_it_is_quoted_the_way_a_shell_needs() {
+        let line = shell_integration_line(Path::new("/home/someone/it's mine/hook.zsh"));
+        assert_eq!(
+            line, ". '/home/someone/it'\\''s mine/hook.zsh'",
+            "the quote must be closed, escaped and reopened, and the whole path wrapped once"
+        );
+        // And the line is still one row, which is what lets the erase reach it.
+        assert!(!line.contains('\n'));
+    }
+
+    /// What a zsh script has to be, and is not allowed to be, anything else.
     ///
     /// `precmd_functions` takes the *name* of a function and runs it; it does not eval its entries.
-    /// That was measured rather than assumed, and the difference is the whole reason the hook defines
-    /// two functions: `precmd_functions+=('print -Pn "…"')` is accepted without complaint, registers
-    /// nothing, and emits no marker at all, which is the silent-no-op failure this feature cannot
-    /// afford. `add-zsh-hook` is gone for the same class of reason — it is an autoloadable function
-    /// that a shell with no rc files has never loaded.
+    /// That was measured rather than assumed, and the difference is the whole reason the script
+    /// defines two functions: `precmd_functions+=('print -Pn "…"')` is accepted without complaint,
+    /// registers nothing, and emits no marker at all, which is the silent-no-op failure this feature
+    /// cannot afford. `add-zsh-hook` is gone for the same class of reason — it is an autoloadable
+    /// function that a shell with no rc files has never loaded.
     #[test]
-    fn the_zsh_hook_appends_function_names_and_needs_nothing_loaded_first() {
-        let hook = shell_integration_hook(Path::new("/bin/zsh")).unwrap();
+    fn the_zsh_script_appends_function_names_and_needs_nothing_loaded_first() {
+        let (_, script) = shell_integration_script(Path::new("/bin/zsh")).unwrap();
         assert!(
-            !hook.contains("add-zsh-hook"),
+            !script.contains("add-zsh-hook"),
             "add-zsh-hook is an autoloadable function, and a shell with no rc files has not loaded it"
         );
-        assert!(
-            !hook.contains('\''),
-            "a hook array entry is looked up as a function name, so putting code in quotes registers nothing"
-        );
         for parameter in ["precmd_functions+=(", "preexec_functions+=("] {
-            let entry = hook
+            let entry = script
                 .split(parameter)
                 .nth(1)
                 .and_then(|rest| rest.split(')').next())
                 .unwrap_or_default();
+            let name = entry.trim();
             assert!(
-                !entry.is_empty(),
-                "{parameter} must name a function, and every name here is defined on the same line"
+                name.starts_with("marvis_"),
+                "{parameter} must name a function, and got {entry:?}"
+            );
+            assert!(
+                script.contains(&format!("{name}()")),
+                "{name} is appended but never defined, so zsh would look it up and find nothing"
             );
         }
     }
 
-    /// The line is drawn twice on screen if it is written before the shell is ready for it.
+    /// The erase has to come from the shell, and it has to be its last act.
     ///
-    /// A shell that has not reached its prompt is still in canonical mode with the tty line discipline
-    /// echoing for it, so a line written into that window is echoed plainly into the middle of its
-    /// startup output and then drawn again, with the line editor's own colouring, once the editor
-    /// takes over. One write, two renders, which is what a person opening a terminal was shown.
-    ///
-    /// Counting is done on a fragment from the first 80 columns of the line, because that is the only
-    /// part of it the editor cannot break: it wraps a longer line at column 80, and the wrap arrives in
-    /// the byte stream as a newline, so anything spanning it does not survive as one string. The
-    /// numbers this asserts were cross-checked by feeding the same captures through a real terminal
-    /// emulator and counting screen lines: two renders written immediately, one written after the
-    /// shell went quiet.
+    /// Bytes written to the pty master are input: zsh's line editor would consume them, and a bare
+    /// erase sent that way comes back as the visual bell rather than as an erase. That was measured,
+    /// and it is why the hook body lives in a file the shell sources.
     #[test]
-    fn the_hook_is_drawn_once_because_the_shell_is_ready_before_it_is_written() {
-        if Command::new("/bin/zsh").arg("--version").output().is_err() {
-            return;
+    fn the_script_erases_the_row_that_sourced_it_and_does_it_last() {
+        for shell in ["/bin/zsh", "/bin/bash"] {
+            let Some((_, script)) = shell_integration_script(Path::new(shell)) else {
+                continue;
+            };
+            let mut lines = script
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .collect::<Vec<_>>();
+            let last = lines.pop().unwrap();
+            assert_eq!(
+                last.trim(),
+                format!("printf '{ERASE_INVOKING_ROW}'"),
+                "the erase must be the last thing {shell} does, or the row is drawn over it"
+            );
+            // Up to the row, erase it, back down. The column is preserved by all three, so the prompt
+            // lands where it would have anyway.
+            assert_eq!(
+                ERASE_INVOKING_ROW,
+                r"\033[A\033[2K\033[A\033[2K\033[B\033[B"
+            );
         }
+    }
+
+    /// The injected line is one short row, whatever the path looks like.
+    ///
+    /// The erase can only reach one row, so this is the constraint that makes the whole thing work: a
+    /// line that wrapped left its first row behind, which is how this was once 146 characters over
+    /// three rows with a person's starship prompt behind it.
+    #[test]
+    fn the_injected_line_is_one_short_row() {
+        for shell in ["/bin/zsh", "/bin/bash"] {
+            let (name, _) = shell_integration_script(Path::new(shell)).unwrap();
+            let line = shell_integration_line(
+                &Path::new("/home/a-rather-long-username")
+                    .join(".marvis")
+                    .join(name),
+            );
+            assert!(
+                line.chars().count() < 60,
+                "{shell}: {} chars, which can wrap behind a wide prompt: {line}",
+                line.chars().count()
+            );
+            assert!(!line.contains('\n'));
+        }
+    }
+
+    /// Where the script goes, and what is left behind when it is not wanted.
+    ///
+    /// It is written per terminal and never deleted, which is what makes turning the setting on
+    /// part-way through a session work: there is no file to have existed at launch. It is written
+    /// before the spawn, so the shell that reads it is never racing the write, and it is left alone
+    /// when the setting is off so that a session opened with the setting on and then turned off does
+    /// not have anything to strip out of a terminal that is already running.
+    #[test]
+    fn the_script_is_written_next_to_the_settings_and_only_when_it_is_wanted() {
+        let directory = tempdir().unwrap();
+        let zsh = Path::new("/bin/zsh");
+        let line = install_shell_integration(zsh, Some(directory.path())).unwrap();
         assert_eq!(
-            visible_hook_renders(true),
-            1,
-            "the hook line is drawn more than once"
+            line,
+            shell_integration_line(&directory.path().join("hook.zsh"))
         );
-        // The same shell and the same line, written the moment it is spawned rather than when it is
-        // ready. This is the count that makes the assertion above mean something rather than pass by
-        // accident: it is what the line used to produce, and what a person opening a terminal saw.
-        assert_eq!(visible_hook_renders(false), 2);
-    }
-
-    /// Counts how many times the hook is drawn in a session's output.
-    ///
-    /// Counted on the first 30 characters of the line, contiguous, in the raw stream. A render by the
-    /// line editor puts that fragment in one piece — it is inside the first 80 columns, so it is not
-    /// broken by the wrap — and so does the tty's echo, which is the whole point: each render
-    /// contributes exactly one occurrence and nothing else in the session's startup output contains
-    /// this text.
-    ///
-    /// Nothing is stripped and no line breaks are joined. Both were tried and both are wrong here: the
-    /// editor interleaves its own fragments into the middle of the line, so joining what is left
-    /// counts a render that is on screen as zero. The numbers this asserts were cross-checked by
-    /// feeding the same captures through a real terminal emulator and counting screen lines.
-    fn visible_hook_renders(wait_for_prompt: bool) -> usize {
-        let hook = shell_integration_hook(Path::new("/bin/zsh")).unwrap();
-        let prefix = &hook[..30];
-        let backend = TerminalBackend::default();
-        let (sender, receiver) = std::sync::mpsc::channel();
-        // Everything is kept as well as forwarded: `wait_for_output` drains what it waits past, and the
-        // echo being counted arrived long before the marker it waits for.
-        let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let kept = std::sync::Arc::clone(&captured);
-        let output: OutputSink = Box::new(move |bytes| {
-            kept.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend_from_slice(bytes);
-            sender.send(bytes.to_vec()).map_err(|e| e.to_string())
-        });
-        let session = format!("session:render:{}", wait_for_prompt);
-        backend
-            .spawn(
-                session.clone(),
-                SpawnOptions {
-                    program: Path::new("/bin/zsh").to_path_buf(),
-                    args: vec!["-l".into(), "-i".into()],
-                    cwd: std::env::current_dir().unwrap(),
-                    cols: 80,
-                    rows: 24,
-                    startup_line: if wait_for_prompt {
-                        Some(hook.clone())
-                    } else {
-                        None
-                    },
-                },
-                output,
-            )
-            .unwrap();
-        if !wait_for_prompt {
-            // A line written into a shell that has not reached its prompt, which is what production
-            // used to do and what this test exists to catch.
-            backend
-                .write(&session, format!("{hook}\n").as_bytes())
-                .unwrap();
+        assert!(directory.path().join("hook.zsh").is_file());
+        // The two shells get their own files rather than one that dispatches on `$0`, and only the one
+        // a terminal actually asked for is written.
+        assert!(!directory.path().join("hook.bash").exists());
+        let bash = Path::new("/bin/bash");
+        if shell_integration_script(bash).is_some() {
+            install_shell_integration(bash, Some(directory.path())).unwrap();
+            assert!(directory.path().join("hook.bash").is_file());
+            assert_ne!(
+                fs::read_to_string(directory.path().join("hook.zsh")).unwrap(),
+                fs::read_to_string(directory.path().join("hook.bash")).unwrap()
+            );
         }
-        wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(15));
-        let raw = captured
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        raw.windows(prefix.len())
-            .filter(|window| *window == prefix.as_bytes())
-            .count()
+        // It is private to its owner, because it is code this app asks somebody's shell to run.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(directory.path().join("hook.zsh"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(
+                mode & 0o777,
+                0o600,
+                "the script must not be readable by anyone else"
+            );
+        }
+        // No folder to write into means no integration rather than a line pointing at nothing.
+        assert_eq!(install_shell_integration(zsh, None), None);
+        assert!(shell_integration_script(Path::new("/bin/sh")).is_none());
     }
 
-    /// Opens a real terminal with a real setting and reports whether the hook line reached it.
+    /// Every terminal gets the same script, and it is not rewritten for each one.
+    ///
+    /// Opening a dozen terminals touching the disk once is the difference between a feature that is
+    /// invisible and one that is merely cheap.
+    #[test]
+    fn the_script_is_written_once_and_reused() {
+        let directory = tempdir().unwrap();
+        let zsh = Path::new("/bin/zsh");
+        let script = directory.path().join("hook.zsh");
+        install_shell_integration(zsh, Some(directory.path())).unwrap();
+        let written_at = fs::metadata(&script).unwrap().modified().unwrap();
+        // A file whose contents no longer match must be replaced, or a change to the script would
+        // never reach a terminal opened after it.
+        fs::write(&script, "stale\n").unwrap();
+        install_shell_integration(zsh, Some(directory.path())).unwrap();
+        assert_ne!(
+            fs::read_to_string(&script).unwrap(),
+            "stale\n",
+            "a script that no longer matches what this build writes must be replaced"
+        );
+        // And a second terminal with the script already right must leave it alone.
+        let settled = fs::metadata(&script).unwrap().modified().unwrap();
+        install_shell_integration(zsh, Some(directory.path())).unwrap();
+        assert_eq!(fs::metadata(&script).unwrap().modified().unwrap(), settled);
+        assert!(written_at <= settled);
+    }
+
+    /// Opens a real terminal with a real setting and reports whether the script reached it.
     ///
     /// Goes through `create_with_settings` rather than through the backend, because the setting is
     /// only read on the way in: what a terminal already has cannot be taken away by turning the
     /// setting off afterwards, which is what the field's own doc comment promises.
-    fn hook_line_reaches_a_new_terminal(setting: Option<bool>) -> bool {
+    ///
+    /// Returns whether the app's folder ended up holding a script, which is the whole of what the
+    /// setting decides: no file and no line, or a file and a line.
+    fn opening_a_terminal_writes(script_dir: &Path, setting: Option<bool>) -> bool {
         let directory = tempdir().unwrap();
         let checkout = directory.path().join("checkout");
         fs::create_dir(&checkout).unwrap();
@@ -554,167 +769,182 @@ mod tests {
                 prompt: None,
             },
             &setting,
+            &Some(script_dir.to_path_buf()),
             output,
         )
         .unwrap();
 
-        let instrumented = if setting == Some(false) {
-            // Nothing is going to print a marker, so this waits on something the shell prints itself:
-            // otherwise the wait would pass instantly and prove nothing.
+        if setting == Some(false) {
+            // Nothing is going to print a marker, so this waits on something the shell prints itself,
+            // which is also what proves the session is live and not merely registered.
             backend
                 .write(&created.session.id, b"printf 'MARVISPROBE\\n'\n")
                 .unwrap();
             wait_for_output(&receiver, b"MARVISPROBE", Duration::from_secs(15));
-            false
-        } else {
-            // The hook reports its own clean exit as soon as it is installed, which is a marker only
-            // an instrumented shell can produce.
-            wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(15));
-            true
-        };
+        }
+        assert!(backend.status(&created.session.id).is_ok());
         backend.close(&created.session.id).unwrap();
-        instrumented
+        script_dir.join("hook.zsh").is_file() || script_dir.join("hook.bash").is_file()
     }
 
     /// The setting decides what the next terminal gets, and nothing else moves.
     ///
-    /// Off means no line at all, which is what a terminal looked like before this existed: no hook, so
-    /// no OSC 133, so the frontend never has an exit code to turn a row red from.
+    /// Off writes no script and sends no line, so a terminal behaves as it did before this existed: no
+    /// script to source, so no OSC 133, so the frontend never has an exit code to turn a row red from.
+    /// There is nothing to strip out of a terminal that is already open either — there was never
+    /// anything in it to strip.
     ///
     /// `None` is "no settings file was reachable" and reads as on, because the feature ships on and a
     /// person whose file is broken already gets an error from the settings dialog. Reading it as off
     /// would quietly take the feature away from everybody whose file has not been written yet.
     #[test]
-    fn the_setting_decides_whether_a_new_terminal_gets_the_line() {
+    fn the_setting_decides_whether_a_new_terminal_is_integrated() {
         if Command::new("/bin/zsh").arg("--version").output().is_err() {
             return;
         }
-        assert!(hook_line_reaches_a_new_terminal(Some(true)));
-        assert!(!hook_line_reaches_a_new_terminal(Some(false)));
-        assert!(hook_line_reaches_a_new_terminal(None));
-    }
-
-    #[test]
-    fn integrates_only_the_shells_that_can_report_an_exit_code() {
-        // `sh` has no prompt hook that fires with `$?` still intact, so it is left alone rather than
-        // given a hook that would report something other than the command's own exit code.
-        assert_eq!(shell_integration_hook(Path::new("/bin/sh")), None);
-        assert_eq!(shell_integration_hook(Path::new("/usr/bin/fish")), None);
-        for shell in ["/bin/zsh", "/bin/bash", "/opt/homebrew/bin/zsh"] {
-            assert!(
-                shell_integration_hook(Path::new(shell)).is_some(),
-                "{shell} should be integrated"
-            );
-        }
-    }
-
-    /// The line is drawn in an 80 column terminal, so every character of it costs two rows of
-    /// scrollback if it can be avoided. Both halves of this are measured: `print -P` over `printf`
-    /// because zsh's `print` takes two-character escapes, and the hook arrays over `add-zsh-hook`
-    /// because appending a name is the whole of what `add-zsh-hook` does.
-    #[test]
-    fn the_hook_line_is_shorter_than_the_one_that_wrapped_over_three_rows() {
-        let zsh = shell_integration_hook(Path::new("/bin/zsh")).unwrap();
+        assert!(opening_a_terminal_writes(
+            tempdir().unwrap().path(),
+            Some(true)
+        ));
+        let off = tempdir().unwrap();
+        assert!(!opening_a_terminal_writes(off.path(), Some(false)));
         assert!(
-            zsh.len().div_ceil(80) <= 2,
-            "the zsh hook is {} chars, which is {} rows at 80 columns",
-            zsh.len(),
-            zsh.len().div_ceil(80)
+            !off.path().join("hook.zsh").exists(),
+            "nothing may be written when the setting is off"
         );
-        // It must still be one line: a newline in here would be read by the shell as the end of the
-        // command and the rest of it would be a second command, at a prompt nobody asked for.
-        assert!(!zsh.contains('\n'));
+        assert!(opening_a_terminal_writes(tempdir().unwrap().path(), None));
     }
 
+    /// Writes a capture of a real session's output for `terminal-shell-integration-render.test.ts` to
+    /// replay through a real terminal.
+    ///
+    /// This is the only test here that can see the erase, because the erase's bytes are in the stream
+    /// whether or not they are honoured: a screen is what tells a line that was drawn from one that
+    /// was drawn and then taken back off. The frontend test asserts on the rendered screen, and this
+    /// is where the bytes come from.
+    ///
+    /// `#[ignore]`d because it writes into the source tree and the render test reads a committed
+    /// capture. Regenerate with:
+    ///
+    /// ```text
+    /// MARVIS_CAPTURE_FIXTURES=src/lib/__fixtures__ cargo test --manifest-path src-tauri/Cargo.toml \
+    ///   captures_a_real_session_for_the_render_test -- --ignored
+    /// ```
     #[test]
-    fn creates_multiple_sessions_only_for_persisted_checkouts_and_forgets_them_on_restart() {
+    #[ignore = "regenerates committed fixtures; see MARVIS_CAPTURE_FIXTURES"]
+    fn captures_a_real_session_for_the_render_test() {
+        let Some(directory) = std::env::var_os("MARVIS_CAPTURE_FIXTURES") else {
+            panic!("set MARVIS_CAPTURE_FIXTURES to the directory to write captures into");
+        };
+        let directory = PathBuf::from(directory);
+        fs::create_dir_all(&directory).unwrap();
+        for (name, shell, args) in [
+            ("zsh-login", "/bin/zsh", &["-l", "-i"][..]),
+            ("zsh-bare", "/bin/zsh", &["-f", "-i"][..]),
+            ("bash-login", "/bin/bash", &["-l", "-i"][..]),
+        ] {
+            if Command::new(shell).arg("--version").output().is_err() {
+                continue;
+            }
+            let stream = capture_a_session(shell, args, tempdir().unwrap().path());
+            fs::write(directory.join(format!("{name}.bin")), &stream).unwrap();
+            println!("captured {name}: {} bytes", stream.len());
+        }
+        // Two controls, both of which the render test needs to be able to fail. Without the first,
+        // "no rows show the line" could be an instrument that never saw the line. Without the second,
+        // waiting for the shell to be ready could look like it makes no difference.
+        let stream = capture_a_session_without_the_erase();
+        fs::write(directory.join("control-no-erase.bin"), &stream).unwrap();
+        println!("captured control-no-erase: {} bytes", stream.len());
+
+        // Held, not dropped at the end of the statement: the directory has to still be there when the
+        // shell reads the script out of it.
+        let script_dir = tempdir().unwrap();
+        let line = script_in(script_dir.path(), "/bin/zsh");
+        let stream = capture_a_stream("/bin/zsh", &["-l", "-i"], Some(line), false);
+        fs::write(directory.join("control-no-settle.bin"), &stream).unwrap();
+        println!("captured control-no-settle: {} bytes", stream.len());
+    }
+
+    /// A real session's output: the injected line, the script's own markers, and a failing command.
+    fn capture_a_session(shell: &str, args: &[&str], script_dir: &Path) -> Vec<u8> {
+        let line = script_in(script_dir, shell);
+        capture_a_stream(shell, args, Some(line), true)
+    }
+
+    /// The same, with a script that registers nothing and never erases, so the row stays on screen.
+    fn capture_a_session_without_the_erase() -> Vec<u8> {
         let directory = tempdir().unwrap();
-        let checkout = directory.path().join("checkout");
-        let other_checkout = directory.path().join("other-checkout");
-        fs::create_dir(&checkout).unwrap();
-        fs::create_dir(&other_checkout).unwrap();
-        let database_path = directory.path().join("workspace.sqlite3");
-        let repo = plain_repo(&checkout);
-        let other_repo = plain_repo(&other_checkout);
-        let database = Database::open(&database_path).unwrap();
-        database.register_plain_repo(repo.clone()).unwrap();
-        database.register_plain_repo(other_repo.clone()).unwrap();
+        let script = directory.path().join("hook.zsh");
+        fs::write(
+            &script,
+            "# Captured without the erase, as the control for the render test.\n\
+             marvis_pc() { print -Pn \"\\e]133;D;$?\\a\"; }\n\
+             precmd_functions+=(marvis_pc)\n",
+        )
+        .unwrap();
+        capture_a_stream(
+            "/bin/zsh",
+            &["-l", "-i"],
+            Some(shell_integration_line(&script)),
+            true,
+        )
+    }
+
+    /// Spawns a shell, waits for it to install `startup_line`, then fails a command and returns
+    /// everything the session printed.
+    fn capture_a_stream(
+        shell: &str,
+        args: &[&str],
+        startup_line: Option<String>,
+        settle: bool,
+    ) -> Vec<u8> {
         let backend = TerminalBackend::default();
-        let output: OutputSink = Box::new(|_| Ok(()));
-
-        assert!(create(
-            &database,
-            &backend,
-            "checkout:unknown",
-            80,
-            24,
-            Box::new(|_| Ok(()))
-        )
-        .is_err());
-        let first = create(&database, &backend, &repo.checkouts[0].id, 80, 24, output).unwrap();
-        let second = create(
-            &database,
-            &backend,
-            &repo.checkouts[0].id,
-            80,
-            24,
-            Box::new(|_| Ok(())),
-        )
-        .unwrap();
-        assert_ne!(first.session.id, second.session.id);
-        assert_eq!(
-            first.session.status,
-            crate::domain::workspace::SessionStatus::Active
-        );
-        assert_eq!(second.workspace.repos[0].checkouts[0].sessions.len(), 2);
-        assert_eq!(
-            second.workspace.active_session_id.as_deref(),
-            Some(second.session.id.as_str())
-        );
-        let other = create(
-            &database,
-            &backend,
-            &other_repo.checkouts[0].id,
-            80,
-            24,
-            Box::new(|_| Ok(())),
-        )
-        .unwrap();
-        assert_eq!(other.session.checkout_id, other_repo.checkouts[0].id);
-        assert_eq!(
-            other.workspace.active_checkout_id.as_deref(),
-            Some(other_repo.checkouts[0].id.as_str())
-        );
-
-        backend.close(&first.session.id).unwrap();
-        backend.close(&second.session.id).unwrap();
-        backend.close(&other.session.id).unwrap();
-        drop(database);
-        // The PTYs died with the processes above, so the reopened database keeps the checkouts
-        // and none of the sessions.
-        let restored = Database::open(database_path)
-            .unwrap()
-            .load_workspace()
+        let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let kept = std::sync::Arc::clone(&captured);
+        let output: OutputSink = Box::new(move |bytes| {
+            kept.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            sender.send(bytes.to_vec()).map_err(|e| e.to_string())
+        });
+        let session = "session:capture".to_string();
+        // `settle` false is the line written the moment the shell exists, while it is still loading its
+        // startup files. Production waits; this is what it is waiting for.
+        backend
+            .spawn(
+                session.clone(),
+                SpawnOptions {
+                    program: Path::new(shell).to_path_buf(),
+                    args: args.iter().map(|arg| (*arg).to_string()).collect(),
+                    cwd: std::env::current_dir().unwrap(),
+                    cols: 80,
+                    rows: 24,
+                    startup_line: if settle { startup_line.clone() } else { None },
+                },
+                output,
+            )
             .unwrap();
-        let restored_first = restored
-            .repos
-            .iter()
-            .find(|item| item.id == repo.id)
-            .unwrap();
-        let restored_checkout = restored_first
-            .checkouts
-            .iter()
-            .find(|checkout| checkout.id == repo.checkouts[0].id)
-            .unwrap();
-        assert!(restored_checkout.sessions.is_empty());
-        let restored_other_repo = restored
-            .repos
-            .iter()
-            .find(|item| item.id == other_repo.id)
-            .unwrap();
-        let restored_other = restored_other_repo.checkouts.first().unwrap();
-        assert_eq!(restored_other.id, other_repo.checkouts[0].id);
-        assert!(restored_other.sessions.is_empty());
+        if !settle {
+            backend
+                .write(
+                    &session,
+                    format!("{}\n", startup_line.unwrap_or_default()).as_bytes(),
+                )
+                .unwrap();
+        }
+        wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(20));
+        backend.write(&session, b"false\n").unwrap();
+        wait_for_output(&receiver, b"\x1b]133;D;1\x07", Duration::from_secs(15));
+        backend.close(&session).unwrap();
+        // The sink is gone by now, so the Arc is the only thing still holding the bytes.
+        let stream = captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        stream
     }
 
     #[test]

@@ -375,7 +375,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         path: "terminal.shellIntegration",
         label: "Report failed commands",
         description:
-          "One line of shell integration is echoed into a terminal when it opens. That line is the only way a command that fails can turn the sidebar row red, since a failing command leaves the shell running and nothing else can see it. Turn this off to keep the line out of the terminal, and the row stays blue whatever you run.",
+          "Marvis writes a small shell script to ~/.marvis and runs one line of it in every terminal it opens, which is the only way a command that fails can turn the sidebar row red: a failing command leaves the shell running and nothing else can see it. Turn this off and no script is written and no line is run, and the row stays blue whatever you run.",
       },
     ],
   },

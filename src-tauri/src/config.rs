@@ -44,6 +44,16 @@ pub fn config_file(home: &Path) -> ConfigFile {
     ConfigFile(home.join(CONFIG_DIR_FROM_HOME).join(CONFIG_FILE_NAME))
 }
 
+/// The app's own folder in the user's home, which is where `config.yml` lives.
+///
+/// Also where the shell-integration script a terminal sources is written, so that the two things this
+/// app keeps in a person's home sit together rather than in a folder that exists for one of them.
+/// Derived from the settings file rather than from `home` a second time, because `terminal_create`
+/// is handed the file and not the home, and it should not have to walk back up to find the folder.
+pub fn dir_of(config_file: &ConfigFile) -> Option<&Path> {
+    config_file.0.parent()
+}
+
 /// Every field defaults, unlike the rows in the database: this file is written by a person as
 /// well as by the dialog, and a line they deleted is a preference they did not set, not a shape
 /// this build cannot read.

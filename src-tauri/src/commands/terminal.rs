@@ -176,6 +176,9 @@ pub async fn terminal_create(
     validate_dimensions(request.cols, request.rows)?;
     let database = database.inner().clone();
     let backend = backend.inner().clone();
+    // Beside `config.yml`, in the app's own folder in the user's home, and where the shell
+    // integration script a terminal sources is written.
+    let script_dir = config::dir_of(config.inner()).map(|dir| dir.to_path_buf());
     let config = config.inner().0.clone();
     tauri::async_runtime::spawn_blocking(move || {
         // The reader's half of the flow control with the window that draws this session's output:
@@ -221,6 +224,7 @@ pub async fn terminal_create(
                 prompt: request.prompt,
             },
             &shell_integration,
+            &script_dir,
             output,
         ) {
             Ok(created) => {
