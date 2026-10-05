@@ -2898,10 +2898,25 @@ line.txt";
 
         // Only the worktree that was written to is named. The row beside it is untouched, and
         // saying otherwise would make a save in one worktree cost a re-read of every other.
-        let update = match receiver.recv_timeout(Duration::from_secs(5)).unwrap() {
-            WatchMessage::Changed(update) => update,
-            WatchMessage::Failed(error) => panic!("watch failed: {error}"),
-            WatchMessage::Stop => panic!("watcher stopped"),
+        //
+        // FSEvents, the backend `recommended_watcher` uses on macOS, can name a watched directory
+        // once when its stream starts, and on a loaded runner that event arrives beside the write
+        // instead of before it. Reading only the first message would then assert on the startup
+        // event. So this waits for the update that names the written worktree, the same way
+        // `assert_membership_signal` waits for the worktree it asked for: the claim under test
+        // is still that one update, and it still has to name that worktree and nothing else.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let update = loop {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            match receiver.recv_timeout(remaining) {
+                Ok(WatchMessage::Changed(update)) if update.status.contains(&"task".to_owned()) => {
+                    break update;
+                }
+                Ok(WatchMessage::Changed(_)) => continue,
+                Ok(WatchMessage::Failed(error)) => panic!("watch failed: {error}"),
+                Ok(WatchMessage::Stop) => panic!("watcher stopped"),
+                Err(_) => panic!("the write into the worktree was never reported"),
+            }
         };
         assert_eq!(update.status, vec!["task".to_owned()]);
         assert_eq!(update.activity, vec!["task".to_owned()]);
