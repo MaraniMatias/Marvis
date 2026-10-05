@@ -40,6 +40,7 @@ are what will report that.
 
 Usage:
     python3 scripts/build-fonts.py FiraCode-Regular.woff2 FiraCode-Bold.woff2 ...
+    python3 scripts/build-fonts.py --self-test [faces...]
 """
 
 import io
@@ -52,13 +53,22 @@ from fontTools.ttLib import TTFont
 HINT_TABLES = ("fpgm", "prep", "cvt ", "gasp")
 # `head.flags` bit 2: "instructions may depend on pointsize".
 POINTSIZE_FLAG = 1 << 2
+BUNDLED_FONTS = Path(__file__).resolve().parent.parent / "src" / "assets" / "fonts"
 
 
 def glyphs_with_bytecode(font):
-    """Glyphs carrying instructions. Expands `font`, so never call this on a face being edited."""
+    """Glyphs carrying instructions. Expands `font`, so never call this on a face being edited.
+
+    The `ensureDecompiled()` call is load-bearing: a face read back from disk keeps
+    every glyph unexpanded, and an unexpanded glyph has no `program` at all, so
+    counting without expanding first reports nothing no matter how much bytecode
+    is actually in the file. `self_test` pins that down.
+    """
+    glyf = font["glyf"]
+    glyf.ensureDecompiled()
     return [
         name
-        for name, glyph in font["glyf"].glyphs.items()
+        for name, glyph in glyf.glyphs.items()
         if (program := getattr(glyph, "program", None)) is not None and program.bytecode
     ]
 
@@ -140,7 +150,51 @@ def strip(path):
     return cleared, len(written)
 
 
+def self_test(paths):
+    """Pin down that instructions hidden in an unexpanded glyph still get counted.
+
+    Builds nothing synthetic: takes a shipped (unhinted) face, gives one glyph
+    instructions back, writes it out, reads it back and requires the count to be
+    exactly that glyph. The reloaded face has every glyph unexpanded, so this is
+    the case that used to pass silently and let a hinted face through the assert.
+    """
+    from fontTools.ttLib.tables.ttProgram import Program
+
+    assert paths, "self-test needs at least one face; a zero-face run passes vacuously"
+    for path in paths:
+        raw = Path(path).read_bytes()
+        assert not glyphs_with_bytecode(TTFont(io.BytesIO(raw))), (
+            f"{path}: shipped face is still hinted"
+        )
+
+        target = TTFont(
+            io.BytesIO(raw), recalcTimestamp=False, recalcBBoxes=False
+        ).getGlyphOrder()[1]
+        face = TTFont(io.BytesIO(raw), recalcTimestamp=False, recalcBBoxes=False)
+        glyph = face["glyf"].glyphs[target]
+        glyph.expand(face["glyf"])
+        glyph.program = Program()
+        glyph.program.fromBytecode(b"\xb0\x01\x00\x00\x2b")
+
+        output = io.BytesIO()
+        face.flavor = "woff2"
+        face.save(output)
+        found = glyphs_with_bytecode(TTFont(io.BytesIO(output.getvalue())))
+        assert found == [target], (
+            f"{path}: reinjected bytecode went unnoticed, found {found}"
+        )
+
+
 def main(argv):
+    if argv and argv[0] == "--self-test":
+        paths = argv[1:] or [
+            str(path) for path in sorted(BUNDLED_FONTS.glob("*.woff2"))
+        ]
+        self_test(paths)
+        print(
+            f"self-test ok over {len(paths)} face(s): shipped faces are unhinted, and instructions in an unexpanded glyph are still counted"
+        )
+        return 0
     if not argv:
         print(__doc__, file=sys.stderr)
         return 2

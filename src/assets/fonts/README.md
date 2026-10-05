@@ -70,8 +70,21 @@ python3 scripts/build-fonts.py \
 ```
 
 The compressed bytes depend on the fontTools version, so after regenerating,
-re-pin `EXPECTED_FONT_SHA256` in `scripts/artifacts.test.mjs` from the hashes
-that run prints.
+re-pin `EXPECTED_FONT_SHA256` in `scripts/artifacts.test.mjs` with the output of
+`shasum -a 256 src/assets/fonts/*.woff2`.
+
+To check the shipped faces are unhinted without rewriting them:
+
+```sh
+python3 scripts/build-fonts.py --self-test
+```
+
+It asserts no glyph in each face carries instructions, then reinjects
+instructions into one glyph, writes the face out, reads it back, and asserts the
+count is exactly that glyph. That last part is the regression guard: a face read
+back from disk keeps every glyph unexpanded, and an unexpanded glyph has no
+`program` at all, so a count that skips decompiling reports nothing and would
+wave a hinted face straight through.
 
 To change the face, replace the files, keep the names, and update the
 `@font-face` blocks in `src/marvis.css` and `TERMINAL_FONT_FAMILY` in
