@@ -408,6 +408,13 @@ describe("TerminalSession UI", () => {
     const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
     await flushPromises();
 
+    // A terminal with shell integration turned off never sees an OSC marker, and nothing invents the
+    // field for it: the status is the backend's answer with the frontend's own two additions, and a
+    // failure the backend cannot see has to arrive from the shell or not at all.
+    await vi.advanceTimersByTimeAsync(750);
+    const polled = wrapper.emitted("statusChanged")?.at(-1)?.[0] as Record<string, unknown>;
+    expect(polled.lastCommandExit).toBeUndefined();
+
     // The backend cannot supply this: a command that fails does not end the shell, so the answer
     // arrives from the OSC 133 hook the session was started with.
     terminalMock.oscHandlers.get(133)?.("D;1");

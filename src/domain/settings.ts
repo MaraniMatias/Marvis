@@ -56,6 +56,18 @@ export interface TerminalSettings {
    * with a build running is not asked to.
    */
   changeDirectoryOnMove: boolean;
+  /**
+   * Whether a new terminal is told to report how its commands ended, which is what turns a failed
+   * command's sidebar row red.
+   *
+   * On by default because it is the only way that row can know: a command that fails prints to the
+   * terminal and leaves the shell running, so nothing else in the app can see it.
+   *
+   * Read when a terminal is opened, so this decides what the terminals opened *after* the change get.
+   * Terminals already open keep the line they were given, and turning it on does not reach back into
+   * them — a shell cannot be told about it now without being asked again.
+   */
+  shellIntegration: boolean;
 }
 
 export interface IndentationSettings {
@@ -106,6 +118,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     cursorStyle: "block",
     scrollbar: "hidden",
     changeDirectoryOnMove: false,
+    shellIntegration: true,
   },
   editor: {
     fontSize: 13,
@@ -174,6 +187,7 @@ export function normalizeSettings(value: unknown): AppSettings {
         : DEFAULT_SETTINGS.terminal.cursorStyle,
       scrollbar: isTerminalScrollbarMode(terminal.scrollbar) ? terminal.scrollbar : DEFAULT_SETTINGS.terminal.scrollbar,
       changeDirectoryOnMove: flag(terminal.changeDirectoryOnMove, DEFAULT_SETTINGS.terminal.changeDirectoryOnMove),
+      shellIntegration: flag(terminal.shellIntegration, DEFAULT_SETTINGS.terminal.shellIntegration),
     },
     editor: {
       fontSize: boundedNumber(editor.fontSize, EDITOR_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.editor.fontSize),
@@ -205,6 +219,7 @@ export type SettingsPath =
   | "terminal.cursorStyle"
   | "terminal.scrollbar"
   | "terminal.changeDirectoryOnMove"
+  | "terminal.shellIntegration"
   | "editor.fontSize"
   | "editor.ligatures"
   | "editor.cursorBlink"
@@ -354,6 +369,13 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         label: "Change directory when moved",
         description:
           "Moving a terminal hands the session to another worktree and leaves the process alone. Turn this on and a shell sitting at a prompt also changes directory; one with a command running is left where it is.",
+      },
+      {
+        kind: "toggle",
+        path: "terminal.shellIntegration",
+        label: "Report failed commands",
+        description:
+          "One line of shell integration is echoed into a terminal when it opens. That line is the only way a command that fails can turn the sidebar row red, since a failing command leaves the shell running and nothing else can see it. Turn this off to keep the line out of the terminal, and the row stays blue whatever you run.",
       },
     ],
   },

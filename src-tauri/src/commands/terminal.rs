@@ -6,6 +6,7 @@ use tauri::{
 };
 
 use crate::{
+    config::{self, ConfigFile},
     domain::{
         ipc::{IpcError, IpcErrorCode},
         terminal_layout::CheckoutTerminalLayout,
@@ -170,10 +171,12 @@ pub async fn terminal_create(
     app: AppHandle,
     database: State<'_, Database>,
     backend: State<'_, std::sync::Arc<TerminalBackend>>,
+    config: State<'_, ConfigFile>,
 ) -> Result<CreatedTerminal, IpcError> {
     validate_dimensions(request.cols, request.rows)?;
     let database = database.inner().clone();
     let backend = backend.inner().clone();
+    let config = config.inner().0.clone();
     tauri::async_runtime::spawn_blocking(move || {
         // The reader's half of the flow control with the window that draws this session's output:
         // one gate per session, and the only thing that can open it is that window saying how far
@@ -202,7 +205,13 @@ pub async fn terminal_create(
             }
             Ok(())
         });
-        match terminal::create_with_options(
+        // Read here rather than asked for over IPC, which is what keeps the setting off the wire: the
+        // shape of `terminal_create` is unchanged, so a frontend that has never heard of the setting
+        // produces terminals that honour it.
+        let shell_integration = config::load(&config)
+            .ok()
+            .map(|settings| settings.terminal.shell_integration);
+        match terminal::create_with_settings(
             &database,
             &backend,
             &request.checkout_id,
@@ -211,6 +220,7 @@ pub async fn terminal_create(
                 rows: request.rows,
                 prompt: request.prompt,
             },
+            &shell_integration,
             output,
         ) {
             Ok(created) => {

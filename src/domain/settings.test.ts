@@ -41,6 +41,7 @@ describe("the settings file", () => {
         cursorStyle: "block",
         scrollbar: "hidden",
         changeDirectoryOnMove: false,
+        shellIntegration: true,
       },
       editor: { fontSize: 13, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
     });
@@ -62,6 +63,7 @@ describe("the settings file", () => {
         cursorStyle: "bar" as const,
         scrollbar: "always" as const,
         changeDirectoryOnMove: true,
+        shellIntegration: false,
       },
       editor: { fontSize: 15, ligatures: false, cursorBlink: false, indentation: { useSpaces: false, size: 4 } },
     };
@@ -161,6 +163,23 @@ describe("the form's schema", () => {
     expect(valueAt(next, "editor.indentation.useSpaces")).toBe(true);
     expect(withValue(DEFAULT_SETTINGS, "terminal.ligatures", false).terminal.ligatures).toBe(false);
     expect(valueAt(withValue(DEFAULT_SETTINGS, "ui.zoom", 1.3), "ui.zoom")).toBe(1.3);
+  });
+
+  it("offers the failed-command toggle with the cost it actually charges", () => {
+    const field = SETTINGS_SECTIONS.flatMap((section) => section.fields).find(
+      (candidate) => candidate.path === "terminal.shellIntegration",
+    );
+    expect(field?.kind).toBe("toggle");
+    // On by default, because it is the only way a failed command's row can be red: a command that
+    // fails does not end the shell, so nothing else in the app can see that it did.
+    expect(DEFAULT_SETTINGS.terminal.shellIntegration).toBe(true);
+    expect(normalizeSettings(undefined).terminal.shellIntegration).toBe(true);
+    expect(withValue(DEFAULT_SETTINGS, "terminal.shellIntegration", false).terminal.shellIntegration).toBe(false);
+    // Someone turning it off is giving up a thing, and the label has to say which. Both halves matter:
+    // the line that appears in the terminal, and the row that stops going red without it.
+    const description = field && "description" in field ? field.description : "";
+    expect(description).toMatch(/echoed into a terminal/i);
+    expect(description).toMatch(/red/i);
   });
 
   it("turns a select's string back into the value it stands for", () => {

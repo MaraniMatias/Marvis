@@ -93,6 +93,14 @@ pub struct TerminalSettings {
     pub scrollbar: String,
     /// Whether moving a terminal to another worktree also moves the shell's working directory.
     pub change_directory_on_move: bool,
+    /// Whether a new terminal is told to report how its commands ended, which is what turns a
+    /// failed command's row red.
+    ///
+    /// Read when a terminal is created, so this only decides what the terminals opened *after* the
+    /// change get: terminals already open keep the line they were given, and turning it on does not
+    /// reach back into them. Off costs the red bar, because nothing else in the app can see a command
+    /// that failed without ending the shell.
+    pub shell_integration: bool,
 }
 
 impl Default for TerminalSettings {
@@ -104,6 +112,7 @@ impl Default for TerminalSettings {
             cursor_style: "block".into(),
             scrollbar: "hidden".into(),
             change_directory_on_move: false,
+            shell_integration: true,
         }
     }
 }
@@ -353,6 +362,7 @@ mod tests {
                 cursor_style: "bar".into(),
                 scrollbar: "always".into(),
                 change_directory_on_move: true,
+                shell_integration: false,
             },
             editor: EditorSettings {
                 font_size: 15.0,
@@ -402,6 +412,37 @@ mod tests {
 
         assert!(error.contains("left as it is"), "{error}");
         assert_eq!(std::fs::read_to_string(&path).unwrap(), broken);
+    }
+
+    /// The shell-integration toggle is the one preference whose default is *on*, so it is the one a
+    /// missing key is most likely to get wrong in both directions: a `config.yml` written by a build
+    /// from before the key existed must load as on, because that is the behaviour those files were
+    /// living with, and must not be mistaken for a person having turned it off.
+    #[test]
+    fn shell_integration_is_on_by_default_and_survives_every_way_of_being_written() {
+        let home = settings_dir();
+        let path = config_path_in(&home);
+
+        // Absent entirely, which is every file written before the key existed.
+        assert!(load(&path).unwrap().terminal.shell_integration);
+        // Absent from a file that has other preferences in it.
+        std::fs::write(&path, "ui:\n  fontSize: 18\n").unwrap();
+        assert!(load(&path).unwrap().terminal.shell_integration);
+
+        // Explicitly off, and explicitly on, both survive a round trip rather than being normalised
+        // back to the default.
+        for written in [false, true] {
+            let mut settings = AppSettings::default();
+            settings.terminal.shell_integration = written;
+            save(&path, &settings).unwrap();
+            assert_eq!(load(&path).unwrap().terminal.shell_integration, written);
+            assert!(
+                std::fs::read_to_string(&path)
+                    .unwrap()
+                    .contains(&format!("shellIntegration: {written}")),
+                "the file should say what was asked for"
+            );
+        }
     }
 
     #[test]

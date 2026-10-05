@@ -55,6 +55,23 @@ pub fn create_with_options(
     options: TerminalOptions,
     output: OutputSink,
 ) -> Result<CreatedTerminal, String> {
+    create_with_settings(database, backend, checkout_id, options, &None, output)
+}
+
+/// `shell_integration` is read from the settings file rather than passed from the frontend, so that
+/// turning it off needs no IPC change at all and cannot be bypassed by a caller that forgot.
+///
+/// `None` means "no settings file was reachable", which is treated as the default: the feature ships
+/// on, and a settings file that cannot be read is a settings dialog problem rather than a reason to
+/// start every terminal uninstrumented.
+pub fn create_with_settings(
+    database: &Database,
+    backend: &TerminalBackend,
+    checkout_id: &str,
+    options: TerminalOptions,
+    shell_integration: &Option<bool>,
+    output: OutputSink,
+) -> Result<CreatedTerminal, String> {
     let TerminalOptions { cols, rows, prompt } = options;
     let cwd = database.terminal_checkout_path(checkout_id)?;
     reject_prompt(prompt.as_deref())?;
@@ -80,7 +97,13 @@ pub fn create_with_options(
     let args = inherited_shell_args(&program);
     // Resolved before the spawn because `program` is moved into it below, and the hook text is a
     // property of the shell that is being started rather than of the PTY that is about to exist.
-    let hook = shell_integration_hook(&program);
+    // Read here rather than at the prompt so that turning the setting off leaves every terminal that
+    // is already open exactly as it was, and turning it on does not retrofit one.
+    let startup_line = if shell_integration.unwrap_or(true) {
+        shell_integration_hook(&program)
+    } else {
+        None
+    };
     backend.spawn(
         session.id.clone(),
         SpawnOptions {
@@ -89,17 +112,10 @@ pub fn create_with_options(
             cwd,
             cols,
             rows,
+            startup_line,
         },
         output,
     )?;
-
-    // Written after the spawn rather than before, because the hook is input and input needs a shell
-    // that is there to read it. A failure here is deliberately swallowed: a shell that died on the
-    // way up has nothing to instrument, and the session it failed to instrument is still a usable
-    // terminal — only the sidebar bar stays blue, which is what a terminal without integration is.
-    if let Some(hook) = hook {
-        let _ = backend.write(&session.id, format!("{hook}\n").as_bytes());
-    }
 
     match database.add_terminal_session(&session) {
         Ok(workspace) => Ok(CreatedTerminal { session, workspace }),
@@ -167,8 +183,17 @@ fn inherited_shell_args(program: &Path) -> Vec<String> {
 /// `D;<code>` after every command is the shell's own `$?`, and `A` when the next one starts is what
 /// tells the row to stop being red. OSC 133 is the ident every shell-integration script uses, and
 /// xterm.js ships no handler for it, so nothing else contends for these bytes.
-const OSC_EXIT: &str = r"\033]133;D;%s\007";
-const OSC_STARTED: &str = r"\033]133;A\007";
+///
+/// `print -P` rather than `printf`, because zsh's `print` takes the escapes as two characters where
+/// `printf` needs four: `\e` against `\033` and `\a` against `\007`. The line is written to an 80
+/// column terminal and every character of it is drawn twice over (see `install_shell_integration`),
+/// so the difference is two rows of scrollback for free.
+const OSC_EXIT: &str = r"\e]133;D;$?\a";
+const OSC_STARTED: &str = r"\e]133;A\a";
+
+/// The same two markers for bash, which has no `print` and so spells the escapes the long way.
+const OSC_EXIT_BASH: &str = r"\033]133;D;%s\007";
+const OSC_STARTED_BASH: &str = r"\033]133;A\007";
 
 /// The one line of shell input that makes this shell report how its commands ended.
 ///
@@ -181,35 +206,41 @@ const OSC_STARTED: &str = r"\033]133;A\007";
 /// `None` means no integration: `sh` has no prompt hook that fires after a command with `$?` still
 /// intact, and a terminal under it keeps today's behaviour rather than half a hook.
 ///
-/// The line is echoed by the tty line discipline and stays in the scrollback. That is accepted: the
-/// bytes written to the master are INPUT to the shell, so an ANSI erase would be eaten by zsh's ZLE
-/// and ring the bell rather than reach the screen, and clearing `ECHO` on the master does not work
-/// on macOS, where master and slave carry separate termios. One line per terminal, at the top of the
-/// scrollback and before the first prompt, is what it costs.
+/// The line is echoed into the scrollback. That much is accepted — the bytes written to the master are
+/// INPUT to the shell, so an ANSI erase would be eaten by zsh's ZLE and ring the bell rather than
+/// reach the screen, and clearing `ECHO` on the master does not work on macOS, where master and slave
+/// carry separate termios. It is drawn *once*, because the line waits for the shell to be at a prompt
+/// before it is written; see `install_shell_integration` in `terminal/mod.rs`.
 fn shell_integration_hook(program: &Path) -> Option<String> {
     match program.file_name().and_then(|name| name.to_str()) {
-        // `autoload -Uz add-zsh-hook` is not optional and `add-zsh-hook` is not a builtin. It is an
-        // autoloadable function, so it exists only once something has loaded it — usually an rc file,
-        // because frameworks like oh-my-zsh do. In a zsh with no rc files nothing has, and the call
-        // below fails with `command not found: add-zsh-hook`: the line is already echoed by then, so
-        // the shell looks fine, no hook is registered, and every session in that terminal silently
-        // never reports an exit code. The bare `-U`/`-z` form is idempotent, so it costs nothing in
-        // the rc-loaded case, and `add-zsh-hook` ships in zsh's own `fpath` on every platform this
-        // app targets, which is what makes the autoload able to find it.
+        // The hook arrays are appended to by name rather than through `add-zsh-hook`, which is what
+        // `add-zsh-hook` itself does and the whole of what it does — so this is the same
+        // registration without the dependency.
+        //
+        // `add-zsh-hook` is not a builtin but an autoloadable *function*, so it exists only once
+        // something has loaded it, usually an rc file because frameworks like oh-my-zsh do. In a zsh
+        // with no rc files nothing has, and calling it fails with `command not found: add-zsh-hook`:
+        // the line is already echoed by then, so the shell looks fine, no hook is registered, and every
+        // session in that terminal silently never reports an exit code. That was measured, and it is
+        // why the arrays are written to directly. `precmd_functions` and `preexec_functions` are
+        // ordinary zsh parameters, so there is nothing to load and nothing to be missing.
+        //
+        // Each entry is the *name* of a function rather than a command: zsh looks the entry up and
+        // runs it, it does not eval it, so `precmd_functions+=('print -Pn "..."')` registers nothing
+        // and silently emits no marker at all. That was measured too, which is what the two
+        // definitions below are for.
         Some("zsh") => Some(format!(
-            "__marvis_precmd() {{ printf '{OSC_EXIT}' $?; }}; \
-             autoload -Uz add-zsh-hook; \
-             add-zsh-hook precmd __marvis_precmd; \
-             __marvis_preexec() {{ printf '{OSC_STARTED}'; }}; \
-             add-zsh-hook preexec __marvis_preexec"
+            "marvis_pc() {{ print -Pn \"{OSC_EXIT}\"; }}; precmd_functions+=(marvis_pc); \
+             marvis_px() {{ print -Pn \"{OSC_STARTED}\"; }}; preexec_functions+=(marvis_px)"
         )),
         // A function rather than an inline `PROMPT_COMMAND` string because `$?` has to be read before
         // anything else in the command resets it, and an existing `PROMPT_COMMAND` is kept because
-        // dropping it would take a user's own prompt work with it.
+        // dropping it would take a user's own prompt work with it. `trap … DEBUG` stands in for zsh's
+        // `preexec`, which bash has no equivalent of.
         Some("bash") => Some(format!(
-            "__marvis_prompt_command() {{ printf '{OSC_EXIT}' \"$?\"; }}; \
+            "__marvis_prompt_command() {{ printf '{OSC_EXIT_BASH}' \"$?\"; }}; \
              PROMPT_COMMAND=\"__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}\"; \
-             trap 'printf \"{OSC_STARTED}\"' DEBUG"
+             trap 'printf \"{OSC_STARTED_BASH}\"' DEBUG"
         )),
         _ => None,
     }
@@ -232,12 +263,12 @@ mod tests {
     use crate::{
         domain::workspace::Repo,
         persistence::Database,
-        terminal::{synchronize_shell, wait_for_output, OutputSink, SpawnOptions, TerminalBackend},
+        terminal::{wait_for_output, OutputSink, SpawnOptions, TerminalBackend},
     };
 
     use super::{
-        create, create_with_options, inherited_shell_args, rename, shell_integration_hook,
-        TerminalOptions,
+        create, create_with_options, create_with_settings, inherited_shell_args, rename,
+        shell_integration_hook, TerminalOptions,
     };
 
     fn plain_repo(path: &Path) -> Repo {
@@ -292,12 +323,16 @@ mod tests {
         }
     }
 
-    /// Installs the hook in a real shell over a real PTY and asks a command to fail.
+    /// Spawns a real shell with the real hook, through the real spawn path, and asks a command to
+    /// fail.
     ///
     /// Everything about this is a real shell rather than a stub because the whole subject is what a
     /// shell *accepts*: a hook line that is syntactically valid, calls functions that exist, and ends
-    /// up registered. A test that only compared the string would have shipped the missing
-    /// `autoload -Uz add-zsh-hook` straight through.
+    /// up registered. A test that only compared the string would have shipped both the missing
+    /// `autoload -Uz add-zsh-hook` and an `add-zsh-hook` that nothing had loaded.
+    ///
+    /// The line goes in as `startup_line` rather than being written by the test, so this exercises the
+    /// same timing production does: the backend decides when the shell is ready for it.
     fn assert_shell_reports_a_failing_command(shell: &str, args: &[&str], session: &str) {
         let Some(hook) = shell_integration_hook(Path::new(shell)) else {
             panic!("{shell} was expected to be integrated");
@@ -315,20 +350,15 @@ mod tests {
                     cwd: std::env::current_dir().unwrap(),
                     cols: 80,
                     rows: 24,
+                    startup_line: Some(hook),
                 },
                 output,
             )
             .unwrap();
 
-        // The shell has to be at a prompt before the hook is typed at it, or the line lands in
-        // whatever it is drawing instead.
-        synchronize_shell(&backend, &receiver, session);
-        backend
-            .write(session, format!("{hook}\n").as_bytes())
-            .unwrap();
         // The hook's own statements report a clean exit, so this wait also proves the hook was
         // accepted by the shell rather than typed into a broken line.
-        wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(10));
+        wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(15));
 
         backend.write(session, b"false\n").unwrap();
         // `false` is the smallest command that fails, and the one every shell agrees on.
@@ -362,7 +392,9 @@ mod tests {
     /// registered, no OSC 133, ever, and no error anywhere because the line was already echoed.
     ///
     /// `zsh -f` is that user. `-f` skips every rc file, so whatever the machine running this has
-    /// installed cannot be what makes the hook work — only what the hook line does for itself.
+    /// installed cannot be what makes the hook work — only what the hook line does for itself. The
+    /// hook now writes to `precmd_functions` directly, which is what `add-zsh-hook` does underneath,
+    /// so there is no longer anything that can be missing.
     #[test]
     fn the_zsh_hook_reports_a_failure_in_a_zsh_with_no_startup_files() {
         if Command::new("/bin/zsh").arg("--version").output().is_err() {
@@ -371,19 +403,195 @@ mod tests {
         assert_shell_reports_a_failing_command("/bin/zsh", &["-f", "-i"], "session:zsh-no-rc");
     }
 
+    /// What a shell hook has to be, and is not allowed to be, anything else.
+    ///
+    /// `precmd_functions` takes the *name* of a function and runs it; it does not eval its entries.
+    /// That was measured rather than assumed, and the difference is the whole reason the hook defines
+    /// two functions: `precmd_functions+=('print -Pn "…"')` is accepted without complaint, registers
+    /// nothing, and emits no marker at all, which is the silent-no-op failure this feature cannot
+    /// afford. `add-zsh-hook` is gone for the same class of reason — it is an autoloadable function
+    /// that a shell with no rc files has never loaded.
     #[test]
-    fn the_zsh_hook_loads_add_zsh_hook_before_it_calls_it() {
+    fn the_zsh_hook_appends_function_names_and_needs_nothing_loaded_first() {
         let hook = shell_integration_hook(Path::new("/bin/zsh")).unwrap();
-        let autoload = hook.find("autoload -Uz add-zsh-hook").expect(
-            "the zsh hook must autoload add-zsh-hook, which is an autoloadable function and not a builtin",
-        );
-        let first_call = hook
-            .find("add-zsh-hook precmd")
-            .expect("the hook must install a precmd hook");
         assert!(
-            autoload < first_call,
-            "add-zsh-hook is called before it is loaded, so the hook is never registered"
+            !hook.contains("add-zsh-hook"),
+            "add-zsh-hook is an autoloadable function, and a shell with no rc files has not loaded it"
         );
+        assert!(
+            !hook.contains('\''),
+            "a hook array entry is looked up as a function name, so putting code in quotes registers nothing"
+        );
+        for parameter in ["precmd_functions+=(", "preexec_functions+=("] {
+            let entry = hook
+                .split(parameter)
+                .nth(1)
+                .and_then(|rest| rest.split(')').next())
+                .unwrap_or_default();
+            assert!(
+                !entry.is_empty(),
+                "{parameter} must name a function, and every name here is defined on the same line"
+            );
+        }
+    }
+
+    /// The line is drawn twice on screen if it is written before the shell is ready for it.
+    ///
+    /// A shell that has not reached its prompt is still in canonical mode with the tty line discipline
+    /// echoing for it, so a line written into that window is echoed plainly into the middle of its
+    /// startup output and then drawn again, with the line editor's own colouring, once the editor
+    /// takes over. One write, two renders, which is what a person opening a terminal was shown.
+    ///
+    /// Counting is done on a fragment from the first 80 columns of the line, because that is the only
+    /// part of it the editor cannot break: it wraps a longer line at column 80, and the wrap arrives in
+    /// the byte stream as a newline, so anything spanning it does not survive as one string. The
+    /// numbers this asserts were cross-checked by feeding the same captures through a real terminal
+    /// emulator and counting screen lines: two renders written immediately, one written after the
+    /// shell went quiet.
+    #[test]
+    fn the_hook_is_drawn_once_because_the_shell_is_ready_before_it_is_written() {
+        if Command::new("/bin/zsh").arg("--version").output().is_err() {
+            return;
+        }
+        assert_eq!(
+            visible_hook_renders(true),
+            1,
+            "the hook line is drawn more than once"
+        );
+        // The same shell and the same line, written the moment it is spawned rather than when it is
+        // ready. This is the count that makes the assertion above mean something rather than pass by
+        // accident: it is what the line used to produce, and what a person opening a terminal saw.
+        assert_eq!(visible_hook_renders(false), 2);
+    }
+
+    /// Counts how many times the hook is drawn in a session's output.
+    ///
+    /// Counted on the first 30 characters of the line, contiguous, in the raw stream. A render by the
+    /// line editor puts that fragment in one piece — it is inside the first 80 columns, so it is not
+    /// broken by the wrap — and so does the tty's echo, which is the whole point: each render
+    /// contributes exactly one occurrence and nothing else in the session's startup output contains
+    /// this text.
+    ///
+    /// Nothing is stripped and no line breaks are joined. Both were tried and both are wrong here: the
+    /// editor interleaves its own fragments into the middle of the line, so joining what is left
+    /// counts a render that is on screen as zero. The numbers this asserts were cross-checked by
+    /// feeding the same captures through a real terminal emulator and counting screen lines.
+    fn visible_hook_renders(wait_for_prompt: bool) -> usize {
+        let hook = shell_integration_hook(Path::new("/bin/zsh")).unwrap();
+        let prefix = &hook[..30];
+        let backend = TerminalBackend::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // Everything is kept as well as forwarded: `wait_for_output` drains what it waits past, and the
+        // echo being counted arrived long before the marker it waits for.
+        let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = std::sync::Arc::clone(&captured);
+        let output: OutputSink = Box::new(move |bytes| {
+            kept.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            sender.send(bytes.to_vec()).map_err(|e| e.to_string())
+        });
+        let session = format!("session:render:{}", wait_for_prompt);
+        backend
+            .spawn(
+                session.clone(),
+                SpawnOptions {
+                    program: Path::new("/bin/zsh").to_path_buf(),
+                    args: vec!["-l".into(), "-i".into()],
+                    cwd: std::env::current_dir().unwrap(),
+                    cols: 80,
+                    rows: 24,
+                    startup_line: if wait_for_prompt {
+                        Some(hook.clone())
+                    } else {
+                        None
+                    },
+                },
+                output,
+            )
+            .unwrap();
+        if !wait_for_prompt {
+            // A line written into a shell that has not reached its prompt, which is what production
+            // used to do and what this test exists to catch.
+            backend
+                .write(&session, format!("{hook}\n").as_bytes())
+                .unwrap();
+        }
+        wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(15));
+        let raw = captured
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        raw.windows(prefix.len())
+            .filter(|window| *window == prefix.as_bytes())
+            .count()
+    }
+
+    /// Opens a real terminal with a real setting and reports whether the hook line reached it.
+    ///
+    /// Goes through `create_with_settings` rather than through the backend, because the setting is
+    /// only read on the way in: what a terminal already has cannot be taken away by turning the
+    /// setting off afterwards, which is what the field's own doc comment promises.
+    fn hook_line_reaches_a_new_terminal(setting: Option<bool>) -> bool {
+        let directory = tempdir().unwrap();
+        let checkout = directory.path().join("checkout");
+        fs::create_dir(&checkout).unwrap();
+        let database = Database::open(directory.path().join("workspace.sqlite3")).unwrap();
+        let repo = plain_repo(&checkout);
+        database.register_plain_repo(repo.clone()).unwrap();
+        let backend = TerminalBackend::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let output: OutputSink =
+            Box::new(move |bytes| sender.send(bytes.to_vec()).map_err(|e| e.to_string()));
+
+        let created = create_with_settings(
+            &database,
+            &backend,
+            &repo.checkouts[0].id,
+            TerminalOptions {
+                cols: 80,
+                rows: 24,
+                prompt: None,
+            },
+            &setting,
+            output,
+        )
+        .unwrap();
+
+        let instrumented = if setting == Some(false) {
+            // Nothing is going to print a marker, so this waits on something the shell prints itself:
+            // otherwise the wait would pass instantly and prove nothing.
+            backend
+                .write(&created.session.id, b"printf 'MARVISPROBE\\n'\n")
+                .unwrap();
+            wait_for_output(&receiver, b"MARVISPROBE", Duration::from_secs(15));
+            false
+        } else {
+            // The hook reports its own clean exit as soon as it is installed, which is a marker only
+            // an instrumented shell can produce.
+            wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(15));
+            true
+        };
+        backend.close(&created.session.id).unwrap();
+        instrumented
+    }
+
+    /// The setting decides what the next terminal gets, and nothing else moves.
+    ///
+    /// Off means no line at all, which is what a terminal looked like before this existed: no hook, so
+    /// no OSC 133, so the frontend never has an exit code to turn a row red from.
+    ///
+    /// `None` is "no settings file was reachable" and reads as on, because the feature ships on and a
+    /// person whose file is broken already gets an error from the settings dialog. Reading it as off
+    /// would quietly take the feature away from everybody whose file has not been written yet.
+    #[test]
+    fn the_setting_decides_whether_a_new_terminal_gets_the_line() {
+        if Command::new("/bin/zsh").arg("--version").output().is_err() {
+            return;
+        }
+        assert!(hook_line_reaches_a_new_terminal(Some(true)));
+        assert!(!hook_line_reaches_a_new_terminal(Some(false)));
+        assert!(hook_line_reaches_a_new_terminal(None));
     }
 
     #[test]
@@ -398,6 +606,24 @@ mod tests {
                 "{shell} should be integrated"
             );
         }
+    }
+
+    /// The line is drawn in an 80 column terminal, so every character of it costs two rows of
+    /// scrollback if it can be avoided. Both halves of this are measured: `print -P` over `printf`
+    /// because zsh's `print` takes two-character escapes, and the hook arrays over `add-zsh-hook`
+    /// because appending a name is the whole of what `add-zsh-hook` does.
+    #[test]
+    fn the_hook_line_is_shorter_than_the_one_that_wrapped_over_three_rows() {
+        let zsh = shell_integration_hook(Path::new("/bin/zsh")).unwrap();
+        assert!(
+            zsh.len().div_ceil(80) <= 2,
+            "the zsh hook is {} chars, which is {} rows at 80 columns",
+            zsh.len(),
+            zsh.len().div_ceil(80)
+        );
+        // It must still be one line: a newline in here would be read by the shell as the end of the
+        // command and the rest of it would be a second command, at a prompt nobody asked for.
+        assert!(!zsh.contains('\n'));
     }
 
     #[test]
