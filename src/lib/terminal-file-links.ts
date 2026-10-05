@@ -20,6 +20,7 @@
 import type { IDisposable, ILink, ILinkProvider, IMarker, Terminal } from "@xterm/xterm";
 import { probeCheckoutFile } from "./ipc";
 import { cellRuns, readLogicalLine } from "./terminal-buffer-line";
+import type { CellRun } from "./terminal-buffer-line";
 import { terminalPathsIn } from "./terminal-paths";
 
 /**
@@ -128,12 +129,16 @@ export function registerFilePathLinks(terminal: Terminal, options: FileLinkOptio
   /**
    * Draws the hovered path in the accent, which is the one part of the link this app owns.
    *
+   * Every run it is handed is drawn, not only the one under the mouse: a path long enough to wrap
+   * comes back as one run per row, and underlining the half the pointer happens to be on is what
+   * makes a wrapped path look truncated. The whole path is one name, so the whole path is drawn.
+   *
    * A decoration takes a 0-based column on the line its marker is on, and the marker is an offset
    * from the cursor rather than a row: both are converted here, because xterm's own 1-based rows
    * and this one disagree in exactly the two places that would silently put the underline on the
    * wrong line.
    */
-  const paint = (row: number, from: number, to: number) => {
+  const paint = (runs: CellRun[]) => {
     clearPaints();
     const color = accentColor();
     if (!color) return;
@@ -141,15 +146,24 @@ export function registerFilePathLinks(terminal: Terminal, options: FileLinkOptio
     // The alternate buffer is a full-screen program's own drawing, and xterm returns no decoration
     // there at all, so asking would only leave a marker nothing is attached to.
     if (buffer.type === "alternate") return;
-    const offset = row - (buffer.baseY + buffer.cursorY);
-    const marker = terminal.registerMarker(offset);
-    if (!marker) return;
-    const decoration = terminal.registerDecoration({ marker, x: from, width: to - from, foregroundColor: color });
-    if (!decoration) {
-      marker.dispose();
-      return;
+    for (const run of runs) {
+      const offset = run.row - (buffer.baseY + buffer.cursorY);
+      const marker = terminal.registerMarker(offset);
+      // A row that scrolled out of the buffer takes no marker, and the rest of the path still
+      // does: one row it cannot draw is not a reason to draw none of them.
+      if (!marker) continue;
+      const decoration = terminal.registerDecoration({
+        marker,
+        x: run.from,
+        width: run.to - run.from,
+        foregroundColor: color,
+      });
+      if (!decoration) {
+        marker.dispose();
+        continue;
+      }
+      paints.push({ decoration, marker });
     }
-    paints.push({ decoration, marker });
   };
 
   const provider: ILinkProvider = {
@@ -175,7 +189,8 @@ export function registerFilePathLinks(terminal: Terminal, options: FileLinkOptio
           // No answer means no link: the path did not survive the check that it is a file this
           // checkout holds, and xterm is not told about it at all, so it cannot underline it.
           if (!opened) continue;
-          for (const run of cellRuns(line.cells, candidate.start, candidate.end)) {
+          const runs = cellRuns(line.cells, candidate.start, candidate.end);
+          for (const run of runs) {
             links.push({
               // xterm's link ranges are 1-based and the end is the last cell, not the one past it.
               range: {
@@ -192,7 +207,9 @@ export function registerFilePathLinks(terminal: Terminal, options: FileLinkOptio
                 if (!event.ctrlKey && !event.metaKey) return;
                 options.open(text);
               },
-              hover: () => paint(run.row, run.from, run.to),
+              // Every row of the path, not this link's row alone: xterm underlines only the link
+              // under the pointer, so the accent is what carries the rest of a wrapped path.
+              hover: () => paint(runs),
               leave: clearPaints,
             });
           }

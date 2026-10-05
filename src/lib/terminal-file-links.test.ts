@@ -149,6 +149,31 @@ describe("registerFilePathLinks coordinates", () => {
     expect(links.map((link) => link.range.start.y)).toEqual([1, 2]);
     expect(links.every((link) => link.text === "verylongdirectory/src/app.ts")).toBe(true);
   });
+
+  it("paints every row of a wrapped path, whichever row the pointer is on", async () => {
+    // The bug this covers is visual: xterm underlines only the link under the pointer, so an accent
+    // drawn for one row leaves the rest of the path looking cut off at the wrap.
+    terminal = new Headless({ allowProposedApi: true, cols: 20, rows: 5 });
+    await write("");
+    await write("verylongdirectory/src/app.ts\r\n");
+    probe.mockResolvedValue({ path: "verylongdirectory/src/app.ts" });
+    mount();
+
+    // Hover the second row, the one no earlier test looked at.
+    const [second] = [(await linksOn(2))![1]];
+    second.hover?.({} as MouseEvent, second.text);
+
+    // Row 1 fills its 20 columns; the path is 28 characters, so row 2 takes the remaining 8.
+    expect(decorations).toMatchObject([
+      { x: 0, width: 20 },
+      { x: 0, width: 8 },
+    ]);
+    // One marker per painted row, and both rows of the path.
+    expect(markerOffsets).toEqual([-2, -1]);
+
+    second.leave?.({} as MouseEvent, second.text);
+    expect(decorations).toHaveLength(0);
+  });
 });
 
 describe("registerFilePathLinks behaviour", () => {
