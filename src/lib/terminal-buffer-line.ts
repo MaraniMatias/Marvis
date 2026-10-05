@@ -95,14 +95,8 @@ function appendRow(
  * a decoration to a single marker, so a line-spanning underline would need one per row and the
  * cell geometry is not something to guess twice.
  */
-export interface CellRun {
-  row: number;
-  from: number;
-  to: number;
-}
-
-export function cellRuns(cells: LineCell[], start: number, end: number): CellRun[] {
-  const runs: CellRun[] = [];
+export function cellRuns(cells: LineCell[], start: number, end: number): { row: number; from: number; to: number }[] {
+  const runs: { row: number; from: number; to: number }[] = [];
   for (let index = start; index < end && index < cells.length; index += 1) {
     const cell = cells[index];
     const last = runs[runs.length - 1];

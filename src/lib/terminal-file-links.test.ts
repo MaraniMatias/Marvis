@@ -17,11 +17,6 @@ const probe = vi.hoisted(() => vi.fn<(checkoutId: string, path: string) => Promi
 
 vi.mock("./ipc", () => ({ probeCheckoutFile: probe }));
 
-/** The columns a link covers, as a test reads them: 1-based, last cell inclusive. */
-function columns(link: ILink): [number, number] {
-  return [link.range.start.x, link.range.end.x];
-}
-
 let terminal: Headless;
 let provider: ILinkProvider | null;
 let decorations: { x: number; width: number; foregroundColor?: string }[] = [];
@@ -89,43 +84,6 @@ describe("registerFilePathLinks coordinates", () => {
     expect(await linksOn(1)).toBeUndefined();
   });
 
-  it("anchors the marker by its offset from the cursor, not by its row", async () => {
-    await write("first\r\nsecond\r\nsrc/lib/foo.ts\r\n");
-    probe.mockResolvedValue({ path: "src/lib/foo.ts" });
-    mount();
-
-    const [link] = (await linksOn(3))!;
-    link.hover?.({} as MouseEvent, link.text);
-
-    // The cursor sits on the empty row after the last one written, and the link is one row above
-    // it, so the offset is -1. An absolute row here would have been 2 and put the paint two rows
-    // down from the path.
-    expect(markerOffsets).toEqual([-1]);
-  });
-
-  it("gives a marker for a row above the cursor a negative offset", async () => {
-    await write("src/lib/foo.ts\r\nmore output\r\nand more\r\n");
-    probe.mockResolvedValue({ path: "src/lib/foo.ts" });
-    mount();
-
-    const [link] = (await linksOn(1))!;
-    link.hover?.({} as MouseEvent, link.text);
-
-    expect(markerOffsets).toEqual([-3]);
-  });
-
-  it("paints a 0-based column range, which is not what the link range is", async () => {
-    await write("error in src/lib/foo.ts\r\n");
-    probe.mockResolvedValue({ path: "src/lib/foo.ts" });
-    mount();
-
-    const [link] = (await linksOn(1))!;
-    link.hover?.({} as MouseEvent, link.text);
-
-    // The link says 1-based 10..23; a decoration is 0-based and carries its own width.
-    expect(decorations).toMatchObject([{ x: 9, width: 14, foregroundColor: "#74ade8" }]);
-  });
-
   it("finds a path that xterm wrapped across two rows", async () => {
     // Narrow enough that the path cannot fit on one row, which is the only way xterm marks a row
     // as a continuation.
@@ -140,39 +98,32 @@ describe("registerFilePathLinks coordinates", () => {
 
     const links = (await linksOn(2))!;
 
-    // One link per row, because a decoration is one row and the click has to work on either.
-    expect(links).toHaveLength(2);
+    // One link over both rows, because xterm underlines every row a link's range spans and a
+    // decoration here would clear that underline rather than add to it.
+    expect(links).toHaveLength(1);
     // The path is 28 characters and the row is 20 wide, so it fills the first row and takes 8
     // columns of the second.
-    expect(columns(links[0])).toEqual([1, 20]);
-    expect(columns(links[1])).toEqual([1, 8]);
-    expect(links.map((link) => link.range.start.y)).toEqual([1, 2]);
-    expect(links.every((link) => link.text === "verylongdirectory/src/app.ts")).toBe(true);
+    expect(links[0].range).toEqual({ start: { x: 1, y: 1 }, end: { x: 8, y: 2 } });
+    expect(links[0].text).toBe("verylongdirectory/src/app.ts");
   });
 
-  it("paints every row of a wrapped path, whichever row the pointer is on", async () => {
-    // The bug this covers is visual: xterm underlines only the link under the pointer, so an accent
-    // drawn for one row leaves the rest of the path looking cut off at the wrap.
+  it("registers no decoration, because that is what cleared xterm's own underline", async () => {
+    // Registering one fires `onDecorationRegistered`, which makes xterm clear and repaint the
+    // screen, and the repaint drops the underline it drew for the hovered link. A hovered path came
+    // out recoloured and not underlined. Nothing here paints, so nothing can clear it.
     terminal = new Headless({ allowProposedApi: true, cols: 20, rows: 5 });
     await write("");
     await write("verylongdirectory/src/app.ts\r\n");
     probe.mockResolvedValue({ path: "verylongdirectory/src/app.ts" });
     mount();
 
-    // Hover the second row, the one no earlier test looked at.
-    const [second] = [(await linksOn(2))![1]];
-    second.hover?.({} as MouseEvent, second.text);
+    const [link] = (await linksOn(2))!;
+    link.hover?.({} as MouseEvent, link.text);
 
-    // Row 1 fills its 20 columns; the path is 28 characters, so row 2 takes the remaining 8.
-    expect(decorations).toMatchObject([
-      { x: 0, width: 20 },
-      { x: 0, width: 8 },
-    ]);
-    // One marker per painted row, and both rows of the path.
-    expect(markerOffsets).toEqual([-2, -1]);
-
-    second.leave?.({} as MouseEvent, second.text);
     expect(decorations).toHaveLength(0);
+    expect(markerOffsets).toEqual([]);
+    // xterm underlines the link itself, which is the only underline there is now.
+    expect(link.decorations).toEqual({ pointerCursor: true, underline: true });
   });
 });
 
@@ -231,31 +182,15 @@ describe("registerFilePathLinks behaviour", () => {
     expect(open).toHaveBeenCalledWith("src/lib/foo.ts");
   });
 
-  it("takes the paint back on leave", async () => {
-    await write("src/lib/foo.ts\r\n");
-    probe.mockResolvedValue({ path: "src/lib/foo.ts" });
-    mount();
-
-    const [link] = (await linksOn(1))!;
-    link.hover?.({} as MouseEvent, link.text);
-    expect(decorations).toHaveLength(1);
-
-    link.leave?.({} as MouseEvent, link.text);
-
-    expect(decorations).toHaveLength(0);
-  });
-
-  it("takes the provider and the paint back when it is disposed", async () => {
+  it("takes the provider back when it is disposed", async () => {
     await write("src/lib/foo.ts\r\n");
     probe.mockResolvedValue({ path: "src/lib/foo.ts" });
     const links = mount();
-    const [link] = (await linksOn(1))!;
-    link.hover?.({} as MouseEvent, link.text);
+    await linksOn(1);
 
     links.dispose();
 
     expect(provider).toBeNull();
-    expect(decorations).toHaveLength(0);
   });
 
   it("answers nothing once it is disposed, rather than painting a terminal that is gone", async () => {
@@ -267,8 +202,8 @@ describe("registerFilePathLinks behaviour", () => {
     const links = mount();
 
     // The callback is deliberately never called once disposed, so this cannot await it. What is
-    // asserted is that nothing was painted and that the answer stayed unsent, which is the same
-    // thing the panel closing means: there is nothing left to answer.
+    // asserted is that the answer stayed unsent, which is the same thing the panel closing means:
+    // there is nothing left to answer.
     let settled = false;
     const pending = linksOn(1).then(() => {
       settled = true;
@@ -277,7 +212,6 @@ describe("registerFilePathLinks behaviour", () => {
     await new Promise((resolve) => setTimeout(resolve, 5));
 
     expect(settled).toBe(false);
-    expect(decorations).toHaveLength(0);
     void pending;
   });
 
