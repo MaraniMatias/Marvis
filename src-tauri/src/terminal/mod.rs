@@ -1213,13 +1213,22 @@ const STARTUP_POLL: Duration = Duration::from_millis(10);
 
 /// Writes the line a program was spawned with, once it is at a prompt.
 ///
-/// Waiting for output rather than writing straight away is what keeps the line to one copy on screen.
-/// A program that has not reached its prompt yet is still in canonical mode with the tty line
-/// discipline echoing for it, so a line written then is echoed plainly into the middle of whatever
-/// startup output is arriving — and is then drawn a second time, with the editor's own syntax
-/// colouring, once the line editor takes over. Both orderings were captured and fed through a real
-/// terminal: written immediately the line is on screen twice, written after the program goes quiet it
-/// is on screen once.
+/// Waiting is what makes the write land in a state the shell can read cleanly. A program that has not
+/// reached its prompt yet is still in canonical mode with the tty line discipline echoing for it, so a
+/// line written then is echoed plainly into the middle of whatever startup output is arriving — and is
+/// then drawn a second time, with the editor's own syntax colouring, once the line editor takes over.
+/// Both orderings were captured and fed through a real terminal: written immediately the line is drawn
+/// twice, written after the program goes quiet it is drawn once.
+///
+/// The sourced script clears the screen, so neither render survives to be seen any more. This wait is
+/// kept anyway, and for two reasons that are not about visibility. The clear covers the whole screen
+/// only once; anything the shell prints *after* it is not covered, so waiting for the program to stop
+/// talking is what makes the screen the clear finds a finished one rather than a half-written one. And
+/// one echo is one echo: the second render is bytes on a wire for no reason.
+///
+/// What this wait must not become is a way for the two to race, because the line's script clears the
+/// screen and a command the user had already run would go with it. The gate in `await_startup_line` is
+/// what holds that ordering, and it is why this function can afford to take its time.
 ///
 /// A close or a shutdown while this is waiting ends it: the session is on its way out and the line
 /// has nowhere left to go. Nothing here reports an error for that, because a session that closed
@@ -1276,19 +1285,32 @@ impl Session {
 /// Holds input until the startup line has gone out, so a keystroke cannot overtake it.
 ///
 /// A no-op for every session without a startup line, which is most of them and all of them once the
-/// setting is off. The wait is bounded for the same reason `install_startup_line`'s is: whatever
-/// happens to the line, input has to start flowing again.
+/// setting is off.
+///
+/// It deliberately has **no deadline of its own**, and that is load-bearing rather than tidy. The
+/// gate exists so that the startup line is the first thing this shell reads; a deadline here would
+/// let the gate give up while the line was still pending, and then the two would race. The deadline
+/// this used to carry was measured from *the keystroke*, while the startup thread's is measured from
+/// *that thread's first scheduling*, so a keystroke that arrived in between — before the thread had
+/// run at all — would expire first, put the user's command into the shell, and only then have the
+/// startup line written behind it. With a clear in the sourced script that destroys the command
+/// rather than merely reordering it.
+///
+/// `install_startup_line` sets `ready` on every exit path — after writing the line, on the timeout,
+/// and on a close — so waiting on it cannot hang. `STARTUP_BACKSTOP` below is here only so that a
+/// thread which somehow never ran cannot wedge input forever; by then that thread cannot write either,
+/// which is what keeps this from reintroducing the race it removes.
 fn await_startup_line(session: &Session) {
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
+    let backstop = Instant::now() + STARTUP_BACKSTOP;
     let mut startup = session
         .startup
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     while !startup.ready {
-        let remaining = deadline.saturating_duration_since(Instant::now());
+        let remaining = backstop.saturating_duration_since(Instant::now());
         if remaining.is_zero() {
-            // The line is out of time. Releasing here rather than refusing the write is the point:
-            // a terminal that cannot be typed into is worse than one without exit-code markers.
+            // Only reachable if the startup thread never ran, which is the one case where there is no
+            // line to be overtaken by.
             startup.ready = true;
             break;
         }
@@ -1299,6 +1321,13 @@ fn await_startup_line(session: &Session) {
         startup = guard;
     }
 }
+
+/// How long input may wait for a startup line that will never come.
+///
+/// Far longer than `STARTUP_TIMEOUT` on purpose: the startup thread has resolved by then in every
+/// case that is not a thread which failed to run at all, so this is a backstop against a wedged
+/// session and not part of the ordering.
+const STARTUP_BACKSTOP: Duration = Duration::from_secs(60);
 
 /// The one way bytes reach a shell, so `closing` is checked once and everything that writes goes
 /// through the same refusal.
@@ -1355,7 +1384,7 @@ mod tests {
     use super::{
         start_child_reaper, ChildState, OutputGate, OutputSink, SpawnOptions, TerminalBackend,
         MAX_TERMINAL_INPUT_BYTES, OUTPUT_HIGH_WATER_BYTES, OUTPUT_LOW_WATER_BYTES,
-        OUTPUT_RESUME_TIMEOUT,
+        OUTPUT_RESUME_TIMEOUT, STARTUP_BACKSTOP, STARTUP_TIMEOUT,
     };
 
     fn spawn(
@@ -1467,6 +1496,123 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(1));
         }
+    }
+
+    /// The gate has to hold a keystroke back until the startup line is out, and that ordering is what
+    /// makes the sourced script's clear safe rather than destructive.
+    ///
+    /// The clear in that script wipes the screen. It is only harmless because the screen at the moment
+    /// it runs holds nothing but the shell's own startup output, its prompt and the injected line —
+    /// which is exactly what it should wipe. A keystroke that got in first would be a command the
+    /// clear then destroys, and this is the test that says a keystroke cannot get in first.
+    ///
+    /// Written immediately, before the shell has printed anything, which is the earliest a frontend
+    /// could possibly write: it needs `createTerminal` to resolve first, and that happens after the
+    /// spawn that starts the startup thread. So this is not a tight race — it is the real ordering,
+    /// asserted from the bytes the shell actually received.
+    #[test]
+    fn a_keystroke_never_overtakes_the_startup_line() {
+        if std::process::Command::new("/bin/sh")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let backend = TerminalBackend::default();
+        let captured: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let (sender, receiver) = mpsc::channel();
+        let kept = Arc::clone(&captured);
+        let output: OutputSink = Box::new(move |bytes| {
+            kept.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            sender.send(bytes.to_vec()).map_err(|e| e.to_string())
+        });
+        backend
+            .spawn(
+                "gated".into(),
+                SpawnOptions {
+                    program: PathBuf::from("/bin/sh"),
+                    args: vec!["-i".into()],
+                    cwd: std::env::current_dir().unwrap(),
+                    cols: 80,
+                    rows: 24,
+                    startup_line: Some("echo STARTUPLINE".into()),
+                },
+                output,
+            )
+            .unwrap();
+        // The whole point: written before the shell has settled, so the gate is what orders them.
+        backend.write("gated", b"echo USERFIRST\n").unwrap();
+        synchronize_shell(&backend, &receiver, "gated");
+
+        let stream = String::from_utf8_lossy(
+            &captured
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
+        .to_string();
+        let startup_at = stream
+            .find("STARTUPLINE")
+            .expect("the startup line never ran");
+        let user_at = stream
+            .find("USERFIRST")
+            .expect("the keystroke never reached the shell");
+        assert!(
+            startup_at < user_at,
+            "the keystroke was read before the startup line: {stream}"
+        );
+        backend.close("gated").unwrap();
+    }
+
+    /// Input is not held forever by a startup line that is never going to arrive.
+    ///
+    /// A shell that prints nothing at all — or dies on the way up — must not leave a pane that cannot
+    /// be typed into. The startup thread gives up after `STARTUP_TIMEOUT` and lets input through, and
+    /// this says the pane is usable again after that rather than trusting the arithmetic.
+    #[test]
+    fn input_is_released_when_the_startup_line_is_abandoned() {
+        let backend = TerminalBackend::default();
+        let (sender, receiver) = sink();
+        let output: OutputSink = sender;
+        // A program that never prints anything, so the settle never happens and the line is abandoned.
+        backend
+            .spawn(
+                "silent".into(),
+                SpawnOptions {
+                    program: PathBuf::from("/bin/sh"),
+                    args: vec!["-c".into(), "sleep 30".into()],
+                    cwd: std::env::current_dir().unwrap(),
+                    cols: 80,
+                    rows: 24,
+                    startup_line: Some("echo NEVER".into()),
+                },
+                output,
+            )
+            .unwrap();
+
+        let started = Instant::now();
+        backend.write("silent", b"still typable\n").unwrap();
+        let elapsed = started.elapsed();
+        assert!(
+            elapsed >= STARTUP_TIMEOUT,
+            "the write went through before the startup line was given up: {elapsed:?}"
+        );
+        assert!(
+            elapsed < STARTUP_BACKSTOP,
+            "the write was held far longer than it needed to be: {elapsed:?}"
+        );
+        // And the bytes really did arrive, rather than the write being refused.
+        let deadline = Instant::now() + Duration::from_secs(3);
+        let mut seen = false;
+        while Instant::now() < deadline && !seen {
+            if let Ok(bytes) = receiver.recv_timeout(Duration::from_millis(200)) {
+                seen = String::from_utf8_lossy(&bytes).contains("still typable");
+            }
+        }
+        assert!(seen, "input was released but never reached the shell");
+        backend.close("silent").unwrap();
     }
 
     #[test]

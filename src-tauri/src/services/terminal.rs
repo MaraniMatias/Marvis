@@ -211,23 +211,54 @@ const OSC_STARTED: &str = r"\e]133;A\a";
 const OSC_EXIT_BASH: &str = r"\033]133;D;%s\007";
 const OSC_STARTED_BASH: &str = r"\033]133;A\007";
 
-/// Up to the rows the `. <script>` line was drawn on, erase them, then back down to where the prompt
-/// is about to be drawn. The column is preserved throughout, so the prompt lands where it would have.
+/// What the sourced script does to the screen before the shell redraws its prompt.
+///
+/// A clear rather than an erase of the row the setup line was drawn on, which is what this used to be
+/// and which was not enough. An erase removes the text and leaves the row, so a terminal whose prompt
+/// is taller than one row opened with the prompt's first rows, then blank rows where the setup had
+/// been, then the first command — a gap in the middle of the top of the screen, which is what was
+/// reported. `ESC[3J` discards the scrollback, `ESC[H` homes the cursor and `ESC[2J` erases the
+/// display, after which the prompt is drawn at row 0 and the terminal is what a freshly opened one
+/// looks like.
+///
+/// Written as escapes rather than shelling out to `clear`, for two reasons that are both about not
+/// depending on something that may not be there: `clear` is not guaranteed to be on `PATH`, and
+/// neither is `tput`, and a setup step that fails is a terminal with no markers and an error in it.
 ///
 /// It has to be the shell that emits this. Bytes written to the pty master are INPUT: zsh's line
-/// editor would consume them, and a bare erase sent that way comes back as the visual bell rather
-/// than as an erase. That was measured, and it is the whole reason the hook body lives in a file
-/// that the shell sources instead of being typed at it.
+/// editor would consume them, and a bare clear sent that way comes back as the visual bell rather
+/// than as a clear. That was measured, and it is the whole reason the hook body lives in a file that
+/// the shell sources instead of being typed at it.
 ///
-/// Two rows, and the erases are cumulative rather than repeated: `up, erase, down` once per row puts
-/// the cursor back where it started every time, so it clears the same row N times and leaves the rest
-/// of a wrapped line on screen. That was measured too — with the repeat form, a line that wrapped left
-/// its first row behind in a login zsh whose prompt was three rows tall.
+/// ## Why wiping the screen is safe here
 ///
-/// The second row is only reached when the line wrapped, which needs the prompt plus the line to
-/// exceed the terminal's width; the row above is the prompt's own middle, which the shell redraws a
-/// line lower down anyway.
-const ERASE_INVOKING_ROW: &str = r"\033[A\033[2K\033[A\033[2K\033[B\033[B";
+/// A clear run at the wrong moment destroys work, so the whole of the safety of this rests on one
+/// ordering: when this runs, the shell cannot have read a byte of user input. That ordering is the
+/// startup gate in `terminal/mod.rs`.
+///
+/// `TerminalBackend::write` — the only path user input takes to a pty — waits for the startup line to
+/// go out before it writes anything, and it has no deadline of its own, so it cannot time out while
+/// the line is still pending. `install_startup_line` writes the line and only then releases input, and
+/// on its own timeout it abandons the line without writing it at all. So the screen at the instant
+/// this script runs holds the shell's startup output, its prompt, and the setup line, and all three
+/// are what a clear is for. The gate that exists to stop a keystroke overtaking the hook is the same
+/// thing that makes this safe; neither is true without the other.
+///
+/// The gate used to carry a deadline of its own, and that was a hole in this argument rather than a
+/// belt-and-braces measure: it was measured from the keystroke while the startup thread's was measured
+/// from that thread's first scheduling, so a keystroke arriving in between would expire first, put the
+/// user's command into the shell, and only then have the setup line written behind it. It has been
+/// replaced by a backstop far beyond the startup thread's own timeout, which cannot fire while the
+/// line is still pending. `a_keystroke_never_overtakes_the_startup_line` in `terminal/mod.rs` is the
+/// test for the ordering this depends on.
+///
+/// ## What it costs
+///
+/// The startup output is real output somebody asked for: a toolchain banner, a version notice, a
+/// warning from a startup file. With the integration on it is gone; with the integration off it is
+/// there. That is a behavioural difference the feature introduces rather than hides, which is why it
+/// is a setting, and why the setting says so.
+const CLEAR_SCREEN: &str = r"\033[3J\033[H\033[2J";
 
 /// The script a terminal sources, per shell.
 ///
@@ -260,13 +291,13 @@ fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
                 "# Written by Marvis and sourced by every terminal it opens. Nothing here is read by \
                  anything else, and it is safe to delete once those terminals are closed.\n\
                  #\n\
-                 # The last line erases the `. …` row that sourced this, so the setup leaves nothing \
-                 behind on screen.\n\
+                 # The last line clears the screen, so this leaves nothing of itself behind and the \
+                 terminal opens looking as though it had just been opened.\n\
                  marvis_pc() {{ print -Pn \"{OSC_EXIT}\"; }}\n\
                  precmd_functions+=(marvis_pc)\n\
                  marvis_px() {{ print -Pn \"{OSC_STARTED}\"; }}\n\
                  preexec_functions+=(marvis_px)\n\
-                 printf '{ERASE_INVOKING_ROW}'\n"
+                 printf '{CLEAR_SCREEN}'\n"
             ),
         )),
         Some("bash") => Some((
@@ -275,12 +306,12 @@ fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
                 "# Written by Marvis and sourced by every terminal it opens. Nothing here is read by \
                  anything else, and it is safe to delete once those terminals are closed.\n\
                  #\n\
-                 # The last line erases the `. …` row that sourced this, so the setup leaves nothing \
-                 behind on screen.\n\
+                 # The last line clears the screen, so this leaves nothing of itself behind and the \
+                 terminal opens looking as though it had just been opened.\n\
                  __marvis_prompt_command() {{ printf '{OSC_EXIT_BASH}' \"$?\"; }}\n\
                  PROMPT_COMMAND=\"__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}\"\n\
                  trap 'printf \"{OSC_STARTED_BASH}\"' DEBUG\n\
-                 printf '{ERASE_INVOKING_ROW}'\n"
+                 printf '{CLEAR_SCREEN}'\n"
             ),
         )),
         // `sh` has no prompt hook that fires after a command with `$?` still intact, and a terminal
@@ -380,7 +411,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
-        time::Duration,
+        time::{Duration, Instant},
     };
 
     use tempfile::tempdir;
@@ -393,8 +424,7 @@ mod tests {
 
     use super::{
         create_with_options, create_with_settings, inherited_shell_args, install_shell_integration,
-        rename, shell_integration_line, shell_integration_script, TerminalOptions,
-        ERASE_INVOKING_ROW,
+        rename, shell_integration_line, shell_integration_script, TerminalOptions, CLEAR_SCREEN,
     };
 
     fn plain_repo(path: &Path) -> Repo {
@@ -611,13 +641,13 @@ mod tests {
         }
     }
 
-    /// The erase has to come from the shell, and it has to be its last act.
+    /// The clear has to come from the shell, and it has to be its last act.
     ///
     /// Bytes written to the pty master are input: zsh's line editor would consume them, and a bare
-    /// erase sent that way comes back as the visual bell rather than as an erase. That was measured,
+    /// clear sent that way comes back as the visual bell rather than as a clear. That was measured,
     /// and it is why the hook body lives in a file the shell sources.
     #[test]
-    fn the_script_erases_the_row_that_sourced_it_and_does_it_last() {
+    fn the_script_clears_the_screen_and_does_it_last() {
         for shell in ["/bin/zsh", "/bin/bash"] {
             let Some((_, script)) = shell_integration_script(Path::new(shell)) else {
                 continue;
@@ -629,23 +659,62 @@ mod tests {
             let last = lines.pop().unwrap();
             assert_eq!(
                 last.trim(),
-                format!("printf '{ERASE_INVOKING_ROW}'"),
-                "the erase must be the last thing {shell} does, or the row is drawn over it"
+                format!("printf '{CLEAR_SCREEN}'"),
+                "the clear must be the last thing {shell} does, or output is drawn over it"
             );
-            // Up to the row, erase it, back down. The column is preserved by all three, so the prompt
-            // lands where it would have anyway.
-            assert_eq!(
-                ERASE_INVOKING_ROW,
-                r"\033[A\033[2K\033[A\033[2K\033[B\033[B"
+            // Scrollback, home, display — in that order. Homing between the two erases is what puts
+            // `2J` over the whole screen rather than over what is below the cursor, and `3J` is what
+            // stops the setup line sitting in the scrollback a scrollback would bring back.
+            assert_eq!(CLEAR_SCREEN, r"\033[3J\033[H\033[2J");
+            // It is emitted as escapes rather than by running `clear`, which is not guaranteed to be
+            // on PATH, and a setup step that fails is a terminal with no markers and an error in it.
+            assert!(
+                !script.contains("clear "),
+                "the clear must not depend on a program being there"
             );
         }
     }
 
-    /// The injected line is one short row, whatever the path looks like.
+    /// A screen that has been wiped is a screen somebody could have lost work on, so the claim that it
+    /// is safe is a claim about ordering and it is worth pinning the two halves of it here.
     ///
-    /// The erase can only reach one row, so this is the constraint that makes the whole thing work: a
-    /// line that wrapped left its first row behind, which is how this was once 146 characters over
-    /// three rows with a person's starship prompt behind it.
+    /// The gate that holds user input back is in `terminal/mod.rs` and is tested there
+    /// (`a_keystroke_never_overtakes_the_startup_line`). What is asserted here is that this script is
+    /// the thing that depends on it: the clear and the gate are two ends of one guarantee, and a
+    /// change to either without the other is how the guarantee is lost.
+    #[test]
+    fn the_clear_is_only_reachable_behind_the_input_gate() {
+        for shell in ["/bin/zsh", "/bin/bash"] {
+            let Some((_, script)) = shell_integration_script(Path::new(shell)) else {
+                continue;
+            };
+            // The script reaches the screen only as the last statement of the one line that is gated,
+            // so there is no path from this file to the screen that does not go through it.
+            assert_eq!(
+                script.matches(&format!("printf '{CLEAR_SCREEN}'")).count(),
+                1,
+                "{shell}: the clear must appear once, as the last line, and nowhere else"
+            );
+            // And nothing before it writes to the screen at all, so the clear cannot be running early
+            // in a script that has already done something visible.
+            let body: String = script
+                .lines()
+                .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let without_the_clear = body.replace(&format!("printf '{CLEAR_SCREEN}'"), "");
+            assert!(
+                !without_the_clear.contains(r"\033["),
+                "{shell}: only the clear may write to the screen: {without_the_clear}"
+            );
+        }
+    }
+
+    /// The injected line stays short, whatever the path looks like.
+    ///
+    /// The clear now covers the whole screen, so a line long enough to wrap is not left on screen — but
+    /// it is still typed at a prompt, and a line that wraps is a line the line editor redraws in
+    /// pieces. Short is one less thing between this and a terminal that opens cleanly.
     #[test]
     fn the_injected_line_is_one_short_row() {
         for shell in ["/bin/zsh", "/bin/bash"] {
@@ -850,12 +919,12 @@ mod tests {
             fs::write(directory.join(format!("{name}.bin")), &stream).unwrap();
             println!("captured {name}: {} bytes", stream.len());
         }
-        // Two controls, both of which the render test needs to be able to fail. Without the first,
-        // "no rows show the line" could be an instrument that never saw the line. Without the second,
-        // waiting for the shell to be ready could look like it makes no difference.
-        let stream = capture_a_session_without_the_erase();
-        fs::write(directory.join("control-no-erase.bin"), &stream).unwrap();
-        println!("captured control-no-erase: {} bytes", stream.len());
+        // Two controls, both of which the render test needs to be able to fail. Without the first, "the
+        // terminal opens pristine" could be an instrument that never saw the residue. Without the
+        // second, waiting for the shell to be ready could look like it makes no difference.
+        let stream = capture_a_session_without_the_clear();
+        fs::write(directory.join("control-no-clear.bin"), &stream).unwrap();
+        println!("captured control-no-clear: {} bytes", stream.len());
 
         // Held, not dropped at the end of the statement: the directory has to still be there when the
         // shell reads the script out of it.
@@ -872,13 +941,13 @@ mod tests {
         capture_a_stream(shell, args, Some(line), true)
     }
 
-    /// The same, with a script that registers nothing and never erases, so the row stays on screen.
-    fn capture_a_session_without_the_erase() -> Vec<u8> {
+    /// The same, with a script that registers nothing and never clears, so the setup leaves its mark.
+    fn capture_a_session_without_the_clear() -> Vec<u8> {
         let directory = tempdir().unwrap();
         let script = directory.path().join("hook.zsh");
         fs::write(
             &script,
-            "# Captured without the erase, as the control for the render test.\n\
+            "# Captured without the clear, as the control for the render test.\n\
              marvis_pc() { print -Pn \"\\e]133;D;$?\\a\"; }\n\
              precmd_functions+=(marvis_pc)\n",
         )
@@ -889,6 +958,18 @@ mod tests {
             Some(shell_integration_line(&script)),
             true,
         )
+    }
+
+    /// Drains the receiver until it has been quiet for `quiet_for`, which is the observable that means
+    /// the shell has stopped talking and its line editor has taken over.
+    fn wait_for_quiet(receiver: &std::sync::mpsc::Receiver<Vec<u8>>, quiet_for: Duration) {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while Instant::now() < deadline {
+            match receiver.recv_timeout(quiet_for) {
+                Ok(_) => continue,
+                Err(_) => return,
+            }
+        }
     }
 
     /// Spawns a shell, waits for it to install `startup_line`, then fails a command and returns
@@ -936,6 +1017,11 @@ mod tests {
                 .unwrap();
         }
         wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(20));
+        // The prompt is still being drawn when that marker arrives, and typing into a shell that has
+        // not finished drawing one is the same race the startup settle exists for — it would put an
+        // extra render of `false` into the capture and make it a worse picture of a real session than
+        // the app produces. So: wait for the quiet that means the line editor is armed.
+        wait_for_quiet(&receiver, Duration::from_millis(400));
         backend.write(&session, b"false\n").unwrap();
         wait_for_output(&receiver, b"\x1b]133;D;1\x07", Duration::from_secs(15));
         backend.close(&session).unwrap();

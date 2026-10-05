@@ -63,6 +63,11 @@ export interface TerminalSettings {
    * On by default because it is the only way that row can know: a command that fails prints to the
    * terminal and leaves the shell running, so nothing else in the app can see it.
    *
+   * What it costs is the terminal's opening screen. The setup clears it, so whatever the shell printed
+   * while starting up — a version banner, a toolchain notice, a warning from an rc file — is discarded
+   * and the terminal opens looking as though it had just been opened. That is a real difference rather
+   * than an invisible one, which is why it is a setting.
+   *
    * Read when a terminal is opened, so this decides what the terminals opened *after* the change get.
    * Terminals already open keep the line they were given, and turning it on does not reach back into
    * them — a shell cannot be told about it now without being asked again.
@@ -375,7 +380,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         path: "terminal.shellIntegration",
         label: "Report failed commands",
         description:
-          "Marvis writes a small shell script to ~/.marvis and runs one line of it in every terminal it opens, which is the only way a command that fails can turn the sidebar row red: a failing command leaves the shell running and nothing else can see it. Turn this off and no script is written and no line is run, and the row stays blue whatever you run.",
+          "Marvis writes a small shell script to ~/.marvis and runs one line of it in every terminal it opens, which is the only way a command that fails can turn the sidebar row red: a failing command leaves the shell running and nothing else can see it. It costs the terminal's opening screen — the setup clears it, so version banners, toolchain notices and warnings from your shell startup files are discarded. Turn this off and no script is written, the startup output stays, and the row stays blue whatever you run.",
       },
     ],
   },

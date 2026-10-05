@@ -175,11 +175,14 @@ describe("the form's schema", () => {
     expect(DEFAULT_SETTINGS.terminal.shellIntegration).toBe(true);
     expect(normalizeSettings(undefined).terminal.shellIntegration).toBe(true);
     expect(withValue(DEFAULT_SETTINGS, "terminal.shellIntegration", false).terminal.shellIntegration).toBe(false);
-    // Someone turning it off is giving up a thing, and the label has to say which. Both halves matter:
-    // the line that appears in the terminal, and the row that stops going red without it.
+    // Someone turning it off is giving up a thing, and the label has to say which. Three halves matter:
+    // what it writes, the row that stops going red without it, and the opening screen it costs — which
+    // is the part that is easy to leave out because it is the part nobody notices is gone.
     const description = field && "description" in field ? field.description : "";
     expect(description).toMatch(/script/i);
     expect(description).toMatch(/red/i);
+    expect(description).toMatch(/discarded/i);
+    expect(description).toMatch(/startup files|banners|notices|startup output/i);
   });
 
   it("turns a select's string back into the value it stands for", () => {
