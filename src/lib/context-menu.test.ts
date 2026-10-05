@@ -1,11 +1,19 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it } from "vitest";
-import { installContextMenu, keepsNativeMenu } from "./context-menu";
+import { installContextMenu } from "./context-menu";
 
 /** The chrome a right-click lands on when it misses, built the way the app builds it. */
 function shell(inner: string): HTMLElement {
   document.body.innerHTML = `<div class="app-shell">${inner}</div>`;
   return document.querySelector(".app-shell") as HTMLElement;
+}
+
+/** A right-click on this target, and whether the webview's menu was taken off it. */
+function denied(target: EventTarget | null): boolean {
+  installContextMenu(document);
+  const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
+  target?.dispatchEvent(event);
+  return event.defaultPrevented;
 }
 
 describe("Context menu", () => {
@@ -16,10 +24,13 @@ describe("Context menu", () => {
   it("denies the webview menu on the chrome, which is where Reload is reachable", () => {
     const row = shell(`<div class="workdir-item"><span class="workdir-name">main</span></div>`);
 
-    expect(keepsNativeMenu(row.querySelector(".workdir-name"))).toBe(false);
+    expect(denied(row.querySelector(".workdir-name"))).toBe(true);
   });
 
-  it("keeps the webview menu in the surfaces text is selected from", () => {
+  // The surfaces that used to be granted the menu. A process watching the mouse draws a second
+  // menu over this one, so a grant here is a double menu, and the Edit submenu carries the same
+  // four commands behind ⌘C and ⌘V.
+  it("denies it on the surfaces text is selected from as well", () => {
     shell(`
       <div class="code-editor-host"><div class="cm-content"><span class="cm-line">x</span></div></div>
       <div class="terminal-host"><div class="xterm"><div class="xterm-rows">y</div></div></div>
@@ -39,44 +50,20 @@ describe("Context menu", () => {
       "input",
       "textarea",
     ]) {
-      expect(keepsNativeMenu(document.querySelector(selector)), selector).toBe(true);
+      expect(denied(document.querySelector(selector)), selector).toBe(true);
     }
   });
 
-  it("reads a right-click on a child of a granted surface, not only on the surface itself", () => {
+  it("reads a right-click on a child of one of those surfaces, not only on the surface itself", () => {
     shell(`<div class="markdown-preview"><p><em>deep</em></p></div>`);
 
-    expect(keepsNativeMenu(document.querySelector("em"))).toBe(true);
+    expect(denied(document.querySelector("em"))).toBe(true);
   });
 
-  it("denies the webview menu outside every grant, including where there is no target", () => {
-    expect(keepsNativeMenu(null)).toBe(false);
-    expect(keepsNativeMenu(document.createTextNode("x"))).toBe(false);
-  });
-
-  it("leaves the menu to a granted surface and takes it from the chrome", () => {
-    const row = shell(`<input data-testid="field" /><div class="workdir-item"></div>`);
-    installContextMenu(document);
-    const field = row.querySelector("input") as HTMLInputElement;
-    const workdir = row.querySelector(".workdir-item") as HTMLElement;
-
-    const inField = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
-    field.dispatchEvent(inField);
-    expect(inField.defaultPrevented).toBe(false);
-
-    const onChrome = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
-    workdir.dispatchEvent(onChrome);
-    expect(onChrome.defaultPrevented).toBe(true);
-  });
-
-  it("takes the menu even from a surface that stops the event on its way up", () => {
+  it("takes the menu even from a library that handles the event on its way up", () => {
     const row = shell(`<div class="source-read"></div>`);
-    // A library handling `contextmenu` itself must not be able to hand the webview menu back.
     row.addEventListener("contextmenu", (event) => event.stopPropagation());
-    installContextMenu(document);
 
-    const event = new MouseEvent("contextmenu", { bubbles: true, cancelable: true });
-    row.dispatchEvent(event);
-    expect(event.defaultPrevented).toBe(true);
+    expect(denied(row)).toBe(true);
   });
 });

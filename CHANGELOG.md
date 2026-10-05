@@ -6,6 +6,19 @@ the part a reader should read and the generated list is the part they can skip. 
 under `Unreleased` and rename that heading to the version when you tag it; a version with no section
 here still gets its generated notes.
 
+## Unreleased
+
+- **A right-click no longer opens the system menu.** Marvis is a webview, and the webview answers a
+  right-click with a menu of its own — Reload, Look Up, Inspect Element — which is how an unsaved
+  draft in the editor used to go away without a word. That menu was kept where text is selected
+  from, because it is where Cut, Copy and Paste arrive greyed out when there is nothing to act on.
+  It is kept nowhere now: while a process is watching the mouse — a screen recorder, a clip tool, a
+  remote-desktop client — that right-click opens a second menu next to the first, one with Insert
+  Emoji in it, so both were drawn where a capture was running and only one was drawn where it was
+  not. The webview is never told that something is watching the mouse, so there is no way to tell
+  those two clicks apart. Cut, Copy, Paste and Select All are still in the Edit menu and still on
+  ⌘X, ⌘C, ⌘V and ⌘A, and the right-click menus of the sidebar are the app's own.
+
 ## 0.13.2
 
 - **A Git command no longer makes every checkout be read again.** Marvis watches each repository to

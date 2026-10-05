@@ -8,57 +8,37 @@
  * right-click that landed on a sidebar row and did not look like it had hit anything at all.
  *
  * There is no way to take that menu away from the host. wry carries `with_default_context_menus`,
- * but it is applied in its WebView2 path and nowhere else, and Tauri does not expose it, so on
- * macOS the event is the only lever there is.
+ * but it is applied in its WebView2 path and nowhere else, and Tauri does not expose it, so the
+ * event is the only lever there is.
  *
- * The native menu is worth keeping where it is a text menu: it is the one place Cut, Copy and
- * Paste arrive already wired to the right keys and already greyed out when there is nothing to act
- * on. So it is denied by default and granted on the surfaces where a right-click has work to do,
- * which is the same rule `style.css` applies to `user-select` and for the same reason: a
- * right-click that lands on a row, a crumb or a pane header has nothing to offer, and offering
- * nothing is the honest answer.
+ * That menu used to be kept on the surfaces text is selected from — the editor, the terminal, the
+ * read views, the fields — because it is where Cut, Copy and Paste arrive already greyed out when
+ * there is nothing to act on. It is kept nowhere now, and the reason is what macOS draws on top of
+ * it.
+ *
+ * While a process is watching the mouse — a screen recorder, a clip tool, a remote-desktop client —
+ * a right-click opens two menus: the webview's, and a second one beside it carrying Insert Emoji
+ * and Insert Unicode Control Character. Two menus for one click, and both of them offering things
+ * the app can do from the keyboard instead. Preventing the event is what takes both away, because
+ * the second menu is drawn by the same WebKit that draws the first, and nothing in Rust says
+ * otherwise. The capture cannot be told apart from the safe case either: the webview is never told
+ * that a process is watching the mouse, so a menu kept for the clicks where nothing is capturing
+ * would also be kept on every click of the capture, which is the one click it cannot be kept for.
+ *
+ * So it goes everywhere, including the editor, the terminal and the fields. What that menu was
+ * worth is not lost: `menus.rs` builds an Edit submenu of Undo, Redo, Cut, Copy, Paste and Select
+ * All, and the key equivalents on those items send `copy:`, `paste:`, `cut:` and `selectAll:` down
+ * the responder chain into the webview, so ⌘C and ⌘V reach the editor, the terminal and a field the
+ * way the menu reached them. The app's own right-click menus — the group menu and the move menu in
+ * the sidebar — are drawn in the page, so they are none of this menu's business.
  */
 
 /**
- * Where the webview's own menu is the right answer.
- *
- * Every entry is somewhere text is selected from. The read views are on the list because
- * `style.css` makes them selectable, and a selection a user cannot copy with a pointer is a
- * selection the pointer forgot about.
- *
- * The terminal is named rather than reached, and cannot be left out: xterm's stylesheet puts
- * `user-select: none` on `.xterm` itself, so no grant inherits into one. It is here because a
- * right-click over terminal output has exactly one thing a user wants from it, and the menu is
- * where that is normally reached from.
- */
-const GRANTED = [
-  ".code-editor-host .cm-content",
-  ".terminal-host .xterm",
-  ".source-read",
-  ".markdown-preview",
-  ".diff-files",
-  ".diff-viewport",
-  "input",
-  "textarea",
-].join(", ");
-
-/** Whether a right-click that landed on this target keeps the webview's menu. */
-export function keepsNativeMenu(target: EventTarget | null): boolean {
-  return target instanceof Element && target.closest(GRANTED) !== null;
-}
-
-/**
- * Denies the webview menu everywhere a right-click is not asking for text.
+ * Denies the webview menu everywhere, on every surface and for every target.
  *
  * Capture, so that a library handling the event on its way up cannot reach the webview's menu by
  * stopping it before it gets here.
  */
 export function installContextMenu(root: Document = document): void {
-  root.addEventListener(
-    "contextmenu",
-    (event) => {
-      if (!keepsNativeMenu(event.target)) event.preventDefault();
-    },
-    true,
-  );
+  root.addEventListener("contextmenu", (event) => event.preventDefault(), true);
 }
