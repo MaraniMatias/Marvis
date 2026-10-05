@@ -186,11 +186,19 @@ export const LANGUAGE_BY_EXTENSION: ReadonlyMap<string, string> = new Map<string
 export const LANGUAGE_BY_FILENAME: ReadonlyMap<string, string> = new Map<string, string>([
   // INI: a `[section]` header over `key = value` lines, or the attribute names gitattributes holds.
   [".curlrc", "ini"],
+  // `[TERM]` sections over bare `LINK file1 file2` lines.
+  [".dircolors", "ini"],
   [".editorconfig", "ini"],
   [".gitattributes", "ini"],
   [".gitconfig", "ini"],
   [".gitmodules", "ini"],
+  // Readline settings, which is `set editing-mode emacs` under no section at all.
+  [".inputrc", "ini"],
   [".npmrc", "ini"],
+  // The `[core] editor = ...` Git reads when nothing else has said which editor.
+  [".selected_editor", "ini"],
+  // `set -g option value` over `%if` blocks, which is what an INI grammar reads best.
+  [".tmux.conf", "ini"],
   [".yarnrc", "ini"],
   // One pattern per line under `#` comments.
   [".cvsignore", "gitignore"],
@@ -200,6 +208,25 @@ export const LANGUAGE_BY_FILENAME: ReadonlyMap<string, string> = new Map<string,
   [".hgignore", "gitignore"],
   [".npmignore", "gitignore"],
   [".prettierignore", "gitignore"],
+  // Shell startup files: bash, zsh, ksh and tcsh each spell the same file their own way, and the
+  // body is what a `.sh` file already renders with.
+  [".bash_login", "shellscript"],
+  [".bash_logout", "shellscript"],
+  [".bash_profile", "shellscript"],
+  [".bashrc", "shellscript"],
+  [".cshrc", "shellscript"],
+  [".kshrc", "shellscript"],
+  [".login", "shellscript"],
+  [".profile", "shellscript"],
+  [".shrc", "shellscript"],
+  [".tcshrc", "shellscript"],
+  [".zlogin", "shellscript"],
+  [".zlogout", "shellscript"],
+  [".zprofile", "shellscript"],
+  [".zshenv", "shellscript"],
+  [".zshrc", "shellscript"],
+  // SQL under a line or two of `\command` meta-commands.
+  [".psqlrc", "sql"],
   // Dotfiles whose body is bare JSON.
   [".babelrc", "json"],
   [".eslintrc", "json"],
@@ -227,7 +254,15 @@ export function detectedLanguageName(path: string): string | undefined {
   // suffix anyone has ever typed would stop at the first one it forgot. The dot is what separates
   // them from `.envrc`, which is a shell script.
   if (fileName === ".env" || fileName.startsWith(".env.")) return "dotenv";
-  return LANGUAGE_BY_FILENAME.get(fileName) ?? extensionLanguageName(fileName);
+  const named = LANGUAGE_BY_FILENAME.get(fileName);
+  if (named) return named;
+  // The same holds for a dotfile wearing a variant of its own name: `.zshrc.local` and
+  // `.bashrc.macos` are the files above under somebody else's name, and listing them would stop at
+  // the first hostname anyone had typed. The second dot is what separates them from a dotfile that
+  // is only named after one, such as `.eslintrc.json`.
+  const variantAt = fileName.indexOf(".", 1);
+  const variant = variantAt > 0 ? LANGUAGE_BY_FILENAME.get(fileName.slice(0, variantAt)) : undefined;
+  return variant ?? extensionLanguageName(fileName);
 }
 
 function extensionLanguageName(fileName: string): string | undefined {

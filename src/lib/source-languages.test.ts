@@ -37,6 +37,31 @@ describe("source languages", () => {
     expect(detectedLanguageName(".eslintrc.json")).toBe("json");
   });
 
+  it("reads a shell startup file by its name, since its leading dot is its whole extension", () => {
+    // Every shell spells the same file its own way, and `zshrc` is not a suffix anyone registered,
+    // so these are names rather than extensions: without the table a `.zshrc` renders as plain text.
+    expect(detectedLanguageName(".zshrc")).toBe("shellscript");
+    expect(detectedLanguageName(".zshenv")).toBe("shellscript");
+    expect(detectedLanguageName(".bashrc")).toBe("shellscript");
+    expect(detectedLanguageName(".bash_profile")).toBe("shellscript");
+    expect(detectedLanguageName(".profile")).toBe("shellscript");
+    // A name that is only ever a suffix still resolves on it, and the two never disagree.
+    expect(detectedLanguageName("deploy.zsh")).toBe("shellscript");
+  });
+
+  it("reads a dotfile wearing a variant of its own name as the file it is a variant of", () => {
+    // A dotfiles checkout is a checkout like any other, so the name somebody gave the file on their
+    // machine is the name it has here. The format is the part before the second dot.
+    expect(detectedLanguageName(".zshrc.local")).toBe("shellscript");
+    expect(detectedLanguageName(".bashrc.macos")).toBe("shellscript");
+    expect(detectedLanguageName("dotfiles/.zprofile.work")).toBe("shellscript");
+    // The dot after the name is what keeps this off a file that is only named after one.
+    expect(detectedLanguageName(".tmux.conf")).toBe("ini");
+    expect(detectedLanguageName(".dircolors.local")).toBe("ini");
+    // A tail that names no dotfile of its own leaves the file plain rather than borrowing one.
+    expect(detectedLanguageName(".editor.bak")).toBeUndefined();
+  });
+
   it("names every grammar it detects, and every grammar the toolbar offers", () => {
     // The table is split across two modules, so this is what keeps a renamed grammar from turning
     // into a silent "no highlighting" for a file that used to have it.

@@ -66,6 +66,15 @@ describe("source highlighter", () => {
     expect(await highlightSource(".prettierrc", '{ "semi": true }')).toHaveLength(1);
   });
 
+  it("colors a shell startup file, whose name is its whole extension", async () => {
+    // `.zshrc` ends in `zshrc`, not in a suffix the extension table registered, so this is the file
+    // that goes back to plain if the name table loses an entry.
+    const lines = await highlightSource(".zshrc", "# prompt\nexport EDITOR=nvim");
+    expect(lines).toHaveLength(2);
+    expect(lines?.[0]).toContain("var(--marvis-syntax-token-comment)");
+    expect(lines?.[1]).toContain("color:");
+  });
+
   it("gives a name that asks for no grammar no highlighting, and no grammar a module path", async () => {
     for (const name of [
       "",
