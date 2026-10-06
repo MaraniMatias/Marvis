@@ -1244,25 +1244,50 @@ const STARTUP_POLL: Duration = Duration::from_millis(10);
 /// A close or a shutdown while this is waiting ends it: the session is on its way out and the line
 /// has nowhere left to go. Nothing here reports an error for that, because a session that closed
 /// before it was instrumented is a session that is already gone.
+/// Resolves the gate when `install_startup_line` returns, however it returns.
+///
+/// This function is the only thing that ever lets a gated session's input through, and it lets it
+/// through by returning. That is a promise about the text of one function rather than about the thread
+/// running it: a single `expect`, an index, or a `?` on a `None` added anywhere in there, and a thread
+/// that dies at that point leaves `ready` false for good — `await_startup_line` blocked on a condvar
+/// nobody will signal again, and `terminal_write` hanging for the life of the session with nothing in
+/// the log to say why. Nothing in there can panic today, every lock taking the poison out rather than
+/// propagating it, which is exactly why this is here: a property that holds because nobody has written
+/// the line yet stops holding the day somebody does.
+///
+/// A `Drop` is enough, because a panic unwinds. It calls the same `release_startup_input` the ordinary
+/// exits call, so there is one way to resolve the gate rather than two that could disagree.
+/// `pub(crate)` only so a test can hold one and let it unwind, which is the only way to reach the panic
+/// path this exists for without writing a panic into the function it guards.
+struct StartupGate<'a> {
+    session: &'a Session,
+}
+
+impl Drop for StartupGate<'_> {
+    fn drop(&mut self) {
+        self.session.release_startup_input();
+    }
+}
+
 fn install_startup_line(session: &Session, id: &str, line: &str) {
+    // Held for the whole function, so the gate is resolved on the way out of it and not at three
+    // separate points inside it: a close, the timeout, and having written the line.
+    let _gate = StartupGate { session };
     let deadline = Instant::now() + STARTUP_TIMEOUT;
     loop {
         if session.closing.load(Ordering::Acquire) {
-            session.release_startup_input();
             return;
         }
         if session.output_settled() {
             break;
         }
-        let mut startup = session
+        let startup = session
             .startup
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         if Instant::now() >= deadline {
             // Nothing was ever printed, or it never stopped: this session goes without the line.
             log::debug!("terminal {id} never reached a prompt; leaving it uninstrumented");
-            startup.ready = true;
-            session.startup_changed.notify_all();
             return;
         }
         let remaining = deadline
@@ -1274,9 +1299,8 @@ fn install_startup_line(session: &Session, id: &str, line: &str) {
             .unwrap_or_else(std::sync::PoisonError::into_inner);
     }
     // The same path user input takes, so `closing` is honoured and there is one way in rather than a
-    // second one that could disagree about it.
+    // second one that could disagree about it. `StartupGate` releases the gate as this returns.
     let _ = write_to_session(session, id, format!("{line}\n").as_bytes());
-    session.release_startup_input();
 }
 
 impl Session {
@@ -1314,10 +1338,11 @@ impl Session {
 ///
 /// So the answer is not a longer clock but the fact that waiting here cannot hang. `spawn` starts the
 /// thread with `thread::Builder::spawn` and returns an error without registering the session if that
-/// fails, so every session reachable through `write` has one. That thread sets `ready` on all three
-/// of its exits — after writing the line, on its own `STARTUP_TIMEOUT`, and on a close — so `ready`
-/// arrives without this function ever having to invent it. `the_gate_does_not_give_up_on_a_startup_
-/// line_that_is_still_pending` is the test for that.
+/// fails, so every session reachable through `write` has one. That thread resolves the gate through
+/// `StartupGate`, which fires on every way out of it including an unwind, so `ready` arrives without
+/// this function ever having to invent it or bound how long it waits.
+/// `the_gate_does_not_give_up_on_a_startup_line_that_is_still_pending` is the test for the first half
+/// and `the_gate_is_released_even_when_the_startup_thread_dies` for the second.
 ///
 /// No lock is taken while `startup` is held, and `write_to_session` takes `writer` without holding
 /// `startup`, so there is no `startup` → `writer` edge here to order against anything: the only two
@@ -1389,8 +1414,9 @@ mod tests {
     use super::{process_group_exists, signal_group_with, GroupSignal, REAP_POLL_INTERVAL};
     use super::{
         start_child_reaper, ChildState, OutputGate, OutputSink, Session, SessionEntry, SpawnOptions,
-        StartupState, TerminalBackend, MAX_TERMINAL_INPUT_BYTES, OUTPUT_HIGH_WATER_BYTES,
-        OUTPUT_LOW_WATER_BYTES, OUTPUT_RESUME_TIMEOUT, STARTUP_BACKSTOP, STARTUP_TIMEOUT,
+        StartupGate, StartupState, TerminalBackend, MAX_TERMINAL_INPUT_BYTES,
+        OUTPUT_HIGH_WATER_BYTES, OUTPUT_LOW_WATER_BYTES, OUTPUT_RESUME_TIMEOUT, STARTUP_BACKSTOP,
+        STARTUP_TIMEOUT,
     };
 
     fn spawn(
@@ -1691,6 +1717,63 @@ mod tests {
         is_written
             .recv_timeout(Duration::from_secs(5))
             .expect("input stayed blocked after the startup line was resolved");
+    }
+
+    /// The gate has no deadline, so the only thing standing between a hung `terminal_write` and a
+    /// terminal that never accepts input again is the startup thread reaching the end of its function.
+    /// A panic skips the returns on purpose, so this unwinds through the same guard and says the gate
+    /// still comes open.
+    #[test]
+    fn the_gate_is_released_even_when_the_startup_thread_dies() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        let session = Session {
+            master: Mutex::new(pair.master),
+            writer: Mutex::new(Box::new(io::sink())),
+            child: Mutex::new(ChildState {
+                child: None,
+                exit_code: Some(0),
+                child_released: true,
+            }),
+            process_id: None,
+            #[cfg(unix)]
+            terminal_session_id: None,
+            closing: AtomicBool::new(false),
+            startup: Mutex::new(StartupState {
+                ready: false,
+                ..StartupState::default()
+            }),
+            startup_changed: Condvar::new(),
+        };
+
+        // The panic message is expected rather than a failure, and the default hook prints it. Silenced
+        // so a passing run does not look like a failing one.
+        let previous = std::panic::take_hook();
+        std::panic::set_hook(Box::new(|_| {}));
+        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _gate = StartupGate { session: &session };
+            panic!("the startup thread died before it wrote the line");
+        }));
+        std::panic::set_hook(previous);
+
+        assert!(
+            unwound.is_err(),
+            "the panic has to unwind for this to say anything"
+        );
+        assert!(
+            session
+                .startup
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .ready,
+            "input is still blocked and nothing will ever open it again"
+        );
     }
 
     #[test]

@@ -380,7 +380,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         path: "terminal.shellIntegration",
         label: "Report failed commands",
         description:
-          "Marvis writes a small shell script to ~/.marvis and runs one line of it in every terminal it opens, which is the only way a command that fails can turn the sidebar row red: a failing command leaves the shell running and nothing else can see it. It costs the terminal's opening screen — the setup clears it, so version banners, toolchain notices and warnings from your shell startup files are discarded. Turn this off and no script is written, the startup output stays, and a terminal's glyph stays the colour of whatever else is on screen whatever you run.",
+          "Marvis writes a small shell script to ~/.marvis and runs one line of it in every terminal it opens, which is the only way a command that fails can turn the sidebar row red: a failing command leaves the shell running and nothing else can see it. It works in zsh and bash; in any other shell there is nothing to hook and rows stay as they are. It costs the terminal's opening screen — the setup clears it, so version banners, toolchain notices and warnings from your shell startup files are discarded. Turn this off and no script is written, the startup output stays, and a terminal's glyph stays the colour of whatever else is on screen whatever you run. Terminals already open keep their hook either way, so the change shows up in the next one.",
       },
     ],
   },
