@@ -225,3 +225,42 @@ function resizeNode(node: TerminalLayoutNode, splitId: string, ratio: number): T
     second: resizeNode(node.second, splitId, ratio),
   };
 }
+
+/**
+ * The order a checkout's terminals are listed in: what the saved layout says, then whatever it says
+ * nothing about in the order it arrived.
+ *
+ * One answer for the sidebar row and for the saved layout, because they are the same list drawn
+ * twice. A terminal the layout never heard of — every one that predates the layout, and every one
+ * created in a run that has not been saved yet — keeps its place after the ones it does know rather
+ * than disappearing, and an id it names that no longer exists is dropped rather than drawn.
+ */
+export function orderedSessionIds(sessions: Session[], layout: CheckoutTerminalLayout | null | undefined): string[] {
+  const byId = new Map(sessions.map((session) => [session.id, session] as const));
+  const order: string[] = [];
+  for (const id of layout?.sessionOrder ?? []) {
+    if (!byId.has(id) || order.includes(id)) continue;
+    order.push(id);
+  }
+  for (const session of sessions) if (!order.includes(session.id)) order.push(session.id);
+  return order;
+}
+
+/**
+ * The order a terminal lands in, given the slot it was dropped into.
+ *
+ * `order` is the list AS DRAWN and the slot is counted against it **with the dragged terminal
+ * already out of the way**, which is what makes one number mean the same thing here, in the sidebar's
+ * drop line and in the layout it saves. A slot that counted the dragged row would shift by one
+ * whenever the row travelled from below the pointer to above it, which is the half of the drag where
+ * it silently drops a terminal in the wrong place.
+ *
+ * The slot is clamped rather than refused, because the pointer can land past the last row, and an
+ * order that does not hold the session simply gets one: a terminal arriving from another worktree is
+ * not in this list yet and is inserted, not refused.
+ */
+export function moveSessionId(order: readonly string[], sessionId: string, index: number): string[] {
+  const next = order.filter((id) => id !== sessionId);
+  next.splice(Math.max(0, Math.min(next.length, index)), 0, sessionId);
+  return next;
+}

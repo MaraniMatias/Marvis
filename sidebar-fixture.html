@@ -1,0 +1,71 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Marvis sidebar fixture</title>
+    <style>
+      /* A frame for the panel to sit in, and nothing that touches the panel's own styles. */
+      body {
+        margin: 0;
+        padding: 16px;
+        background: #101216;
+        color: #faf9f5;
+        font:
+          13px/1.4 ui-sans-serif,
+          system-ui,
+          sans-serif;
+      }
+      /* The frames sit side by side rather than in one tall column, so the whole matrix is one
+         screen instead of a scroll and two widths of the same row can be compared next to each
+         other. */
+      .fixture {
+        display: flex;
+        flex-wrap: wrap;
+        align-items: flex-start;
+        gap: 20px;
+      }
+      /* The header is a row of its own: `flex-basis: 100%` alone is defeated by a `max-width`,
+         which made it one narrow item in the first line and put the first panel beside it. */
+      .fixture-head {
+        flex: 0 0 100%;
+        opacity: 0.7;
+      }
+      /* Each case is exactly as wide as the frame it wraps, so a long case label wraps in its own
+         column instead of widening the grid track and pushing every other frame out of the shot. */
+      .fixture-case {
+        display: flex;
+        flex-direction: column;
+        gap: 6px;
+        min-width: 0;
+      }
+      .fixture-case-label {
+        margin: 0;
+        font: inherit;
+        font-weight: 600;
+        line-height: 1.3;
+        opacity: 0.8;
+        overflow-wrap: anywhere;
+      }
+      .fixture-frame {
+        height: 620px;
+        min-width: 0;
+        overflow: auto;
+        border: 1px solid #2c313b;
+      }
+      /* The light palette is judged on a light surround: the panel paints its own background, and a
+         dark page behind it changes what its own surface reads as. */
+      :root[data-theme="light"] body {
+        background: #f4f5f7;
+        color: #141413;
+      }
+      :root[data-theme="light"] .fixture-frame {
+        border-color: #c9cbd0;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <script type="module" src="/src/dev/sidebar-fixture.ts"></script>
+  </body>
+</html>

@@ -104,15 +104,112 @@ export function sessionTitle(session: Session, status?: TerminalSessionStatus | 
 }
 
 /**
+ * Whether a terminal has a process in front of its shell, which is what makes closing it a question
+ * rather than a cleanup.
+ *
+ * Two conditions, and the second is the one that matters: a shell at a prompt is `running` too, and
+ * nothing is lost by closing that. What closing destroys is a process with its own output in flight,
+ * so the status alone never answers it.
+ *
+ * Written here because three places have to agree and only one of them is visible: the close button,
+ * the close that runs when a shell exits on purpose, and the close of the whole window. A rule kept
+ * per caller is how the window ends up stopping a build without ever asking.
+ */
+export function terminalHasProcess(status: TerminalSessionStatus | null | undefined): boolean {
+  return status?.state === "running" && status.foregroundProcess === true;
+}
+
+/**
+ * The program whose TUI writes a session title, and the only program this panel treats as one.
+ *
+ * Named here because two things need it and must agree: a terminal's own title is only read as an
+ * agent's session title while this program is the one in front of the shell, and the row's glyph
+ * and its second line are drawn from the same answer. `App.vue`'s foreground answer comes from the
+ * OS as a process name, so this is that name and not a guess at what a TUI calls itself.
+ */
+export const AGENT_APP = "opencode";
+
+/**
+ * What OpenCode's TUI puts in front of the title of the session it has open, as observed in the
+ * installed build: `setTerminalTitle(\`OC | ${title.length > 40 ? title.slice(0, 37) + "…" : title}\`)`.
+ *
+ * The prefix is the whole of the filter. A shell writes its prompt into the terminal title and an
+ * editor writes its file, neither with this, and both say where the terminal is rather than what it
+ * is doing — which the row above already says. Whether the string behind the prefix belongs to a
+ * session this worktree still has is a separate question, and `agentSessionForTitle` is where that
+ * is asked.
+ */
+const AGENT_TITLE_PREFIX = "OC | ";
+
+/** What OpenCode titles its TUI with while no session is open, which names the program and nothing else. */
+const AGENT_HOME_TITLE = "OpenCode";
+
+/**
+ * The session title a terminal's own program wrote, or null when it wrote nothing that names one.
+ *
+ * **The runtime must confirm the program.** A terminal title is whatever last wrote one, and a PTY
+ * title outlives the process that set it: when OpenCode exits, the shell behind it takes the
+ * terminal back and the title stays `OC | …` until something else writes one. So this asks the
+ * current foreground answer first, and a stale title over a shell, over `sleep`, or over any other
+ * program is no title at all — which is the only honest reading, since the panel cannot tell a
+ * leftover string from a live one and the alternative is naming a terminal after an agent that is
+ * no longer running in it.
+ *
+ * What comes back is still **inferred identity, not a mapping**. OpenCode 2.0.22 exposes no route,
+ * header or event that ties a TUI process to a session id, so this is a string the program itself
+ * wrote about itself, read by a client that cannot verify it. Two terminals in one worktree showing
+ * the same session would both report this title, and nothing here can tell that from two terminals
+ * each showing their own session with one title.
+ */
+export function agentSessionTitle(status: TerminalSessionStatus | null | undefined): string | null {
+  if (status?.foregroundApp !== AGENT_APP) return null;
+  const title = status.terminalTitle;
+  if (!title?.startsWith(AGENT_TITLE_PREFIX)) return null;
+  const session = title.slice(AGENT_TITLE_PREFIX.length).trim();
+  return session && session !== AGENT_HOME_TITLE ? session : null;
+}
+
+/**
+ * How a terminal is named in the sidebar row, which is a narrower question than `sessionTitle`.
+ *
+ * Three answers, in the order `sessionTitle` uses them, because a sidebar row and the titlebar
+ * crumb list the same terminals and cannot disagree about what one is called:
+ *
+ * - The agent session's own title, when this terminal's program is confirmed to be the agent and
+ *   wrote one. It is the only name that came from the thing running rather than from the place it
+ *   runs.
+ * - The program in front of the shell, read from the OS.
+ * - The name the session was opened with, which is where a rename shows.
+ *
+ * **The row says nothing about where the terminal is.** The worktree or branch row directly above
+ * already carries that identity, and repeating it on every child gave two sibling shells the same
+ * text — `zsh · Marvis` twice, side by side — which is the one thing a list of terminals cannot be:
+ * two rows the reader cannot tell apart. So the name is the session and nothing else: an idle shell
+ * reads `zsh`, a running one reads `pnpm` or `opencode`, a renamed one reads its rename, and an
+ * identified agent reads its session's title.
+ *
+ * Two idle shells in one worktree therefore both read `zsh`. That is truthful — nothing observed
+ * distinguishes them — and it is why the row's accessible name carries its state as well and why a
+ * rename remains the way to tell two of them apart. No ordinal, timestamp or id is invented here to
+ * fill the gap.
+ *
+ * Unlike `sessionTitle`, a terminal's own title is read only behind the agent's own prefix: a shell
+ * writes its prompt there and an editor writes its file, and both name a place rather than a session.
+ */
+export function sessionRowTitle(session: Session, status: TerminalSessionStatus | null | undefined): string {
+  return agentSessionTitle(status) || status?.foregroundApp || session.name;
+}
+
+/**
  * What stands for a checkout, as one word, wherever a checkout is drawn.
  *
  * The sidebar row that lists a workdir and the rule that names it are one thing split in two, so
  * the word is written here and the row asks for it: nothing about the glyph belongs to the panel
- * that happens to be showing it. `terminal` is in the set because the row of a session asks for
- * one too, but it is not what a checkout answers: it names an item open inside a workdir, not the
- * workdir itself.
+ * that happens to be showing it. `terminal`, `agent` and `working` are in the set because the row of
+ * a session asks for one too, but they are not what a checkout answers: they name an item open
+ * inside a workdir, not the workdir itself.
  */
-export type WorkdirIconKind = "git" | "worktree" | "folder" | "home" | "missing" | "terminal";
+export type WorkdirIconKind = "git" | "worktree" | "folder" | "home" | "missing" | "terminal" | "agent" | "working";
 
 /**
  * Which icon a checkout wears: a directory that is gone before anything else, the home one, a
@@ -126,7 +223,7 @@ export function workdirIconKind(
   repo: Repo | null,
   checkout: Checkout,
   homeCheckoutId?: string | null,
-): Exclude<WorkdirIconKind, "terminal"> {
+): Exclude<WorkdirIconKind, "terminal" | "agent" | "working"> {
   if (checkout.isMissing) return "missing";
   if (checkout.id === homeCheckoutId) return "home";
   if (repo?.kind !== "git") return "folder";

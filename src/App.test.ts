@@ -30,6 +30,7 @@ const mocks = vi.hoisted(() => ({
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
   prepareAppExit: vi.fn(),
+  getTerminalStatus: vi.fn(),
   loadReviewTarget: vi.fn(),
   saveReviewTarget: vi.fn(),
   exportReviewMarkdown: vi.fn(),
@@ -264,6 +265,7 @@ vi.mock("./lib/ipc", () => ({
   saveSettings: mocks.saveSettings,
   saveCheckoutUiState: mocks.saveCheckoutUiState,
   prepareAppExit: mocks.prepareAppExit,
+  getTerminalStatus: mocks.getTerminalStatus,
   saveReviewTarget: mocks.saveReviewTarget,
   // The real command returns the refreshed workspace; App assigns it straight back,
   // so returning undefined here crashed the next render. Only the shell and Neovim requests
@@ -641,6 +643,7 @@ describe("App UI integration", () => {
     mocks.saveSettings.mockResolvedValue(undefined);
     mocks.saveCheckoutUiState.mockResolvedValue(undefined);
     mocks.prepareAppExit.mockResolvedValue(undefined);
+    mocks.getTerminalStatus.mockResolvedValue({ state: "running", foregroundProcess: false });
     mocks.loadReviewTarget.mockResolvedValue("markdown");
     mocks.saveReviewTarget.mockResolvedValue(undefined);
     mocks.exportReviewMarkdown.mockResolvedValue("2026-03-14-1532.md");
@@ -2244,6 +2247,56 @@ describe("App UI integration", () => {
     wrapper.unmount();
   });
 
+  it("asks before stopping a running process, and cancelling leaves the window open", async () => {
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "web")])));
+    wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", "session:one", {
+      state: "running",
+      foregroundProcess: true,
+      foregroundApp: "pnpm",
+    });
+    await flushPromises();
+    mocks.getTerminalStatus.mockResolvedValue({
+      state: "running",
+      foregroundProcess: true,
+      foregroundApp: "pnpm",
+    });
+
+    const closing = mocks.onCloseRequested!({ preventDefault: vi.fn() });
+    await flushPromises();
+    // Asked before anything is written or swept, and about the terminal the way the sidebar names
+    // it — which here is the program, because nothing has renamed the terminal.
+    const dialog = wrapper.findAll('[role="dialog"]').at(-1)!;
+    expect(dialog.text()).toContain("pnpm");
+    // And the program is not repeated beside a name that already is the program.
+    expect(dialog.text()).not.toContain("(pnpm)");
+    expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
+    expect(mocks.prepareAppExit).not.toHaveBeenCalled();
+
+    await dialog.findAll("footer button").at(0)!.trigger("click");
+    await Promise.all([closing, flushPromises()]);
+    // Cancelled: nothing stopped, nothing written, and the window is still there to try again.
+    expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
+    expect(mocks.prepareAppExit).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("closes without asking when every terminal is a shell at a prompt", async () => {
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "zsh")])));
+    wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", "session:one", {
+      state: "running",
+      foregroundProcess: false,
+    });
+    await flushPromises();
+    mocks.getTerminalStatus.mockResolvedValue({ state: "running", foregroundProcess: false });
+
+    const closing = mocks.onCloseRequested!({ preventDefault: vi.fn() });
+    await Promise.all([closing, flushPromises()]);
+    // A shell at a prompt loses nothing, so there is nothing to ask about.
+    expect(wrapper.findAll('[role="dialog"]')).toHaveLength(0);
+    expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
+    wrapper.unmount();
+  });
+
   it("waits for queued UI and settings writes before allowing a native close", async () => {
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
     let resolveLayoutWrite!: () => void;
@@ -2467,7 +2520,10 @@ describe("App UI integration", () => {
       expect(zoom.defaultPrevented).toBe(false);
       expect(mocks.saveSettings).not.toHaveBeenCalled();
 
-      resolveSettings({ ...cloneSettings(DEFAULT_SETTINGS), ui: { fontSize: 18, zoom: 1, theme: "system" as const } });
+      resolveSettings({
+        ...cloneSettings(DEFAULT_SETTINGS),
+        ui: { fontSize: 18, zoom: 1, theme: "system" as const },
+      });
       await flushPromises();
       expect(wrapper.find('[data-testid="settings-button"]').exists()).toBe(true);
       expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe(String(18 / 14));
@@ -2721,7 +2777,12 @@ describe("App UI integration", () => {
       const wrapper = await mountApp(
         workspaceWith(checkout("checkout:one")),
         { ...DEFAULT_APP_LAYOUT },
-        { settings: { ...cloneSettings(DEFAULT_SETTINGS), ui: { fontSize: 16, zoom: 1, theme: "system" as const } } },
+        {
+          settings: {
+            ...cloneSettings(DEFAULT_SETTINGS),
+            ui: { fontSize: 16, zoom: 1, theme: "system" as const },
+          },
+        },
       );
       mocks.saveSettings.mockRejectedValueOnce(new Error("the settings file could not be read"));
 

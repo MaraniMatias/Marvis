@@ -160,6 +160,7 @@ fn main() {
         .invoke_handler(tauri::generate_handler![
             commands::app::app_prepare_exit,
             commands::agent::agent_sessions,
+            commands::agent::agent_candidate_sessions,
             commands::agent::agent_agents,
             commands::agent::agent_session_create,
             commands::agent::agent_prompt,

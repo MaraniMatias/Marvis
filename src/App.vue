@@ -15,7 +15,7 @@ import {
 } from "@lucide/vue";
 import type { Checkout, Repo } from "./domain/workspace";
 import type { ReviewTarget } from "./domain/review";
-import { sessionTitle } from "./domain/workspace";
+import { sessionTitle, terminalHasProcess } from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
 import type { TitlebarMenuItem, TitlebarMenuSection } from "./domain/titlebar-menu";
@@ -34,6 +34,7 @@ import {
   closeCheckout as persistCheckoutClose,
   closeMissingCheckout as persistMissingCheckoutClose,
   exportReviewMarkdown,
+  getTerminalStatus,
   loadReviewTarget,
   renameTerminal,
   restoreArchivedWorktrees as persistArchivedRestore,
@@ -141,10 +142,12 @@ const gitSnapshot = useActiveGitSnapshot(
 const review = useReviewNotes(activeCheckout, activeRepo);
 const agent = useAgentSessions(activeCheckout, activeRepo);
 /**
- * The OpenCode state of every checkout that has a terminal, for the sidebar rows.
+ * The OpenCode sessions of every checkout that has a terminal, for the sidebar rows.
  *
  * Separate from `agent`, which follows the active checkout for the review surface: a row is about
  * one terminal in one worktree, and it must be able to answer for a worktree nobody has selected.
+ * It is the whole session list rather than one summary per worktree, because a row identifies its
+ * own session by its terminal title and needs every candidate in that workdir to match against.
  */
 const terminalAgents = useTerminalAgentRows(
   computed(() => [
@@ -214,6 +217,14 @@ watch(openCrumb, (name) => {
 const sendingReview = ref(false);
 const mainViews = ref<Record<string, MainView>>({});
 const sessionRuntimeStatuses = ref<Record<string, TerminalSessionStatus>>({});
+/**
+ * The order each checkout's terminals are listed in, as the pane saved it.
+ *
+ * The pane owns that order and the sidebar draws it, so it travels through here rather than being
+ * decided twice: a sidebar that ordered the sessions itself would show a reorder as nothing at all,
+ * because the order it computed is not the one that was saved.
+ */
+const sessionOrder = ref<Record<string, string[]>>({});
 const documentRefreshRevisions = ref<Record<string, number>>({});
 let shellRequestToken = 0;
 let unlistenFileActivity: (() => void) | undefined;
@@ -1080,6 +1091,9 @@ function requestWindowClose(currentWindow: ReturnType<typeof getCurrentWindow>):
   if (windowClosePromise) return windowClosePromise;
   windowClosePromise = (async () => {
     try {
+      // The question comes before any of the close work, because everything below it writes and
+      // stops things: asking afterwards would be asking about a build that is already gone.
+      if (!(await askAboutRunningProcesses())) return;
       // The window waits for the queued writes, but only for as long as that can reasonably
       // take. A window that cannot be closed is worse than a layout that is one launch stale, and
       // the write is on the other side of the bridge: it goes on after this stops waiting for it.
@@ -1105,6 +1119,116 @@ function requestWindowClose(currentWindow: ReturnType<typeof getCurrentWindow>):
     }
   })();
   return windowClosePromise;
+}
+
+/**
+ * The question a close asks while one is open, and the answer it is waiting for.
+ *
+ * Its own dialog rather than `pendingConfirm`, because this one has to be awaited: the close below
+ * continues on the answer rather than finishing on its own, so a second close request arriving
+ * while the reader is still looking at it has to find this one rather than ask another.
+ */
+const closeQuestion = ref<{ title: string; message: string } | null>(null);
+let closeAnswer: ((confirmed: boolean) => void) | null = null;
+
+function answerCloseQuestion(confirmed: boolean) {
+  const answer = closeAnswer;
+  closeAnswer = null;
+  closeQuestion.value = null;
+  answer?.(confirmed);
+}
+
+/**
+ * The terminals a close would stop, read fresh rather than believed.
+ *
+ * Every terminal this window created is asked about, not the ones on screen: a pane the user last
+ * looked at is not the pane that has been building for twenty minutes, and only the created ones
+ * exist to be asked. The status is read from the backend rather than taken from the poll, because
+ * the poll is up to three quarters of a second old in both directions — warning about a build that
+ * already finished is wrong, and staying quiet about one that started is worse.
+ */
+async function runningProcessTerminals(): Promise<{ name: string; program: string; where: string }[]> {
+  const live = workspace.value.repos.flatMap((repo) =>
+    repo.checkouts.flatMap((checkout) =>
+      checkout.sessions
+        .filter((session) => session.id in sessionRuntimeStatuses.value)
+        .map((session) => ({ session, checkout, repo })),
+    ),
+  );
+  const found = await Promise.all(
+    live.map(async ({ session, checkout, repo }) => {
+      try {
+        const status = await getTerminalStatus(checkout.id, session.id);
+        if (!terminalHasProcess(status)) return null;
+        return {
+          // The name the sidebar row gives this terminal, so the question and the row agree.
+          name: sessionTitle(session, status),
+          program: status.foregroundApp ?? "a process",
+          where: workdirTitle(repo, checkout),
+        };
+      } catch (cause) {
+        // A terminal whose status cannot be read is reported as still running rather than as safe.
+        // The cost of the mistake is a question that was not needed; the cost of the other way
+        // round is a build stopped without anyone being asked.
+        showWindowError(cause);
+        return { name: session.name, program: "a process", where: workdirTitle(repo, checkout) };
+      }
+    }),
+  );
+  return found.filter((entry): entry is { name: string; program: string; where: string } => entry !== null);
+}
+
+/**
+ * What the question lists: as many as a reader can act on, and a count for the rest.
+ *
+ * Each entry is the terminal the way the sidebar names it, with the program that would stop beside
+ * it — and without the program when it is the same word, which is what an unrenamed terminal is
+ * called by the app itself. Two terminals can share a name, and a question naming the same word
+ * twice tells the reader nothing about which is which, so a repeated name carries the worktree.
+ */
+function describeRunningProcesses(entries: { name: string; program: string; where: string }[]): string {
+  const NAMED = 4;
+  const named = entries
+    .slice(0, NAMED)
+    .map((entry) => {
+      const where = entries.filter((other) => other.name === entry.name).length > 1 ? ` · ${entry.where}` : "";
+      return `“${entry.name}${where}”${entry.name === entry.program ? "" : ` (${entry.program})`}`;
+    })
+    .join(", ");
+  const rest = entries.length - NAMED;
+  const one = entries.length === 1;
+  return `${named}${rest > 0 ? ` and ${rest} more` : ""}. Closing the window stops ${one ? "it" : "them"}, and whatever ${one ? "it has" : "they have"} not written yet is lost.`;
+}
+
+/**
+ * Asks before stopping anything, and answers yes on its own when there is nothing to stop.
+ *
+ * A refusal and a failure land the same way on purpose: both leave the window open, and neither is
+ * silent. A window that cannot be closed is a bug, but a build that was killed without a word is
+ * worse than both, so the question comes first and the close follows the answer rather than a
+ * timer.
+ */
+async function askAboutRunningProcesses(): Promise<boolean> {
+  if (closeQuestion.value) return false;
+  let running: { name: string; program: string; where: string }[];
+  try {
+    running = await runningProcessTerminals();
+  } catch (cause) {
+    // The question could not be asked, which is not the same as there being nothing to lose. The
+    // window stays open and says why, because a close nobody could confirm is not a close anybody
+    // agreed to.
+    showWindowError(cause);
+    return false;
+  }
+  if (!running.length) return true;
+  const one = running.length === 1;
+  return new Promise<boolean>((resolve) => {
+    closeAnswer = resolve;
+    closeQuestion.value = {
+      title: one ? "A process is still running" : `${running.length} processes are still running`,
+      message: `${describeRunningProcesses(running)} The window stays open if you cancel.`,
+    };
+  });
 }
 
 /** How long a close waits for each thing it waits for before it stops waiting for it. */
@@ -1389,6 +1513,10 @@ function updateSessionStatus(sessionId: string, status: TerminalSessionStatus | 
   else delete sessionRuntimeStatuses.value[sessionId];
 }
 
+function updateSessionOrder(checkoutId: string, order: string[]) {
+  sessionOrder.value = { ...sessionOrder.value, [checkoutId]: order };
+}
+
 async function closeTerminalSession(sessionId: string) {
   await mainPane.value?.requestClose(sessionId);
 }
@@ -1400,8 +1528,8 @@ async function closeTerminalSession(sessionId: string) {
  * this only carries the destination across. The workspace the backend returns already selects the
  * destination worktree, which is what puts the files and the changes panel on it.
  */
-async function moveTerminalSession(sessionId: string, targetCheckoutId: string) {
-  await mainPane.value?.moveSession(sessionId, targetCheckoutId);
+async function moveTerminalSession(sessionId: string, targetCheckoutId: string, index: number) {
+  await mainPane.value?.moveSession(sessionId, targetCheckoutId, index);
 }
 
 /**
@@ -1622,6 +1750,7 @@ function reportWarning(message: string) {
           :active-checkout-id="workspace.activeCheckoutId"
           :active-session-id="workspace.activeSessionId"
           :session-runtime-statuses="sessionRuntimeStatuses"
+          :session-order="sessionOrder"
           :agent-rows="terminalAgents.byCheckout"
           :is-opening="isOpening"
           :archived-worktrees="workspace.archivedWorktrees"
@@ -1683,6 +1812,7 @@ function reportWarning(message: string) {
           @open-folder="chooseFolder"
           @workspace-updated="updateWorkspace"
           @session-status-changed="updateSessionStatus"
+          @session-order="updateSessionOrder"
           @update-document-mode="setDocumentMode"
           @reading-position-changed="activeCheckout && updateDocumentReadingPosition(activeCheckout.id, $event)"
           @diff-position-changed="activeCheckout && updateDiffReadingPosition(activeCheckout.id, $event)"
@@ -1755,6 +1885,16 @@ function reportWarning(message: string) {
       :confirm-label="pendingConfirm?.confirmLabel ?? 'Confirm'"
       @confirm="answerConfirm(true)"
       @close="answerConfirm(false)"
+    />
+    <!-- The one the window close asks, which is asked before anything is written or stopped. -->
+    <ConfirmDialog
+      :open="closeQuestion !== null"
+      :title="closeQuestion?.title ?? ''"
+      :message="closeQuestion?.message ?? ''"
+      confirm-label="Stop and close"
+      destructive
+      @confirm="answerCloseQuestion(true)"
+      @close="answerCloseQuestion(false)"
     />
     <WorktreeDialog
       :open="!!lifecycle"

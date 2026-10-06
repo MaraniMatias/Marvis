@@ -12,7 +12,13 @@ import {
 } from "../domain/agent";
 import { isIpcError } from "../domain/ipc";
 import type { Checkout, Repo } from "../domain/workspace";
-import { createAgentSession, listAgentAgents, listAgentSessions, stopAgent } from "../lib/ipc";
+import {
+  createAgentSession,
+  listAgentAgents,
+  listAgentCandidateSessions,
+  listAgentSessions,
+  stopAgent,
+} from "../lib/ipc";
 
 /** Name of the Tauri event the bridge emits normalized agent events on. */
 export const AGENT_EVENT = "marvis://agent-event";
@@ -53,17 +59,17 @@ const MAX_EVENTS = 200;
  * How often a working session is re-read while the service reports a turn running.
  *
  * The service announces no turn-completed event: a turn ends in silence and only
- * `/api/session/active` stops reporting it. So an ending has to be observed, and this is the
- * cost. Polling stops the moment nothing is running, so an idle app is not polled.
+ * `/api/session/active` stops reporting it. So an ending has to be observed, and this is the cost.
  */
 const BUSY_POLL_MS = 2000;
 /**
- * How often the service is asked about again while it is not there.
+ * How often the service is asked about again on the slow question.
  *
- * Nothing is started on these ticks: this app is a client of a service the person runs, so the
- * only way to notice one is to ask. See `DISCONNECTED_POLL_MS` at its use.
+ * Both hooks that use it are asking something a person decides on their own schedule — whether they
+ * have started OpenCode, whether a turn has begun — and neither is answered by an event this app
+ * receives. Named for the cadence rather than for one of its two callers.
  */
-const DISCONNECTED_POLL_MS = 5000;
+const SLOW_POLL_MS = 5000;
 
 function errorText(cause: unknown): string {
   return isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
@@ -327,7 +333,7 @@ export function useAgentSessions(
   const disconnectedTimer = setInterval(() => {
     if (state.state !== "error") return;
     void reload();
-  }, DISCONNECTED_POLL_MS);
+  }, SLOW_POLL_MS);
 
   onScopeDispose(() => {
     clearInterval(pollTimer);
@@ -352,17 +358,36 @@ export function useAgentSessions(
   return Object.assign(state, { reload, createSession, selectTarget, stop });
 }
 
-/** What one terminal row says about the OpenCode running behind it. */
+/** What one session says about itself, for a terminal to be matched against it. */
+export interface TerminalAgentSession {
+  /** The session's own title, which is what its TUI writes into the terminal title. */
+  title: string;
+  /** The agent running it, with the color OpenCode paints it with, absent when the session has none. */
+  agent: AgentHeadline | null;
+  /** Whether the service reports a turn running in this session right now. */
+  running: boolean;
+  /**
+   * When the service last touched this session, in epoch milliseconds.
+   *
+   * Carried because it is the only real clock the row has: the elapsed time in a terminal's right
+   * slot is how long ago this session was last updated, read from the service and from nowhere
+   * else. Nothing else is a duration this app observed, so nothing else may be drawn as one.
+   */
+  updatedAt: number;
+}
+
+/** What one checkout's sessions say, which is everything a terminal in it could be matched to. */
 export interface TerminalAgentRow {
   /**
-   * The agent running in this directory, with the color OpenCode paints it with.
+   * Every session this checkout's service is running.
    *
-   * Absent when no OpenCode TUI is running here, or when the service cannot be reached, which
-   * are the same thing to a row: there is nothing behind it to speak for.
+   * A list rather than one headline on purpose: OpenCode 2.0.22 has no route that maps a TUI
+   * process to a session, so the only thing that can say which session a terminal has open is the
+   * title that terminal's own TUI wrote into it. That is a title to match against, and it needs
+   * every candidate to match against. Empty when the service cannot be reached, which is a list
+   * that says nothing rather than a session that says the wrong thing.
    */
-  agent: AgentHeadline | null;
-  /** Whether a turn is running in this directory right now. */
-  running: boolean;
+  readonly sessions: TerminalAgentSession[];
 }
 
 export interface TerminalAgentRows {
@@ -391,25 +416,29 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
   /** Checkouts with a turn running, so the poll knows there is something to wait for. */
   const busy = new Set<string>();
 
-  const row = (checkoutId: string): TerminalAgentRow => byCheckout[checkoutId] ?? { agent: null, running: false };
+  const row = (checkoutId: string): TerminalAgentRow => byCheckout[checkoutId] ?? { sessions: [] };
 
   async function read(checkoutId: string): Promise<TerminalAgentRow> {
-    const sessions = await listAgentSessions(checkoutId);
+    // The repository-wide list, not the worktree's own: a terminal's session is not necessarily
+    // located in the worktree the terminal is filed under, and a row that cannot name its session
+    // draws no state at all. Nothing here is trusted on its own — the row matches a title and refuses
+    // an ambiguous one.
+    const sessions = await listAgentCandidateSessions(checkoutId);
     const agents = await listAgentAgents(checkoutId).catch(() => [] as AgentAgent[]);
-    // The review target is deliberately not consulted: this is not a review surface, so the
-    // loudest session in the directory is what a row speaks for.
-    const session = headlineSession(sessions, null);
-    const label = agentLabel(agents, session?.agent);
+    // Every session is offered, and no headline is picked: the terminal row is about one terminal,
+    // and the only thing that can say which session that terminal has open is the title the
+    // terminal's own TUI wrote into it. It matches against this list by title
+    // (`agentSessionForTitle`), and an unmatched terminal draws no state at all.
     return {
-      agent:
-        session && label
-          ? {
-              label,
-              color: agentColor(agents, session.agent),
-              attention: agentAttention(session),
-            }
-          : null,
-      running: sessions.some((candidate) => candidate.running),
+      sessions: sessions.map((session) => {
+        const label = agentLabel(agents, session.agent);
+        return {
+          title: session.title,
+          agent: label ? { label, color: agentColor(agents, session.agent), attention: agentAttention(session) } : null,
+          running: session.running,
+          updatedAt: session.updatedAt,
+        };
+      }),
     };
   }
 
@@ -425,9 +454,9 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
         try {
           return [checkoutId, await read(checkoutId)] as const;
         } catch {
-          // A service that is not run leaves the row without an agent, which is the state to
-          // wait in rather than a failure to report.
-          return [checkoutId, { agent: null, running: false }] as const;
+          // A service that is not run leaves the row with no session to match, which is the state
+          // to wait in rather than a failure to report.
+          return [checkoutId, { sessions: [] as TerminalAgentSession[] }] as const;
         }
       }),
     );
@@ -436,7 +465,7 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
     for (const [checkoutId, entry] of read_) byCheckout[checkoutId] = entry;
     busy.clear();
     for (const [checkoutId, entry] of read_) {
-      if (entry.running) busy.add(checkoutId);
+      if (entry.sessions.some((session) => session.running)) busy.add(checkoutId);
     }
   }
 
@@ -454,19 +483,27 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
   }, BUSY_POLL_MS);
 
   /**
-   * Asks again while no checkout has an agent to show.
+   * Asks again whenever nothing is running, and slowly.
    *
-   * The service belongs to whoever started it, so this app does not start one: it waits here
-   * until that person runs OpenCode, and connects on the first read that answers.
+   * The service announces no turn-started event to this hook, and a turn started in the user's own TUI
+   * is the one nobody here can hear about. So a panel with sessions on it and nothing running still has
+   * to look: otherwise the row says idle while the agent has been working for minutes, and nothing
+   * would correct it until some other event happened to reload the list. It was worse than quiet before
+   * — a checkout with any session at all stopped both timers, so a service with fifty finished
+   * sessions was never asked about again.
+   *
+   * The two timers are a fast one and a slow one rather than two questions, because the fast poll is
+   * only ever the right question while something is running and the slow one is the only right question
+   * once it is not.
    */
-  const disconnectedTimer = setInterval(() => {
-    if (Object.values(byCheckout).some((entry) => entry.agent !== null)) return;
+  const idleTimer = setInterval(() => {
+    if (busy.size > 0) return;
     void reload();
-  }, DISCONNECTED_POLL_MS);
+  }, SLOW_POLL_MS);
 
   onScopeDispose(() => {
     clearInterval(pollTimer);
-    clearInterval(disconnectedTimer);
+    clearInterval(idleTimer);
   });
 
   return { byCheckout, row, reload };

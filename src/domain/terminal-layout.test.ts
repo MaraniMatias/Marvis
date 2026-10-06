@@ -9,6 +9,8 @@ import {
   removeSessionFromLayout,
   reorderSession,
   resizeSplit,
+  moveSessionId,
+  orderedSessionIds,
   restoreTerminalLayout,
 } from "./terminal-layout";
 
@@ -125,6 +127,45 @@ describe("terminal layout", () => {
       activeTabId: "layout:one",
       tabs: [{ id: "layout:one", root: { kind: "session", sessionId: "one" } }],
       sessionOrder: ["one"],
+    });
+  });
+});
+
+describe("the order a checkout's terminals are listed in", () => {
+  const layoutOf = (...ids: string[]) => createTerminalLayout(ids.map((id) => session(id)));
+
+  it("puts what the layout names first and keeps the rest after it", () => {
+    // The layout knows two of the three; the one it never saved keeps its own place rather than
+    // disappearing from the list.
+    expect(orderedSessionIds([session("one"), session("two"), session("three")], layoutOf("three", "one"))).toEqual([
+      "three",
+      "one",
+      "two",
+    ]);
+    // And a layout that names nothing is not a list of nothing.
+    expect(orderedSessionIds([session("one"), session("two")], layoutOf())).toEqual(["one", "two"]);
+    expect(orderedSessionIds([session("one")], null)).toEqual(["one"]);
+  });
+
+  it("drops an id the checkout no longer has and never repeats one", () => {
+    expect(orderedSessionIds([session("one")], layoutOf("one", "gone", "one"))).toEqual(["one"]);
+  });
+
+  describe("moveSessionId", () => {
+    it("lands the terminal in the slot it was dropped into, counted without itself", () => {
+      // [A, B, C] with A out of the way is [B, C]: dropping on the second terminal means slot 1.
+      expect(moveSessionId(["one", "two", "three"], "one", 1)).toEqual(["two", "one", "three"]);
+      // The same list, the last slot: past B and C is slot 2.
+      expect(moveSessionId(["one", "two", "three"], "one", 2)).toEqual(["two", "three", "one"]);
+      // And the first, which is the same rule and not a special case.
+      expect(moveSessionId(["one", "two", "three"], "three", 0)).toEqual(["three", "one", "two"]);
+    });
+
+    it("inserts a terminal that is not in the list yet, and clamps one past the end", () => {
+      // A terminal arriving from another worktree is inserted where it was aimed.
+      expect(moveSessionId(["one", "three"], "two", 1)).toEqual(["one", "two", "three"]);
+      expect(moveSessionId(["one", "two"], "one", 99)).toEqual(["two", "one"]);
+      expect(moveSessionId(["one", "two"], "one", -5)).toEqual(["one", "two"]);
     });
   });
 });

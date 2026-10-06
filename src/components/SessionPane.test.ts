@@ -399,20 +399,23 @@ describe("SessionPane terminal UI", () => {
     await flushPromises();
 
     // The process is the one already running, so a move is a row change and nothing is mounted.
-    await wrapper.vm.moveSession("session:live", target.id);
+    await wrapper.vm.moveSession("session:live", target.id, 0);
     await flushPromises();
 
     expect(moveTerminal).toHaveBeenCalledWith(checkout.id, "session:live", target.id);
     expect(terminalMock.mounts).toBe(1);
     expect(terminalMock.closeRequests).toBe(0);
-    // The layout that had the pane gives it up, and the one that gained it takes it.
+    // The layout that had the pane gives it up, and the one that gained it takes it. The gained layout
+    // is written in full — the terminal that arrives plus the ones the destination already had —
+    // because that list is what the sidebar draws, and a layout naming only the newcomer is a list
+    // that says nothing about where the newcomer sits among the others.
     expect(saveTerminalLayout).toHaveBeenCalledWith(
       checkout.id,
       expect.objectContaining({ sessionOrder: ["session:old"] }),
     );
     expect(saveTerminalLayout).toHaveBeenCalledWith(
       target.id,
-      expect.objectContaining({ sessionOrder: ["session:live"] }),
+      expect.objectContaining({ sessionOrder: ["session:live", "session:old"] }),
     );
     // Off by default: a move is not a `cd`.
     expect(terminalMock.directoryChanges).toEqual([]);
@@ -444,12 +447,141 @@ describe("SessionPane terminal UI", () => {
     });
     await flushPromises();
 
-    await wrapper.vm.moveSession("session:live", target.id);
+    await wrapper.vm.moveSession("session:live", target.id, 0);
 
     expect(toasts.value.map((toast) => toast.message)).toContain(
       "terminal session does not belong to the requested checkout",
     );
     expect(toasts.value.map((toast) => toast.message)).not.toContain("[object Object]");
+    wrapper.unmount();
+  });
+
+  it("reorders a terminal inside its own worktree without touching the backend move", async () => {
+    terminalMock.autoCreate = true;
+    // Three terminals, which is what a reorder needs: with one there is no slot to aim at, and with
+    // two the drag cannot be told from a no-op.
+    const third: Session = {
+      id: "session:third",
+      type: "shell",
+      checkoutId: checkout.id,
+      name: "zsh",
+      createdAt: "now",
+      status: "inactive",
+    };
+    const withSiblings: Checkout = {
+      ...checkout,
+      sessions: [
+        {
+          id: "session:live",
+          type: "shell",
+          checkoutId: checkout.id,
+          name: "zsh",
+          createdAt: "now",
+          status: "inactive",
+        },
+        ...checkout.sessions,
+        third,
+      ],
+    };
+    vi.mocked(moveTerminal).mockResolvedValue({ repos: [], activeCheckoutId: checkout.id, activeSessionId: null });
+    const wrapper = mount(SessionPane, {
+      props: {
+        checkout: withSiblings,
+        checkouts: [withSiblings],
+        activeSessionId: null,
+        isOpening: true,
+        shellRequest: null,
+        terminalSettings: { ...DEFAULT_SETTINGS.terminal },
+      },
+    });
+    await wrapper.setProps({
+      isOpening: false,
+      shellRequest: { checkoutId: checkout.id, token: 1 },
+      activeSessionId: "session:live",
+      registeredSessionIds: ["session:live", "session:old", "session:third"],
+    });
+    await flushPromises();
+    vi.mocked(moveTerminal).mockClear();
+    vi.mocked(saveTerminalLayout).mockClear();
+
+    // Slot 2 of a three-terminal list, counted without the dragged row: the terminal lands last.
+    await wrapper.vm.moveSession("session:live", checkout.id, 2);
+    await flushPromises();
+
+    // The list moved and nothing else did: no backend move, no terminal remounted, and the terminal
+    // still belongs to the worktree it was in.
+    expect(moveTerminal).not.toHaveBeenCalled();
+    expect(terminalMock.mounts).toBe(1);
+    expect(terminalMock.closeRequests).toBe(0);
+    expect(saveTerminalLayout).toHaveBeenCalledWith(
+      checkout.id,
+      expect.objectContaining({ sessionOrder: ["session:old", "session:third", "session:live"] }),
+    );
+    // And the order is announced, because the sidebar draws this list and nothing else.
+    expect(wrapper.emitted("sessionOrder")?.at(-1)).toEqual([
+      checkout.id,
+      ["session:old", "session:third", "session:live"],
+    ]);
+    wrapper.unmount();
+  });
+
+  it("drops a terminal into another worktree's list at the slot it was aimed at", async () => {
+    terminalMock.autoCreate = true;
+    const target: Checkout = {
+      ...checkout,
+      id: "checkout:/work/repo-wt",
+      path: "/work/repo-wt",
+      sessions: [
+        {
+          id: "session:a",
+          type: "shell",
+          checkoutId: "checkout:/work/repo-wt",
+          name: "zsh",
+          createdAt: "now",
+          status: "inactive",
+        },
+        {
+          id: "session:b",
+          type: "shell",
+          checkoutId: "checkout:/work/repo-wt",
+          name: "zsh",
+          createdAt: "now",
+          status: "inactive",
+        },
+      ],
+    };
+    vi.mocked(moveTerminal).mockResolvedValue({
+      repos: [],
+      activeCheckoutId: target.id,
+      activeSessionId: "session:live",
+    });
+    const wrapper = mount(SessionPane, {
+      props: {
+        checkout,
+        checkouts: [checkout, target],
+        activeSessionId: null,
+        isOpening: true,
+        shellRequest: null,
+        terminalSettings: { ...DEFAULT_SETTINGS.terminal },
+      },
+    });
+    await wrapper.setProps({
+      isOpening: false,
+      shellRequest: { checkoutId: checkout.id, token: 1 },
+      activeSessionId: "session:live",
+      registeredSessionIds: ["session:live"],
+    });
+    await flushPromises();
+
+    // Between the destination's first and second terminal, which is what a drop on its first row's
+    // lower half means.
+    await wrapper.vm.moveSession("session:live", target.id, 1);
+    await flushPromises();
+
+    expect(saveTerminalLayout).toHaveBeenCalledWith(
+      target.id,
+      expect.objectContaining({ sessionOrder: ["session:a", "session:live", "session:b"] }),
+    );
     wrapper.unmount();
   });
 
@@ -480,7 +612,7 @@ describe("SessionPane terminal UI", () => {
     await flushPromises();
 
     terminalMock.busy = true;
-    await wrapper.vm.moveSession("session:live", target.id);
+    await wrapper.vm.moveSession("session:live", target.id, 0);
     await flushPromises();
 
     // A busy shell still gets a notice that the move succeeded but its directory stayed put.
@@ -505,8 +637,8 @@ describe("SessionPane terminal UI", () => {
     });
     await flushPromises();
 
-    await wrapper.vm.moveSession("session:live", "checkout:unknown");
-    await wrapper.vm.moveSession("session:live", checkout.id);
+    await wrapper.vm.moveSession("session:live", "session:live", 0);
+    await wrapper.vm.moveSession("session:live", checkout.id, 0);
     await flushPromises();
 
     expect(moveTerminal).not.toHaveBeenCalled();

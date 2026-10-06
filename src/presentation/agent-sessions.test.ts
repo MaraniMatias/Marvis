@@ -6,6 +6,7 @@ import type { Checkout, Repo } from "../domain/workspace";
 
 const mocks = vi.hoisted(() => ({
   listAgentSessions: vi.fn(),
+  listAgentCandidateSessions: vi.fn(),
   listAgentAgents: vi.fn(),
   createAgentSession: vi.fn(),
   stopAgent: vi.fn(),
@@ -15,6 +16,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("@tauri-apps/api/event", () => ({ listen: mocks.listen }));
 vi.mock("../lib/ipc", () => ({
   listAgentSessions: mocks.listAgentSessions,
+  listAgentCandidateSessions: mocks.listAgentCandidateSessions,
   listAgentAgents: mocks.listAgentAgents,
   createAgentSession: mocks.createAgentSession,
   stopAgent: mocks.stopAgent,
@@ -384,9 +386,9 @@ describe("useAgentSessions", () => {
 });
 
 describe("useTerminalAgentRows", () => {
-  /** Answers each checkout with its own sessions, which is what directory scoping buys. */
+  /** Answers each checkout with the candidates its own service knows. */
   function perCheckout(byCheckout: Record<string, Partial<AgentSession>[]>): void {
-    mocks.listAgentSessions.mockImplementation(async (checkoutId: string) =>
+    mocks.listAgentCandidateSessions.mockImplementation(async (checkoutId: string) =>
       (byCheckout[checkoutId] ?? []).map((overrides) => session({ checkoutId, ...overrides })),
     );
   }
@@ -411,19 +413,15 @@ describe("useTerminalAgentRows", () => {
     const state = useTerminalAgentRows(computed(() => ["checkout:first", "checkout:second"]));
     await settle();
 
-    expect(state.byCheckout["checkout:first"].agent).toEqual({
-      label: "Coder",
-      color: "#4ed6bf",
-      attention: "busy",
-    });
-    expect(state.byCheckout["checkout:second"].agent).toEqual({
-      label: "Plan",
-      color: null,
-      attention: "none",
-    });
-    // Busy is per row too, so one worktree working never marks another as working.
-    expect(state.byCheckout["checkout:first"].running).toBe(true);
-    expect(state.byCheckout["checkout:second"].running).toBe(false);
+    // Every session is offered rather than one headline per checkout: a terminal row is about one
+    // terminal, and the only thing that can say which session it has open is its own title. A row
+    // matches against this list itself, so anything the list drops cannot be named by anybody.
+    expect(state.byCheckout["checkout:first"].sessions).toEqual([
+      { title: "review", agent: { label: "Coder", color: "#4ed6bf", attention: "busy" }, running: true, updatedAt: 1 },
+    ]);
+    expect(state.byCheckout["checkout:second"].sessions).toEqual([
+      { title: "review", agent: { label: "Plan", color: null, attention: "none" }, running: false, updatedAt: 1 },
+    ]);
   });
 
   it("keeps two terminals in one worktree from being told they are different sessions", async () => {
@@ -431,16 +429,16 @@ describe("useTerminalAgentRows", () => {
     // the only scope OpenCode can answer in; what must not happen is either row claiming a
     // session id the service never reported for this terminal.
     perCheckout({ "checkout:first": [{ id: "ses_only", agent: "coder" }] });
-    mocks.listAgentSessions.mockClear();
+    mocks.listAgentCandidateSessions.mockClear();
 
     const state = useTerminalAgentRows(computed(() => ["checkout:first"]));
     await settle();
 
-    expect(state.byCheckout["checkout:first"].agent?.label).toBe("Coder");
+    expect(state.byCheckout["checkout:first"].sessions[0]?.agent?.label).toBe("Coder");
     // One read for the one checkout, asked of that checkout alone: the row cannot be drawn from
     // any other worktree's sessions, so it never asks for them.
-    expect(mocks.listAgentSessions).toHaveBeenCalledTimes(1);
-    expect(mocks.listAgentSessions).toHaveBeenCalledWith("checkout:first");
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(1);
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledWith("checkout:first");
   });
 
   it("drops a checkout that no longer has terminals", async () => {
@@ -457,34 +455,63 @@ describe("useTerminalAgentRows", () => {
   });
 
   it("reports no agent while the service is not run, without starting one", async () => {
-    mocks.listAgentSessions.mockRejectedValue(new Error("OpenCode is not running."));
+    mocks.listAgentCandidateSessions.mockRejectedValue(new Error("OpenCode is not running."));
 
     const state = useTerminalAgentRows(computed(() => ["checkout:first"]));
     await settle();
 
-    expect(state.byCheckout["checkout:first"]).toEqual({ agent: null, running: false });
-    expect(state.row("checkout:absent")).toEqual({ agent: null, running: false });
+    expect(state.byCheckout["checkout:first"]).toEqual({ sessions: [] });
+    expect(state.row("checkout:absent")).toEqual({ sessions: [] });
   });
 
-  it("re-reads while a row is running and stops once every row is idle", async () => {
+  it("offers a session with no agent as a session, so a title can still match it", async () => {
+    // A fresh session has no agent behind it yet, which is not the same as not existing: its title
+    // is what a terminal with it open writes into its own title, and the row can still say which
+    // session it is looking at. It just has no mode to name.
+    perCheckout({ "checkout:first": [{ id: "ses_fresh", agent: null }] });
+
+    const state = useTerminalAgentRows(computed(() => ["checkout:first"]));
+    await settle();
+
+    // The clock rides along because it is the only duration a terminal row has: the elapsed time in a
+    // row's trailing slot is this session's own last update, read from the service and nowhere else.
+    expect(state.byCheckout["checkout:first"].sessions).toEqual([
+      { title: "review", agent: null, running: false, updatedAt: 1 },
+    ]);
+  });
+
+  it("re-reads fast while a row is running and slowly once every row is idle", async () => {
     vi.useFakeTimers();
     perCheckout({ "checkout:first": [{ id: "ses_one", agent: "coder", running: true }] });
 
     const state = useTerminalAgentRows(computed(() => ["checkout:first"]));
     await vi.advanceTimersByTimeAsync(0);
-    expect(state.byCheckout["checkout:first"].running).toBe(true);
-    const whileRunning = mocks.listAgentSessions.mock.calls.length;
+    expect(state.byCheckout["checkout:first"].sessions[0]?.running).toBe(true);
+    const whileRunning = mocks.listAgentCandidateSessions.mock.calls.length;
 
     await vi.advanceTimersByTimeAsync(2000);
-    expect(mocks.listAgentSessions.mock.calls.length).toBeGreaterThan(whileRunning);
+    expect(mocks.listAgentCandidateSessions.mock.calls.length).toBeGreaterThan(whileRunning);
 
     perCheckout({ "checkout:first": [{ id: "ses_one", agent: "coder" }] });
     await vi.advanceTimersByTimeAsync(2000);
-    expect(state.byCheckout["checkout:first"].running).toBe(false);
+    expect(state.byCheckout["checkout:first"].sessions[0]?.running).toBe(false);
 
-    const onceIdle = mocks.listAgentSessions.mock.calls.length;
-    await vi.advanceTimersByTimeAsync(10000);
-    expect(mocks.listAgentSessions.mock.calls.length).toBe(onceIdle);
+    // Idle is not the end of the questions. A turn started in the person's own TUI announces nothing
+    // to this hook, so a row that stopped asking would say "idle" while the agent works, and nothing
+    // would correct it until some unrelated event reloaded the list.
+    const onceIdle = mocks.listAgentCandidateSessions.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mocks.listAgentCandidateSessions.mock.calls.length).toBeGreaterThan(onceIdle);
+    const slow = mocks.listAgentCandidateSessions.mock.calls.length - onceIdle;
+
+    // And it asks at the slow cadence, not the fast one: a second 5s window costs about one request.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mocks.listAgentCandidateSessions.mock.calls.length - onceIdle).toBeLessThanOrEqual(slow + 1);
+
+    // A turn that began while the panel was idle is seen, which is the whole reason for the above.
+    perCheckout({ "checkout:first": [{ id: "ses_one", agent: "coder", running: true }] });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(state.byCheckout["checkout:first"].sessions[0]?.running).toBe(true);
     vi.useRealTimers();
   });
 });

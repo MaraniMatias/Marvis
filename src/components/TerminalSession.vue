@@ -4,7 +4,9 @@ import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import ConfirmDialog from "./ConfirmDialog.vue";
 import { isIpcError } from "../domain/ipc";
+import { terminalHasProcess } from "../domain/workspace";
 import type { TerminalSessionStatus } from "../domain/workspace";
 import type { TerminalCursorStyle, TerminalScrollbarMode } from "../domain/settings";
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
@@ -27,6 +29,9 @@ import { useToasts } from "../presentation/toasts";
 const props = withDefaults(
   defineProps<{
     checkoutId: string;
+    /** The session's own name, which the confirmation names: a terminal asked about by what it is
+     * called, not by an id no reader has ever seen. */
+    name?: string;
     active: boolean;
     visible?: boolean;
     focused?: boolean;
@@ -39,6 +44,7 @@ const props = withDefaults(
   }>(),
   {
     visible: true,
+    name: undefined,
     focused: false,
     scrollbar: "hidden",
     fontSize: 16,
@@ -374,6 +380,33 @@ function queueInput(value: string): Promise<boolean> {
   );
 }
 
+/**
+ * The question a close has to ask, and the answer it is waiting for.
+ *
+ * A terminal with a process in front of it is the only close that can lose work: the build, the
+ * server and the agent are all writing output that nothing has read yet, and stopping them takes it
+ * away. A shell at a prompt is the same button and nothing to ask about, which is why the status
+ * alone is not the test and `terminalHasProcess` is.
+ *
+ * It is asked in the app's own dialog rather than the browser's, because a native confirm cannot be
+ * styled, is not announced the way the rest of the app announces, and on some platforms renders
+ * behind the window it belongs to.
+ */
+const pendingClose = ref<TerminalSessionStatus | null>(null);
+
+/** What the question names: the program that would stop, in this terminal. */
+const closeQuestion = computed(() => {
+  const status = pendingClose.value;
+  const program = status?.foregroundApp;
+  const terminal = props.name ?? "this terminal";
+  return {
+    title: "Stop the running process?",
+    message: program
+      ? `“${terminal}” is running ${program}. Closing it stops the process, and anything it has not written yet is lost.`
+      : `“${terminal}” still has a process running in it. Closing it stops the process, and anything it has not written yet is lost.`,
+  };
+});
+
 async function requestClose() {
   if (!sessionId || closing.value) return false;
   closing.value = true;
@@ -382,25 +415,48 @@ async function requestClose() {
     // Recorded but not published: a process that ended between two polls has already reported its
     // own ending, and this read exists to be sure before stopping something, not to say it twice.
     state.value = actualStatus;
-    if (
-      actualStatus.state === "running" &&
-      !window.confirm("This terminal session is still running. Close the session and stop its process?")
-    ) {
+    // The read is the whole of the guard. A failure to read it falls to the catch below and closes
+    // nothing: "I could not tell whether a build was running" is not the same as "none was", and
+    // stopping the process anyway is the one answer that cannot be taken back.
+    if (terminalHasProcess(actualStatus)) {
+      pendingClose.value = actualStatus;
       closing.value = false;
       return false;
     }
-    await inputQueue;
-    // A resize still in flight when the PTY is closed is a size the session never learns about.
-    // One promise is the whole of the queue from here: the guard in `queueResize` refuses new work
-    // the moment closing begins, so the drain cannot hand back a replacement while this waits.
-    await resizeQueue;
-    emit("closed", await closeTerminal(props.checkoutId, sessionId));
+    await stopSession();
     return true;
   } catch (cause) {
     showError(cause);
     closing.value = false;
     return false;
   }
+}
+
+/** The close itself, once nothing is left to ask about. */
+async function stopSession(): Promise<void> {
+  try {
+    await inputQueue;
+    // A resize still in flight when the PTY is closed is a size the session never learns about.
+    // One promise is the whole of the queue from here: the guard in `queueResize` refuses new work
+    // the moment closing begins, so the drain cannot hand back a replacement while this waits.
+    await resizeQueue;
+    emit("closed", await closeTerminal(props.checkoutId, sessionId!));
+  } catch (cause) {
+    showError(cause);
+    closing.value = false;
+  }
+}
+
+async function answerClose(confirmed: boolean) {
+  const status = pendingClose.value;
+  pendingClose.value = null;
+  // Cancel is the whole of the answer that matters: nothing is stopped, the PTY keeps running and
+  // the terminal keeps its output. The close is not left half-done for the next attempt to find.
+  if (!confirmed || !status) {
+    closing.value = false;
+    return;
+  }
+  await stopSession();
 }
 
 /**
@@ -436,7 +492,7 @@ async function changeDirectory(path: string): Promise<boolean> {
   // Read rather than believe: the polled state can be most of a second old, and a build that
   // started since the last poll would have the `cd` fed to it instead of read by a shell.
   const status = await getTerminalStatus(props.checkoutId, sessionId);
-  if (status.state !== "running" || status.foregroundProcess) return false;
+  if (status.state !== "running" || terminalHasProcess(status)) return false;
   // A directory is typed into the shell as input, so anything that could end the line or run a
   // second command is refused rather than quoted into shape.
   if (/[\n\r\0]/.test(path)) return false;
@@ -664,5 +720,24 @@ onUnmounted(() => {
     >
       {{ error }}
     </p>
+
+    <!-- Teleported, because a terminal that is not the one on screen is still mounted and still
+         answers: `SessionPane` keeps every view alive with `v-show`, so a pane that is not the active
+         one is `display: none` rather than gone. A dialog drawn inside it therefore existed in the
+         DOM and was invisible — closing a background terminal with a build in it asked a question
+         nobody could see or answer. Drawing it at the body also takes it out of the pane's stacking
+         and out of the terminal's zoom, which are the other two ways an overlay ends up underneath
+         what it is meant to cover. -->
+    <Teleport to="body">
+      <ConfirmDialog
+        :open="pendingClose !== null"
+        :title="closeQuestion.title"
+        :message="closeQuestion.message"
+        confirm-label="Stop and close"
+        destructive
+        @confirm="answerClose(true)"
+        @close="answerClose(false)"
+      />
+    </Teleport>
   </section>
 </template>
