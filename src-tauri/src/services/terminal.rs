@@ -279,10 +279,57 @@ const CLEAR_SCREEN: &str = r"\033[3J\033[H\033[2J";
 /// it does not eval it. That was measured, not assumed, and it is why the two definitions exist —
 /// `precmd_functions+=('print -Pn "…"')` registers nothing and emits no marker at all.
 ///
+/// ## bash: the two hooks, and what they do to a shell that already had them
+///
 /// bash gets a function rather than an inline `PROMPT_COMMAND` string because `$?` has to be read
-/// before anything else in the command resets it, and an existing `PROMPT_COMMAND` is kept because
-/// dropping it would take a person's own prompt work with it. `trap … DEBUG` stands in for zsh's
-/// `preexec`, which bash has no equivalent of.
+/// before anything else in the command resets it. That is the whole reason for the function, and it
+/// is why the function also **returns** the status it read: without the `return`, `printf`'s own exit
+/// status — 0 — is what every prompt command after ours sees, and a user whose prompt colours on
+/// `$?` gets a green prompt for a command that failed. Measured on both a bash 3.2 and a bash 5.3 in
+/// a PTY: with the `return`, the commands after ours read the command's status; without it they read
+/// 0.
+///
+/// Which shape the hook is installed in depends on what `PROMPT_COMMAND` already is, because bash
+/// 5.1 made it an array and both are live in the wild:
+///
+/// - As an **array** it is prepended to: `PROMPT_COMMAND=(__marvis_prompt_command "${…[@]}")`. Each
+///   element is then run with `$?` still holding the command's status, so ours reading it costs the
+///   user's own elements nothing — measured, and that is the form a multi-element array needs or the
+///   elements after the first are folded into one string and cannot be addressed individually.
+/// - As a **string** it is prepended to as a string, which is what a bash older than 5.1 has and what
+///   a user who set `PROMPT_COMMAND='a; b'` has.
+///
+/// Assigning a string to a variable that is already an array does *not* replace the array — it
+/// assigns element 0 and leaves the rest, measured on both versions — which is why the original line
+/// did not actually lose a user's prompt commands on bash 5.1+. What it did instead was fold element
+/// 0 into a compound string (`[0]="__marvis_prompt_command; a"`), which is what a prompt framework
+/// that later reads or rewrites `PROMPT_COMMAND` sees as a corrupted array. The array form removes
+/// that, and the version test is there because on bash 3.2 an array `PROMPT_COMMAND` is *not* run as
+/// an array at all — only element 0 is, which would silently drop every prompt command after the
+/// first. That was measured too: `PROMPT_COMMAND=(a b)` runs `a` alone on 3.2 and `a` then `b` on
+/// 5.3.
+///
+/// `trap … DEBUG` stands in for zsh's `preexec`, which bash has no named hook for. It replaces
+/// whatever DEBUG trap the user had, and bash does not keep the old one anywhere — but it *does* print
+/// it: `trap -p DEBUG` reports `trap -- '<body>' DEBUG`, and that is enough to chain it, since the
+/// body is the trap's own quoted text and evaluating it re-arms exactly what was there. Verified
+/// against bodies containing single quotes, semicolons and variable references. So the previous trap
+/// is read back, stripped of the `trap -- ` prefix and the ` DEBUG` suffix, evaluated once to
+/// unquote it, and run after the marker. `PS0` would avoid all of this — it is expanded before a
+/// command runs and, measured in a real PTY through a real xterm.js render, its output is *not*
+/// printed to the screen, so a marker emitted there is invisible. But `PS0` does not exist in bash
+/// 3.2, which is what `/bin/bash` is on macOS and what this app spawns when `$SHELL` says so:
+/// measured, a bash 3.2 with `PS0` set emits nothing at all for `cd`, `[ -f … ]` or `false`, where
+/// the DEBUG trap fires for all three. Using it would silently drop the marker on the version of bash
+/// most likely to be on the machine, so the DEBUG trap stays and the user's is chained instead.
+///
+/// One thing about the DEBUG trap that is *not* fixed here, because it is a property of bash 3.2
+/// rather than of this script: a `trap` set inside a sourced file does not survive the sourcing
+/// command on 3.2 — bash restores the trap state it saved when the `.` ran. Measured: on 3.2 the
+/// user's DEBUG trap is what is armed after the hook is sourced, and no `A` marker is emitted at all;
+/// on 5.3 the hook's is. So on bash 3.2 the chaining below is a no-op and the marker never fires,
+/// which is the pre-existing behaviour of installing from a sourced file and not something this
+/// script can fix from inside one.
 fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
     match program.file_name().and_then(|name| name.to_str()) {
         Some("zsh") => Some((
@@ -306,11 +353,27 @@ fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
                 "# Written by Marvis and sourced by every terminal it opens. Nothing here is read by \
                  anything else, and it is safe to delete once those terminals are closed.\n\
                  #\n\
+                 # Every line here prepends to something the shell already had, because a bash \
+                 that was configured before this file was sourced keeps its configuration either \
+                 way.\n\
+                 #\n\
                  # The last line clears the screen, so this leaves nothing of itself behind and the \
                  terminal opens looking as though it had just been opened.\n\
-                 __marvis_prompt_command() {{ printf '{OSC_EXIT_BASH}' \"$?\"; }}\n\
-                 PROMPT_COMMAND=\"__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}\"\n\
-                 trap 'printf \"{OSC_STARTED_BASH}\"' DEBUG\n\
+                 __marvis_prompt_command() {{ local __marvis_status=$?; printf '{OSC_EXIT_BASH}' \
+                 \"$__marvis_status\"; return \"$__marvis_status\"; }}\n\
+                 if [[ ${{BASH_VERSINFO[0]}} -gt 5 || ${{BASH_VERSINFO[0]}} -eq 5 && \
+                 ${{BASH_VERSINFO[1]}} -ge 1 ]] && [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == \
+                 'declare -a'* ]]; then\n\
+                 \x20 PROMPT_COMMAND=(__marvis_prompt_command \"${{PROMPT_COMMAND[@]}}\")\n\
+                 else\n\
+                 \x20 PROMPT_COMMAND=\"__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}\"\n\
+                 fi\n\
+                 __marvis_previous_debug=$(trap -p DEBUG)\n\
+                 if [[ -n $__marvis_previous_debug ]]; then \
+                 __marvis_previous_debug=${{__marvis_previous_debug#trap -- }}; \
+                 __marvis_previous_debug=${{__marvis_previous_debug% DEBUG}}; eval \
+                 \"__marvis_previous_debug=$__marvis_previous_debug\"; fi\n\
+                 trap 'printf \"{OSC_STARTED_BASH}\"; eval \"$__marvis_previous_debug\"' DEBUG\n\
                  printf '{CLEAR_SCREEN}'\n"
             ),
         )),
@@ -411,6 +474,7 @@ mod tests {
         fs,
         path::{Path, PathBuf},
         process::Command,
+        sync::Arc,
         time::{Duration, Instant},
     };
 
@@ -779,6 +843,193 @@ mod tests {
         // No folder to write into means no integration rather than a line pointing at nothing.
         assert_eq!(install_shell_integration(zsh, None), None);
         assert!(shell_integration_script(Path::new("/bin/sh")).is_none());
+    }
+
+    /// Every bash the machine has, oldest first.
+    ///
+    /// The script has to be right on all of them rather than on whichever one happens to come first,
+    /// because `inherited_shell` spawns `$SHELL` and a person who has installed a bash has usually put
+    /// it there on purpose. `/bin/bash` leads because on macOS that is the one most terminals get, and
+    /// it is the oldest bash there is.
+    fn bashes() -> Vec<String> {
+        let mut found: Vec<String> = std::env::var("PATH")
+            .unwrap_or_default()
+            .split(':')
+            .map(String::from)
+            .filter(|path| path.ends_with("/bash") && Path::new(path).is_file())
+            .filter(|path| {
+                Command::new(path)
+                    .arg("--version")
+                    .output()
+                    .is_ok_and(|out| out.status.success())
+            })
+            .collect();
+        found.dedup();
+        if !found.iter().any(|path| path == "/bin/bash") {
+            found.insert(0, "/bin/bash".into());
+        }
+        found
+    }
+
+    /// Whether this bash runs every element of a `PROMPT_COMMAND` array, or only the first.
+    ///
+    /// Asked of the shell rather than read off its version number, because it is the property the
+    /// script branches on and therefore the one that has to hold. Measured false on bash 3.2, which is
+    /// what `/bin/bash` is on macOS, so the script has to take the string branch there.
+    fn bash_honours_prompt_command_arrays(bash: &str) -> bool {
+        let run = "\
+PROMPT_COMMAND=(probe_one probe_two)
+probe_one() { printf '[ONE]'; }
+probe_two() { printf '[TWO]'; }
+";
+        // `true` is there to draw one more prompt, and the answer is on it.
+        bash_session_with(bash, run, &[b"true\n"], b"\x1b]133;D;0\x07").contains("[ONE][TWO]")
+    }
+
+    /// Opens a bash with a startup file of the test's own, runs the real install script against it, and
+    /// hands back everything the shell printed.
+    ///
+    /// The user's prompt work and their DEBUG trap are installed by `--rcfile` rather than by the test
+    /// writing to the PTY, because that is the order they exist in for real: a bashrc has run long
+    /// before the line this app types, and a script that only survives because nothing was set up yet
+    /// is not a script that leaves a shell alone.
+    ///
+    /// Every chunk is kept rather than drained at the end, because `wait_for_output` consumes the
+    /// channel to find its marker and what came *before* that marker is the subject here.
+    fn bash_session_with(bash: &str, rc: &str, commands: &[&[u8]], ends_with: &[u8]) -> String {
+        let directory = tempdir().unwrap();
+        let rcfile = directory.path().join("bashrc");
+        fs::write(&rcfile, rc).unwrap();
+        let line = script_in(directory.path(), bash);
+        let backend = TerminalBackend::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        // Every chunk is kept rather than drained at the end, because `wait_for_output` consumes the
+        // channel to find its marker and what came before that marker is the subject here.
+        let collected: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = Arc::clone(&collected);
+        let output: OutputSink = Box::new(move |bytes| {
+            kept.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            sender.send(bytes.to_vec()).map_err(|e| e.to_string())
+        });
+        backend
+            .spawn(
+                "bash:existing".into(),
+                SpawnOptions {
+                    program: PathBuf::from(bash),
+                    args: vec![
+                        "--noprofile".into(),
+                        "--rcfile".into(),
+                        rcfile.to_string_lossy().into_owned(),
+                        "-i".into(),
+                    ],
+                    cwd: std::env::current_dir().unwrap(),
+                    cols: 80,
+                    rows: 24,
+                    startup_line: Some(line),
+                },
+                output,
+            )
+            .unwrap();
+        wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(15));
+        for command in commands {
+            backend.write("bash:existing", command).unwrap();
+        }
+        // The last prompt drawn is where the effects of those commands are all in the stream, so the
+        // wait is on that command's own status: `false` ends a prompt with `D;1`, not `D;0`.
+        wait_for_output(&receiver, ends_with, Duration::from_secs(10));
+        backend.close("bash:existing").unwrap();
+        let stream = collected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        String::from_utf8_lossy(&stream).into_owned()
+    }
+
+    /// A bash script that installs itself has to leave the shell it lands in as it found it.
+    ///
+    /// Two things in it do reach into somebody's configuration, and both were doing it silently. The
+    /// `PROMPT_COMMAND` assignment replaced a multi-element array a person had set up, taking every
+    /// prompt command but the first with it; and `trap … DEBUG` replaced a DEBUG trap they had, with
+    /// no error anywhere and no way back. A user on a bash 5.1+ who had two or three prompt commands
+    /// in the array opened a terminal and found one of them gone.
+    ///
+    /// Both are asserted against a real bash with a real rc file rather than by comparing the script's
+    /// text, because the subject is what the shell *does* with the text, and that is the class of bug
+    /// that shipped a syntactically perfect `PROMPT_COMMAND="…"` in the first place.
+    #[test]
+    fn the_bash_script_keeps_a_prompt_and_a_debug_trap_that_were_already_there() {
+        // A DEBUG trap of the user's own, which is the state every shell framework that manages a
+        // prompt ends up in.
+        const DEBUG_TRAP: &str = "trap 'printf \"<USER_DEBUG>\"' DEBUG\n";
+        // The same three prompt commands as an array, which is what bash 5.1 and later use, and as a
+        // string, which is what every bash before it uses and what a person who set one by hand has.
+        const FUNCTIONS: &str = "\
+user_prompt_one() { printf '[ONE:%s]' \"$?\"; }
+user_prompt_two() { printf '[TWO:%s]' \"$?\"; }
+user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
+";
+        for bash in bashes() {
+            let arrays_honoured = bash_honours_prompt_command_arrays(&bash);
+            let rc = format!(
+                "{FUNCTIONS}{DEBUG_TRAP}PROMPT_COMMAND=(user_prompt_one user_prompt_two user_prompt_three)\n"
+            );
+            let stream = bash_session_with(
+                &bash,
+                &rc,
+                &[b"declare -p PROMPT_COMMAND\n", b"false\n"],
+                b"\x1b]133;D;1\x07",
+            );
+            assert!(
+                stream.contains("<USER_DEBUG>"),
+                "{bash}: installing the integration silently dropped the user's DEBUG trap:\n{stream}"
+            );
+            // Still an array, with the user's entries where they were. A prompt framework that reads
+            // or rewrites `PROMPT_COMMAND` is looking at exactly this.
+            assert!(
+                stream.contains("declare -a PROMPT_COMMAND"),
+                "{bash}: PROMPT_COMMAND stopped being the array the user had:\n{stream}"
+            );
+            for entry in ["user_prompt_one", "user_prompt_two", "user_prompt_three"] {
+                assert!(
+                    stream.contains(entry),
+                    "{bash}: PROMPT_COMMAND lost {entry}:\n{stream}"
+                );
+            }
+            // Ours goes in as its own element rather than folded into element 0, which is the shape
+            // that only matters where every element runs. On a bash that runs element 0 alone the
+            // string form below is what keeps the user's commands, and asserting this there would be
+            // asserting the wrong thing.
+            if arrays_honoured {
+                assert!(
+                    stream.contains("[0]=\"__marvis_prompt_command\""),
+                    "{bash}: our function was folded into element 0 rather than prepended to the array:\n{stream}"
+                );
+            }
+
+            // The string form, which every bash runs in full — a bash before 5.1 runs only element 0 of
+            // an array, so this is the one shape where all three can be watched running everywhere.
+            let rc = format!(
+                "{FUNCTIONS}{DEBUG_TRAP}PROMPT_COMMAND='user_prompt_one; user_prompt_two; user_prompt_three'\n"
+            );
+            let stream = bash_session_with(&bash, &rc, &[b"false\n"], b"\x1b]133;D;1\x07");
+            for prompt in ["[ONE:", "[TWO:", "[THREE:"] {
+                assert!(
+                    stream.contains(prompt),
+                    "{bash}: installing the integration dropped {prompt} from PROMPT_COMMAND:\n{stream}"
+                );
+            }
+            // And the status is the command's rather than ours: `false` leaves 1, and a user's prompt
+            // colouring is exactly the thing that reads it. Only the first of theirs can be holding
+            // it — in a `;`-separated string each command resets `$?` for the next, which is what a
+            // bare `PROMPT_COMMAND='a; b'` does with no integration installed either — so this is the
+            // one assertion about `$?` that is about what this script does.
+            assert!(
+                stream.contains("[ONE:1]"),
+                "{bash}: the first prompt command after ours saw $? = 0 rather than the command's status:\n{stream}"
+            );
+        }
     }
 
     /// Every terminal gets the same script, and it is not rewritten for each one.
