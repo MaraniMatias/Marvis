@@ -2,6 +2,6 @@
 The default interactive shell is now zsh.
 To update your account to use zsh, please run `chsh -s /bin/zsh`.
 For more details, please visit https://support.apple.com/kb/HT208050.
-[?1034hMatiass-MacBook-Pro:src-tauri matiasmarani$ . '/var/folders/sk/q98w72y96952ydh_1 3kn_p0c0000gn/T/.tmpKGhpkq/hook.bash'
+[?1034hMatiass-MacBook-Pro:src-tauri matiasmarani$ . '/var/folders/sk/q98w72y96952ydh_1 3kn_p0c0000gn/T/.tmpPiCt2W/hook.bash'
 [3J[H[2J]133;D;0Matiass-MacBook-Pro:src-tauri matiasmarani$ false
 ]133;D;1Matiass-MacBook-Pro:src-tauri matiasmarani$ 

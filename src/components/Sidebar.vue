@@ -1068,6 +1068,15 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
          *   waits for a reply, the sparkles in the danger colour when its last turn failed.
          * - A plain terminal with something in front of the shell is a process that is up, which is
          *   green and which nothing else in the panel is.
+         * - A plain terminal whose last command failed is red. The backend cannot see that at all: the
+         *   command did not kill the shell, so it is a grandchild of the process the app spawns and no
+         *   `waitpid` reaches it. The answer arrives from the OSC 133 hook (`services/terminal.rs`) as
+         *   `lastCommandExit`, read *before* the foreground process, because a session with a failed
+         *   command behind it is exactly the row that must be red. The hook clears the field when the
+         *   next command starts, so red means "the last command you ran failed" and green means one is
+         *   in front of you now. A shell that has exited stays idle whatever code it left with: the
+         *   panel already names that state in the row's accessible name, and the colour is for the
+         *   thing nothing else can report.
          * - Everything else is idle: the agent's own glyph or a terminal's, both grey. An OpenCode
          *   whose session nobody identified lands here too, which is why it also says `sin sesión` —
          *   a colour cannot say "nothing was observed" without lying about the state.
@@ -1080,7 +1089,15 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
         // An OpenCode whose session nobody identified has no state to draw, so it is idle rather
         // than green: `running` on a row with an agent glyph in front would claim a process that
         // the panel cannot identify, and the word beside it already says what is missing.
-        state: agent?.state ?? (agentTerminal ? "idle" : status?.foregroundProcess ? "running" : "idle"),
+        state:
+          agent?.state ??
+          (agentTerminal
+            ? "idle"
+            : status?.lastCommandExit
+              ? "failed"
+              : status?.foregroundProcess
+                ? "running"
+                : "idle"),
         // Only a row that identified a session has a clock to read, and that row is the only one
         // that draws a time.
         elapsed: identified ? elapsedSince(identified.updatedAt) : null,
@@ -1142,27 +1159,6 @@ const collapsedRepos = ref(new Set<string>());
 
 function isRepoCollapsed(group: Group): boolean {
   return collapsedRepos.value.has(group.id);
-}
-
-/**
- * Running is blue, a failure is red, anything else is quiet.
- *
- * Red comes from either end of a session's life. A shell that ended with a non-zero code failed on
- * its way out. A *live* shell whose last command failed is the far more common case and the backend
- * cannot see it at all: the command did not kill the shell, so it is a grandchild of the process the
- * app spawns and no `waitpid` reaches it. That answer arrives from the OSC 133 hook
- * (`services/terminal.rs`) as `lastCommandExit`, and it is checked before the live-session return
- * below because a running session with a failed command behind it is exactly the row that must be red.
- *
- * The hook clears the field when the next command starts, so red means "the last command you ran
- * failed" and running blue means one is in front of you now. `exitCode` is read defensively: a
- * terminal that reports neither is idle rather than wrongly accused.
- */
-function sessionTone(session: Session): SessionTone {
-  if (props.sessionRuntimeStatuses[session.id]?.lastCommandExit) return "error";
-  if (sessionState(session) !== "exited") return "running";
-  const status = props.sessionRuntimeStatuses[session.id] as { exitCode?: number | null } | undefined;
-  return status?.exitCode ? "error" : "idle";
 }
 
 function toggleRepo(group: Group) {

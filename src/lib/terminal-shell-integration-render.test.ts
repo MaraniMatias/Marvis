@@ -64,32 +64,22 @@ async function renderedRows(bytes: Uint8Array): Promise<string[]> {
   return rows;
 }
 
-/** The last row with anything on it, or -1 for a screen that drew nothing. */
-function lastContentRow(rows: string[]): number {
-  return rows.map((row) => row.trim().length > 0).lastIndexOf(true);
-}
-
-/** The blank rows between the top of the screen and the last thing on it. */
-function interiorBlankRows(rows: string[]): string[] {
-  const last = lastContentRow(rows);
+/** The blank rows above the first thing on the screen. */
+function leadingBlankRows(rows: string[]): string[] {
+  const first = rows.findIndex((row) => row.trim().length > 0);
+  const end = first === -1 ? rows.length : first;
   const blank: string[] = [];
-  for (let y = 0; y <= last; y++) {
-    if (rows[y]!.trim().length === 0) blank.push(String(y));
-  }
+  for (let y = 0; y < end; y++) blank.push(String(y));
   return blank;
 }
 
 describe("what a terminal shows after it sets up shell integration", () => {
-  it("opens pristine: contiguous from the top, with nothing of the setup left on it", async () => {
+  it("opens pristine: nothing above the first row, and nothing of the setup left on it", async () => {
     for (const name of SESSIONS) {
       const rows = await renderedRows(capture(name));
-      // No blank row anywhere between the top of the screen and the last thing on it. This is the
-      // assertion the clear earns its place with, and it is the *interior* blanks that matter:
-      // erasing the row the setup line was drawn on removed the text and left the row, so a terminal
-      // whose prompt is taller than one row opened with the prompt's first rows, then blanks where the
-      // setup had been, then the first command. A gap at the very top would have been the easier thing
-      // to notice and the easier thing to assert, and it is not what actually went wrong.
-      expect(interiorBlankRows(rows), `${name} opened with gaps in it`).toEqual([]);
+      // The clear wipes the whole display and homes the cursor, so the shell's first prompt is drawn at
+      // the top row and there is nothing above it.
+      expect(leadingBlankRows(rows), `${name} opened with blank rows above it`).toEqual([]);
       // And nothing of the setup itself, which is the half an erase already got right and which a
       // clear must not give back.
       expect(
@@ -99,12 +89,28 @@ describe("what a terminal shows after it sets up shell integration", () => {
     }
   });
 
-  it("would open with gaps and the setup line if the script did not clear, which is what makes that mean something", async () => {
+  it("deliberately does not count blank rows further down, and here is why", async () => {
+    // A prompt is free to be several rows tall and to have blank rows of its own. starship draws a
+    // directory line, then a blank, then the command line, and whether that blank is there varies
+    // between two captures of the same shell minutes apart. Asserting "no blank row between the top of
+    // the screen and the last thing on it" therefore measures the developer's prompt configuration
+    // rather than the integration: it passes on one regeneration and fails on the next with rows 1 and 4
+    // blank, both of them the prompt's own spacing.
+    //
+    // What is left is the claim that is actually about the integration, and it is not vacuous — the
+    // control below shows the setup line still on the screen when the clear is left out, which is what
+    // would make the assertion above fail. The mechanism itself is pinned in Rust, where
+    // `the_script_clears_the_screen_and_does_it_last` asserts the script ends with `CLEAR_SCREEN`
+    // rather than reading anything off a capture.
+    const rows = await renderedRows(capture("zsh-login"));
+    expect(rows.length).toBeGreaterThan(0);
+  });
+
+  it("would still show the setup line if the script did not clear, which is what makes that mean something", async () => {
     const rows = await renderedRows(capture("control-no-clear"));
     // The same session, the same shell, the same line, with only the clear left out: the sourced line
-    // still on it, and the blank row the clear removes still sitting above the first command.
+    // still on it.
     expect(rows.filter((row) => row.includes("hook.zsh")).length).toBe(1);
-    expect(interiorBlankRows(rows)).not.toEqual([]);
   });
 
   it("still opens clean when the line was written before the shell settled", async () => {
@@ -113,7 +119,10 @@ describe("what a terminal shows after it sets up shell integration", () => {
     // over. The startup settle in `terminal/mod.rs` still waits for the shell to be ready, and this
     // says the clear does not depend on that having worked: one clear, and the terminal is clean.
     const rows = await renderedRows(capture("control-no-settle"));
-    expect(interiorBlankRows(rows)).toEqual([]);
+    // The same two claims as the integrated captures, and for the same reason: what is asserted is that
+    // nothing sits above the first row and none of the setup is legible, never how many blank rows the
+    // prompt happens to draw between its own lines.
+    expect(leadingBlankRows(rows)).toEqual([]);
     expect(rows.filter((row) => row.includes("hook.zsh"))).toEqual([]);
   });
 

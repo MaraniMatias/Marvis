@@ -97,7 +97,7 @@ let terminalTitle: string | null = null;
  * object on each 750ms poll, which is exactly what `terminalTitle` above does and for the same
  * reason: a field the backend never sends has to survive the poll that replaces the backend's answer
  * with it. `undefined` is a real value here and not the same as absent — it is what says "the last
- * command is running", which is what puts the sidebar bar back to blue.
+ * command is running", which is what takes the red off the sidebar's glyph.
  */
 let lastCommandExit: number | undefined;
 let shellIntegration: { dispose(): void } | undefined;
@@ -384,7 +384,8 @@ function syncStatusPolling() {
 }
 
 function updateStatus(status: TerminalSessionStatus) {
-  // Preserve the shell integration result across status polls, whose payload omits it.
+  // Preserve the shell integration result across status polls, whose payload omits it; otherwise the
+  // sidebar's glyph would flicker back to grey between polls.
   state.value = {
     ...status,
     ...(terminalTitle !== null && { terminalTitle }),

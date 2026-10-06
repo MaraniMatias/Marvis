@@ -507,7 +507,16 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.emitted("closeSession")).toEqual([["session:exited"]]);
   });
 
-  it("paints a live terminal red when its last command failed, and blue once one is running", async () => {
+  it("paints a live terminal red when its last command failed, and green once one is running", async () => {
+    const ids = ["session:failed", "session:passed", "session:busy", "session:idle"];
+    const statuses = {
+      // A command that fails does not end the shell, so the only thing that separates a live shell that
+      // failed from one that did not is the exit code the OSC 133 hook read out of `$?`.
+      "session:failed": { state: "running", foregroundProcess: false, lastCommandExit: 1 },
+      "session:passed": { state: "running", foregroundProcess: false, lastCommandExit: 0 },
+      "session:busy": { state: "running", foregroundProcess: true, foregroundApp: "cargo" },
+      "session:idle": { state: "running", foregroundProcess: false },
+    } as const;
     const wrapper = mount(Sidebar, {
       props: {
         repos: [
@@ -515,11 +524,7 @@ describe("Sidebar workdir rows", () => {
             checkouts: [
               {
                 ...checkout({ id: "checkout:tone" }),
-                sessions: [
-                  session("session:failed", "zsh", "checkout:tone"),
-                  session("session:passed", "zsh", "checkout:tone"),
-                  session("session:idle", "zsh", "checkout:tone"),
-                ],
+                sessions: ids.map((id) => session(id, "zsh", "checkout:tone")),
               },
             ],
           }),
@@ -527,33 +532,30 @@ describe("Sidebar workdir rows", () => {
         activeCheckoutId: "checkout:tone",
         activeSessionId: null,
         isOpening: false,
-        sessionRuntimeStatuses: {
-          // All three shells are alive. A command that fails does not end the shell, so the only thing
-          // that separates them is the exit code the OSC 133 hook read out of `$?`.
-          "session:failed": { state: "running", foregroundProcess: false, lastCommandExit: 1 },
-          "session:passed": { state: "running", foregroundProcess: false, lastCommandExit: 0 },
-          "session:idle": { state: "running", foregroundProcess: false },
-        },
+        sessionRuntimeStatuses: { ...statuses },
       },
     });
 
-    const rows = wrapper.findAll(".workdir-child");
-    expect(rows[0]!.classes()).toContain("tone-error");
-    // A command that succeeded, and a shell that has reported nothing yet, are both just running.
-    expect(rows[1]!.classes()).toContain("tone-running");
-    expect(rows[2]!.classes()).toContain("tone-running");
-    expect(rows.every((row) => !row.classes().includes("tone-error") || row === rows[0])).toBe(true);
+    const stateOf = (id: string) => {
+      const row = wrapper.get(`.workdir-child[data-session-id="${id}"]`);
+      return row.classes().find((name) => name.startsWith("state-"));
+    };
 
-    // The hook clears the field when the next command starts, and the bar goes with it: red means
+    expect(stateOf("session:failed")).toBe("state-failed");
+    // A command that succeeded leaves nothing running and nothing failed, so the row is simply idle.
+    expect(stateOf("session:passed")).toBe("state-idle");
+    expect(stateOf("session:busy")).toBe("state-running");
+    expect(stateOf("session:idle")).toBe("state-idle");
+
+    // The hook clears the field when the next command starts, and the colour goes with it: red means
     // "the last command you ran failed", not "this shell has ever failed".
     await wrapper.setProps({
       sessionRuntimeStatuses: {
+        ...statuses,
         "session:failed": { state: "running", foregroundProcess: true, foregroundApp: "cargo" },
-        "session:passed": { state: "running", foregroundProcess: false, lastCommandExit: 0 },
-        "session:idle": { state: "running", foregroundProcess: false },
       },
     });
-    expect(wrapper.findAll(".workdir-child")[0]!.classes()).toContain("tone-running");
+    expect(stateOf("session:failed")).toBe("state-running");
     wrapper.unmount();
   });
 
