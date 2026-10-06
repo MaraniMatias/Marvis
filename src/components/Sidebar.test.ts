@@ -739,6 +739,63 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
   });
 
+  it("tells a duplicated session name apart from a session it could not find", () => {
+    // The candidates are the whole service's sessions, because a terminal's session is not
+    // necessarily in the worktree the terminal is filed under — so two sessions sharing a title is a
+    // finding, not an edge case (measured: `Humanizer` twice, `Read-only worktree probe` twice). The
+    // row draws no state either way, because neither may claim the other, but it must not claim that
+    // no session exists: the list holds one, the title just cannot say which of the two.
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [{ ...checkout({ id: "checkout:twin" }), sessions: [session("only", "zsh", "checkout:twin")] }],
+          }),
+        ],
+        activeCheckoutId: "checkout:twin",
+        activeSessionId: null,
+        isOpening: false,
+        agentRows: {
+          "checkout:twin": {
+            sessions: [
+              {
+                title: "Humanizer",
+                agent: { label: "coder", color: null, attention: "busy" },
+                running: true,
+                updatedAt: Date.now(),
+              },
+              {
+                title: "Humanizer",
+                agent: { label: "plan", color: null, attention: "none" },
+                running: false,
+                updatedAt: Date.now() - 60_000,
+              },
+            ],
+          },
+        },
+        sessionRuntimeStatuses: {
+          only: {
+            state: "running",
+            foregroundProcess: true,
+            foregroundApp: "opencode",
+            terminalTitle: "OC | Humanizer",
+          },
+        },
+      },
+    });
+
+    const row = wrapper.get(".workdir-child");
+    // Neither of the two sessions' states, and no time: the service's clock belongs to a session this
+    // row did not identify.
+    expect(row.classes()).toContain("state-idle");
+    expect(row.find(".workdir-end-time").exists()).toBe(false);
+    expect(row.get(".dm").text()).toBe("varias con este nombre");
+    expect(row.get(".workdir-select").attributes("aria-label")).toBe(
+      "Terminal session: Humanizer, varias con este nombre \u2014 Several sessions share this name",
+    );
+    wrapper.unmount();
+  });
+
   it("drops an agent's name when the agent has left the terminal", () => {
     // A PTY title outlives the process that wrote it. OpenCode sets `OC | …`, exits, and the shell
     // takes the terminal back without writing anything, so the status still carries the old string —

@@ -124,37 +124,54 @@ export function isTurnEvent(kind: AgentEventKind): boolean {
 const TITLE_ELLIPSIS = "…";
 
 /**
+ * What a terminal's own title named.
+ *
+ * `one` is the only answer a row may draw a state from. `ambiguous` is a finding rather than a
+ * failure to find: the service's own list holds several sessions carrying that name, which is
+ * something a row can say out loud. `none` is everything else — no title was ever captured, or the
+ * title names nothing the service lists.
+ */
+export type AgentTitleMatch<Session> = { kind: "one"; session: Session } | { kind: "ambiguous" } | { kind: "none" };
+
+/**
  * The session a terminal is showing, when its own terminal title names exactly one.
  *
  * **This is inference, not a mapping, and the panel is written as if it knows that.** The service
  * offers no route, header or event that says which session a given TUI process has open (see
  * `services/agent.rs`), so the only thing available is a string the TUI wrote about itself, matched
- * against the titles of the sessions this worktree has. Three things are therefore possible and none
- * of them can be told apart here: a correct match, two terminals showing one session between them,
- * and a worktree whose sessions have been renamed out from under a terminal. What can be refused is
- * being wrong in a way that shows: an open question is `null`, and `null` draws no state rather than
- * a state borrowed from the nearest session.
+ * against the titles of the sessions the service lists. Two readings are therefore possible and
+ * nothing here can tell them apart: a correct match, and two terminals showing one session between
+ * them. What can be refused is being wrong in a way that shows: anything but `one` draws no state
+ * rather than a state borrowed from the nearest session.
+ *
+ * The candidates are the service's whole list rather than one worktree's, because a terminal's
+ * session is not necessarily located in the worktree the terminal is filed under; that is why a
+ * duplicate title is a real answer here and not an edge case, and why `ambiguous` is kept apart from
+ * `none` instead of collapsing into it.
  *
  * The order is exact first, then prefix, because an exact title is the strongest thing here and
  * must not be passed over for a looser reading of it:
  *
  * - An exact match that is unique wins outright.
- * - An exact match that is not unique — two sessions carrying one title — is `null`. Falling through
- *   to the prefix pass would turn a duplicate into a prefix, and the duplicate is the fact.
+ * - An exact match that is not unique — two sessions carrying one title — is `ambiguous`. Falling
+ *   through to the prefix pass would turn a duplicate into a prefix, and the duplicate is the fact.
  * - Only a title carrying the TUI's own ellipsis is read as a prefix, and only when exactly one
  *   session starts with what is left of it. The ellipsis is the signal that the title was cut; how
  *   many characters the cut was is the TUI's business, changes between releases, and is not checked.
  */
-export function agentSessionForTitle<Session extends { title: string }>(
+export function matchAgentSessionTitle<Session extends { title: string }>(
   sessions: Session[],
   title: string | null,
-): Session | null {
-  if (!title) return null;
+): AgentTitleMatch<Session> {
+  const nothing: AgentTitleMatch<Session> = { kind: "none" };
+  if (!title) return nothing;
   const exact = sessions.filter((session) => session.title === title);
-  if (exact.length === 1) return exact[0] ?? null;
-  if (exact.length > 1) return null;
+  if (exact.length) {
+    const only = exact[0];
+    return exact.length === 1 && only ? { kind: "one", session: only } : { kind: "ambiguous" };
+  }
 
-  if (!title.endsWith(TITLE_ELLIPSIS)) return null;
+  if (!title.endsWith(TITLE_ELLIPSIS)) return nothing;
   const stem = title.slice(0, -TITLE_ELLIPSIS.length);
   // How wide the TUI cuts the title is the TUI's business and it has changed between releases — the
   // installed 2.0.24 still slices at 37, but nothing guarantees that is the number arriving here. A
@@ -164,5 +181,7 @@ export function agentSessionForTitle<Session extends { title: string }>(
   // exactly one session starts with what is left — and not an arithmetic detail about how many
   // characters the cut happened to be.
   const matches = sessions.filter((session) => session.title.startsWith(stem));
-  return matches.length === 1 ? (matches[0] ?? null) : null;
+  const only = matches[0];
+  if (matches.length === 1 && only) return { kind: "one", session: only };
+  return matches.length > 1 ? { kind: "ambiguous" } : nothing;
 }

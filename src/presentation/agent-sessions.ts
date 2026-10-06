@@ -428,7 +428,7 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
     // Every session is offered, and no headline is picked: the terminal row is about one terminal,
     // and the only thing that can say which session that terminal has open is the title the
     // terminal's own TUI wrote into it. It matches against this list by title
-    // (`agentSessionForTitle`), and an unmatched terminal draws no state at all.
+    // (`matchAgentSessionTitle`), and a terminal that names none — or several — draws no state.
     return {
       sessions: sessions.map((session) => {
         const label = agentLabel(agents, session.agent);

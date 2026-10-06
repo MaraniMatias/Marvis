@@ -27,7 +27,7 @@ import {
 import type { ArchivedCheckout, Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
 import { AGENT_APP, agentSessionTitle, sessionRowTitle, workdirIconKind, workdirTitle } from "../domain/workspace";
 import type { AgentAttention } from "../domain/agent";
-import { agentSessionForTitle } from "../domain/agent";
+import { matchAgentSessionTitle } from "../domain/agent";
 import type { TerminalAgentRow } from "../presentation/agent-sessions";
 import { useDiffStats } from "../presentation/diff-stats";
 import { WORKDIR_ICONS } from "../presentation/workdir-icons";
@@ -56,9 +56,11 @@ const props = withDefaults(
      * Keyed by checkout rather than handed over as one summary because a row is about one terminal
      * in one worktree: two terminals in different worktrees are different rows, and each reads only
      * its own. OpenCode 2.0.22 cannot report which session a given terminal has open, so this is
-     * every session of the worktree and the row matches them by the title its own terminal carried
-     * (`agentSessionForTitle`). A row that matches none draws no state at all, which is what keeps
-     * a worktree's unrelated sessions off a terminal that is not showing them.
+     * every session the service lists — not just this checkout's, because a terminal filed here
+     * routinely has its session open in a worktree beside it — and the row matches them by the
+     * title its own terminal carried (`matchAgentSessionTitle`). A row that matches exactly one draws
+     * that session's state and nothing else draws any, which is what keeps a namesake session off a
+     * terminal that is not showing it.
      */
     agentRows?: Record<string, TerminalAgentRow>;
     /**
@@ -495,6 +497,17 @@ const AGENT_STATE: Record<AgentAttention, { state: RowState; text: string }> = {
  */
 const NO_AGENT_SESSION = "sin sesión";
 
+/**
+ * What the same row says when the title named several sessions, which is a different fact.
+ *
+ * The candidates are the whole service's list, because a terminal's session is not necessarily in
+ * the worktree the terminal is filed under, and two sessions may share one title — measured against
+ * the real service: `Humanizer` twice, `Read-only worktree probe` twice. Neither may claim the
+ * other, so the row draws no state either way; what changes is the words, because "no session" would
+ * then be a claim about a session that exists and is merely not distinguishable from its namesake.
+ */
+const AMBIGUOUS_AGENT_SESSION = "varias con este nombre";
+
 interface WorkdirItem {
   session: Session;
   /**
@@ -519,8 +532,10 @@ interface WorkdirItem {
    *
    * - An identified agent session's mode: `plan`, `coder`. It is the one word the service named for
    *   this terminal's own session, and it sits beside the session's title rather than under it.
-   * - `sin sesión`, when OpenCode is in front but nothing identified which session. The row's name is
-   *   already `opencode`, so this says the missing thing rather than repeating the present one.
+   * - `sin sesión`, when OpenCode is in front but no title named a session, and `varias con este
+   *   nombre` when one named several. The row's name is already `opencode`, so these say what is
+   *   missing rather than repeating what is present, and they are kept apart because they are
+   *   different findings: nothing was found, or more than one thing was.
    *
    * A plain terminal has none, and that is the user's call after seeing it: the worktree name beside
    * `zsh` repeated the group row directly above it, three rows under it, spelling the same branch
@@ -761,23 +776,24 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
       const status = props.sessionRuntimeStatuses[session.id];
       const app = status?.foregroundApp;
       /**
-       * The session this terminal is showing, read from this terminal's own worktree and matched by
-       * this terminal's own title.
+       * The session this terminal is showing, read from this terminal's own title.
        *
        * Two conditions, both about this row rather than about the worktree, and both refused rather
        * than relaxed: the runtime has to confirm OpenCode is the program in front of this terminal
        * right now (`agentSessionTitle`), and the title that program wrote has to name exactly one
-       * session of this worktree (`agentSessionForTitle`). A worktree can hold a checkout's worth of
-       * unrelated sessions, so nothing falls back to the newest, the loudest or the only one: two
-       * OpenCode terminals in one worktree with no live title are both unidentified rather than one
-       * of them wearing the other's name. The match is inference, not a mapping the service
-       * confirms — `agentSessionForTitle` says what cannot be told apart here — so an unconfirmed
-       * answer draws no state rather than a borrowed one.
+       * session (`matchAgentSessionTitle`). The list it is matched against is the service's whole
+       * one, because a terminal's session is not necessarily in the worktree the row is filed under
+       * — a terminal under this repository routinely has its session open in a worktree beside it.
+       * The match is inference, not a mapping the service confirms — `matchAgentSessionTitle` says
+       * what cannot be told apart here — so anything but one named session draws no state rather
+       * than a borrowed one, and the two refusals are told apart in words.
        */
       const agentTerminal = app === AGENT_APP;
-      const identified = agentTerminal
-        ? agentSessionForTitle(props.agentRows[checkout.id]?.sessions ?? [], agentSessionTitle(status))
+      const match = agentTerminal
+        ? matchAgentSessionTitle(props.agentRows[checkout.id]?.sessions ?? [], agentSessionTitle(status))
         : null;
+      const identified = match?.kind === "one" ? match.session : null;
+      const unidentified = match?.kind === "ambiguous" ? AMBIGUOUS_AGENT_SESSION : NO_AGENT_SESSION;
       /**
        * One attention for the whole row, and the session's own answer wins.
        *
@@ -808,11 +824,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
          * muted half beside it, and it is there so two identical shells are not identical rows.
          */
         title: sessionRowTitle(session, status),
-        detail: identified
-          ? (identified.agent?.label ?? NO_AGENT_SESSION)
-          : agentTerminal
-            ? NO_AGENT_SESSION
-            : undefined,
+        detail: identified ? (identified.agent?.label ?? NO_AGENT_SESSION) : agentTerminal ? unidentified : undefined,
         /**
          * The glyph and its colour, which between them are the whole of the row's state.
          *
@@ -839,7 +851,13 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
         elapsed: identified ? elapsedSince(identified.updatedAt) : null,
         // The words say the same thing the glyph says, and a session that was identified and is
         // simply quiet says it is idle rather than claiming that nothing could be found.
-        note: agent ? agent.text : agentTerminal ? "Session not identified" : "",
+        note: agent
+          ? agent.text
+          : agentTerminal
+            ? match?.kind === "ambiguous"
+              ? "Several sessions share this name"
+              : "Session not identified"
+            : "",
       };
     }),
   };

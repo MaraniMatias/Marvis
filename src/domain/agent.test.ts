@@ -3,10 +3,10 @@ import {
   agentAttention,
   agentColor,
   agentLabel,
-  agentSessionForTitle,
   defaultAgentSession,
   headlineSession,
   isTurnEvent,
+  matchAgentSessionTitle,
   sortAgentSessions,
 } from "./agent";
 import type { AgentSession } from "./agent";
@@ -27,6 +27,12 @@ function session(overrides: Partial<AgentSession> = {}): AgentSession {
     updatedAt: 1,
     ...overrides,
   };
+}
+
+/** The id of the one session a title named, or the kind of answer when it named none. */
+function matched(sessions: AgentSession[], title: string | null): string | "none" | "ambiguous" {
+  const match = matchAgentSessionTitle(sessions, title);
+  return match.kind === "one" ? match.session.id : match.kind;
 }
 
 describe("agent session helpers", () => {
@@ -128,17 +134,17 @@ describe("agent session helpers", () => {
     // statement about that terminal. It is inference and not a mapping the service confirms: two
     // terminals showing one session would both report this title, and nothing here can tell that
     // from two terminals each showing their own session under one title. What can be refused is
-    // being wrong in a way that shows, and an open question is `null`.
-    expect(agentSessionForTitle([copy, review], "Copy ids into lists")?.id).toBe("ses_copy");
-    expect(agentSessionForTitle([copy, review], "Review duplicates")?.id).toBe("ses_review");
+    // being wrong in a way that shows, and only `one` is allowed to draw.
+    expect(matched([copy, review], "Copy ids into lists")).toBe("ses_copy");
+    expect(matched([copy, review], "Review duplicates")).toBe("ses_review");
 
     // No title, no session: this is every terminal whose title was never captured, and it is the
     // ordinary answer rather than a failure.
-    expect(agentSessionForTitle([copy, review], null)).toBeNull();
-    expect(agentSessionForTitle([copy, review], "")).toBeNull();
+    expect(matchAgentSessionTitle([copy, review], null).kind).toBe("none");
+    expect(matchAgentSessionTitle([copy, review], "").kind).toBe("none");
     // A title the service no longer lists is not matched to whatever is left.
-    expect(agentSessionForTitle([copy, review], "Add a tinted chip")).toBeNull();
-    expect(agentSessionForTitle([], "Copy ids into lists")).toBeNull();
+    expect(matchAgentSessionTitle([copy, review], "Add a tinted chip").kind).toBe("none");
+    expect(matchAgentSessionTitle([], "Copy ids into lists").kind).toBe("none");
   });
 
   it("reads a cut title as a prefix of whatever length the TUI cut it to", () => {
@@ -151,22 +157,23 @@ describe("agent session helpers", () => {
     for (const width of [37, 34, 12]) {
       const cutTitle = `${long.slice(0, width)}…`;
       const cut = session({ id: "ses_cut", title: long, agent: "plan" });
-      expect(agentSessionForTitle([cut], cutTitle)?.id).toBe("ses_cut");
+      expect(matched([cut], cutTitle)).toBe("ses_cut");
     }
     // An exact title is still resolved before any prefix reading of it, so a session *called*
     // `Review…` is that session and not the longer one it happens to be a prefix of.
     const literal = session({ id: "ses_literal", title: "Review…", agent: "plan" });
     const longer = session({ id: "ses_longer", title: "Review more of the panel", agent: "plan" });
-    expect(agentSessionForTitle([literal, longer], "Review…")?.id).toBe("ses_literal");
-    // And the refusal is still a refusal: a stem landing on two sessions claims neither.
+    expect(matched([literal, longer], "Review…")).toBe("ses_literal");
+    // And the refusal is still a refusal: a stem landing on two sessions claims neither, and says so
+    // rather than passing for a session that is not there.
     expect(
-      agentSessionForTitle(
+      matchAgentSessionTitle(
         [session({ id: "ses_cut", title: long }), session({ id: "ses_other", title: `${long} for the inspector` })],
         `${long.slice(0, 37)}…`,
-      ),
-    ).toBeNull();
+      ).kind,
+    ).toBe("ambiguous");
     // A stem that lands on nothing is nothing.
-    expect(agentSessionForTitle([longer], "Nothing like this…")).toBeNull();
+    expect(matchAgentSessionTitle([longer], "Nothing like this…").kind).toBe("none");
     // The residual cost, stated rather than hidden: with no session literally called `Review…`, a
     // terminal whose title reads `Review…` is read as the session it prefixes. That is either the TUI
     // cutting a longer title, or a session renamed away from the title the terminal still carries, and
@@ -178,23 +185,27 @@ describe("agent session helpers", () => {
   it("refuses a duplicate exact title instead of widening it into a prefix", () => {
     // Two sessions carrying one title. The exact match found both, and the honest answer is that the
     // terminal's title cannot say which one it is on — so widening the same string into a prefix pass
-    // would turn a known duplicate into a guess that happens to sound careful.
+    // would turn a known duplicate into a guess that happens to sound careful. It is also why the
+    // answer is `ambiguous` and not `none`: the list holds the session, the title just cannot say
+    // which, and a row that said "no session" would be claiming something false.
     const one = session({ id: "ses_one", title: "Review duplicates", agent: "coder" });
     const two = session({ id: "ses_two", title: "Review duplicates", agent: "plan" });
-    expect(agentSessionForTitle([one, two], "Review duplicates")).toBeNull();
+    expect(matchAgentSessionTitle([one, two], "Review duplicates").kind).toBe("ambiguous");
 
     // The same shape after truncation, which is where a duplicate and a prefix collide: both cut
     // titles begin the same way, so neither may claim the other.
     const long = "Plan de implementación para la sidebar y sus estados";
     const cutTitle = `${long.slice(0, 37)}…`;
     expect(
-      agentSessionForTitle([session({ id: "a", title: long }), session({ id: "b", title: `${long} too` })], cutTitle),
-    ).toBeNull();
+      matchAgentSessionTitle([session({ id: "a", title: long }), session({ id: "b", title: `${long} too` })], cutTitle)
+        .kind,
+    ).toBe("ambiguous");
     // And an exact match is never passed over for a prefix: a session called `Copy ids` is not the
     // session called `Copy ids into lists` just because one starts with the other.
-    expect(
-      agentSessionForTitle([session({ title: "Copy ids" }), session({ title: "Copy ids into lists" })], "Copy ids")
-        ?.title,
-    ).toBe("Copy ids");
+    const exact = matchAgentSessionTitle(
+      [session({ title: "Copy ids" }), session({ title: "Copy ids into lists" })],
+      "Copy ids",
+    );
+    expect(exact.kind === "one" ? exact.session.title : exact.kind).toBe("Copy ids");
   });
 });

@@ -73,8 +73,33 @@ const MAX_SSE_FRAME_LINES: usize = 16 * 1024;
 /// The header the service reads to decide which location answers a request.
 ///
 /// It scopes the answer; the `directory` query parameter filters session lists. JSON requests
-/// carry both; the SSE request carries this header and filters event locations locally.
+/// carry both; the SSE request carries this header and filters event locations locally. The one
+/// read that carries neither is `get_unscoped_json`, and only because a session list filtered by
+/// directory cannot name the session a terminal has open when that session lives in another
+/// worktree — the row it exists for would then draw no state at all.
 const DIRECTORY_HEADER: &str = "x-opencode-directory";
+
+/// How long the service-wide session list is reused before it is read again.
+///
+/// Every checkout asks in the same tick and the answer is the same for all of them, so the window
+/// only has to outlive one tick's requests. Longer than that would keep describing a turn that has
+/// already ended.
+const CANDIDATE_CACHE_TTL: Duration = Duration::from_secs(1);
+
+/// How many sessions that read asks for.
+///
+/// The route answers newest-first — measured: `time.updated` descending — and stops at fifty on its
+/// own, which is fewer than a busy service accumulates in a week, while a terminal left open on an
+/// older session is still a row in the panel. Measured against the real service, two hundred
+/// sessions are 109 KB, once per window.
+const CANDIDATE_SESSION_LIMIT: usize = 200;
+
+/// How long one directory's agent catalog is reused before it is read again.
+///
+/// Longer than the session list's window because a catalog is a palette rather than a turn state:
+/// it changes when a person edits their agents, and no row is made untrue by showing the last one
+/// for a few seconds.
+const AGENT_CATALOG_TTL: Duration = Duration::from_secs(10);
 
 /// The service a bridge talks to, and the directory it is scoped to.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,6 +221,15 @@ impl<T> ApiEnvelope<T> {
             }
         }
         Ok(self.data)
+    }
+
+    /// Hands the payload over without asking which directory answered for it.
+    ///
+    /// An unscoped request has no directory to be foreign to: it asked for every location the
+    /// service knows, which is the whole point of the read that uses this. Measured against the
+    /// real service, the answer to one of those carries no `location` at all.
+    fn into_unscoped_data(self) -> T {
+        self.data
     }
 }
 
@@ -350,6 +384,30 @@ impl AgentBridge {
                 .call()
         }))?;
         envelope.into_scoped(self.directory())
+    }
+
+    /// Fetches `path` as the service answers it for every directory it knows.
+    ///
+    /// No directory in the query and none in the header, which is the only way `/api/session` will
+    /// describe a session outside the checkout that happens to be asking: measured, the same route
+    /// answers one session for a worktree, fifty for its repository and two hundred and more for
+    /// the service. A read that carries the directory cannot answer "which session does this
+    /// terminal have open" for a terminal whose session was started somewhere else, and that
+    /// question is the whole reason a candidate list exists.
+    fn get_unscoped_json<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        timeout: Duration,
+    ) -> Result<T, BridgeError> {
+        let url = format!("{}{path}", self.base_url());
+        let envelope: ApiEnvelope<T> = send_json(retry_interrupted(|| {
+            json_client(timeout)
+                .get(&url)
+                .header("authorization", self.auth_header())
+                .header("accept", "application/json")
+                .call()
+        }))?;
+        Ok(envelope.into_unscoped_data())
     }
 
     /// Posts to `path` and returns the `data` payload, refusing a foreign directory.
@@ -1229,10 +1287,44 @@ impl BridgeSlot {
     }
 }
 
+/// One read, and when it was taken, so a question asked twice in one tick costs one request.
+#[derive(Debug, Clone)]
+struct Cached<T> {
+    read_at: Instant,
+    value: T,
+}
+
+impl<T> Cached<T> {
+    fn taken(read_at: Instant, value: T) -> Self {
+        Self { read_at, value }
+    }
+
+    fn within(&self, ttl: Duration) -> bool {
+        self.read_at.elapsed() < ttl
+    }
+}
+
+/// The service's own session list, with the running answer that arrived with it.
+///
+/// Both halves answer for every location the service knows, which is what makes one read of them
+/// the answer for every checkout: `running` in particular is a property of a turn, not of a
+/// worktree. The arcs are what let the read be shared without being copied per checkout.
+#[derive(Debug, Clone)]
+struct CandidateRead {
+    sessions: Arc<Vec<ApiSession>>,
+    running: Arc<HashSet<String>>,
+}
+
 /// Owns one server per checkout for the app's lifetime.
 pub struct AgentService {
     bridges: Mutex<HashMap<String, Arc<BridgeSlot>>>,
     checkout_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
+    /// The service-wide session list, read once and answered from for every checkout's rows.
+    candidates: Mutex<Option<Cached<CandidateRead>>>,
+    /// The agent catalogs, per checkout: `/api/agent` answers for one directory, so a cache wider
+    /// than that would hand one project's agents to another project's row. Measured against the
+    /// real service: Marvis offers eight, a sibling repository eleven, three of them its own.
+    catalogs: Mutex<HashMap<String, Cached<Arc<Vec<AgentAgent>>>>>,
     removal_state: Arc<Mutex<RemovalState>>,
     busy_turns: Arc<Mutex<HashMap<String, HashMap<String, TrackedTurn>>>>,
     sink: Mutex<Option<EventSink>>,
@@ -1313,6 +1405,8 @@ impl AgentService {
         Self {
             bridges: Mutex::new(HashMap::new()),
             checkout_operations: Mutex::new(HashMap::new()),
+            candidates: Mutex::new(None),
+            catalogs: Mutex::new(HashMap::new()),
             removal_state: Arc::new(Mutex::new(RemovalState::default())),
             busy_turns: Arc::new(Mutex::new(HashMap::new())),
             sink: Mutex::new(None),
@@ -1755,55 +1849,105 @@ impl AgentService {
     /// ask about. That is not the question a sidebar row asks. A row asks WHICH SESSION THIS
     /// TERMINAL HAS OPEN, and the only thing that can answer it is the title the terminal's own TUI
     /// wrote — and a terminal's session is not necessarily located in the worktree the terminal is
-    /// filed under. Measured against the real service: a terminal grouped under
-    /// `.worktrees/feedback-shell` had a session open that lives in `.worktrees/feat/sidebar-layouts`,
-    /// so the scoped list could never name it, and the row fell back to "session not identified" — no
-    /// state, no colour — while the agent was plainly working.
+    /// filed under. Measured against the real service: a terminal grouped under the repository had a
+    /// session open that lives in `.worktrees/agent-follow-worktree`, so the scoped list could never
+    /// name it, and the row fell back to "session not identified" — no state, no colour — while the
+    /// agent was plainly working. That list is why this read carries no directory at all: measured,
+    /// `/api/session` answers one session for a worktree, fifty for its repository and two hundred
+    /// for the service, and the two hundred are the ones that can belong to a row.
     ///
-    /// **The list is as wide as the service, not as wide as the repository.** `/api/session` answers
-    /// for every directory that service knows, and one service is not guaranteed to be one
-    /// repository's: measured against the real one, it returned fifty sessions across many
-    /// directories. So this does not filter by repository either — pretending to, by name or by
-    /// comment, is what made the earlier claim about it wrong.
+    /// **The list is as wide as the service, not as wide as the repository.** One service is not
+    /// guaranteed to be one repository's, and nothing here filters by repository either — pretending
+    /// to, by name or by comment, is what made the earlier claim about this false.
     ///
-    /// Nothing is trusted here. A candidate is only ever a candidate: it is refused unless the title
-    /// matches exactly one of them, and prompting one by id still refuses a session from another
-    /// directory. A wrong candidate therefore draws no state rather than a wrong one.
+    /// It is the service's list for every checkout, so one read answers for all of them and a poll
+    /// that arrives once per checkout costs one request rather than one each. Nothing is trusted
+    /// here: a candidate is only ever a candidate, it is refused unless the title matches exactly
+    /// one of them, and a wrong candidate therefore draws no state rather than a wrong one.
     pub fn candidate_sessions(
         &self,
         checkout_id: &str,
         directory: &Path,
     ) -> Result<Vec<AgentSession>, BridgeError> {
         let bridge = self.bridge(checkout_id, directory)?;
-        let listed: Vec<ApiSession> = bridge.get_json("/api/session")?;
-        let running = bridge.running_sessions()?;
-        Ok(listed
-            .into_iter()
-            .map(|raw| bridge.to_agent_session(&raw, running.contains(&raw.id)))
+        let read = self.candidate_read(&bridge)?;
+        Ok(read
+            .sessions
+            .iter()
+            .map(|raw| bridge.to_agent_session(raw, read.running.contains(&raw.id)))
             .collect())
+    }
+
+    /// The service-wide list, read once for every checkout that asks in the same tick.
+    ///
+    /// The lock is held across the request, so a poll arriving for nine checkouts at once cannot
+    /// turn into nine identical reads: the first one to arrive reads, and the rest find the window
+    /// closed by a read that is already answering them.
+    fn candidate_read(&self, bridge: &AgentBridge) -> Result<CandidateRead, BridgeError> {
+        let mut slot = self
+            .candidates
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent candidate cache is poisoned".into()))?;
+        if let Some(read) = slot.as_ref() {
+            if read.within(CANDIDATE_CACHE_TTL) {
+                return Ok(read.value.clone());
+            }
+        }
+        let sessions: Vec<ApiSession> = bridge.get_unscoped_json(
+            &format!("/api/session?limit={CANDIDATE_SESSION_LIMIT}"),
+            JSON_REQUEST_TIMEOUT,
+        )?;
+        let running = bridge.running_sessions()?;
+        let read = Cached::taken(
+            Instant::now(),
+            CandidateRead {
+                sessions: Arc::new(sessions),
+                running: Arc::new(running),
+            },
+        );
+        *slot = Some(read.clone());
+        Ok(read.value)
     }
 
     /// Every agent the checkout's service offers, with the color OpenCode paints it with.
     ///
-    /// The list is the same for every session in the checkout, so this is one call behind a
-    /// cache rather than one per session.
+    /// The list is the same for every session in the checkout, so this is one call behind a cache
+    /// rather than one per session. It is keyed by checkout rather than shared, because the route
+    /// answers for a directory: two repositories offer different agents and a wider cache would
+    /// paint one project's row with the other's palette.
     pub fn agents(
         &self,
         checkout_id: &str,
         directory: &Path,
     ) -> Result<Vec<AgentAgent>, BridgeError> {
         let bridge = self.bridge(checkout_id, directory)?;
+        if let Ok(catalogs) = self.catalogs.lock() {
+            if let Some(cached) = catalogs.get(checkout_id) {
+                if cached.within(AGENT_CATALOG_TTL) {
+                    return Ok(cached.value.as_ref().clone());
+                }
+            }
+        }
         let listed: Vec<ApiAgent> = bridge.get_json("/api/agent")?;
-        Ok(listed
-            .into_iter()
-            .map(|raw| AgentAgent {
-                id: raw.id,
-                name: raw.name,
-                mode: raw.mode,
-                color: raw.color,
-                hidden: raw.hidden,
-            })
-            .collect())
+        let catalog: Arc<Vec<AgentAgent>> = Arc::new(
+            listed
+                .into_iter()
+                .map(|raw| AgentAgent {
+                    id: raw.id,
+                    name: raw.name,
+                    mode: raw.mode,
+                    color: raw.color,
+                    hidden: raw.hidden,
+                })
+                .collect(),
+        );
+        if let Ok(mut catalogs) = self.catalogs.lock() {
+            catalogs.insert(
+                checkout_id.to_string(),
+                Cached::taken(Instant::now(), Arc::clone(&catalog)),
+            );
+        }
+        Ok(catalog.as_ref().clone())
     }
 
     /// Resolves a session inside `checkout_id` only. A session belonging to another
@@ -1988,6 +2132,9 @@ impl AgentService {
         if let Ok(mut turns) = self.busy_turns.lock() {
             turns.remove(checkout_id);
         }
+        if let Ok(mut catalogs) = self.catalogs.lock() {
+            catalogs.remove(checkout_id);
+        }
     }
 
     pub(crate) fn stop_at_generation(
@@ -2063,9 +2210,9 @@ mod tests {
         read_bounded_line, read_sse_frame, ready, remove_slot_if_current, retry_interrupted,
         same_directory, send_json, status_detail, validate_session_id, AgentBridge, AgentEvent,
         AgentService, BridgeError, BridgeState, BridgeStopper, EventSink, RemovalState,
-        ServerCredentials, DIRECTORY_HEADER, INTERRUPTED_READ_ATTEMPTS, INTERRUPTED_REQUEST,
-        MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES,
-        MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
+        ServerCredentials, CANDIDATE_SESSION_LIMIT, DIRECTORY_HEADER, INTERRUPTED_READ_ATTEMPTS,
+        INTERRUPTED_REQUEST, MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES,
+        MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
     };
     use crate::services::opencode::ServiceEndpoint;
 
@@ -2438,7 +2585,7 @@ mod tests {
             "location": {"directory": second.path().to_string_lossy()},
             "time": {"created": 4, "updated": 5}
         });
-        let (port, _server) = mock_json_responses(vec![
+        let (port, server) = mock_json_responses(vec![
             serde_json::json!({"data": [owned.clone(), sibling.clone()]}),
             serde_json::json!({"data": {"ses_sibling": {"type": "running"}}}),
             serde_json::json!({"data": [owned.clone(), sibling.clone()]}),
@@ -2460,6 +2607,90 @@ mod tests {
             .find(|session| session.id == "ses_sibling")
             .unwrap();
         assert!(sibling_row.running);
+
+        let requests = server.join().expect("mock server should finish");
+        let route = |line: &str| line.split('?').next().unwrap_or_default().to_string();
+        assert_eq!(route(&requests[0].0), "GET /api/session");
+        assert_eq!(route(&requests[2].0), "GET /api/session");
+        // The answer above only exists because the second read of the same route named no
+        // directory. This is the assertion that was missing: the mock replays the same sessions for
+        // either request, so the test passed while the read was scoped and the real service — which
+        // filters by that directory — answered with the two sessions this worktree owns.
+        assert!(
+            !requests[2].0.contains("directory="),
+            "the candidate read must not be scoped: {}",
+            requests[2].0
+        );
+        assert!(!requests[2]
+            .3
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case(DIRECTORY_HEADER)));
+        // It asks for more than the route's own fifty, because a terminal left open on an older
+        // session is still a row in the panel.
+        assert!(requests[2]
+            .0
+            .contains(&format!("limit={CANDIDATE_SESSION_LIMIT}")));
+    }
+
+    #[test]
+    fn one_unscoped_read_answers_every_checkout_that_asks_in_the_same_tick() {
+        // The service's session list is the same for every checkout, so a poll that arrives once per
+        // checkout must cost one request. The mock serves exactly the two responses one read makes;
+        // a second read would find nothing listening and fail, which is the regression this pins.
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let listed = serde_json::json!({
+            "data": [{
+                "id": "ses_one",
+                "title": "One",
+                "location": {"directory": second.path().to_string_lossy()},
+                "time": {"created": 1, "updated": 2}
+            }]
+        });
+        let (port, server) = mock_json_responses(vec![
+            listed.clone(),
+            serde_json::json!({"data": {"ses_one": {"type": "running"}}}),
+        ]);
+        let agents = AgentService::with_test_server(port);
+
+        let asked_first = agents.candidate_sessions("first", first.path()).unwrap();
+        let asked_second = agents.candidate_sessions("second", second.path()).unwrap();
+        assert_eq!(asked_first.len(), 1);
+        // Each checkout answers with its own id on the sessions, because that is what the row and the
+        // review round are given, while the list behind them was read once.
+        assert_eq!(asked_first[0].checkout_id, "first");
+        assert_eq!(asked_second[0].checkout_id, "second");
+        assert_eq!(asked_second[0].id, "ses_one");
+        assert!(asked_second[0].running);
+        assert_eq!(server.join().expect("mock server should finish").len(), 2);
+    }
+
+    #[test]
+    fn the_agent_catalog_is_cached_per_checkout_and_never_shared_across_directories() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_catalog = serde_json::json!({
+            "data": [{"id": "build", "name": "Build", "mode": "primary"}],
+            "location": {"directory": first.path().to_string_lossy()}
+        });
+        let second_catalog = serde_json::json!({
+            "data": [{"id": "local", "name": "Local", "mode": "subagent"}],
+            "location": {"directory": second.path().to_string_lossy()}
+        });
+        let (port, server) =
+            mock_json_responses(vec![first_catalog.clone(), second_catalog.clone()]);
+        let agents = AgentService::with_test_server(port);
+
+        // Asked twice, read once: a catalog is a palette, not a turn state.
+        assert_eq!(agents.agents("first", first.path()).unwrap()[0].id, "build");
+        assert_eq!(agents.agents("first", first.path()).unwrap()[0].id, "build");
+        // And the second directory's answer is never the first one's. The mock is gone by now, so a
+        // cache that ignored the checkout would have served `build` here and passed.
+        assert_eq!(
+            agents.agents("second", second.path()).unwrap()[0].id,
+            "local"
+        );
+        assert_eq!(server.join().expect("mock server should finish").len(), 2);
     }
 
     #[test]
@@ -2569,12 +2800,18 @@ mod tests {
         assert_eq!(second_requests[0].1, first_authorization);
     }
 
-    /// Every request names the directory twice, because the service reads the scope two ways.
+    /// Every request that asks about a worktree names the directory twice, because the service
+    /// reads the scope two ways.
     ///
-    /// This is not redundancy: with only the header, `/api/session` answers for every location
-    /// the service knows (50 sessions where the checkout has 2), and with only the query,
-    /// `/api/agent` answers for the service's own working directory. A row scoped to a terminal's
-    /// worktree is built out of these answers, so a missing half of it is a wrong row.
+    /// This is not redundancy: with only the header, `/api/session` answers for every location the
+    /// service knows (50 sessions where the checkout has 2), and with only the query, `/api/agent`
+    /// answers for the service's own working directory. A worktree's own session list and its agent
+    /// catalog are built out of these answers, so a missing half of it is a wrong answer.
+    ///
+    /// The candidate read a terminal row is built from is the documented exception: it asks which
+    /// session a terminal has open, and a session list filtered by directory cannot answer that for a
+    /// terminal whose session lives in another worktree. `candidate_sessions_offer_a_sibling_
+    /// worktrees_session_while_sessions_do_not` pins that it names no directory at all.
     #[test]
     fn every_request_carries_the_directory_as_a_header_and_as_a_query_parameter() {
         let directory = tempfile::tempdir().unwrap();

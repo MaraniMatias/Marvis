@@ -136,7 +136,7 @@ export const AGENT_APP = "opencode";
  * The prefix is the whole of the filter. A shell writes its prompt into the terminal title and an
  * editor writes its file, neither with this, and both say where the terminal is rather than what it
  * is doing — which the row above already says. Whether the string behind the prefix belongs to a
- * session this worktree still has is a separate question, and `agentSessionForTitle` is where that
+ * session the service still lists is a separate question, and `matchAgentSessionTitle` is where that
  * is asked.
  */
 const AGENT_TITLE_PREFIX = "OC | ";
