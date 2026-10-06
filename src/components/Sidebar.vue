@@ -2180,6 +2180,18 @@ function rowLabel(item: WorkdirItem): string {
   color: var(--marvis-text-faint);
 }
 
+/* The panel's own last action is a button, and it is the one row that does not lead with a text
+   left edge: the name is the whole of it, so the glyph and the name sit centred as one block.
+   The label stops growing (`.lbl` fills the row everywhere else) so the block has a width to centre. */
+.add-item {
+  justify-content: center;
+  cursor: pointer;
+}
+
+.add-item .lbl {
+  flex: 0 1 auto;
+}
+
 .add-item .workdir-icon,
 .new-item .workdir-icon,
 .add-item .nm,
