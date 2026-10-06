@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Ships one release: bumps the version, pushes the commit and the tag, waits for the build and
-# publishes the draft it leaves behind.
+# Ships one release: bumps the version, pushes the commit and the tag, waits for the build and reads
+# back the release the run published.
 #
 # Usage: scripts/release.sh <version> [--dry-run]
 #
@@ -9,8 +9,10 @@
 # tag is pushed before the build is known to pass: the alternative is a dance between bumping and
 # tagging, and a dry run cannot even start until the bumped manifests are on the default branch.
 # What this gives up instead is a human pausing between the artifacts being uploaded and the
-# release going live, so the pause is conditional on the run instead: nothing is published unless
-# every matrix job succeeded, which is also the only way a release exists at all.
+# release going live, so the pause is conditional on the run instead: the run publishes only once
+# every matrix job succeeded, which is also the only way a release exists at all. Publishing it there
+# rather than here is what keeps a draft from sitting there holding the previous release as the
+# latest one, and it leaves this script with a read-back where its publish used to be.
 #
 # Every step is skipped when the state already satisfies it, so the same command resumes a release
 # instead of refusing it. That is what makes the two-command release work:
@@ -24,7 +26,6 @@
 # If a build fails the tag is already pushed, so nothing was published and the run can be retried
 # with `gh run rerun <id>`: the same tag, the same commit, no new version.
 #
-# Set RELEASE_SKIP_PUBLISH=1 to stop at the draft and publish it by hand.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
@@ -157,33 +158,17 @@ if ! gh run watch "$run" --exit-status; then
   gh run rerun $run"
 fi
 
-step "Reading the draft the run left behind"
-# Read through `gh` rather than a `jq` binary: `gh` is already required, and it already knows how to
-# answer these questions, so the script needs nothing else installed.
-[[ "$(gh release view "$tag" --json isDraft --jq .isDraft)" == "true" ]] ||
-  die "$tag is not a draft, so it was published by something else; stopping before touching it"
-assets="$(gh release view "$tag" --json assets --jq '.assets | length')"
-[[ "$assets" -gt 0 ]] || die "$tag has no assets, so there is nothing to publish"
-gh release view "$tag" --json assets --jq '.assets[].name' | sed 's/^/  /'
-# A draft is addressed by its id and not by its name, and only swaps `untagged-<id>` for
-# `tag/<name>` once it is published. Both paths below that still mean a draft want that address,
-# so it is read once here — and named for what it is, because reading it here and echoing it after
-# the PATCH is what printed a link to a page that does not exist.
-draft_url="$(gh release view "$tag" --json url --jq .url)"
-
-if [[ -n "${RELEASE_SKIP_PUBLISH:-}" ]]; then
-  step "Leaving it as a draft, as asked"
-  echo "$draft_url"
-  exit 0
-fi
-
-step "Publishing the release"
-# `gh release edit` can only set a draft, never clear one, so the release is published through the
-# API and then read back to confirm it is no longer a draft.
-gh api -X PATCH "repos/$repository/releases/$(gh release view "$tag" --json databaseId --jq .databaseId)" \
-  -F draft=false >/dev/null
+step "Reading the release the run published"
+# The run publishes it, so this is a read-back and not a step. It is still where a tag whose run
+# succeeded ends with no release to read, and the two ways that happens are read apart: a release
+# that is not there at all, and one left as a draft.
+gh release view "$tag" >/dev/null ||
+  die "there is no release for $tag; check https://github.com/$repository/actions/runs/$run"
 [[ "$(gh release view "$tag" --json isDraft --jq .isDraft)" == "false" ]] ||
-  die "the release still reads as a draft; publish it by hand at $draft_url"
-# Read after the PATCH, and not reused from above: the last line of this script is the link
-# somebody copies.
+  die "$tag is still a draft, so the run did not publish it.
+Check https://github.com/$repository/actions/runs/$run"
+assets="$(gh release view "$tag" --json assets --jq '.assets | length')"
+[[ "$assets" -gt 0 ]] || die "$tag has no assets, so there is nothing to install"
+gh release view "$tag" --json assets --jq '.assets[].name' | sed 's/^/  /'
+# The last line of this script is the link somebody copies.
 gh release view "$tag" --json url --jq .url
