@@ -2535,7 +2535,7 @@ describe("App UI integration", () => {
 
       resolveSettings({
         ...cloneSettings(DEFAULT_SETTINGS),
-        ui: { fontSize: 18, zoom: 1, theme: "system" as const, contentBackground: "#222436" },
+        ui: { ...DEFAULT_SETTINGS.ui, fontSize: 18 },
       });
       await flushPromises();
       expect(wrapper.find('[data-testid="settings-button"]').exists()).toBe(true);
@@ -2757,6 +2757,45 @@ describe("App UI integration", () => {
       light.unmount();
     });
 
+    it("offers the swatch's own way back, and only once it has been moved", async () => {
+      // A color control has no empty state, so this is the one preference a person cannot put back
+      // by using the control again. The button appears on a changed value and nowhere else.
+      const wrapper = await openSettings({
+        ...DEFAULT_SETTINGS,
+        ui: { ...DEFAULT_SETTINGS.ui, theme: "dark", contentBackground: "#334455" },
+      });
+      const swatch = wrapper.get("#settings-ui-contentBackground");
+      const reset = () => wrapper.findAll("button").find((button) => button.text() === "Reset");
+      expect((swatch.element as HTMLInputElement).value).toBe("#334455");
+      expect(reset(), "a saved color that is not the default").toBeTruthy();
+
+      // Putting it back is a draft edit like any other: nothing on screen has moved until Apply.
+      await reset()!.trigger("click");
+      expect((wrapper.get("#settings-ui-contentBackground").element as HTMLInputElement).value).toBe(
+        DEFAULT_SETTINGS.ui.contentBackground,
+      );
+      expect(reset(), "a value that is already the default").toBeFalsy();
+
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Apply")!
+        .trigger("click");
+      await flushPromises();
+      expect(mocks.saveSettings).toHaveBeenCalledWith({
+        ...DEFAULT_SETTINGS,
+        ui: { ...DEFAULT_SETTINGS.ui, theme: "dark" },
+      });
+      expect(document.documentElement.style.getPropertyValue("--marvis-content-bg-0")).toBe(
+        DEFAULT_SETTINGS.ui.contentBackground,
+      );
+      wrapper.unmount();
+
+      // And a window that has never moved the swatch is not offered a control that would do nothing.
+      const untouched = await openSettings();
+      expect(untouched.findAll("button").some((button) => button.text() === "Reset")).toBe(false);
+      untouched.unmount();
+    });
+
     it("says nothing has been written when Cancel throws the draft away", async () => {
       const wrapper = await openSettings();
       const fontSize = wrapper.get("#settings-terminal-fontSize");
@@ -2827,7 +2866,7 @@ describe("App UI integration", () => {
         {
           settings: {
             ...cloneSettings(DEFAULT_SETTINGS),
-            ui: { fontSize: 16, zoom: 1, theme: "system" as const, contentBackground: "#222436" },
+            ui: { ...DEFAULT_SETTINGS.ui, fontSize: 16 },
           },
         },
       );

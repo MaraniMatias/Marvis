@@ -27,6 +27,11 @@ const EDITOR_FONT_SIZE_MIN: f64 = 9.0;
 const EDITOR_FONT_SIZE_MAX: f64 = 32.0;
 const INDENTATION_SIZE_MIN: u32 = 1;
 const INDENTATION_SIZE_MAX: u32 = 8;
+/// The dark surface the editor, the diff and the terminal open on, and what a `contentBackground`
+/// that is not a color comes back as. It is written in `src/domain/settings.ts` as well, because a
+/// preference nobody has touched still has to have an answer on both sides of the bridge, and one
+/// constant here is what keeps the two copies from drifting apart.
+const CONTENT_BACKGROUND: &str = "#16181c";
 /// The ends of the zoom steps the renderer walks. Kept here so a factor typed into the file
 /// cannot come back as a scale no step in `src/domain/zoom.ts` names.
 const ZOOM_MIN: f64 = 0.8;
@@ -65,7 +70,7 @@ impl Default for UiSettings {
             font_size: 14.0,
             zoom: 1.0,
             theme: "system".into(),
-            content_background: "#222436".into(),
+            content_background: CONTENT_BACKGROUND.into(),
         }
     }
 }
@@ -143,7 +148,7 @@ impl AppSettings {
             self.ui.theme = "system".into();
         }
         if !valid_hex_color(&self.ui.content_background) {
-            self.ui.content_background = "#222436".into();
+            self.ui.content_background = CONTENT_BACKGROUND.into();
         } else {
             self.ui.content_background.make_ascii_lowercase();
         }
@@ -332,7 +337,7 @@ mod tests {
                 font_size: 16.0,
                 zoom: 1.2,
                 theme: "light".into(),
-                content_background: "#222436".into(),
+                content_background: CONTENT_BACKGROUND.into(),
             },
             terminal: TerminalSettings {
                 font_size: 18.0,
@@ -447,12 +452,22 @@ mod tests {
         assert_eq!(loaded.ui.font_size, 14.0);
         assert_eq!(loaded.ui.zoom, ZOOM_MAX);
         assert_eq!(loaded.ui.theme, "system");
-        assert_eq!(loaded.ui.content_background, "#222436");
+        assert_eq!(loaded.ui.content_background, CONTENT_BACKGROUND);
         assert_eq!(loaded.terminal.font_size, TERMINAL_FONT_SIZE_MIN);
         assert_eq!(loaded.terminal.cursor_style, "block");
         assert_eq!(loaded.terminal.scrollbar, "hidden");
         assert_eq!(loaded.editor.font_size, EDITOR_FONT_SIZE_MAX);
         assert_eq!(loaded.editor.indentation.size, INDENTATION_SIZE_MIN);
+    }
+
+    #[test]
+    fn a_color_keeps_its_hex_digits_and_loses_its_capitals() {
+        // A picker hands back lower case and a person typing into the file does not, so the two
+        // spellings of one color have to come back as the one the dialog and the stylesheet compare.
+        let home = settings_dir();
+        let path = config_path_in(&home);
+        std::fs::write(&path, "ui:\n  contentBackground: '#A1B2C3'\n").unwrap();
+        assert_eq!(load(&path).unwrap().ui.content_background, "#a1b2c3");
     }
 
     #[cfg(unix)]
@@ -475,7 +490,7 @@ mod tests {
                     font_size: 15.0,
                     zoom: 1.0,
                     theme: "dark".into(),
-                    content_background: "#222436".into(),
+                    content_background: CONTENT_BACKGROUND.into(),
                 },
                 ..AppSettings::default()
             },

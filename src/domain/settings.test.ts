@@ -14,10 +14,20 @@ import {
 } from "./settings";
 import { ZOOM_STEPS } from "./zoom";
 
+/**
+ * The dark surface the app ships with, named here once.
+ *
+ * It is written in `src/domain/settings.ts` and again in the Rust defaults, because a file this app
+ * does not own the writing of still has to have a value to read back. That is two copies that can
+ * disagree, so the test states the answer rather than reading it from the thing it checks: an
+ * expectation of `DEFAULT_SETTINGS` would pass whatever that copy happens to say today.
+ */
+const DEFAULT_CONTENT_BACKGROUND = "#16181c";
+
 describe("the settings file", () => {
   it("names the three surfaces and everything they carry", () => {
     expect(DEFAULT_SETTINGS).toEqual({
-      ui: { fontSize: 14, zoom: 1, theme: "system", contentBackground: "#222436" },
+      ui: { fontSize: 14, zoom: 1, theme: "system", contentBackground: DEFAULT_CONTENT_BACKGROUND },
       terminal: {
         fontSize: 16,
         ligatures: true,
@@ -79,9 +89,15 @@ describe("the settings file", () => {
     expect(normalizeSettings({ ui: { theme: "solarized" } }).ui.theme).toBe("system");
   });
 
-  it("accepts six-digit hex content backgrounds and defaults invalid values", () => {
+  it("accepts six-digit hex content backgrounds and defaults anything else", () => {
     expect(normalizeSettings({ ui: { contentBackground: "#A1b2C3" } }).ui.contentBackground).toBe("#a1b2c3");
-    expect(normalizeSettings({ ui: { contentBackground: "red" } }).ui.contentBackground).toBe("#222436");
+    // A name rather than a color is what a hand-edited file and somebody picking from the OS picker
+    // can both produce, and a value CSS cannot read is not a preference: it is the default instead.
+    for (const invalid of ["red", "#12345", "#1234567", 42, null]) {
+      expect(normalizeSettings({ ui: { contentBackground: invalid } }).ui.contentBackground, String(invalid)).toBe(
+        DEFAULT_CONTENT_BACKGROUND,
+      );
+    }
   });
 
   it("keeps a scrollbar mode it knows and falls back to hidden for one it does not", () => {

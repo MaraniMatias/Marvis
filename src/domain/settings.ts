@@ -92,7 +92,10 @@ export const DEFAULT_SETTINGS: AppSettings = {
     fontSize: 14,
     zoom: 1,
     theme: "system",
-    contentBackground: "#16181C",
+    // Lower case, because `normalizeSettings` lower cases it and the Rust side does the same: a
+    // default in capitals is a value this app rewrites on its way in, so a window could never hold
+    // the defaults it ships with, and nothing comparing the two would ever agree.
+    contentBackground: "#16181c",
   },
   terminal: {
     fontSize: 16,

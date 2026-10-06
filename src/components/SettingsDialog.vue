@@ -95,6 +95,24 @@ function resetDraft() {
   draft.value = cloneSettings(DEFAULT_SETTINGS);
 }
 
+/**
+ * Whether this field holds something other than what the app ships.
+ *
+ * It is what the per-field reset is drawn on, and the reason that reset is drawn at all: a number,
+ * a toggle and a select can all be put back by using them again, and a color cannot. A swatch has
+ * no empty state, so a person who picked one has exactly two ways back to the default — type the
+ * hex they are trying to undo — or a button. This is the button, and it only appears once the value
+ * has actually moved, because a control that is always there is a control that means nothing.
+ */
+function isChanged(field: SettingsField) {
+  return valueAt(draft.value, field.path) !== valueAt(DEFAULT_SETTINGS, field.path);
+}
+
+/** One field back to what the app ships. The whole set is the footer's Reset, and this is not it. */
+function resetField(path: SettingsPath) {
+  change(path, valueAt(DEFAULT_SETTINGS, path));
+}
+
 function requestClose() {
   if (!props.saving) emit("close");
 }
@@ -185,15 +203,28 @@ function onDialogKeydown(event: KeyboardEvent) {
                   </span>
                 </div>
 
-                <input
-                  v-else-if="field.kind === 'color'"
-                  :id="controlId(field.path)"
-                  type="color"
-                  :disabled="saving"
-                  class="marvis-input h-8 w-full cursor-pointer p-1"
-                  :value="String(valueAt(draft, field.path))"
-                  @input="change(field.path, ($event.target as HTMLInputElement).value)"
-                />
+                <div v-else-if="field.kind === 'color'" class="flex items-center gap-1">
+                  <input
+                    :id="controlId(field.path)"
+                    type="color"
+                    :disabled="saving"
+                    class="marvis-input h-8 min-w-0 flex-1 cursor-pointer p-1"
+                    :value="String(valueAt(draft, field.path))"
+                    @input="change(field.path, ($event.target as HTMLInputElement).value)"
+                  />
+                  <!-- The swatch's own way back. It sits beside the control rather than replacing
+                       it, so the color that is set stays on screen while it is being put back. -->
+                  <Button
+                    v-if="isChanged(field)"
+                    variant="ghost"
+                    size="sm"
+                    :disabled="saving"
+                    :aria-label="`Reset ${field.label} to default`"
+                    @click="resetField(field.path)"
+                  >
+                    Reset
+                  </Button>
+                </div>
 
                 <SelectControl
                   v-else
