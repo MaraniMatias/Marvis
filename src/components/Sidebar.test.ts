@@ -1031,6 +1031,15 @@ describe("Sidebar workdir rows", () => {
     expect(rule(".workdir-row")).toContain("height: 26px;");
   });
 
+  it("draws no edge of its own, because the handle that moves the panel is the only divider", () => {
+    // A border down the panel's right, next to the five pixels of handle that move it, is one line
+    // drawn twice — and a reader cannot tell a divider from a panel edge. What is left is the
+    // hairline, which is there only while the pointer is on the handle or a drag is in progress, and
+    // the two backgrounds meeting.
+    expect(sidebarStyles()).not.toMatch(/class="app-sidebar[^"]*\bborder-/);
+    expect(rule(".app-sidebar")).not.toContain("border");
+  });
+
   it("swaps a row's time for its cross in the one slot, so nothing can move", () => {
     // The slot is `min-width: 20px`, which is the width of the cross, so the two are the same size
     // and the cross is drawn exactly where the time stood. The cross is out of flow, so it cannot

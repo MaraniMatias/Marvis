@@ -9,9 +9,9 @@ const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const DIST = resolve(ROOT, "dist");
 const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest("hex");
 const EXPECTED_FONT_SHA256 = {
-  "FiraCode-Bold.woff2": "d778c19803c672d294663e9283c7b752cc125ab266f0ddb8e53b039da92caf67",
-  "FiraCode-Regular.woff2": "a6ce59520b90e15d7062ffef214f94c8add5a4085c0bbb1683602ef227a4d1fe",
-  "NerdSymbols.woff2": "884f36993b24d91233b7da36a4994ce6d2dc23520469a13f60a0d537aee843a2",
+  "FiraCode-Bold.woff2": "579875c4041100ef9ba140b0c38a52979438d987d1708771018a69c9bdfa21a9",
+  "FiraCode-Regular.woff2": "dd1de59cd3efe47a3aad6e9cbc93a8fe25685085074f9fed383ac5107c20145f",
+  "NerdSymbols.woff2": "d8e67f9e007bc9a4f24b2cfc86778d6112183a0a1e4aed8b556a452928190266",
 };
 
 test("production dist preserves third-party notices and shipped font binaries", () => {
@@ -40,7 +40,9 @@ test("production dist preserves third-party notices and shipped font binaries", 
   const fontDirectory = resolve(ROOT, "src/assets/fonts");
   const fontNames = Object.keys(EXPECTED_FONT_SHA256).sort();
   assert.deepEqual(
-    readdirSync(fontDirectory).filter((name) => name.endsWith(".woff2")).sort(),
+    readdirSync(fontDirectory)
+      .filter((name) => name.endsWith(".woff2"))
+      .sort(),
     fontNames,
   );
   const sourceFonts = fontNames

@@ -25,6 +25,7 @@ import { theme } from "../presentation/theme";
 import { diffRowHeight, useLargeDiff } from "./use-large-diff";
 import ReviewComposer from "./ReviewComposer.vue";
 import ReviewNoteList from "./ReviewNoteList.vue";
+import OverlayScrollbar from "./OverlayScrollbar.vue";
 import SelectControl from "./ui/select/SelectControl.vue";
 
 const props = withDefaults(
@@ -74,6 +75,7 @@ const showNoTextHunks = computed(
     !hasTextHunks.value,
 );
 const diffViewport = ref<HTMLElement | null>(null);
+const changesViewport = ref<HTMLElement | null>(null);
 const diffScrollTop = ref(props.scrollTop);
 const selectedPath = ref<string | null>(null);
 /**
@@ -947,7 +949,7 @@ onUnmounted(() => {
       </div>
     </header>
     <template v-if="path === null">
-      <div class="diff-files min-h-0 flex-1 overflow-auto">
+      <div ref="changesViewport" class="diff-files min-h-0 flex-1 overflow-auto">
         <p v-if="gitSnapshot.statusState === 'loading'" role="status" class="pane-state text-sm">Loading changes…</p>
         <p v-else-if="gitSnapshot.statusState === 'error'" role="alert" class="pane-state text-sm">
           {{ gitSnapshot.changesStatusError || gitSnapshot.statusError }}
@@ -1226,6 +1228,11 @@ onUnmounted(() => {
         />
       </template>
     </template>
+    <!-- The change set and a diff are the same panel showing one or the other, so one bar for both is
+         drawn here: whichever box is on the screen is the one the bar measures, and the other has
+         nothing to measure. -->
+    <OverlayScrollbar :target="changesViewport" label="Changed files" />
+    <OverlayScrollbar :target="diffViewport" label="Diff contents" />
   </section>
 </template>
 

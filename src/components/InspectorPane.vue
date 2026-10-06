@@ -9,6 +9,7 @@ import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { useDiffStats } from "../presentation/diff-stats";
 import { listCheckoutFiles } from "../lib/ipc";
 import FileIcon from "./FileIcon.vue";
+import OverlayScrollbar from "./OverlayScrollbar.vue";
 
 const props = defineProps<{
   checkout: Checkout | null;
@@ -517,10 +518,7 @@ const matchedSearchEntries = searchEntries.value
 </script>
 
 <template>
-  <aside
-    class="app-inspector flex h-full w-full min-w-0 flex-col border-l"
-    :style="{ '--tree-row-height': `${rowHeight}px` }"
-  >
+  <aside class="app-inspector flex h-full w-full min-w-0 flex-col" :style="{ '--tree-row-height': `${rowHeight}px` }">
     <div class="details-tabs" role="tablist" aria-label="Inspector sections" @keydown="onInspectorTabKeydown">
       <button
         v-for="tab in tabs"
@@ -547,7 +545,7 @@ const matchedSearchEntries = searchEntries.value
       :role="checkout ? 'tabpanel' : undefined"
       :aria-labelledby="checkout ? 'inspector-tab-files' : undefined"
       :tabindex="checkout ? 0 : undefined"
-      class="flex min-h-0 flex-1 flex-col"
+      class="relative flex min-h-0 flex-1 flex-col"
     >
       <div ref="treeViewport" class="details-scroll" aria-label="Checkout files" @scroll="onTreeScroll">
         <p v-if="rootState === 'idle'" class="pane-state">Open a checkout to browse files.</p>
@@ -641,9 +639,10 @@ const matchedSearchEntries = searchEntries.value
           </div>
         </template>
       </div>
+      <OverlayScrollbar :target="treeViewport" label="Checkout files" />
     </div>
 
-    <div v-if="showChanges" v-show="activeTab === 'changes'" class="flex min-h-0 flex-1 flex-col">
+    <div v-if="showChanges" v-show="activeTab === 'changes'" class="relative flex min-h-0 flex-1 flex-col">
       <div class="details-all-changes">
         <button type="button" class="file-row new-item" @click="openAllChanges">
           <SquareArrowOutUpRightIcon class="icon-xs file-icon" aria-hidden="true" />
@@ -700,6 +699,7 @@ const matchedSearchEntries = searchEntries.value
             </div>
           </template>
         </div>
+        <OverlayScrollbar :target="changesViewport" label="Changed files" />
       </div>
     </div>
   </aside>
@@ -758,14 +758,14 @@ const matchedSearchEntries = searchEntries.value
   font-size: 0.625rem;
 }
 
-/* The tab strip stays put, each list scrolls on its own. The right padding is the scrollbar's:
-   macOS draws its own overlay scrollbar on top of the content, so a row whose status letter or
-   +/- counts end 6px from the edge is read through it while it is showing. */
+/* The tab strip stays put, each list scrolls on its own, and each draws its own bar over its right
+   edge: the browser's is off (in `style.css`) so a row whose status letter or +/- counts end at the
+   edge are not read through a scrollbar. */
 .details-scroll {
   flex: 1;
   min-height: 0;
   overflow-y: auto;
-  padding: 4px 8px 4px 0;
+  padding: 4px 0;
 }
 
 /*

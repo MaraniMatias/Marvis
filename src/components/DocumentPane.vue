@@ -24,6 +24,7 @@ import {
 import { useToasts } from "../presentation/toasts";
 import type { EditorView } from "@codemirror/view";
 import { changedLineRanges, type LineRange } from "../lib/changed-lines";
+import OverlayScrollbar from "./OverlayScrollbar.vue";
 
 const props = withDefaults(
   defineProps<{
@@ -61,6 +62,10 @@ const contentError = ref("");
 const contentIdentity = ref<string | null>(null);
 const fileViewport = ref<HTMLElement | null>(null);
 const editorHost = ref<HTMLElement | null>(null);
+/** CodeMirror's own scrolling box, which is a ref rather than a lookup because the editor is built
+ *  asynchronously and is destroyed and rebuilt under the same host: the scrollbar is placed over
+ *  whatever box is on screen, and a stale one would be measured against a destroyed editor. */
+const editorScroller = ref<HTMLElement | null>(null);
 const editorLoading = ref(false);
 const editorError = ref("");
 const saving = ref(false);
@@ -340,6 +345,7 @@ function disposeEditor() {
   editorGeneration += 1;
   editorView?.destroy();
   editorView = null;
+  editorScroller.value = null;
   editorIdentity = null;
   editorLanguage = null;
   editorLoading.value = false;
@@ -418,6 +424,7 @@ async function ensureEditor(fileIdentity: string) {
         emit("readingPositionChanged", position);
       },
     });
+    editorScroller.value = editorView.scrollDOM;
     editorIdentity = fileIdentity;
     editorLanguage = effectiveLanguage.value;
     // The marks may already have arrived: the file is asked about separately from being read, and
@@ -834,7 +841,7 @@ function onMarkdownLink(event: MouseEvent) {
 </script>
 
 <template>
-  <main class="document-pane flex min-h-0 flex-1 flex-col">
+  <main class="document-pane relative flex min-h-0 flex-1 flex-col">
     <header class="document-toolbar flex h-10 shrink-0 items-center justify-between gap-3 border-b px-3">
       <div class="flex min-w-0 items-center gap-1.5">
         <span class="min-w-0 truncate text-[0.6875rem] text-(--marvis-text-dim)" :title="path ?? undefined">{{
@@ -965,7 +972,12 @@ function onMarkdownLink(event: MouseEvent) {
         </button>
       </div>
     </header>
-    <section ref="fileViewport" class="min-h-0 flex-1 overflow-auto" aria-label="File contents" @scroll="onFileScroll">
+    <section
+      ref="fileViewport"
+      class="file-viewport min-h-0 flex-1 overflow-auto"
+      aria-label="File contents"
+      @scroll="onFileScroll"
+    >
       <p v-if="available === false" role="status" class="pane-state text-sm">
         {{ unavailableText() }}
       </p>
@@ -1082,6 +1094,11 @@ function onMarkdownLink(event: MouseEvent) {
         {{ saving ? "Saving…" : "Save" }}
       </button>
     </footer>
+    <!-- The document's scrollbar and the editor's are drawn over the box they measure rather than
+         inside it: the browser's is off in both (in `style.css`) so a long line ends flush against
+         the pane instead of short of a gutter. -->
+    <OverlayScrollbar :target="fileViewport" label="Document" />
+    <OverlayScrollbar :target="editorScroller" label="Source code" />
   </main>
 </template>
 
@@ -1371,13 +1388,12 @@ function onMarkdownLink(event: MouseEvent) {
   color: var(--marvis-content-text-faint);
 }
 
-/* The right padding is the vertical scrollbar's and the bottom one is the horizontal's, the same
-   reason the inspector and the sidebar leave room: macOS draws its scrollbar on top of the content,
-   so a long line that ends flush against the edge is read through it, and the last line of the file
-   sits under the one that crosses the bottom. Both are inside the scrollable area, so the end of a
-   long line can still be scrolled clear instead of being lost to the scrollbar. */
+/* The right padding is the vertical scrollbar's and the bottom one is the horizontal's: macOS draws
+   its scrollbar over the content, so a long line that ends flush against the edge is read through
+   it. It is five pixels rather than none because the bar drawn over the scroller is three of them
+   wide and the end of a long line has to be scrolled clear of it rather than lost behind it. */
 .code-editor-host :deep(.cm-content) {
-  padding-right: 10px;
+  padding-right: 5px;
   padding-bottom: 8px;
 }
 

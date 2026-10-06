@@ -102,7 +102,6 @@ body {
 .app-sidebar,
 .app-inspector {
   background: var(--marvis-bg-1);
-  border-color: var(--marvis-border);
 }
 
 .surface-popover {
@@ -123,6 +122,13 @@ body {
   background: var(--marvis-bg-0);
 }
 
+/* The divider between two panels is not drawn at all.
+
+   The handle that moves them is drawn over the edge they share rather than between them: it keeps
+   its five pixels, so there is still something for a pointer to find, but they cost no width, the
+   two panels meet, and nothing says the edge is there until the pointer is on it. A panel edge that
+   is drawn is a second vertical line in a window that already has one per panel, and a reader cannot
+   tell a divider from a border. */
 .splitter-handle {
   position: relative;
   z-index: 5;
@@ -133,6 +139,14 @@ body {
   outline: none;
 }
 
+.splitter-handle-edge-left {
+  margin-left: -5px;
+}
+
+.splitter-handle-edge-right {
+  margin-right: -5px;
+}
+
 .splitter-handle::after {
   position: absolute;
   inset: 0 2px;
@@ -140,10 +154,32 @@ body {
   content: "";
 }
 
+/* On an edge the line IS the edge: one pixel on the boundary the two panels share, rather than one
+   pixel in the middle of five. */
+.splitter-handle-edge-left::after,
+.splitter-handle-edge-right::after {
+  inset-block: 0;
+  width: 1px;
+}
+
+.splitter-handle-edge-left::after {
+  right: 0;
+}
+
+.splitter-handle-edge-right::after {
+  left: 0;
+}
+
 .splitter-handle:hover::after,
 .splitter-handle:focus-visible::after,
 .splitter-handle[data-resize-handle-active]::after {
   background: var(--marvis-accent);
+}
+
+/* A drag is the one moment the edge has to be followable rather than merely there. */
+.splitter-handle-edge-left[data-resize-handle-active]::after,
+.splitter-handle-edge-right[data-resize-handle-active]::after {
+  width: 3px;
 }
 
 .splitter-handle:focus-visible {
@@ -175,16 +211,16 @@ body {
    closed, so it is the thing the pointer finds at the edge; once the drawer is open the strip
    drops below it and the whole panel, its scrollbar included, takes the pointer again.
 
-   It is 20px rather than a hairline because a hairline is not something a pointer finds by
+   It is 10px rather than a hairline because a hairline is not something a pointer finds by
    accident, and this area has no other way to announce itself. It costs the diff view its
-   outermost 20px, which is the whitespace past the last column, and only in the split layout. */
+   outermost 10px, which is the whitespace past the last column, and only in the split layout. */
 .inspector-hover-strip {
   position: absolute;
   z-index: 40;
   top: 32px;
   right: 0;
   bottom: 0;
-  width: 20px;
+  width: 10px;
 }
 
 .inspector-hover-strip-open {
@@ -199,7 +235,7 @@ body {
   top: 0;
   right: 0;
   bottom: 0;
-  width: 3px;
+  width: 2px;
   background: var(--marvis-accent);
   content: "";
 }
@@ -362,6 +398,79 @@ body {
 .terminal-scrollbar:active .terminal-scrollbar-thumb {
   right: 1px;
   width: 8px;
+}
+
+/* The scrollbar every panel draws for itself: the same overlay as the terminal's, sized for a list.
+   The track is five pixels of hit area with a three-pixel thumb drawn in it, which is as thin as a
+   thumb goes before it stops reading as one, and the thumb grows to the full track under the pointer
+   so there is something there to aim at. There is no groove and no arrow, for the reason the
+   terminal's says: a bar that appears and disappears cannot have a button you have to hit the
+   first time.
+
+   Its top and height are written by the component rather than declared here: the bar is placed over
+   the box it measures, so one drawn at the end of a pane covers the list and not the toolbar above
+   it, and no call site has to wrap anything to give it an edge to sit on.
+
+   It is above the resize handle rather than under it: on the sidebar the two are the same five
+   pixels, and a bar nobody can take hold of is a bar that only says where you are. The handle is
+   5, so the edge stays grabbable everywhere the bar is not lit, which in `auto` is all the time
+   except for the moment after a scroll. */
+.overlay-scrollbar {
+  position: absolute;
+  top: 0;
+  right: 0;
+  z-index: 6;
+  width: 5px;
+  height: 0;
+  touch-action: none;
+  transition: opacity 160ms ease-out;
+}
+
+.overlay-scrollbar-idle {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.overlay-scrollbar-idle:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.overlay-scrollbar:focus-visible {
+  outline: 1px solid var(--marvis-control-focus);
+  outline-offset: -1px;
+}
+
+.overlay-scrollbar-thumb {
+  position: absolute;
+  right: 0;
+  width: 3px;
+  border-radius: 0;
+  background: var(--marvis-scrollbar);
+  transition: width 120ms ease-out;
+}
+
+.overlay-scrollbar:hover .overlay-scrollbar-thumb,
+.overlay-scrollbar:active .overlay-scrollbar-thumb {
+  width: 5px;
+}
+
+/* The browser's own bar is off in every box that carries one of these, and it is drawn over the
+   padding instead, so a row's last column reaches the panel's edge and the box gives up no width to
+   it. Only the vertical one is taken: a diff, a document and a source file all scroll sideways as
+   well, and the horizontal bar is still macOS's to draw. */
+.sidebar-scroll,
+.details-scroll {
+  scrollbar-width: none;
+}
+
+.sidebar-scroll::-webkit-scrollbar,
+.details-scroll::-webkit-scrollbar,
+.diff-files::-webkit-scrollbar,
+.diff-viewport::-webkit-scrollbar,
+.file-viewport::-webkit-scrollbar,
+.code-editor-host .cm-scroller::-webkit-scrollbar {
+  width: 0;
 }
 
 /* The chrome is not a text document. A click that lands on a sidebar row, a title-bar crumb or a

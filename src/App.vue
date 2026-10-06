@@ -1772,14 +1772,9 @@ function reportWarning(message: string) {
         v-show="sidePanelsVisible"
         id="navigation-resize-handle"
         aria-label="Resize navigation sidebar"
-        class="splitter-handle"
+        class="splitter-handle splitter-handle-edge-left"
         @dblclick.stop="resetPanelWidth('sidebar')"
-      >
-        <div
-          aria-hidden="true"
-          class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 bg-(--marvis-text-faint)"
-        />
-      </SplitterResizeHandle>
+      />
       <SplitterPanel
         id="main-panel"
         :min-size="toScreen(isSplitLayout ? (activeMainView.kind === 'terminal' ? 320 : 585) : 420)"
@@ -1826,14 +1821,9 @@ function reportWarning(message: string) {
         v-show="sidePanelsVisible && !inspectorInDrawer"
         id="inspector-resize-handle"
         aria-label="Resize files and changes inspector"
-        class="splitter-handle"
+        class="splitter-handle splitter-handle-edge-right"
         @dblclick.stop="resetPanelWidth('inspector')"
-      >
-        <div
-          aria-hidden="true"
-          class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 bg-(--marvis-text-faint)"
-        />
-      </SplitterResizeHandle>
+      />
       <SplitterPanel
         id="inspector-panel"
         ref="inspectorPanel"

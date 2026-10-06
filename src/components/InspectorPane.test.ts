@@ -97,6 +97,16 @@ describe("InspectorPane", () => {
     for (const toast of [...toasts.value]) dismiss(toast.id);
   });
 
+  it("draws no edge of its own, so the handle that moves it is the only divider", () => {
+    // A border down the panel's left, next to the five pixels of handle that move it, is one line
+    // drawn twice. The panels meet on their own backgrounds instead, and the hairline the handle
+    // draws is there only while the pointer is on it or a drag is in progress.
+    const wrapper = mountInspector({ checkout: checkout("checkout:one") });
+
+    expect(wrapper.get(".app-inspector").classes()).not.toContain("border-l");
+    wrapper.unmount();
+  });
+
   it("opens a selected file in the central document and marks the open row per checkout", async () => {
     mocks.listCheckoutFiles.mockImplementation(async (checkoutId: string) => ({
       entries: [{ name: `${checkoutId}.txt`, path: `${checkoutId}.txt`, kind: "file" }],

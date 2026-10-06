@@ -151,12 +151,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
       @pointerup="finishPreviewResize"
       @pointercancel="finishPreviewResize"
       @keydown="onPreviewResizeKeydown"
-    >
-      <div
-        aria-hidden="true"
-        class="absolute left-1/2 top-1/2 h-6 w-1 -translate-x-1/2 -translate-y-1/2 bg-(--marvis-text-faint)"
-      />
-    </div>
+    />
     <section
       v-show="!terminal"
       id="main-view-preview"

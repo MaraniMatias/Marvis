@@ -31,6 +31,7 @@ import { agentSessionForTitle } from "../domain/agent";
 import type { TerminalAgentRow } from "../presentation/agent-sessions";
 import { useDiffStats } from "../presentation/diff-stats";
 import { WORKDIR_ICONS } from "../presentation/workdir-icons";
+import OverlayScrollbar from "./OverlayScrollbar.vue";
 
 defineOptions({ name: "FolderSidebar" });
 
@@ -912,12 +913,10 @@ function rowLabel(item: WorkdirItem): string {
 </script>
 
 <template>
-  <aside
-    class="app-sidebar flex h-full min-h-0 flex-col border-r"
-    :class="{ 'is-terminal-dragging': pointerDrag?.started }"
-  >
-    <!-- The right padding is the scrollbar's: macOS draws its own overlay scrollbar over the
-         content, so a row whose name and counts end at the edge are read through it. -->
+  <aside class="app-sidebar flex h-full min-h-0 flex-col" :class="{ 'is-terminal-dragging': pointerDrag?.started }">
+    <!-- The list's scrollbar is drawn over the list's right edge rather than sitting in it, so a row's
+         name and counts run to the panel's edge instead of stopping short of a scrollbar's worth of
+         padding to keep them clear of macOS's own overlay. That overlay is off (in `style.css`). -->
     <div ref="sidebarScroll" class="sidebar-scroll">
       <div
         v-for="group in groups"
@@ -1252,6 +1251,7 @@ function rowLabel(item: WorkdirItem): string {
         Your opened folders will appear here. Use Open directory below to add one.
       </p>
     </div>
+    <OverlayScrollbar :target="sidebarScroll" label="Repos and worktrees" />
 
     <div class="sidebar-footer">
       <div class="sep" />
@@ -1478,8 +1478,12 @@ function rowLabel(item: WorkdirItem): string {
 }
 
 /* The panel's own type: the reference's 13px, which is a step under the interface's 14px because
-   every row in here is one line and the rows are read in columns rather than one at a time. */
+   every row in here is one line and the rows are read in columns rather than one at a time.
+
+   It is also what the scrollbar is positioned against, which is the only reason the panel is a
+   containing block rather than a static box in a layout that never asked for one. */
 .app-sidebar {
+  position: relative;
   font-size: 13px;
 }
 
@@ -1487,9 +1491,6 @@ function rowLabel(item: WorkdirItem): string {
   min-height: 0;
   flex: 1;
   overflow-y: auto;
-  /* The right padding is the scrollbar's: macOS draws its own overlay scrollbar over the content,
-     so a row whose name and counts end at the edge are read through it. */
-  padding-right: 8px;
 }
 
 /* The fold, which is a button of its own rather than the whole row: the row selects the checkout,

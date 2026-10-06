@@ -1535,9 +1535,9 @@ describe("App UI integration", () => {
       mocks.onProgrammaticPanelResize = resizeCalls;
 
       const handles = wrapper.findAllComponents(SplitterResizeHandle);
-      const grip = handles[0]!.find(".h-6.w-1");
-      expect(grip.exists()).toBe(true);
-      expect(grip.classes().some((className) => className.startsWith("rounded"))).toBe(false);
+      // Nothing is drawn on a handle at rest: the edge appears when the pointer is on it, so there
+      // is no grip to assert and a dash standing in the middle of the panel for every pane is gone.
+      expect(handles[0]!.find(".h-6.w-1").exists()).toBe(false);
       await handles[0]!.trigger("dblclick");
       await flushPromises();
 
@@ -1551,6 +1551,19 @@ describe("App UI integration", () => {
         inspectorWidth: 450,
         previewWidth: 360,
       });
+      wrapper.unmount();
+    });
+
+    it("places the handles over the edges they move, so the panels meet with nothing between them", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), { ...DEFAULT_APP_LAYOUT });
+
+      // A handle between two panels is a gutter of five pixels with the window's background behind
+      // it, which is a line drawn twice: once by the border on each side of it and once by the gap
+      // itself. Laid over the edge it moves, the same five pixels are still something a pointer finds
+      // and cost nothing, so nothing is drawn until the pointer is there.
+      const handles = wrapper.findAllComponents(SplitterResizeHandle);
+      expect(handles[0]!.classes()).toContain("splitter-handle-edge-left");
+      expect(handles[1]!.classes()).toContain("splitter-handle-edge-right");
       wrapper.unmount();
     });
 
