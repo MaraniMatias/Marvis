@@ -11,7 +11,7 @@ const sha256 = (path) => createHash("sha256").update(readFileSync(path)).digest(
 const EXPECTED_FONT_SHA256 = {
   "FiraCode-Bold.woff2": "579875c4041100ef9ba140b0c38a52979438d987d1708771018a69c9bdfa21a9",
   "FiraCode-Regular.woff2": "dd1de59cd3efe47a3aad6e9cbc93a8fe25685085074f9fed383ac5107c20145f",
-  "NerdSymbols.woff2": "d8e67f9e007bc9a4f24b2cfc86778d6112183a0a1e4aed8b556a452928190266",
+  "NerdSymbols.woff2": "884f36993b24d91233b7da36a4994ce6d2dc23520469a13f60a0d537aee843a2",
 };
 
 test("production dist preserves third-party notices and shipped font binaries", () => {

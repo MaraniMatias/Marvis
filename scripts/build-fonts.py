@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Strip TrueType hinting out of the bundled woff2 faces.
+"""Strip TrueType hinting out of the bundled text faces.
 
-Every bundled face shipped Fira Code's full hinting bytecode: a 3.6KB `fpgm`,
-a `prep`, a `cvt `, and a `gasp` asking for grid-fitting at every ppem with no
+Both text faces shipped Fira Code's full hinting bytecode: a 3.6KB `fpgm`, a
+`prep`, a `cvt `, and a `gasp` asking for grid-fitting at every ppem with no
 large-ppem escape hatch. CoreText, which macOS uses, ignores that bytecode
 entirely, so the app already looked right there. FreeType, which Linux uses,
 executes it, and at 1x a 14px cell is exactly where snapping stems to the pixel
@@ -15,10 +15,9 @@ outlines -- which is what macOS already drew, and what `src/marvis.css` says
 bundling these faces is for. Outlines, advance widths and the GSUB/GPOS
 features Fira Code's ligatures depend on are left untouched.
 
-Inputs are the prepared woff2 files described in `src/assets/fonts/README.md`:
-the Fira Code 6.2 release `woff2/` folder, and the already-subset
-NerdSymbols.woff2. Re-running this on an already-stripped file rewrites the
-same bytes, so it doubles as the check that the committed fonts are hint-free.
+Inputs are the Fira Code 6.2 release `woff2/` folder. Re-running this on an
+already-stripped file rewrites the same bytes, so it doubles as the check that
+the committed faces are hint-free.
 
 Note that emptying a glyph's `program` is not enough: `_g_l_y_f.py` decides
 whether to emit an instruction block from `hasattr(glyph, "program")`, so the
@@ -40,6 +39,7 @@ are what will report that.
 
 Usage:
     python3 scripts/build-fonts.py FiraCode-Regular.woff2 FiraCode-Bold.woff2 ...
+    python3 scripts/build-fonts.py --self-test [faces...]
 """
 
 import io
@@ -52,13 +52,29 @@ from fontTools.ttLib import TTFont
 HINT_TABLES = ("fpgm", "prep", "cvt ", "gasp")
 # `head.flags` bit 2: "instructions may depend on pointsize".
 POINTSIZE_FLAG = 1 << 2
+BUNDLED_FONTS = Path(__file__).resolve().parent.parent / "src" / "assets" / "fonts"
+# Only the text faces get de-hinted, and only they are expected to be unhinted
+# afterwards. NerdSymbols is shipped as upstream patched it: 9 of its 10089 drawn
+# glyphs carry instructions (`.notdef` and U+EE00-EE09), none of them in the
+# powerline range the terminal loads, against every drawn glyph of the text
+# faces. Rewriting a 908KB third-party icon file to move 2KB of bytecode is not
+# a trade worth making, so it stays byte-identical to the file it was built from.
+DEHINTED_FACES = ("FiraCode-Regular.woff2", "FiraCode-Bold.woff2")
 
 
 def glyphs_with_bytecode(font):
-    """Glyphs carrying instructions. Expands `font`, so never call this on a face being edited."""
+    """Glyphs carrying instructions. Expands `font`, so never call this on a face being edited.
+
+    The `ensureDecompiled()` call is load-bearing: a face read back from disk keeps
+    every glyph unexpanded, and an unexpanded glyph has no `program` at all, so
+    counting without expanding first reports nothing no matter how much bytecode
+    is actually in the file. `self_test` pins that down.
+    """
+    glyf = font["glyf"]
+    glyf.ensureDecompiled()
     return [
         name
-        for name, glyph in font["glyf"].glyphs.items()
+        for name, glyph in glyf.glyphs.items()
         if (program := getattr(glyph, "program", None)) is not None and program.bytecode
     ]
 
@@ -140,7 +156,49 @@ def strip(path):
     return cleared, len(written)
 
 
+def self_test(paths):
+    """Pin down that instructions hidden in an unexpanded glyph still get counted.
+
+    Builds nothing synthetic: takes a shipped (unhinted) face, gives one glyph
+    instructions back, writes it out, reads it back and requires the count to be
+    exactly that glyph. The reloaded face has every glyph unexpanded, so this is
+    the case that used to pass silently and let a hinted face through the assert.
+    """
+    from fontTools.ttLib.tables.ttProgram import Program
+
+    assert paths, "self-test needs at least one face; a zero-face run passes vacuously"
+    for path in paths:
+        raw = Path(path).read_bytes()
+        assert not glyphs_with_bytecode(TTFont(io.BytesIO(raw))), (
+            f"{path}: shipped face is still hinted"
+        )
+
+        target = TTFont(
+            io.BytesIO(raw), recalcTimestamp=False, recalcBBoxes=False
+        ).getGlyphOrder()[1]
+        face = TTFont(io.BytesIO(raw), recalcTimestamp=False, recalcBBoxes=False)
+        glyph = face["glyf"].glyphs[target]
+        glyph.expand(face["glyf"])
+        glyph.program = Program()
+        glyph.program.fromBytecode(b"\xb0\x01\x00\x00\x2b")
+
+        output = io.BytesIO()
+        face.flavor = "woff2"
+        face.save(output)
+        found = glyphs_with_bytecode(TTFont(io.BytesIO(output.getvalue())))
+        assert found == [target], (
+            f"{path}: reinjected bytecode went unnoticed, found {found}"
+        )
+
+
 def main(argv):
+    if argv and argv[0] == "--self-test":
+        paths = argv[1:] or [str(BUNDLED_FONTS / name) for name in DEHINTED_FACES]
+        self_test(paths)
+        print(
+            f"self-test ok over {len(paths)} face(s): de-hinted faces carry no instructions, and instructions in an unexpanded glyph are still counted"
+        )
+        return 0
     if not argv:
         print(__doc__, file=sys.stderr)
         return 2
