@@ -42,6 +42,19 @@ export interface AgentAgent {
   hidden: boolean;
 }
 
+/**
+ * One session that is working in a worktree other than the one it was in.
+ *
+ * OpenCode reports the directory every session is in and changes it when an agent is sent
+ * somewhere else, which is what its TUI shows at the footer. Both sides are checkouts of this
+ * workspace, so this is a relocation rather than a session living in another project.
+ */
+export interface AgentRelocation {
+  sessionId: string;
+  fromCheckoutId: string;
+  toCheckoutId: string;
+}
+
 export interface AgentEvent {
   checkoutId: string;
   sessionId: string | null;
@@ -50,6 +63,15 @@ export interface AgentEvent {
   rawType: string;
   data: unknown;
 }
+
+/**
+ * The one program in front of a shell that is also an agent, and so owns the row's agent line.
+ *
+ * A terminal's `foregroundApp` is its process name as the OS reports it, so this is that name
+ * and nothing else: it is what makes a row an agent row, and what makes a terminal the one an
+ * OpenCode session moved along with it.
+ */
+export const AGENT_APP = "opencode";
 
 const turnEvents: AgentEventKind[] = ["turnStarted", "turnFinished", "turnFailed"];
 

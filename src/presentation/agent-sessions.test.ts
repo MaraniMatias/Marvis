@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   listAgentSessions: vi.fn(),
   listAgentCandidateSessions: vi.fn(),
   listAgentAgents: vi.fn(),
+  listAgentRelocations: vi.fn(),
   createAgentSession: vi.fn(),
   stopAgent: vi.fn(),
   listen: vi.fn(),
@@ -18,11 +19,12 @@ vi.mock("../lib/ipc", () => ({
   listAgentSessions: mocks.listAgentSessions,
   listAgentCandidateSessions: mocks.listAgentCandidateSessions,
   listAgentAgents: mocks.listAgentAgents,
+  listAgentRelocations: mocks.listAgentRelocations,
   createAgentSession: mocks.createAgentSession,
   stopAgent: mocks.stopAgent,
 }));
 
-import { applyAgentEvent, useAgentSessions, useTerminalAgentRows } from "./agent-sessions";
+import { applyAgentEvent, useAgentRelocations, useAgentSessions, useTerminalAgentRows } from "./agent-sessions";
 
 function session(overrides: Partial<AgentSession> = {}): AgentSession {
   return {
@@ -664,8 +666,8 @@ describe("useTerminalAgentRows", () => {
     const state = useTerminalAgentRows(computed(() => ["checkout:first"]));
     await settle();
 
-    expect(state.byCheckout["checkout:first"]).toEqual({ sessions: [] });
-    expect(state.row("checkout:absent")).toEqual({ sessions: [] });
+    expect(state.byCheckout["checkout:first"]).toEqual({ sessions: [], sessionIds: [] });
+    expect(state.row("checkout:absent")).toEqual({ sessions: [], sessionIds: [] });
   });
 
   it.each([false, true])("offers a session with no agent, awaiting reply: %s", async (awaitingReply) => {
@@ -963,7 +965,7 @@ describe("useTerminalAgentRows", () => {
 
     expect(drawn.slice(before).some((store) => store.includes("checkout:second"))).toBe(false);
     expect(Object.keys(state.byCheckout)).toEqual(["checkout:first"]);
-    expect(state.row("checkout:second")).toEqual({ sessions: [] });
+    expect(state.row("checkout:second")).toEqual({ sessions: [], sessionIds: [] });
     vi.useRealTimers();
   });
 
@@ -1002,6 +1004,90 @@ describe("useTerminalAgentRows", () => {
     // And no interval survived the scope: advancing well past both cadences asks for nothing.
     await vi.advanceTimersByTimeAsync(30000);
     expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(whenReleased);
+    vi.useRealTimers();
+  });
+});
+
+describe("useAgentRelocations", () => {
+  beforeEach(() => {
+    mocks.listAgentRelocations.mockResolvedValue([]);
+  });
+
+  it("reports each move the service named, and keeps asking while everything is idle", async () => {
+    // The turn that moves a session also ends it, so a poll that stopped when nothing was
+    // running would be the poll that was not running when the move happened.
+    vi.useFakeTimers();
+    mocks.listAgentRelocations.mockResolvedValue([]);
+    const seen: string[] = [];
+    useAgentRelocations((relocation) => seen.push(`${relocation.fromCheckoutId}->${relocation.toCheckoutId}`));
+    await vi.advanceTimersByTimeAsync(0);
+    const afterFirstRead = mocks.listAgentRelocations.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(mocks.listAgentRelocations.mock.calls.length).toBeGreaterThan(afterFirstRead);
+
+    mocks.listAgentRelocations.mockResolvedValue([
+      { sessionId: "ses_one", fromCheckoutId: "checkout:first", toCheckoutId: "checkout:second" },
+    ]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(seen).toEqual(["checkout:first->checkout:second"]);
+    vi.useRealTimers();
+  });
+
+  it("reports nothing while the service is not run, without failing the caller", async () => {
+    mocks.listAgentRelocations.mockRejectedValue(new Error("OpenCode is not running."));
+    const onRelocated = vi.fn();
+    useAgentRelocations(onRelocated);
+    await settle();
+    expect(onRelocated).not.toHaveBeenCalled();
+  });
+
+  it("does not report a move from a read that was superseded before it answered", async () => {
+    // A slow answer arriving after the next poll has already gone out describes where the
+    // session was a poll ago, and moving a terminal on it would move one on stale news. The
+    // backend keeps the move and offers it again, so this answer being dropped costs nothing:
+    // the next poll that answers carries it.
+    vi.useFakeTimers();
+    const onRelocated = vi.fn();
+    let release: (() => void) | undefined;
+    mocks.listAgentRelocations.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve([{ sessionId: "ses_one", fromCheckoutId: "checkout:first", toCheckoutId: "checkout:second" }]);
+        }),
+    );
+    useAgentRelocations(onRelocated);
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.listAgentRelocations.mockResolvedValue([]);
+    await vi.advanceTimersByTimeAsync(2000);
+    release?.();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onRelocated).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("reports nothing from a read that answers after the scope is gone", async () => {
+    // The timer is cleared on dispose, but a read already dispatched is still in flight, and its
+    // callback would otherwise run against a window that is closing.
+    vi.useFakeTimers();
+    const onRelocated = vi.fn();
+    let release: (() => void) | undefined;
+    mocks.listAgentRelocations.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve([{ sessionId: "ses_one", fromCheckoutId: "checkout:first", toCheckoutId: "checkout:second" }]);
+        }),
+    );
+    const scope = effectScope();
+    scope.run(() => useAgentRelocations(onRelocated));
+    await vi.advanceTimersByTimeAsync(0);
+    scope.stop();
+    release?.();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onRelocated).not.toHaveBeenCalled();
     vi.useRealTimers();
   });
 });

@@ -78,8 +78,15 @@ let resizePointerId: number | null = null;
 defineExpose({
   focusActiveTerminal: () => sessionPane.value?.focusActiveTerminal(),
   requestClose: (sessionId: string) => sessionPane.value?.requestClose(sessionId) ?? Promise.resolve(false),
-  moveSession: (sessionId: string, targetCheckoutId: string, index: number) =>
-    sessionPane.value?.moveSession(sessionId, targetCheckoutId, index) ?? Promise.resolve(),
+  moveSession: (
+    sessionId: string,
+    targetCheckoutId: string,
+    index: number,
+    changeDirectory?: boolean,
+    selectTarget?: boolean,
+  ) =>
+    sessionPane.value?.moveSession(sessionId, targetCheckoutId, index, changeDirectory, selectTarget) ??
+    Promise.resolve(false),
 });
 
 /** The three views, one of them visible (D.1). */

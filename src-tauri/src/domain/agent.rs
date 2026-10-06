@@ -34,6 +34,20 @@ pub struct AgentSession {
     pub updated_at: i64,
 }
 
+/// One session that is working in a different worktree than it was the last time it was read.
+///
+/// OpenCode reports the directory every session is in and changes it when an agent is sent to
+/// work somewhere else, which is what the TUI shows at its footer. Two checkouts of this app's
+/// workspace on either side is what makes that a relocation rather than a session that happens
+/// to live in another project.
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct AgentRelocation {
+    pub session_id: String,
+    pub from_checkout_id: String,
+    pub to_checkout_id: String,
+}
+
 /// One agent a checkout's server offers, as OpenCode describes it.
 ///
 /// The color is OpenCode's own, so a row painted with it matches what the user sees in the

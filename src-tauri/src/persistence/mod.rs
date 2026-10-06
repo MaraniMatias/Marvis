@@ -1381,6 +1381,32 @@ impl Database {
         self.load_workspace()
     }
 
+    /// Every checkout still on the panel, with the directory it lives in.
+    ///
+    /// A missing or archived checkout is left out because a session cannot be handed to one:
+    /// there is no row to put it under and the directory behind it is not there to work in.
+    /// The stored path is returned as it is, because `canonical_path` is already canonical and
+    /// resolving it again per call is work a directory comparison would do anyway.
+    pub fn checkout_directories(&self) -> Result<Vec<(String, PathBuf)>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, canonical_path FROM checkouts WHERE is_missing = 0 AND is_archived = 0",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    PathBuf::from(row.get::<_, String>(1)?),
+                ))
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        Ok(rows)
+    }
+
     pub fn terminal_checkout_path(&self, checkout_id: &str) -> Result<PathBuf, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let stored_path = connection
@@ -1486,10 +1512,16 @@ impl Database {
     /// checkout so the terminal belongs to the worktree it is listed under. Both layouts are
     /// reconciled in the same transaction as the row, because a layout still naming a session its
     /// checkout no longer holds is a layout the next read prunes and the next save refuses.
+    ///
+    /// `select_target` says whether the window should follow. A person dragging a row to another
+    /// worktree wants to be there; a session that moved on its own does not get to decide what the
+    /// window is looking at, so the caller that noticed the move passes false and leaves the
+    /// selection alone.
     pub fn move_terminal_session(
         &self,
         session_id: &str,
         target_checkout_id: &str,
+        select_target: bool,
     ) -> Result<WorkspaceState, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.unchecked_transaction().map_err(db_error)?;
@@ -1534,10 +1566,12 @@ impl Database {
             .map_err(db_error)?;
         reconcile_stored_layout(&transaction, &source_checkout_id)?;
         reconcile_stored_layout(&transaction, target_checkout_id)?;
-        // The worktree the session now belongs to is the one whose files, changes and agent the
-        // window shows, so the move selects it and the session inside it.
-        set_preference(&transaction, ACTIVE_CHECKOUT, Some(target_checkout_id))?;
-        set_preference(&transaction, ACTIVE_SESSION, Some(session_id))?;
+        if select_target {
+            // The worktree the session now belongs to is the one whose files, changes and agent the
+            // window shows, so the move selects it and the session inside it.
+            set_preference(&transaction, ACTIVE_CHECKOUT, Some(target_checkout_id))?;
+            set_preference(&transaction, ACTIVE_SESSION, Some(session_id))?;
+        }
         transaction.commit().map_err(db_error)?;
         drop(connection);
         self.load_workspace()
@@ -4235,6 +4269,43 @@ mod tests {
             .is_err());
     }
 
+    /// A missing or archived worktree is not a place a session can be sent, so it is not
+    /// offered as one; the path is what makes a session's directory nameable at all.
+    #[test]
+    fn checkout_directories_lists_only_the_worktrees_a_session_can_be_handed_to() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path().join("root");
+        let worktree = temp.path().join("worktree");
+        let gone = temp.path().join("gone");
+        for folder in [&root, &worktree, &gone] {
+            fs::create_dir(folder).unwrap();
+        }
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let root_id = repo.checkouts[0].id.clone();
+        let database = Database::open_in_memory().expect("database");
+        database
+            .register_git_repo(repo, &worktree_id)
+            .expect("register worktrees");
+
+        let listed = database.checkout_directories().expect("list checkouts");
+        let mut listed_ids = listed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>();
+        listed_ids.sort_unstable();
+        let mut expected = vec![root_id.as_str(), worktree_id.as_str()];
+        expected.sort_unstable();
+        assert_eq!(listed_ids, expected);
+        assert!(listed.iter().all(|(_, path)| path.is_absolute()));
+
+        // Archiving takes a worktree off the panel, so a session may no longer be handed to it.
+        database
+            .archive_checkout(&worktree_id)
+            .expect("archive worktree");
+        assert!(database
+            .checkout_directories()
+            .expect("list checkouts")
+            .iter()
+            .all(|(id, _)| id != &worktree_id));
+    }
+
     #[test]
     fn checkout_layouts_persist_and_heal_sessions_owned_by_another_checkout() {
         let temp = tempdir().expect("temporary directory");
@@ -4414,21 +4485,21 @@ mod tests {
 
         // Another repository is a different Git directory, so it is never a destination.
         assert!(database
-            .move_terminal_session(&session.id, &other_root_id)
+            .move_terminal_session(&session.id, &other_root_id, true)
             .is_err());
         assert_eq!(
             database.terminal_session_checkout(&session.id).unwrap(),
             Some(root_id.clone())
         );
         assert!(database
-            .move_terminal_session(&session.id, &root_id)
+            .move_terminal_session(&session.id, &root_id, true)
             .is_err());
         assert!(database
-            .move_terminal_session("session:unknown", &worktree_id)
+            .move_terminal_session("session:unknown", &worktree_id, true)
             .is_err());
 
         let moved = database
-            .move_terminal_session(&session.id, &worktree_id)
+            .move_terminal_session(&session.id, &worktree_id, true)
             .unwrap();
 
         let moved_repo = moved
@@ -4471,6 +4542,48 @@ mod tests {
         // The destination had no stored layout, so it has none to repair: the pane its sessions
         // name is built on the next read, and the session it gained is in it.
         assert_eq!(database.load_terminal_layout(&worktree_id).unwrap(), None);
+    }
+
+    /// A move that happened on its own moves the row and nothing else: the window stays on the
+    /// worktree the person was looking at, because a session changing directory is not a reason to
+    /// take over the screen.
+    #[test]
+    fn a_move_that_was_not_asked_for_leaves_the_window_where_it_was() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        for folder in [&root, &worktree] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let root_id = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo, &worktree_id).unwrap();
+        let session = Session {
+            id: "session:walked".into(),
+            session_type: SessionType::Shell,
+            checkout_id: root_id.clone(),
+            name: "zsh".into(),
+            created_at: "now".into(),
+            status: SessionStatus::Active,
+        };
+        database.add_terminal_session(&session).unwrap();
+
+        let moved = database
+            .move_terminal_session(&session.id, &worktree_id, false)
+            .unwrap();
+
+        // The row moved...
+        assert_eq!(
+            database.terminal_session_checkout(&session.id).unwrap(),
+            Some(worktree_id.clone())
+        );
+        // ...and the window did not.
+        assert_eq!(moved.active_checkout_id.as_deref(), Some(root_id.as_str()));
+        assert_ne!(
+            moved.active_checkout_id.as_deref(),
+            Some(worktree_id.as_str())
+        );
     }
 
     #[test]

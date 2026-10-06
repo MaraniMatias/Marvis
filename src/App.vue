@@ -18,7 +18,13 @@ import {
 import type { Checkout, Repo } from "./domain/workspace";
 import type { CheckoutFileActivity } from "./domain/git";
 import type { ReviewTarget } from "./domain/review";
-import { displayCheckoutPath, resolveActiveSession, sessionTitle, terminalHasProcess } from "./domain/workspace";
+import {
+  checkoutForWorkingDirectory,
+  displayCheckoutPath,
+  resolveActiveSession,
+  sessionTitle,
+  terminalHasProcess,
+} from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
 import type { TitlebarMenuItem, TitlebarMenuSection } from "./domain/titlebar-menu";
@@ -54,12 +60,13 @@ import { useGitWatchers } from "./presentation/git-watchers";
 import { useWorktreeSync } from "./presentation/worktree-sync";
 import { REVIEW_SENDER, useReviewNotes } from "./presentation/review-notes";
 import type { ReviewSender } from "./presentation/review-notes";
-import { useAgentSessions, useTerminalAgentRows } from "./presentation/agent-sessions";
+import { useAgentRelocations, useAgentSessions, useTerminalAgentRows } from "./presentation/agent-sessions";
 import { useToasts } from "./presentation/toasts";
 import { WORKDIR_ICONS } from "./presentation/workdir-icons";
 import { theme } from "./presentation/theme";
 import type { Theme } from "./presentation/theme";
-import { defaultAgentSession } from "./domain/agent";
+import { AGENT_APP, defaultAgentSession } from "./domain/agent";
+import type { AgentRelocation } from "./domain/agent";
 import { DEFAULT_ZOOM, zoomKeyFor, zoomLabel, zoomStep } from "./domain/zoom";
 import type { Zoom, ZoomModifier } from "./domain/zoom";
 import { buildReviewMarkdown, localReviewTimestamp } from "./domain/review";
@@ -183,6 +190,14 @@ const terminalAgents = useTerminalAgentRows(
     ),
   ]),
 );
+/**
+ * Where OpenCode sessions are working, so a row can follow one into the worktree it moved to.
+ *
+ * `followAgentRelocation` is declared below and called from here, which is fine because nothing
+ * is asked until the service answers: the read is asynchronous, so the first answer arrives after
+ * this file has been set up.
+ */
+useAgentRelocations(followAgentRelocation);
 const reviewTarget = ref<ReviewTarget>("markdown");
 let reviewTargetLoadGeneration = 0;
 watch(
@@ -1676,8 +1691,31 @@ const reviewSender: ReviewSender = {
 provide(REVIEW_SENDER, reviewSender);
 
 function updateSessionStatus(sessionId: string, status: TerminalSessionStatus | null) {
-  if (status) sessionRuntimeStatuses.value[sessionId] = status;
-  else delete sessionRuntimeStatuses.value[sessionId];
+  if (status) {
+    sessionRuntimeStatuses.value[sessionId] = status;
+    followWorkingDirectory(sessionId, status);
+  } else delete sessionRuntimeStatuses.value[sessionId];
+}
+
+/**
+ * Hands a terminal to the worktree its shell changed directory into.
+ *
+ * The shell's own directory is the whole signal, read from the OS rather than asked of the shell,
+ * so this works in every shell without configuring any of them. An agent in front is not one of
+ * these: it reports where it is working through its own session, and the shell behind it never
+ * moved, so those terminals are left to `followAgentRelocation`.
+ */
+function followWorkingDirectory(sessionId: string, status: TerminalSessionStatus) {
+  if (!settings.value.terminal.followDirectoryAcrossWorktrees) return;
+  if (!status.workingDirectory || status.foregroundApp === AGENT_APP) return;
+  const checkouts = allCheckouts.value;
+  const from = checkouts.find((checkout) => checkout.sessions.some((session) => session.id === sessionId));
+  if (!from) return;
+  // Nothing when the shell is already where its row says it is, which is also what stops this
+  // from moving the row over and over after it has moved.
+  const target = checkoutForWorkingDirectory(checkouts, from.id, status.workingDirectory);
+  if (!target) return;
+  void moveTerminalToWorktree(sessionId, from.id, target.id);
 }
 
 function updateSessionOrder(checkoutId: string, order: string[]) {
@@ -1695,8 +1733,112 @@ async function closeTerminalSession(sessionId: string) {
  * this only carries the destination across. The workspace the backend returns already selects the
  * destination worktree, which is what puts the files and the changes panel on it.
  */
-async function moveTerminalSession(sessionId: string, targetCheckoutId: string, index: number) {
-  await mainPane.value?.moveSession(sessionId, targetCheckoutId, index);
+async function moveTerminalSession(
+  sessionId: string,
+  targetCheckoutId: string,
+  index: number,
+  changeDirectory = true,
+  selectTarget = true,
+) {
+  return (
+    (await mainPane.value?.moveSession(sessionId, targetCheckoutId, index, changeDirectory, selectTarget)) ?? false
+  );
+}
+
+/**
+ * Whether the window takes `sessionId` with it when it leaves `fromCheckoutId` on its own.
+ *
+ * `visible` answers for what is on screen, which is the only question that has a good answer: a
+ * terminal nobody was looking at moving in the sidebar must not change the pane someone is working
+ * in, and the terminal that *was* on screen must not leave an empty pane behind.
+ */
+function windowFollowsMove(sessionId: string, fromCheckoutId: string) {
+  if (settings.value.terminal.followSelection === "always") return true;
+  const { activeCheckoutId, activeSessionId } = workspace.value;
+  return activeCheckoutId === fromCheckoutId && activeSessionId === sessionId;
+}
+
+/**
+ * Terminals whose move to a sibling worktree is already on its way.
+ *
+ * A terminal that is being moved is still in the old worktree until the move lands, so every
+ * signal that arrives meanwhile says the same thing again: the status poll every 750ms, and a
+ * relocation the service re-offers for half a minute. Asking twice is not harmless — the second
+ * move lands on a session that has already arrived and comes back as "already in that worktree",
+ * which is a message to the person reading it. One terminal, one move, until it finishes.
+ */
+const movingTerminals = new Set<string>();
+
+/**
+ * Hands a terminal to a sibling worktree of the same repository because it started working there,
+ * and brings the window with it when the policy says so.
+ *
+ * Both detectors end here — an OpenCode session that moved itself, and a shell that `cd`'d into a
+ * worktree — because the guards and the follow are the same for both, and the only thing that
+ * differs is which directory said where the work is.
+ *
+ * The directory is never changed by either: the program already moved itself, and its shell is
+ * sitting behind it with nothing at a prompt to read a `cd`.
+ */
+async function moveTerminalToWorktree(sessionId: string, fromCheckoutId: string, toCheckoutId: string) {
+  const repo = workspace.value.repos.find((candidate) =>
+    candidate.checkouts.some((checkout) => checkout.id === fromCheckoutId),
+  );
+  const target = repo?.checkouts.find((checkout) => checkout.id === toCheckoutId);
+  // A destination this app cannot label with a live worktree of the same repository is not one a
+  // session can be handed to; the backend refuses it, so it is not asked.
+  if (!repo || !target || target.isMissing) return;
+  const follow = windowFollowsMove(sessionId, fromCheckoutId);
+  // Decided before the move is taken, because the workspace it changes is the question: once the
+  // row has left, the checkout it left no longer holds the terminal that was in front of us.
+  if (movingTerminals.has(sessionId)) return;
+  movingTerminals.add(sessionId);
+  try {
+    // The pane reports whether the row actually moved, because a terminal with no live view does
+    // not move and the pane it was on is still the pane on screen.
+    if (!(await moveTerminalSession(sessionId, toCheckoutId, 0, false, follow)) || !follow) return;
+    // The same two steps a person clicking the row takes, so following looks like following: the
+    // destination's view names the terminal, and the caret goes to it once the pane has rendered.
+    // `giveBackToTerminal` is not claimed here: it is the close button's claim that a preview is
+    // finished with, and a terminal moving on its own is not a reader closing anything. Without it
+    // a split layout keeps whatever document or diff the destination was showing, which is what
+    // clicking the row does.
+    showView(toCheckoutId, { kind: "terminal", sessionId });
+    await nextTick();
+    mainPane.value?.focusActiveTerminal();
+  } finally {
+    movingTerminals.delete(sessionId);
+  }
+}
+
+/**
+ * Puts the terminal an OpenCode session left behind under the worktree that session moved to.
+ *
+ * The service reports that a session changed directory, not which terminal was showing it, and
+ * there is no route that would say: OpenCode 2.0.23 keeps no registry of TUI clients. So the
+ * terminal is named by the worktree it is in, by what is in front of its shell, and by the session
+ * the move names — this worktree's own OpenCode has to list that session, or the session belongs to
+ * somebody else and its move says nothing about a terminal here. A worktree with more than one
+ * OpenCode in it, or with none, is left alone. Guessing would put a terminal under a worktree whose
+ * files it is not working in, which is the one mistake this cannot recover from: the terminal is
+ * still there, reading the wrong tree.
+ */
+function followAgentRelocation({ sessionId, fromCheckoutId, toCheckoutId }: AgentRelocation) {
+  if (!settings.value.terminal.followAgentAcrossWorktrees) return;
+  const repo = workspace.value.repos.find((candidate) =>
+    candidate.checkouts.some((checkout) => checkout.id === fromCheckoutId),
+  );
+  const source = repo?.checkouts.find((checkout) => checkout.id === fromCheckoutId);
+  if (!source) return;
+  // The session that moved must be one this worktree's service lists. Nothing here can say which
+  // terminal had it open, but this much is a fact about the worktree rather than a guess about a
+  // process: a session another client opened in the same directory is not this row's session.
+  if (!terminalAgents.row(fromCheckoutId).sessionIds.includes(sessionId)) return;
+  const terminals = source.sessions.filter(
+    (session) => sessionRuntimeStatuses.value[session.id]?.foregroundApp === AGENT_APP,
+  );
+  if (terminals.length !== 1) return;
+  void moveTerminalToWorktree(terminals[0].id, fromCheckoutId, toCheckoutId);
 }
 
 /**

@@ -22,6 +22,14 @@ export interface TerminalSessionStatus {
    * installed and the moment before the first command finishes.
    */
   lastCommandExit?: number;
+  /**
+   * Where the shell itself is, as the OS records it. Absent once the terminal has exited, and when
+   * the OS will not say.
+   *
+   * This is what says a plain shell changed worktree: an agent that moved itself reports where it
+   * is working, but its shell is still sitting where it was launched.
+   */
+  workingDirectory?: string;
 }
 
 export interface Repo {
@@ -246,6 +254,48 @@ export function workdirIconKind(
   if (checkout.id === homeCheckoutId) return "home";
   if (repo?.kind !== "git") return "folder";
   return checkout.isPrimary ? "git" : "worktree";
+}
+
+/**
+ * Whether `child` is `parent` or somewhere under it, compared a whole segment at a time.
+ *
+ * A trailing separator is dropped and nothing else is normalised: the string this is given comes
+ * from the OS, and `/work/repo-wt-2` is not inside `/work/repo-wt` no matter how one prefixes the
+ * other.
+ */
+function containsDirectory(parent: string, child: string): boolean {
+  const trim = (value: string) => value.replace(/\/+$/, "");
+  const root = trim(parent);
+  return child === root || child.startsWith(`${root}/`);
+}
+
+/**
+ * The sibling worktree a terminal sitting in `fromCheckoutId` has changed directory into, if any.
+ *
+ * A sibling of the *same repository*, never another repo: two worktrees of one repo share a Git
+ * directory and a terminal may be handed between them, and a session labelled with another repo's
+ * tree is the one mistake a terminal cannot come back from. A directory inside no sibling answers
+ * nothing, and so does the checkout the terminal is already in — which is what keeps a shell from
+ * moving its own row over and over.
+ *
+ * Both `path` and `canonicalPath` are tried because the OS reports the directory as the kernel
+ * recorded it and the two are not always spelled the same way, as `/tmp` and `/private/tmp` show.
+ */
+export function checkoutForWorkingDirectory(
+  checkouts: Checkout[],
+  fromCheckoutId: string,
+  directory: string,
+): Checkout | null {
+  const from = checkouts.find((checkout) => checkout.id === fromCheckoutId);
+  if (!from) return null;
+  const target = checkouts.find(
+    (checkout) =>
+      checkout.id !== fromCheckoutId &&
+      checkout.repoId === from.repoId &&
+      !checkout.isMissing &&
+      (containsDirectory(checkout.canonicalPath, directory) || containsDirectory(checkout.path, directory)),
+  );
+  return target ?? null;
 }
 
 export function repoIdForPath(canonicalPath: string): string {

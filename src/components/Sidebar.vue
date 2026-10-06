@@ -479,7 +479,6 @@ function chooseDestination(sessionId: string, targetCheckoutId: string) {
  * `working` moves; the rest are states, and a state is noticed without moving.
  */
 type RowState = "working" | "waiting" | "failed" | "running" | "idle";
-
 /**
  * What each agent state is called, beside the glyph and the colour it wears.
  *

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentSessionTitle,
+  checkoutForWorkingDirectory,
   createCheckout,
   displayCheckoutPath,
   createPlainRepo,
@@ -41,6 +42,101 @@ function gitRepo(): Repo {
     lastOpenedAt: "2026-01-01T00:00:00Z",
   };
 }
+
+describe("checkoutForWorkingDirectory", () => {
+  const sibling = createCheckout({
+    repoId: "repo:/work/app",
+    path: "/work/app-feature",
+    canonicalPath: "/work/app-feature",
+    isPrimary: false,
+    branch: "feature",
+  });
+  const elsewhere = createCheckout({
+    repoId: "repo:/work/other",
+    path: "/work/other",
+    canonicalPath: "/work/other",
+    isPrimary: true,
+    branch: "main",
+  });
+  const root = createCheckout({
+    repoId: "repo:/work/app",
+    path: "/work/app",
+    canonicalPath: "/work/app",
+    isPrimary: true,
+    branch: "main",
+  });
+
+  it("names the sibling worktree a shell changed directory into, however deep", () => {
+    const checkouts = [root, sibling, elsewhere];
+
+    expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app-feature")?.id).toBe(sibling.id);
+    // A directory inside the worktree is still that worktree: nobody `cd`s into its root exactly.
+    expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app-feature/src/deep")?.id).toBe(sibling.id);
+    // A trailing separator is how a shell spells the root of the same directory.
+    expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app-feature/")?.id).toBe(sibling.id);
+  });
+
+  it("names nothing when the shell is where its row already says it is", () => {
+    // This is the case that would otherwise move the row over and over: after a move the shell's
+    // directory is inside the worktree its row now names.
+    const checkouts = [root, sibling, elsewhere];
+
+    expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app")).toBeNull();
+    expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app/src")).toBeNull();
+    expect(checkoutForWorkingDirectory(checkouts, sibling.id, "/work/app-feature/src")).toBeNull();
+  });
+
+  it("names nothing for a directory in no worktree, in another repo, or in a missing one", () => {
+    const missing = createCheckout({
+      repoId: "repo:/work/app",
+      path: "/work/app-gone",
+      canonicalPath: "/work/app-gone",
+      isPrimary: false,
+      branch: "gone",
+      isMissing: true,
+    });
+
+    expect(checkoutForWorkingDirectory([root, sibling], root.id, "/tmp")).toBeNull();
+    // Another repository shares no Git directory, so a terminal cannot be handed to it.
+    expect(checkoutForWorkingDirectory([root, elsewhere], root.id, "/work/other")?.id).not.toBe(elsewhere.id);
+    // A worktree whose directory is gone is not a place to work.
+    expect(checkoutForWorkingDirectory([root, missing], root.id, "/work/app-gone")).toBeNull();
+  });
+
+  it("compares the directory the OS spells against the worktree both ways", () => {
+    // macOS records `/var/...` as `/private/var/...`, and which of the two a checkout was stored
+    // under is not something this can normalise away.
+    const stored = createCheckout({
+      repoId: "repo:/work/app",
+      path: "/var/tmp/app",
+      canonicalPath: "/var/tmp/app",
+      isPrimary: true,
+      branch: "main",
+    });
+    const linked = createCheckout({
+      repoId: "repo:/work/app",
+      path: "/private/var/tmp/app",
+      canonicalPath: "/private/var/tmp/app",
+      isPrimary: false,
+      branch: "feature",
+    });
+
+    expect(checkoutForWorkingDirectory([stored, linked], stored.id, "/private/var/tmp/app")?.id).toBe(linked.id);
+  });
+
+  it("does not treat a longer sibling name as containing the shorter one", () => {
+    // `/work/app-feature-2` and `/work/app-feature` share a prefix and nothing else.
+    const longer = createCheckout({
+      repoId: "repo:/work/app",
+      path: "/work/app-feature-2",
+      canonicalPath: "/work/app-feature-2",
+      isPrimary: false,
+      branch: "other",
+    });
+
+    expect(checkoutForWorkingDirectory([root, sibling, longer], root.id, "/work/app-feature-2")?.id).toBe(longer.id);
+  });
+});
 
 describe("workspace domain", () => {
   it("shortens only paths inside the user's home directory", () => {

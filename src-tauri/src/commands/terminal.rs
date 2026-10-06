@@ -349,13 +349,14 @@ pub async fn terminal_move(
     checkout_id: String,
     session_id: String,
     target_checkout_id: String,
+    select_target: bool,
     database: State<'_, Database>,
 ) -> Result<WorkspaceState, IpcError> {
     let database = database.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         validate_session_owner(&database, &session_id, &checkout_id)?;
         database
-            .move_terminal_session(&session_id, &target_checkout_id)
+            .move_terminal_session(&session_id, &target_checkout_id, select_target)
             .map_err(operation_error)
     })
     .await

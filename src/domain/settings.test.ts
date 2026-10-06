@@ -42,6 +42,9 @@ describe("the settings file", () => {
         scrollbar: "hidden",
         changeDirectoryOnMove: false,
         shellIntegration: true,
+        followAgentAcrossWorktrees: true,
+        followDirectoryAcrossWorktrees: false,
+        followSelection: "visible" as const,
       },
       editor: { fontSize: 13, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
     });
@@ -64,6 +67,9 @@ describe("the settings file", () => {
         scrollbar: "always" as const,
         changeDirectoryOnMove: true,
         shellIntegration: false,
+        followAgentAcrossWorktrees: false,
+        followDirectoryAcrossWorktrees: true,
+        followSelection: "always" as const,
       },
       editor: { fontSize: 15, ligatures: false, cursorBlink: false, indentation: { useSpaces: false, size: 4 } },
     };

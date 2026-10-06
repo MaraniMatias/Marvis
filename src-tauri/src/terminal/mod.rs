@@ -239,12 +239,14 @@ impl TerminalBackend {
                 exit_code: Some(exit_code),
                 foreground_process: false,
                 foreground_app: None,
+                working_directory: None,
             },
             None => TerminalSessionStatus {
                 state: TerminalProcessState::Running,
                 exit_code: None,
                 foreground_process: session.foreground_process(),
                 foreground_app: session.foreground_app(),
+                working_directory: session.working_directory(),
             },
         })
     }
@@ -313,6 +315,17 @@ impl Session {
         (group != shell)
             .then(|| process::executable_name(group))
             .flatten()
+    }
+
+    /// The shell's own directory, which is the only one that says where this terminal is working.
+    ///
+    /// Asked of the shell rather than of the foreground group: a program in front changes its own
+    /// directory for reasons that have nothing to do with where the terminal is, and a terminal
+    /// whose row moved because a build ran with a `-C` flag would be moved by nothing the person
+    /// did.
+    fn working_directory(&self) -> Option<String> {
+        let shell = self.process_id?;
+        process::current_directory(shell).map(|directory| directory.to_string_lossy().into_owned())
     }
 
     fn foreground_group(&self) -> Option<u32> {

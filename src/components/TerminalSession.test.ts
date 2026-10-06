@@ -1364,7 +1364,7 @@ describe("TerminalSession UI", () => {
     await wrapper.vm.moveSession(created.session.id, target.id, 0);
     await flushPromises();
 
-    expect(moveTerminal).toHaveBeenCalledWith(checkout.id, created.session.id, target.id);
+    expect(moveTerminal).toHaveBeenCalledWith(checkout.id, created.session.id, target.id, true);
     expect(saveTerminalLayout).toHaveBeenCalledWith(
       target.id,
       expect.objectContaining({ sessionOrder: [created.session.id] }),

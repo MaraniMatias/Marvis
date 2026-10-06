@@ -282,6 +282,7 @@ fn main() {
             commands::app::frontend_diagnostic,
             commands::agent::agent_sessions,
             commands::agent::agent_candidate_sessions,
+            commands::agent::agent_relocations,
             commands::agent::agent_agents,
             commands::agent::agent_session_create,
             commands::agent::agent_prompt,

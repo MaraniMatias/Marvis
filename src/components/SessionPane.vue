@@ -210,27 +210,45 @@ async function requestClose(sessionId: string) {
  *
  * With `terminal.changeDirectoryOnMove` on, a shell sitting at a prompt is also told to `cd`. A
  * shell with something running in front of it is left where it is, and says so: typing `cd` into a
- * build would feed the build.
+ * build would feed the build. A caller that has already moved the program itself passes false:
+ * there is no shell at a prompt to tell, and announcing a `cd` that was never attempted would
+ * report a failure the user did not have.
+ *
+ * `selectTarget` is the same distinction one level up: a move someone asked for takes the window
+ * with it, and a move that happened on its own does not get to change what is on screen.
+ *
+ * Whether the row actually moved is returned rather than assumed. A terminal with no live view
+ * cannot move, and a caller that then pointed the window at the destination would leave the pane on
+ * screen empty without saying why.
  */
-async function moveSession(sessionId: string, targetCheckoutId: string, index: number) {
+async function moveSession(
+  sessionId: string,
+  targetCheckoutId: string,
+  index: number,
+  changeDirectory = true,
+  selectTarget = true,
+): Promise<boolean> {
   const view = views.value.find((item) => item.session?.id === sessionId);
   const target = (props.checkouts ?? []).find((checkout) => checkout.id === targetCheckoutId);
-  if (!view || !view.session || !target || target.isMissing) return;
-  const source = view.checkoutId;
-  // A drop in the terminal's own worktree is a reorder: the list it belongs to is the one that moves,
-  // and nothing else changes — not the terminal's directory, not which terminal is in front, not the
-  // backend, which has no notion of an order to keep.
-  if (source === targetCheckoutId) {
-    const layout = layouts.value[source] ?? createTerminalLayout([]);
-    void saveLayout(source, { ...layout, sessionOrder: moveSessionId(currentOrder(source), sessionId, index) });
-    return;
+  // A drop in the terminal's own worktree is a reorder, which is not a move at all: nothing about the
+  // terminal changes, and asking the backend about it would be refused. Checked before the target,
+  // because the target is what a reorder names and the reorder is what is really happening.
+  if (view && view.session && view.checkoutId === targetCheckoutId) {
+    const layout = layouts.value[view.checkoutId] ?? createTerminalLayout([]);
+    void saveLayout(view.checkoutId, {
+      ...layout,
+      sessionOrder: moveSessionId(currentOrder(view.checkoutId), sessionId, index),
+    });
+    return true;
   }
+  if (!view || !view.session || !target || target.isMissing) return false;
+  const source = view.checkoutId;
   let workspace: WorkspaceState;
   try {
-    workspace = await moveTerminal(source, sessionId, targetCheckoutId);
+    workspace = await moveTerminal(source, sessionId, targetCheckoutId, selectTarget);
   } catch (cause) {
     reportTerminalError(cause);
-    return;
+    return false;
   }
   view.checkoutId = targetCheckoutId;
   const moved = { ...view.session, checkoutId: targetCheckoutId };
@@ -247,7 +265,7 @@ async function moveSession(sessionId: string, targetCheckoutId: string, index: n
     sessionOrder: moveSessionId(orderedSessionIds(target.sessions, targetLayout), moved.id, index),
   });
   emit("workspaceUpdated", workspace);
-  if (!props.terminalSettings?.changeDirectoryOnMove) return;
+  if (!changeDirectory || !props.terminalSettings?.changeDirectoryOnMove) return true;
   // The pane's own checkout prop is what the session is written under, and the new one only
   // reaches the terminal on the next tick. Writing before that would address the `cd` to the
   // worktree the session just left, which the backend refuses.
@@ -257,6 +275,7 @@ async function moveSession(sessionId: string, targetCheckoutId: string, index: n
     // False also covers a rejected PTY write, whose actual error remains in the terminal alert.
     pushToast(`${target.path}: the terminal moved, but its directory was not changed.`);
   }
+  return true;
 }
 
 defineExpose({ focusActiveTerminal, requestClose, moveSession });

@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::{
     domain::{
-        agent::{AgentAgent, AgentSession},
+        agent::{AgentAgent, AgentRelocation, AgentSession},
         ipc::{IpcError, IpcErrorCode},
     },
     persistence::Database,
@@ -97,6 +97,27 @@ pub async fn agent_candidate_sessions(
             generation,
             || agents.candidate_sessions(&checkout_id, &directory),
         )
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+/// The sessions that have moved to another worktree since the last read.
+///
+/// There is no checkout to ask this of: the whole point is that a session has left the one it
+/// was in, so it is named by the workspace rather than by a directory to scope it to.
+#[tauri::command]
+pub async fn agent_relocations(
+    database: State<'_, Database>,
+    agents: State<'_, Arc<AgentService>>,
+) -> Result<Vec<AgentRelocation>, IpcError> {
+    let database = database.inner().clone();
+    let agents: Arc<AgentService> = Arc::clone(agents.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let checkouts = database
+            .checkout_directories()
+            .map_err(|error| IpcError::new(IpcErrorCode::InvalidCheckout, error))?;
+        agents.relocations(&checkouts).map_err(agent::map_error)
     })
     .await
     .map_err(operation_error)?

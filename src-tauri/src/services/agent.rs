@@ -44,7 +44,7 @@ use serde::Deserialize;
 
 use crate::{
     domain::{
-        agent::{agent_event_kind, AgentAgent, AgentSession},
+        agent::{agent_event_kind, AgentAgent, AgentRelocation, AgentSession},
         ipc::{IpcError, IpcErrorCode},
     },
     services::opencode::{self, ServiceEndpoint},
@@ -54,6 +54,26 @@ pub use crate::domain::agent::AgentEvent;
 
 /// The HTTP requests a bridge makes, which a service that is busy answering a turn can delay.
 const JSON_REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How many sessions one relocation read asks for.
+///
+/// The service answers with the newest fifty and, as measured against 2.0.23, ignores both this
+/// and `cursor`: fifty is a ceiling this side cannot raise. Sent anyway, because it costs nothing
+/// and a server that honours it widens the window for free.
+const SESSION_LIST_LIMIT: &str = "500";
+/// How long a session's last known worktree is kept once the reads stop naming it.
+///
+/// A session that is not in the page this read asked for, or whose directory is one this panel has
+/// no checkout for, keeps its last known position for this long rather than forever: the position
+/// is what turns a worktree registered later into a move, and a stale one is worse than a missing
+/// one.
+const SESSION_LOCATION_TTL: Duration = Duration::from_secs(300);
+/// How long a reported move is handed over again before it is given up on.
+///
+/// A move is a change in where a session works, and a terminal left in the worktree it left is
+/// reading the wrong tree, so the move is offered for longer than one poll is likely to take. It
+/// is not offered forever: a move nobody applied after this long is not going to be applied at
+/// all, and repeating it would keep trying to move a terminal that is no longer there.
+const PENDING_MOVES_TTL: Duration = Duration::from_secs(30);
 /// How long a freshly found service is given to answer for this checkout before the app says it
 /// is not there yet.
 const SERVER_READY_TIMEOUT: Duration = Duration::from_secs(5);
@@ -244,11 +264,11 @@ impl<T> ApiEnvelope<T> {
         Ok(self.data)
     }
 
-    /// Hands the payload over without asking which directory answered for it.
+    /// The payload of a request that asked for no directory in the first place.
     ///
-    /// An unscoped request has no directory to be foreign to: it asked for every location the
-    /// service knows, which is the whole point of the read that uses this. Measured against the
-    /// real service, the answer to one of those carries no `location` at all.
+    /// There is no scope to check such an answer against, so there is nothing to refuse and the
+    /// payload is handed back as it arrived. The only caller is [`AgentBridge::session_locations`],
+    /// which asks across every location precisely because the scope is what it cannot use.
     fn into_unscoped_data(self) -> T {
         self.data
     }
@@ -492,6 +512,44 @@ impl AgentBridge {
             .send_json(body),
         )?;
         envelope.into_scoped(self.directory())
+    }
+
+    /// Every session the service lists, with the directory it is in, across every location.
+    ///
+    /// This is the one read that is deliberately not scoped, and it exists because a session
+    /// that moves cannot be seen from where it was: `?directory=` filters the list by where a
+    /// session is now, so a session that left stops answering for the directory it left and
+    /// nothing reports that it went anywhere. Read without the scope, the same session is still
+    /// there under its new directory, which is the only thing that makes a move observable.
+    ///
+    /// Nothing here is addressed by the answer: the caller matches each directory against the
+    /// checkouts it already knows and drops the rest, so no directory this app has no checkout
+    /// for crosses into the UI. Subagent sessions are left out (`parentID=null`) because they
+    /// follow their parent and would report the same move twice.
+    ///
+    /// `limit` is sent, and 2.0.23 answers with fifty sessions whatever it is set to: measured against
+    /// the running service, `limit=5`, `limit=50` and `limit=500` all return the newest fifty, and
+    /// `cursor.next` returns that same page again. So fifty is a ceiling this read cannot raise
+    /// from here, and the parameter is kept because it costs nothing and a server that honours it
+    /// would only widen the window. What makes the ceiling tolerable is that a move is a recent
+    /// event: a session that just changed worktree is among the newest fifty. A session that moved
+    /// and then went quiet long enough to fall out of the page is dropped by
+    /// [`SESSION_LOCATION_TTL`] and is only picked up again as new.
+    fn session_locations(&self) -> Result<Vec<(String, PathBuf)>, BridgeError> {
+        let url = format!("{}/api/session", self.base_url());
+        let envelope: ApiEnvelope<Vec<ApiSession>> = send_json(retry_interrupted(|| {
+            with_timeout(self.client.get(&url), JSON_REQUEST_TIMEOUT)
+                .query("parentID", "null")
+                .query("limit", SESSION_LIST_LIMIT)
+                .header("authorization", self.auth_header())
+                .header("accept", "application/json")
+                .call()
+        }))?;
+        Ok(envelope
+            .into_unscoped_data()
+            .into_iter()
+            .filter_map(|raw| Some((raw.id, PathBuf::from(raw.location?.directory))))
+            .collect())
     }
 
     /// The session ids the service is draining a turn for, as its own answer rather than an
@@ -1809,6 +1867,31 @@ fn read_candidates(bridge: &AgentBridge, budget: Duration) -> Result<CandidateRe
     })
 }
 
+/// The last worktree this panel could name for a session, and when it was last read.
+///
+/// `checkout_id` is kept even while the session's directory is one this panel has no checkout for.
+/// That is the whole point: a session that walks into a worktree Marvis has not registered yet is
+/// the commonest case there is, and forgetting where it was makes that worktree look like a
+/// session appearing for the first time, which is never a move.
+#[derive(Debug, Clone)]
+struct SessionLocation {
+    /// The last checkout the session was seen in, held while its directory is not one of them.
+    checkout_id: Option<String>,
+    seen: Instant,
+}
+
+/// A move that has been reported but might not have arrived.
+///
+/// Delivery is not something the reader can be trusted with: a caller that throws its answer away,
+/// or a window that goes away mid-poll, would lose the move for good if the record were deleted
+/// the moment it was handed over. So a reported move stays here and is handed over again, and only
+/// drops when the session moves on or when [`PENDING_MOVES_TTL`] says nobody collected it.
+#[derive(Debug, Clone)]
+struct PendingMove {
+    relocation: AgentRelocation,
+    since: Instant,
+}
+
 /// Owns one server per checkout for the app's lifetime.
 pub struct AgentService {
     bridges: Mutex<HashMap<String, Arc<BridgeSlot>>>,
@@ -1821,6 +1904,11 @@ pub struct AgentService {
     catalogs: Mutex<HashMap<String, Cached<Arc<Vec<AgentAgent>>>>>,
     removal_state: Arc<Mutex<RemovalState>>,
     busy_turns: Arc<Mutex<HashMap<String, HashMap<String, TrackedTurn>>>>,
+    /// Where each session was at the last relocation read, keyed by session id. See
+    /// [`AgentService::relocations`], which is the only thing that reads or writes it.
+    session_locations: Mutex<HashMap<String, SessionLocation>>,
+    /// Moves that have been reported and might not have arrived. See [`PendingMove`].
+    pending_moves: Mutex<HashMap<String, PendingMove>>,
     sink: Mutex<Option<EventSink>>,
     launcher: Arc<BridgeLauncher>,
     finder: Arc<EndpointFinder>,
@@ -1921,6 +2009,8 @@ impl AgentService {
             catalogs: Mutex::new(HashMap::new()),
             removal_state: Arc::new(Mutex::new(RemovalState::default())),
             busy_turns: Arc::new(Mutex::new(HashMap::new())),
+            session_locations: Mutex::new(HashMap::new()),
+            pending_moves: Mutex::new(HashMap::new()),
             sink: Mutex::new(None),
             launcher,
             finder,
@@ -2439,6 +2529,136 @@ impl AgentService {
         }
     }
 
+    /// Sessions that are working in a worktree of `checkouts` other than the one they were in.
+    ///
+    /// `checkouts` is every checkout the panel holds with the directory it lives in, and it is
+    /// the whole of the world this answer is allowed to talk about: a session in a directory
+    /// that is not one of these is somebody else's session and is dropped rather than reported.
+    ///
+    /// The previous read is what a move is a change from, so it is kept here rather than in the
+    /// caller, and it is keyed by session id. A session seen for the first time seeds that record
+    /// instead of counting as a move: nothing has moved yet, and a session that has always been in
+    /// its worktree would otherwise move on the first read after an app launch.
+    ///
+    /// What a read does *not* see does not erase what the last one saw. A session that walks into
+    /// a worktree this panel has no checkout for yet keeps the worktree it came from, so the move
+    /// is still reported when that worktree is registered, which is the commonest case there is:
+    /// the agent creates the worktree and walks into it. An entry that goes unread for
+    /// [`SESSION_LOCATION_TTL`] is dropped, because a position that old says nothing about where a
+    /// session is now.
+    ///
+    /// A move is offered again on every read for [`PENDING_MOVES_TTL`]. Handing one over is the
+    /// only thing this side can do about delivery: the caller is a poll that may throw its answer
+    /// away, and nothing here can tell whether it did, so the record outlives the first delivery.
+    /// Repeating a move is safe, because the terminal is looked up in the worktree it left and a
+    /// move already applied leaves nothing there to move.
+    pub fn relocations(
+        &self,
+        checkouts: &[(String, PathBuf)],
+    ) -> Result<Vec<AgentRelocation>, BridgeError> {
+        // Any live bridge reads every location, so the read is asked of one that is already
+        // connected rather than of one this call would connect. A bridge is opened for a
+        // checkout the panel is already talking to, which is also the only kind of checkout a
+        // session can move out of, so there is nothing to be gained by opening another one for
+        // a worktree nobody has a terminal in — and an event reader would be left running.
+        let anchor = {
+            let bridges = self
+                .bridges
+                .lock()
+                .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
+            checkouts
+                .iter()
+                .find(|(checkout_id, _)| bridges.contains_key(checkout_id))
+                .cloned()
+        };
+        let Some((anchor_id, anchor_directory)) = anchor else {
+            return Ok(Vec::new());
+        };
+        let bridge = self.bridge(&anchor_id, &anchor_directory)?;
+        let located = bridge.session_locations()?;
+        self.record_relocations(checkouts, located, Instant::now())
+    }
+
+    /// What changed between the last read and this one, together with what is still owed.
+    ///
+    /// Split out from the read so that time can be given rather than waited for: both windows
+    /// here are what stops a stale record from outliving its usefulness, and neither can be
+    /// checked by sleeping in a test.
+    fn record_relocations(
+        &self,
+        checkouts: &[(String, PathBuf)],
+        located: Vec<(String, PathBuf)>,
+        now: Instant,
+    ) -> Result<Vec<AgentRelocation>, BridgeError> {
+        let mut known = self
+            .session_locations
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
+        known.retain(|_, entry| now.duration_since(entry.seen) <= SESSION_LOCATION_TTL);
+        let mut pending = self
+            .pending_moves
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
+        pending.retain(|_, entry| now.duration_since(entry.since) <= PENDING_MOVES_TTL);
+        // A move already reported goes out again: handing one over is the only thing this process
+        // can do about delivery, and a caller that dropped the first copy has no other way to know.
+        let mut moved: Vec<AgentRelocation> = pending
+            .values()
+            .map(|entry| entry.relocation.clone())
+            .collect();
+        for (session_id, directory) in located {
+            // A session whose directory is not a checkout of this workspace is not news, and
+            // naming it would be reporting on a project this app has no worktree for. It is not
+            // forgotten either: its last known worktree is what the move is read from when the
+            // worktree it walked into is registered.
+            let named = checkouts
+                .iter()
+                .find(|(_, candidate)| same_directory(candidate, &directory))
+                .map(|(checkout_id, _)| checkout_id.clone());
+            match known.get_mut(&session_id) {
+                Some(entry) => {
+                    entry.seen = now;
+                    if let (Some(was), Some(checkout_id)) = (&entry.checkout_id, &named) {
+                        if was != checkout_id {
+                            let relocation = AgentRelocation {
+                                session_id: session_id.clone(),
+                                from_checkout_id: was.clone(),
+                                to_checkout_id: checkout_id.clone(),
+                            };
+                            // A session that moved twice is only where it is now; the earlier hop
+                            // is not something to hand over again.
+                            pending.insert(
+                                session_id.clone(),
+                                PendingMove {
+                                    relocation,
+                                    since: now,
+                                },
+                            );
+                            moved.push(AgentRelocation {
+                                session_id,
+                                from_checkout_id: was.clone(),
+                                to_checkout_id: checkout_id.clone(),
+                            });
+                        }
+                    }
+                    if named.is_some() {
+                        entry.checkout_id = named;
+                    }
+                }
+                None => {
+                    known.insert(
+                        session_id,
+                        SessionLocation {
+                            checkout_id: named,
+                            seen: now,
+                        },
+                    );
+                }
+            }
+        }
+        Ok(moved)
+    }
+
     /// Every session the checkout's server knows about, with the service's own running answer.
     pub fn sessions(
         &self,
@@ -2908,8 +3128,10 @@ mod tests {
         PendingReadFailure, RemovalState, ServerCredentials, StreamLoss, CANDIDATE_SESSION_LIMIT,
         DIRECTORY_HEADER, INTERRUPTED_READ_ATTEMPTS, INTERRUPTED_REQUEST, JSON_REQUEST_TIMEOUT,
         MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES,
-        MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES, PENDING_READ_CONCURRENCY,
+        MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES, PENDING_MOVES_TTL, PENDING_READ_CONCURRENCY,
+        SESSION_LIST_LIMIT,
     };
+    use crate::domain::agent::AgentRelocation;
     use crate::services::opencode::ServiceEndpoint;
 
     fn test_event_bridge(directory: &Path, port: u16) -> AgentBridge {
@@ -4537,6 +4759,236 @@ mod tests {
             .find(|(name, _)| name.eq_ignore_ascii_case(DIRECTORY_HEADER))
             .expect("every request should name the directory it is scoped to");
         assert_eq!(header.1, path);
+    }
+
+    /// A session that changes directory is the only sign of the move, and it can only be seen by
+    /// reading every location at once: with `?directory=` set, the session is simply not in the
+    /// list its old worktree asks for.
+    #[test]
+    fn relocations_report_a_session_that_changed_worktree_and_nothing_else() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let elsewhere = tempfile::tempdir().unwrap();
+        let first_path = first.path().to_string_lossy().into_owned();
+        let second_path = second.path().to_string_lossy().into_owned();
+        let elsewhere_path = elsewhere.path().to_string_lossy().into_owned();
+        let checkouts = vec![
+            ("first".to_string(), first.path().to_path_buf()),
+            ("second".to_string(), second.path().to_path_buf()),
+        ];
+        let located = |session_id: &str, directory: &str| {
+            serde_json::json!({
+                "id": session_id,
+                "location": {"directory": directory}
+            })
+        };
+        let (port, server) = mock_json_responses(vec![
+            // Opens the bridge the relocation reads are then asked of. A session can only have
+            // moved out of a checkout the panel is already talking to, and a read that connected
+            // to a worktree nobody has a terminal in would leave an event reader running.
+            serde_json::json!({"data": [{"id": "build", "name": "Build", "mode": "primary"}]}),
+            // The first read only records where each session is. A session that has always been
+            // in a worktree has not moved, and saying it has would move a terminal on launch.
+            serde_json::json!({"data": [
+                located("ses_stayed", &first_path),
+                located("ses_moved", &first_path),
+                located("ses_foreign", &elsewhere_path),
+            ]}),
+            serde_json::json!({"data": [
+                located("ses_stayed", &first_path),
+                located("ses_moved", &second_path),
+                located("ses_foreign", &elsewhere_path),
+            ]}),
+            // A session that appears for the first time is not a relocation either.
+            serde_json::json!({"data": [
+                located("ses_stayed", &first_path),
+                located("ses_moved", &second_path),
+                located("ses_late", &first_path),
+            ]}),
+            serde_json::json!({"data": [
+                located("ses_stayed", &first_path),
+                located("ses_moved", &second_path),
+                located("ses_late", &first_path),
+            ]}),
+        ]);
+        let agents = AgentService::with_test_server(port);
+
+        // Nothing is connected yet, so there is nothing to ask and nothing is opened to ask it.
+        assert!(agents.relocations(&checkouts).unwrap().is_empty());
+        agents.agents("first", first.path()).unwrap();
+        assert!(agents.relocations(&checkouts).unwrap().is_empty());
+        let moved = vec![AgentRelocation {
+            session_id: "ses_moved".to_string(),
+            from_checkout_id: "first".to_string(),
+            to_checkout_id: "second".to_string(),
+        }];
+        assert_eq!(agents.relocations(&checkouts).unwrap(), moved);
+        // The next read brings a session that has just appeared, which is not a move, and the move
+        // from before is offered again. Handing one over is the only thing this side can do about
+        // delivery, and repeating it costs nothing: the terminal is looked up in the worktree it
+        // left, and a move already applied leaves nothing there to move.
+        assert_eq!(agents.relocations(&checkouts).unwrap(), moved);
+        assert_eq!(agents.relocations(&checkouts).unwrap(), moved);
+        // A workspace with no checkout has nothing to match a session against, so it never asks.
+        assert!(agents.relocations(&[]).unwrap().is_empty());
+
+        let requests = server.join().expect("mock server should finish");
+        assert_eq!(requests.len(), 5);
+        for request in &requests[1..] {
+            // `limit` is asked for even though 2.0.23 answers with fifty whatever it says: it costs nothing
+            // and a server that honours it would widen the window.
+            assert_eq!(
+                request.0,
+                format!("GET /api/session?parentID=null&limit={SESSION_LIST_LIMIT} HTTP/1.1")
+            );
+            // Unscoped on purpose: naming a directory here is what hides the move. Auth is not.
+            assert!(!request
+                .3
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(DIRECTORY_HEADER)));
+            assert_eq!(request.1, crate::services::opencode::authorization("test"));
+        }
+    }
+
+    /// The commonest move there is: the agent walks into a worktree Marvis has not registered yet,
+    /// and the worktree only appears on the panel afterwards. Forgetting where the session came
+    /// from when it was somewhere this panel had no checkout for would leave the row behind for
+    /// good, which is the one outcome the whole feature exists to prevent.
+    #[test]
+    fn relocations_survive_a_worktree_that_is_registered_after_the_session_arrives() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let first_path = first.path().to_string_lossy().into_owned();
+        let second_path = second.path().to_string_lossy().into_owned();
+        let located = |session_id: &str, directory: &str| serde_json::json!({"id": session_id, "location": {"directory": directory}});
+        let (port, server) = mock_json_responses(vec![
+            serde_json::json!({"data": [{"id": "build", "name": "Build", "mode": "primary"}]}),
+            serde_json::json!({"data": [located("ses_walk", &first_path)]}),
+            // The session is already in the new worktree, and this panel has no checkout for it.
+            serde_json::json!({"data": [located("ses_walk", &second_path)]}),
+            serde_json::json!({"data": [located("ses_walk", &second_path)]}),
+        ]);
+        let agents = AgentService::with_test_server(port);
+
+        // Only the first worktree is on the panel to begin with.
+        let registered = vec![("first".to_string(), first.path().to_path_buf())];
+        agents.agents("first", first.path()).unwrap();
+        assert!(agents.relocations(&registered).unwrap().is_empty());
+        // The session walks into a directory this panel cannot name. Nothing is reported, because
+        // there is no destination to report, and nothing is forgotten.
+        assert!(agents.relocations(&registered).unwrap().is_empty());
+
+        // The worktree is registered afterwards, and the move the panel could not name while it
+        // happened is reported now.
+        let with_both = vec![
+            ("first".to_string(), first.path().to_path_buf()),
+            ("second".to_string(), second.path().to_path_buf()),
+        ];
+        assert_eq!(
+            agents.relocations(&with_both).unwrap(),
+            vec![AgentRelocation {
+                session_id: "ses_walk".to_string(),
+                from_checkout_id: "first".to_string(),
+                to_checkout_id: "second".to_string(),
+            }]
+        );
+
+        server.join().expect("mock server should finish");
+    }
+
+    /// The service answers with the newest fifty whatever `limit` says, so a session that goes
+    /// quiet falls out of the read. That must not read as a session that has just appeared: the
+    /// worktree it was in is kept until the entry is old enough to say nothing at all.
+    #[test]
+    fn a_session_that_falls_out_of_the_read_keeps_the_worktree_it_was_in() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let checkouts = vec![
+            ("first".to_string(), first.path().to_path_buf()),
+            ("second".to_string(), second.path().to_path_buf()),
+        ];
+        let located = |directory: &Path| vec![("ses_quiet".to_string(), directory.to_path_buf())];
+        let agents = AgentService::with_test_server(0);
+        let start = Instant::now();
+
+        assert!(agents
+            .record_relocations(&checkouts, located(first.path()), start)
+            .unwrap()
+            .is_empty());
+        // Out of the page: the read does not mention it at all, and nothing is reported.
+        assert!(agents
+            .record_relocations(&checkouts, Vec::new(), start + Duration::from_secs(2))
+            .unwrap()
+            .is_empty());
+        // It comes back in the worktree it moved to. That is still a move, not a new session.
+        assert_eq!(
+            agents
+                .record_relocations(
+                    &checkouts,
+                    located(second.path()),
+                    start + Duration::from_secs(4)
+                )
+                .unwrap(),
+            vec![AgentRelocation {
+                session_id: "ses_quiet".to_string(),
+                from_checkout_id: "first".to_string(),
+                to_checkout_id: "second".to_string(),
+            }]
+        );
+    }
+
+    /// A move is handed over again because this side cannot know whether the caller kept it, and it
+    /// stops being handed over once nobody has taken it: a terminal that stayed behind for the
+    /// whole window is not going to move now, and asking again forever would be asking to move a
+    /// terminal that is no longer there.
+    #[test]
+    fn a_reported_move_is_offered_again_until_nobody_takes_it() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let checkouts = vec![
+            ("first".to_string(), first.path().to_path_buf()),
+            ("second".to_string(), second.path().to_path_buf()),
+        ];
+        let located = |directory: &Path| vec![("ses_walk".to_string(), directory.to_path_buf())];
+        let agents = AgentService::with_test_server(0);
+        let start = Instant::now();
+        let moved = vec![AgentRelocation {
+            session_id: "ses_walk".to_string(),
+            from_checkout_id: "first".to_string(),
+            to_checkout_id: "second".to_string(),
+        }];
+
+        assert!(agents
+            .record_relocations(&checkouts, located(first.path()), start)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            agents
+                .record_relocations(&checkouts, located(second.path()), start)
+                .unwrap(),
+            moved
+        );
+        // Read again well inside the window: the move is offered once more, because the read that
+        // got it is not known to have kept it.
+        assert_eq!(
+            agents
+                .record_relocations(
+                    &checkouts,
+                    located(second.path()),
+                    start + PENDING_MOVES_TTL / 2
+                )
+                .unwrap(),
+            moved
+        );
+        // Past the window nobody has taken it, and a move this old says nothing about now.
+        assert!(agents
+            .record_relocations(
+                &checkouts,
+                located(second.path()),
+                start + PENDING_MOVES_TTL * 2
+            )
+            .unwrap()
+            .is_empty());
     }
 
     #[test]

@@ -26,6 +26,16 @@ export const TERMINAL_CURSOR_STYLES = ["block", "bar", "underline"] as const;
 
 export type TerminalCursorStyle = (typeof TERMINAL_CURSOR_STYLES)[number];
 
+/**
+ * Whether the window follows a terminal that moved to another worktree on its own.
+ *
+ * `visible` and `always`, and nothing else: not following leaves an empty pane, which is an answer
+ * nobody picks on purpose. See [`TerminalSettings.followSelection`].
+ */
+export const TERMINAL_FOLLOW_SELECTIONS = ["visible", "always"] as const;
+
+export type TerminalFollowSelection = (typeof TERMINAL_FOLLOW_SELECTIONS)[number];
+
 export interface UiSettings {
   /** CSS pixels. The whole interface's type scale is a ratio of this one number. */
   fontSize: number;
@@ -67,6 +77,33 @@ export interface TerminalSettings {
    * Applies only to new terminals; terminals already open keep their hooks.
    */
   shellIntegration: boolean;
+  /**
+   * Whether an OpenCode session that starts working in another worktree takes its terminal with it.
+   *
+   * On by default because the terminal is otherwise left under the worktree it left, still running
+   * there while the agent works somewhere else, and nothing in the sidebar says so.
+   */
+  followAgentAcrossWorktrees: boolean;
+  /**
+   * Whether a shell that changes directory into another worktree moves its terminal to it.
+   *
+   * Off by default. The terminal follows only when the directory is a worktree of the same
+   * repository, and only for a shell with no agent in front of it: an agent that moved itself is
+   * reported by `followAgentAcrossWorktrees`, and its shell has not changed directory.
+   */
+  followDirectoryAcrossWorktrees: boolean;
+  /**
+   * Whether the window follows a terminal that moved on its own.
+   *
+   * `visible` follows the destination only when the moved terminal is the one on screen, so a
+   * terminal you were not looking at moves in the sidebar without the pane you are in changing
+   * under you. `always` follows every move, background ones included.
+   *
+   * There is no "never": the pane on screen renders the worktree it is pointed at, so a terminal
+   * that leaves without the window following leaves an empty pane behind. Not moving is the one
+   * answer that offers nothing.
+   */
+  followSelection: TerminalFollowSelection;
 }
 
 export interface IndentationSettings {
@@ -118,6 +155,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
     scrollbar: "hidden",
     changeDirectoryOnMove: false,
     shellIntegration: true,
+    followAgentAcrossWorktrees: true,
+    followDirectoryAcrossWorktrees: false,
+    followSelection: "visible",
   },
   editor: {
     fontSize: 13,
@@ -133,6 +173,10 @@ export function isTerminalScrollbarMode(value: unknown): value is TerminalScroll
 
 export function isTerminalCursorStyle(value: unknown): value is TerminalCursorStyle {
   return TERMINAL_CURSOR_STYLES.some((style) => style === value);
+}
+
+export function isTerminalFollowSelection(value: unknown): value is TerminalFollowSelection {
+  return TERMINAL_FOLLOW_SELECTIONS.some((selection) => selection === value);
 }
 
 export function isThemePreference(value: unknown): value is ThemePreference {
@@ -187,6 +231,17 @@ export function normalizeSettings(value: unknown): AppSettings {
       scrollbar: isTerminalScrollbarMode(terminal.scrollbar) ? terminal.scrollbar : DEFAULT_SETTINGS.terminal.scrollbar,
       changeDirectoryOnMove: flag(terminal.changeDirectoryOnMove, DEFAULT_SETTINGS.terminal.changeDirectoryOnMove),
       shellIntegration: flag(terminal.shellIntegration, DEFAULT_SETTINGS.terminal.shellIntegration),
+      followAgentAcrossWorktrees: flag(
+        terminal.followAgentAcrossWorktrees,
+        DEFAULT_SETTINGS.terminal.followAgentAcrossWorktrees,
+      ),
+      followDirectoryAcrossWorktrees: flag(
+        terminal.followDirectoryAcrossWorktrees,
+        DEFAULT_SETTINGS.terminal.followDirectoryAcrossWorktrees,
+      ),
+      followSelection: isTerminalFollowSelection(terminal.followSelection)
+        ? terminal.followSelection
+        : DEFAULT_SETTINGS.terminal.followSelection,
     },
     editor: {
       fontSize: boundedNumber(editor.fontSize, EDITOR_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.editor.fontSize),
@@ -219,6 +274,9 @@ export type SettingsPath =
   | "terminal.scrollbar"
   | "terminal.changeDirectoryOnMove"
   | "terminal.shellIntegration"
+  | "terminal.followAgentAcrossWorktrees"
+  | "terminal.followDirectoryAcrossWorktrees"
+  | "terminal.followSelection"
   | "editor.fontSize"
   | "editor.ligatures"
   | "editor.cursorBlink"
@@ -375,6 +433,31 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         label: "Report failed commands",
         description:
           "Reports command failures in zsh and bash without clearing shell startup output. Other shells keep their normal configuration without command reporting. Applies to new terminals only.",
+      },
+      {
+        kind: "toggle",
+        path: "terminal.followAgentAcrossWorktrees",
+        label: "Follow an agent to another worktree",
+        description:
+          "An OpenCode session that starts working in another worktree takes its terminal with it. The terminal keeps running and its directory is left alone, because the agent moved itself.",
+      },
+      {
+        kind: "toggle",
+        path: "terminal.followDirectoryAcrossWorktrees",
+        label: "Follow a shell that changes worktree",
+        description:
+          "A shell that runs cd into another worktree of the same repository moves its terminal there. Not for a terminal with an agent in front of it: the agent reports where it is working, and its shell has not moved.",
+      },
+      {
+        kind: "select",
+        path: "terminal.followSelection",
+        label: "Follow the window",
+        description: "Which moves take the window with them.",
+        options: [
+          { value: "visible", label: "Only what I am looking at" },
+          { value: "always", label: "Every move" },
+        ],
+        parse: IDENTIFIER,
       },
     ],
   },

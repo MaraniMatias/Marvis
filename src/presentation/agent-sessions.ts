@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { onScopeDispose, reactive, watch } from "vue";
 import type { ComputedRef } from "vue";
-import type { AgentAttention, AgentAgent, AgentEvent, AgentSession } from "../domain/agent";
+import type { AgentAttention, AgentAgent, AgentEvent, AgentRelocation, AgentSession } from "../domain/agent";
 import {
   agentAttention,
   agentColor,
@@ -16,6 +16,7 @@ import {
   createAgentSession,
   listAgentAgents,
   listAgentCandidateSessions,
+  listAgentRelocations,
   listAgentSessions,
   stopAgent,
 } from "../lib/ipc";
@@ -70,6 +71,16 @@ const BUSY_POLL_MS = 2000;
  * receives. Named for the cadence rather than for one of its two callers.
  */
 const SLOW_POLL_MS = 5000;
+
+/**
+ * How often to ask where every session is working.
+ *
+ * The turn that moves a session also ends it, and this app hears a turn end only by reading
+ * again, so a poll that stopped while everything was idle would be the poll that was not
+ * running when the move happened. This one does not stop: it is one request to a server on the
+ * same machine, and it is the only way a change made inside someone's own TUI is ever seen.
+ */
+const RELOCATION_POLL_MS = 2000;
 
 function errorText(cause: unknown): string {
   return isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
@@ -446,6 +457,15 @@ export interface TerminalAgentRow {
    * that says nothing rather than a session that says the wrong thing.
    */
   readonly sessions: TerminalAgentSession[];
+  /**
+   * The ids of those sessions, which is what a reported move is checked against.
+   *
+   * The list above carries titles because a terminal row matches its own TUI's title against them;
+   * a relocation arrives naming a session by id and has to be refused unless this worktree's own
+   * service knows that id. Both are asked of the same read, so the ids are kept rather than read
+   * again.
+   */
+  readonly sessionIds: readonly string[];
 }
 
 export interface TerminalAgentRows {
@@ -512,7 +532,7 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
   /** Checkouts with a turn running, so the poll knows there is something to wait for. */
   const busy = new Set<string>();
 
-  const row = (checkoutId: string): TerminalAgentRow => byCheckout[checkoutId] ?? { sessions: [] };
+  const row = (checkoutId: string): TerminalAgentRow => byCheckout[checkoutId] ?? { sessions: [], sessionIds: [] };
 
   async function read(checkoutId: string): Promise<TerminalAgentRow> {
     // The repository-wide list, not the worktree's own: a terminal's session is not necessarily
@@ -536,6 +556,7 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
           updatedAt: session.updatedAt,
         };
       }),
+      sessionIds: sessions.map((session) => session.id),
     };
   }
 
@@ -571,7 +592,7 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
         } catch {
           // A service that is not run leaves the row with no session to match, which is the state
           // to wait in rather than a failure to report.
-          return [checkoutId, { sessions: [] as TerminalAgentSession[] }] as const;
+          return [checkoutId, { sessions: [] as TerminalAgentSession[], sessionIds: [] }] as const;
         }
       }),
     );
@@ -676,4 +697,46 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
   });
 
   return { byCheckout, row, reload };
+}
+
+/**
+ * Reports the OpenCode sessions that have started working in another worktree.
+ *
+ * OpenCode records the directory a session works in and changes it when an agent is sent to work
+ * somewhere else, which is what its TUI shows at the footer. That directory is the only sign of
+ * the move there is, and it can only be read across every location at once, because a session
+ * that has left stops answering for the one it left. The backend keeps the previous read, so
+ * what arrives here is a change rather than a position.
+ *
+ * It says nothing about which terminal a session belongs to, and nothing here decides: see the
+ * note at the top of `services/agent.rs`. `onRelocated` is handed the two checkouts and is the
+ * only place a row is moved, because a caller that has the terminal list is the only one that
+ * can tell which terminal a session is behind.
+ */
+export function useAgentRelocations(onRelocated: (relocation: AgentRelocation) => void): void {
+  let generation = 0;
+  let disposed = false;
+
+  async function reload() {
+    const request = ++generation;
+    try {
+      const moved = await listAgentRelocations();
+      // A read that was superseded mid-flight must not move a terminal on a stale answer, and one
+      // that answers after the scope is gone must not move a terminal at all: the timer is
+      // cleared on dispose, but a read already dispatched is still in flight and its callback
+      // would run against a window that is closing.
+      if (disposed || request !== generation) return;
+      for (const relocation of moved) onRelocated(relocation);
+    } catch {
+      // A service that is not run has moved nothing, which is the state to wait in rather than
+      // a failure to report.
+    }
+  }
+
+  void reload();
+  const timer = setInterval(() => void reload(), RELOCATION_POLL_MS);
+  onScopeDispose(() => {
+    disposed = true;
+    clearInterval(timer);
+  });
 }

@@ -402,7 +402,7 @@ describe("SessionPane terminal UI", () => {
     await wrapper.vm.moveSession("session:live", target.id, 0);
     await flushPromises();
 
-    expect(moveTerminal).toHaveBeenCalledWith(checkout.id, "session:live", target.id);
+    expect(moveTerminal).toHaveBeenCalledWith(checkout.id, "session:live", target.id, true);
     expect(terminalMock.mounts).toBe(1);
     expect(terminalMock.closeRequests).toBe(0);
     // The layout that had the pane gives it up, and the one that gained it takes it. The gained layout
@@ -642,6 +642,37 @@ describe("SessionPane terminal UI", () => {
     await flushPromises();
 
     expect(moveTerminal).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("leaves the window where it was when a move that happened on its own asks it to", async () => {
+    // A session that moved by itself does not get to decide what the window is showing.
+    terminalMock.autoCreate = true;
+    const target: Checkout = { ...checkout, id: "checkout:/work/repo-wt", path: "/work/repo-wt" };
+    vi.mocked(moveTerminal).mockResolvedValue({ repos: [], activeCheckoutId: checkout.id, activeSessionId: null });
+    const wrapper = mount(SessionPane, {
+      props: {
+        checkout,
+        checkouts: [checkout, target],
+        activeSessionId: null,
+        isOpening: true,
+        shellRequest: null,
+        terminalSettings: DEFAULT_SETTINGS.terminal,
+      },
+    });
+    await wrapper.setProps({
+      isOpening: false,
+      shellRequest: { checkoutId: checkout.id, token: 1 },
+      activeSessionId: "session:live",
+      registeredSessionIds: ["session:live"],
+    });
+    await flushPromises();
+
+    await wrapper.vm.moveSession("session:live", target.id, 0, false, false);
+    await flushPromises();
+
+    expect(moveTerminal).toHaveBeenCalledWith(checkout.id, "session:live", target.id, false);
+    expect(terminalMock.directoryChanges).toEqual([]);
     wrapper.unmount();
   });
 
