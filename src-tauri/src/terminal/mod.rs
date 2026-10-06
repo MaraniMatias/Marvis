@@ -66,6 +66,9 @@ struct StartupState {
     /// keystroke that arrives first is a command the shell reads before the line that was supposed to
     /// come before it — the line then never registers and the session silently reports no exit codes
     /// for the rest of its life.
+    ///
+    /// Only the startup thread ever sets this for a session that has a line, and it sets it on every
+    /// one of its exits, which is what lets `await_startup_line` wait here with no deadline of its own.
     ready: bool,
 }
 
@@ -1208,7 +1211,10 @@ const STARTUP_QUIET: Duration = Duration::from_millis(250);
 /// releases input either way, so the cost of giving up is only the missing markers.
 const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How often the wait looks at the clock, which is also the shortest it will sleep.
+/// How often the startup thread looks at its own deadline, which is also the shortest it will sleep.
+///
+/// Only that thread polls. The gate in `await_startup_line` waits on the condvar with no timeout at
+/// all, because it has nothing to time out against.
 const STARTUP_POLL: Duration = Duration::from_millis(10);
 
 /// Writes the line a program was spawned with, once it is at a prompt.
@@ -1228,7 +1234,12 @@ const STARTUP_POLL: Duration = Duration::from_millis(10);
 ///
 /// What this wait must not become is a way for the two to race, because the line's script clears the
 /// screen and a command the user had already run would go with it. The gate in `await_startup_line` is
-/// what holds that ordering, and it is why this function can afford to take its time.
+/// what holds that ordering, and it is why this function can afford to take its time — the gate has no
+/// deadline, so however long this takes, a keystroke waits behind it rather than overtaking it.
+///
+/// This thread is also the only thing that ever sets `ready` for a session that has a startup line,
+/// and it does so on all three of its exits: after writing the line, on the timeout below, and on a
+/// close. That is what lets `await_startup_line` wait without a deadline of its own.
 ///
 /// A close or a shutdown while this is waiting ends it: the session is on its way out and the line
 /// has nowhere left to go. Nothing here reports an error for that, because a session that closed
@@ -1287,47 +1298,42 @@ impl Session {
 /// A no-op for every session without a startup line, which is most of them and all of them once the
 /// setting is off.
 ///
-/// It deliberately has **no deadline of its own**, and that is load-bearing rather than tidy. The
-/// gate exists so that the startup line is the first thing this shell reads; a deadline here would
-/// let the gate give up while the line was still pending, and then the two would race. The deadline
-/// this used to carry was measured from *the keystroke*, while the startup thread's is measured from
-/// *that thread's first scheduling*, so a keystroke that arrived in between — before the thread had
-/// run at all — would expire first, put the user's command into the shell, and only then have the
-/// startup line written behind it. With a clear in the sourced script that destroys the command
-/// rather than merely reordering it.
+/// It has **no deadline of its own**, and that is load-bearing rather than tidy: *the gate never
+/// gives up on a line that is still going to be written.* The gate exists so that the startup line is
+/// the first thing this shell reads, and a deadline here lets the two race — a keystroke is put into
+/// the shell, and the startup line is written behind it, where the sourced script's clear destroys
+/// that command rather than merely reordering it.
 ///
-/// `install_startup_line` sets `ready` on every exit path — after writing the line, on the timeout,
-/// and on a close — so waiting on it cannot hang. `STARTUP_BACKSTOP` below is here only so that a
-/// thread which somehow never ran cannot wedge input forever; by then that thread cannot write either,
-/// which is what keeps this from reintroducing the race it removes.
+/// A deadline here cannot be made safe by choosing a value. The one this used to carry was measured
+/// from *the keystroke*, while the startup thread's is measured from *that thread's first
+/// scheduling*, so the two expire in an order that depends on when the OS got round to the thread. A
+/// backstop far beyond `STARTUP_TIMEOUT` did not fix that, only narrowed it: it is the same race with
+/// a longer fuse, and the way to reach it — a startup thread that is spawned but has not run — is
+/// exactly the way in which the line is still pending and still going to be written. The gate cannot
+/// tell those apart, because both look like a line that has not gone out.
+///
+/// So the answer is not a longer clock but the fact that waiting here cannot hang. `spawn` starts the
+/// thread with `thread::Builder::spawn` and returns an error without registering the session if that
+/// fails, so every session reachable through `write` has one. That thread sets `ready` on all three
+/// of its exits — after writing the line, on its own `STARTUP_TIMEOUT`, and on a close — so `ready`
+/// arrives without this function ever having to invent it. `the_gate_does_not_give_up_on_a_startup_
+/// line_that_is_still_pending` is the test for that.
+///
+/// No lock is taken while `startup` is held, and `write_to_session` takes `writer` without holding
+/// `startup`, so there is no `startup` → `writer` edge here to order against anything: the only two
+/// holders of `startup` are this function and the startup thread, neither of which writes.
 fn await_startup_line(session: &Session) {
-    let backstop = Instant::now() + STARTUP_BACKSTOP;
     let mut startup = session
         .startup
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
     while !startup.ready {
-        let remaining = backstop.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            // Only reachable if the startup thread never ran, which is the one case where there is no
-            // line to be overtaken by.
-            startup.ready = true;
-            break;
-        }
-        let (guard, _timed_out) = session
+        startup = session
             .startup_changed
-            .wait_timeout(startup, remaining.min(STARTUP_POLL))
+            .wait(startup)
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        startup = guard;
     }
 }
-
-/// How long input may wait for a startup line that will never come.
-///
-/// Far longer than `STARTUP_TIMEOUT` on purpose: the startup thread has resolved by then in every
-/// case that is not a thread which failed to run at all, so this is a backstop against a wedged
-/// session and not part of the ordering.
-const STARTUP_BACKSTOP: Duration = Duration::from_secs(60);
 
 /// The one way bytes reach a shell, so `closing` is checked once and everything that writes goes
 /// through the same refusal.
@@ -1365,14 +1371,14 @@ mod tests {
         io::{self, Write},
         path::PathBuf,
         sync::{
-            atomic::{AtomicUsize, Ordering},
-            mpsc, Arc, Mutex,
+            atomic::{AtomicBool, AtomicUsize, Ordering},
+            mpsc, Arc, Condvar, Mutex,
         },
         thread,
         time::{Duration, Instant},
     };
 
-    use portable_pty::{Child, ChildKiller, ExitStatus};
+    use portable_pty::{native_pty_system, Child, ChildKiller, ExitStatus, PtySize};
     use tempfile::tempdir;
 
     #[cfg(unix)]
@@ -1382,9 +1388,9 @@ mod tests {
     #[cfg(unix)]
     use super::{process_group_exists, signal_group_with, GroupSignal, REAP_POLL_INTERVAL};
     use super::{
-        start_child_reaper, ChildState, OutputGate, OutputSink, SpawnOptions, TerminalBackend,
-        MAX_TERMINAL_INPUT_BYTES, OUTPUT_HIGH_WATER_BYTES, OUTPUT_LOW_WATER_BYTES,
-        OUTPUT_RESUME_TIMEOUT, STARTUP_BACKSTOP, STARTUP_TIMEOUT,
+        start_child_reaper, ChildState, OutputGate, OutputSink, Session, SessionEntry, SpawnOptions,
+        StartupState, TerminalBackend, MAX_TERMINAL_INPUT_BYTES, OUTPUT_HIGH_WATER_BYTES,
+        OUTPUT_LOW_WATER_BYTES, OUTPUT_RESUME_TIMEOUT, STARTUP_BACKSTOP, STARTUP_TIMEOUT,
     };
 
     fn spawn(
@@ -1599,10 +1605,6 @@ mod tests {
             elapsed >= STARTUP_TIMEOUT,
             "the write went through before the startup line was given up: {elapsed:?}"
         );
-        assert!(
-            elapsed < STARTUP_BACKSTOP,
-            "the write was held far longer than it needed to be: {elapsed:?}"
-        );
         // And the bytes really did arrive, rather than the write being refused.
         let deadline = Instant::now() + Duration::from_secs(3);
         let mut seen = false;
@@ -1613,6 +1615,82 @@ mod tests {
         }
         assert!(seen, "input was released but never reached the shell");
         backend.close("silent").unwrap();
+    }
+
+    /// The other half of the same ordering: the gate must not hand input over while the startup line
+    /// is still pending, however long that takes.
+    ///
+    /// `a_keystroke_never_overtakes_the_startup_line` covers the ordering while the startup thread is
+    /// alive and settling. This covers the other way the two can cross, which is the gate giving up.
+    /// The only state in which the line is still pending long after the startup thread's own
+    /// `STARTUP_TIMEOUT` is a thread that has been spawned and has not run yet — which is what a
+    /// loaded machine does, and which the gate's sixty-second backstop did not stop it doing. A
+    /// keystroke let through at sixty seconds is a command the startup line then arrives behind, and
+    /// the line clears the screen, so that command is not reordered but destroyed.
+    ///
+    /// The session is assembled here rather than spawned because this is the one state the spawn path
+    /// cannot be asked for: a spawn whose startup thread failed to start registers no session at all,
+    /// and one whose thread does start resolves within `STARTUP_TIMEOUT` of running, so a real spawn
+    /// releases input through the thread in both cases and never through a gate timeout. Sixty seconds
+    /// is a long time to ask of a test suite, and it is asked for here because the alternative is
+    /// asserting that a constant exists rather than that a deadline does not.
+    #[test]
+    fn the_gate_does_not_give_up_on_a_startup_line_that_is_still_pending() {
+        let pair = native_pty_system()
+            .openpty(PtySize {
+                rows: 24,
+                cols: 80,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .unwrap();
+        // A spawn that reached its startup thread and one whose thread failed to start are both
+        // accounted for in the doc comment above; what is left is the session itself, with a line
+        // still owed to it and nothing yet to say so.
+        let session = Arc::new(Session {
+            master: Mutex::new(pair.master),
+            writer: Mutex::new(Box::new(io::sink())),
+            child: Mutex::new(ChildState {
+                child: None,
+                exit_code: Some(0),
+                child_released: true,
+            }),
+            process_id: None,
+            #[cfg(unix)]
+            terminal_session_id: None,
+            closing: AtomicBool::new(false),
+            startup: Mutex::new(StartupState {
+                ready: false,
+                ..StartupState::default()
+            }),
+            startup_changed: Condvar::new(),
+        });
+        let backend = Arc::new(TerminalBackend::default());
+        backend
+            .sessions
+            .lock()
+            .unwrap()
+            .insert("pending".into(), SessionEntry::Active(Arc::clone(&session)));
+
+        let (wrote, is_written) = mpsc::channel();
+        let writer = Arc::clone(&backend);
+        thread::spawn(move || {
+            let _ = writer.write("pending", b"echo TYPED_FIRST\n");
+            let _ = wrote.send(());
+        });
+
+        // The gate used to carry a sixty-second backstop for this, so a wait past it is what
+        // distinguishes the two: before, the write came through with the line still owed.
+        assert!(
+            is_written.recv_timeout(Duration::from_secs(62)).is_err(),
+            "input was released while the startup line was still pending"
+        );
+        // And it is held by the line rather than by anything being wrong: the write goes through as
+        // soon as the thread that owns the line says so.
+        session.release_startup_input();
+        is_written
+            .recv_timeout(Duration::from_secs(5))
+            .expect("input stayed blocked after the startup line was resolved");
     }
 
     #[test]
