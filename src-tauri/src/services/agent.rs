@@ -944,19 +944,13 @@ fn is_interrupted(error: &ureq::Error) -> bool {
     matches!(error, ureq::Error::Io(error) if error.kind() == io::ErrorKind::Interrupted)
 }
 
-/// How an interrupted request is reported, kept as one wording so a caller can recognize it.
-const INTERRUPTED_REQUEST: &str = "an agent request was interrupted by a signal";
-
-/// Whether this failure is a signal ending the syscall rather than a server that could not answer.
+/// How an interrupted request is reported.
 ///
-/// Asking again is the caller's call and not always safe: a repeated prompt reaches the server
-/// twice, so the routes that cannot absorb that report this instead of retrying. No route can
-/// today, which is why this is test-only; it is here so the caller that can is written against a
-/// predicate rather than against the wording.
-#[cfg(test)]
-pub(crate) fn is_interrupted_request(error: &BridgeError) -> bool {
-    matches!(error, BridgeError::Unavailable(message) if message.starts_with(INTERRUPTED_REQUEST))
-}
+/// A signal can end the syscall a request is sitting in, and nothing is lost: no reply arrived and
+/// the connection is still the one that was opened. Saying so is more honest than claiming the
+/// server cannot be reached, and it is the one error a caller may be tempted to repeat, so the
+/// wording is worth keeping in one place.
+const INTERRUPTED_REQUEST: &str = "an agent request was interrupted by a signal";
 
 /// Parses the `{data: …}` envelope every route replies with.
 fn send_json<T: serde::de::DeserializeOwned>(
@@ -2065,13 +2059,13 @@ mod tests {
     };
 
     use super::{
-        event_from_payload, event_stream, generation_scoped_sink, is_interrupted,
-        is_interrupted_request, join_reader, read_bounded_line, read_sse_frame, ready,
-        remove_slot_if_current, retry_interrupted, same_directory, status_detail,
-        validate_session_id, AgentBridge, AgentEvent, AgentService, BridgeError, BridgeState,
-        BridgeStopper, EventSink, RemovalState, ServerCredentials, DIRECTORY_HEADER,
-        INTERRUPTED_READ_ATTEMPTS, INTERRUPTED_REQUEST, MAX_EVENT_HEADERS_BYTES,
-        MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
+        event_from_payload, event_stream, generation_scoped_sink, is_interrupted, join_reader,
+        read_bounded_line, read_sse_frame, ready, remove_slot_if_current, retry_interrupted,
+        same_directory, send_json, status_detail, validate_session_id, AgentBridge, AgentEvent,
+        AgentService, BridgeError, BridgeState, BridgeStopper, EventSink, RemovalState,
+        ServerCredentials, DIRECTORY_HEADER, INTERRUPTED_READ_ATTEMPTS, INTERRUPTED_REQUEST,
+        MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES,
+        MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
     };
     use crate::services::opencode::ServiceEndpoint;
 
@@ -4121,20 +4115,25 @@ mod tests {
     }
 
     #[test]
-    fn only_an_interrupted_syscall_is_reported_as_one() {
-        let interrupted = BridgeError::Unavailable(format!(
-            "{INTERRUPTED_REQUEST}: {}",
-            io::Error::from(io::ErrorKind::Interrupted)
-        ));
-        assert!(is_interrupted_request(&interrupted));
+    fn an_interrupted_syscall_is_not_reported_as_an_unreachable_server() {
+        let interrupted = send_json::<serde_json::Value>(Err(ureq::Error::Io(io::Error::from(
+            io::ErrorKind::Interrupted,
+        ))))
+        .expect_err("an interrupted request did not answer");
+
+        let message = match interrupted {
+            BridgeError::Unavailable(message) => message,
+            other => {
+                panic!("an interrupted request is not a server that could not answer: {other:?}")
+            }
+        };
         assert!(
-            !is_interrupted_request(&BridgeError::Unavailable(
-                "the agent server is not reachable: connection refused".into()
-            )),
-            "a server that could not answer is not something a caller may ask again"
+            message.starts_with(INTERRUPTED_REQUEST),
+            "a signal ended the syscall, and saying so beats claiming the server is gone: {message}"
         );
-        assert!(!is_interrupted_request(&BridgeError::Failed(
-            "could not read the reply".into()
-        )));
+        assert!(
+            message.contains(&io::Error::from(io::ErrorKind::Interrupted).to_string()),
+            "the cause is kept for whoever reads it: {message}"
+        );
     }
 }

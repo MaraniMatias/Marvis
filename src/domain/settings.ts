@@ -110,15 +110,11 @@ export const DEFAULT_SETTINGS: AppSettings = {
   },
 };
 
-export function isTerminalScrollbarMode(
-  value: unknown,
-): value is TerminalScrollbarMode {
+export function isTerminalScrollbarMode(value: unknown): value is TerminalScrollbarMode {
   return TERMINAL_SCROLLBAR_MODES.some((mode) => mode === value);
 }
 
-export function isTerminalCursorStyle(
-  value: unknown,
-): value is TerminalCursorStyle {
+export function isTerminalCursorStyle(value: unknown): value is TerminalCursorStyle {
   return TERMINAL_CURSOR_STYLES.some((style) => style === value);
 }
 
@@ -126,21 +122,13 @@ export function isThemePreference(value: unknown): value is ThemePreference {
   return THEME_PREFERENCES.some((preference) => preference === value);
 }
 
-function boundedNumber(
-  value: unknown,
-  limits: { min: number; max: number },
-  fallback: number,
-) {
+function boundedNumber(value: unknown, limits: { min: number; max: number }, fallback: number) {
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isFinite(number)) return fallback;
   return Math.min(limits.max, Math.max(limits.min, number));
 }
 
-function boundedInteger(
-  value: unknown,
-  limits: { min: number; max: number },
-  fallback: number,
-) {
+function boundedInteger(value: unknown, limits: { min: number; max: number }, fallback: number) {
   const number = typeof value === "number" ? value : Number(value);
   if (!Number.isInteger(number)) return fallback;
   return Math.min(limits.max, Math.max(limits.min, number));
@@ -160,66 +148,34 @@ export function normalizeSettings(value: unknown): AppSettings {
   const ui = (raw.ui ?? {}) as Partial<UiSettings>;
   const terminal = (raw.terminal ?? {}) as Partial<TerminalSettings>;
   const editor = (raw.editor ?? {}) as Partial<EditorSettings>;
-  const indentation = (editor.indentation ??
-    {}) as Partial<IndentationSettings>;
+  const indentation = (editor.indentation ?? {}) as Partial<IndentationSettings>;
   return {
     ui: {
-      fontSize: boundedNumber(
-        ui.fontSize,
-        UI_FONT_SIZE_LIMITS,
-        DEFAULT_SETTINGS.ui.fontSize,
-      ),
+      fontSize: boundedNumber(ui.fontSize, UI_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.ui.fontSize),
       zoom: normalizeZoom(ui.zoom),
       theme: isThemePreference(ui.theme) ? ui.theme : DEFAULT_SETTINGS.ui.theme,
       contentBackground:
-        typeof ui.contentBackground === "string" &&
-        /^#[\da-fA-F]{6}$/.test(ui.contentBackground)
+        typeof ui.contentBackground === "string" && /^#[\da-fA-F]{6}$/.test(ui.contentBackground)
           ? ui.contentBackground.toLowerCase()
           : DEFAULT_SETTINGS.ui.contentBackground,
     },
     terminal: {
-      fontSize: boundedNumber(
-        terminal.fontSize,
-        TERMINAL_FONT_SIZE_LIMITS,
-        DEFAULT_SETTINGS.terminal.fontSize,
-      ),
+      fontSize: boundedNumber(terminal.fontSize, TERMINAL_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.terminal.fontSize),
       ligatures: flag(terminal.ligatures, DEFAULT_SETTINGS.terminal.ligatures),
-      cursorBlink: flag(
-        terminal.cursorBlink,
-        DEFAULT_SETTINGS.terminal.cursorBlink,
-      ),
+      cursorBlink: flag(terminal.cursorBlink, DEFAULT_SETTINGS.terminal.cursorBlink),
       cursorStyle: isTerminalCursorStyle(terminal.cursorStyle)
         ? terminal.cursorStyle
         : DEFAULT_SETTINGS.terminal.cursorStyle,
-      scrollbar: isTerminalScrollbarMode(terminal.scrollbar)
-        ? terminal.scrollbar
-        : DEFAULT_SETTINGS.terminal.scrollbar,
-      changeDirectoryOnMove: flag(
-        terminal.changeDirectoryOnMove,
-        DEFAULT_SETTINGS.terminal.changeDirectoryOnMove,
-      ),
+      scrollbar: isTerminalScrollbarMode(terminal.scrollbar) ? terminal.scrollbar : DEFAULT_SETTINGS.terminal.scrollbar,
+      changeDirectoryOnMove: flag(terminal.changeDirectoryOnMove, DEFAULT_SETTINGS.terminal.changeDirectoryOnMove),
     },
     editor: {
-      fontSize: boundedNumber(
-        editor.fontSize,
-        EDITOR_FONT_SIZE_LIMITS,
-        DEFAULT_SETTINGS.editor.fontSize,
-      ),
+      fontSize: boundedNumber(editor.fontSize, EDITOR_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.editor.fontSize),
       ligatures: flag(editor.ligatures, DEFAULT_SETTINGS.editor.ligatures),
-      cursorBlink: flag(
-        editor.cursorBlink,
-        DEFAULT_SETTINGS.editor.cursorBlink,
-      ),
+      cursorBlink: flag(editor.cursorBlink, DEFAULT_SETTINGS.editor.cursorBlink),
       indentation: {
-        useSpaces: flag(
-          indentation.useSpaces,
-          DEFAULT_SETTINGS.editor.indentation.useSpaces,
-        ),
-        size: boundedInteger(
-          indentation.size,
-          INDENTATION_SIZE_LIMITS,
-          DEFAULT_SETTINGS.editor.indentation.size,
-        ),
+        useSpaces: flag(indentation.useSpaces, DEFAULT_SETTINGS.editor.indentation.useSpaces),
+        size: boundedInteger(indentation.size, INDENTATION_SIZE_LIMITS, DEFAULT_SETTINGS.editor.indentation.size),
       },
     },
   };
@@ -303,8 +259,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         kind: "number",
         path: "ui.fontSize",
         label: "Font size",
-        description:
-          "Scales every size the interface draws itself in, from the sidebar to the dialogs.",
+        description: "Scales every size the interface draws itself in, from the sidebar to the dialogs.",
         limits: UI_FONT_SIZE_LIMITS,
         unit: "px",
       },
@@ -312,8 +267,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         kind: "select",
         path: "ui.theme",
         label: "Theme",
-        description:
-          "The app's light and dark palettes; code keeps its own colors.",
+        description: "The app's light and dark palettes; code keeps its own colors.",
         options: [
           { value: "system", label: "System" },
           { value: "light", label: "Light" },
@@ -355,8 +309,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         kind: "toggle",
         path: "terminal.ligatures",
         label: "Ligatures",
-        description:
-          "Joins the sequences the font draws as one glyph, such as => or !=.",
+        description: "Joins the sequences the font draws as one glyph, such as => or !=.",
       },
       {
         kind: "select",
@@ -418,8 +371,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         kind: "number",
         path: "editor.indentation.size",
         label: "Indent size",
-        description:
-          "Columns one level of indent is, whether it is spaces or a tab stop.",
+        description: "Columns one level of indent is, whether it is spaces or a tab stop.",
         limits: INDENTATION_SIZE_LIMITS,
         unit: "cols",
       },
@@ -447,14 +399,10 @@ export function cloneSettings(settings: AppSettings): AppSettings {
 }
 
 /** Reads one field out of the settings, as the string a select's trigger is showing. */
-export function valueAt(
-  settings: AppSettings,
-  path: SettingsPath,
-): SettingsValue {
+export function valueAt(settings: AppSettings, path: SettingsPath): SettingsValue {
   const keys = path.split(".");
   let branch = settings as unknown as Record<string, unknown>;
-  for (const key of keys.slice(0, -1))
-    branch = branch[key] as Record<string, unknown>;
+  for (const key of keys.slice(0, -1)) branch = branch[key] as Record<string, unknown>;
   return branch[keys.at(-1)!] as SettingsValue;
 }
 
@@ -463,11 +411,7 @@ export function valueAt(
  * replaces its draft wholesale on Reset, and a tree that was edited in place is not the tree that
  * got replaced.
  */
-export function withValue(
-  settings: AppSettings,
-  path: SettingsPath,
-  value: SettingsValue,
-): AppSettings {
+export function withValue(settings: AppSettings, path: SettingsPath, value: SettingsValue): AppSettings {
   const next = cloneSettings(settings) as unknown as Record<string, unknown>;
   const keys = path.split(".");
   const leaf = keys.pop()!;
