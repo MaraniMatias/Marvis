@@ -679,25 +679,123 @@ describe("TerminalSession UI", () => {
     wrapper.unmount();
   });
 
-  it("requires confirmation before closing a running shell", async () => {
-    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  it("closes a shell at a prompt without asking, because nothing is lost", async () => {
+    const confirm = vi.spyOn(window, "confirm");
+    vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running", foregroundProcess: false });
     const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
     await flushPromises();
 
     await wrapper.vm.requestClose();
     await flushPromises();
-    expect(confirm).toHaveBeenCalledWith(
-      "This terminal session is still running. Close the session and stop its process?",
-    );
-    expect(closeTerminal).not.toHaveBeenCalled();
-
-    confirm.mockReturnValue(true);
-    await wrapper.vm.requestClose();
-    await flushPromises();
+    // A shell at a prompt is `running` too, and the browser's dialog is never reached: it is not the
+    // app's own, and nothing is being stopped.
+    expect(confirm).not.toHaveBeenCalled();
     expect(closeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new");
     expect(wrapper.emitted("closed")).toHaveLength(1);
     wrapper.unmount();
     confirm.mockRestore();
+  });
+
+  it("asks in the app's own dialog before stopping a process, and cancelling stops nothing", async () => {
+    const confirm = vi.spyOn(window, "confirm");
+    vi.mocked(getTerminalStatus).mockResolvedValue({
+      state: "running",
+      foregroundProcess: true,
+      foregroundApp: "pnpm",
+    });
+    const wrapper = mount(TerminalSession, {
+      props: { checkoutId: "checkout:repo", name: "web", active: true },
+    });
+    await flushPromises();
+
+    await wrapper.vm.requestClose();
+    await flushPromises();
+    // Asked where the rest of the app asks, and about what: the terminal by the name it is called and
+    // the program that would be stopped. A native confirm could say neither.
+    const dialog = document.body.querySelector('[role="dialog"]')!;
+    expect(dialog.textContent).toContain("web");
+    expect(dialog.textContent).toContain("pnpm");
+    expect(confirm).not.toHaveBeenCalled();
+    expect(closeTerminal).not.toHaveBeenCalled();
+
+    // Cancel, or Escape: the process is left running and the terminal keeps what it printed.
+    (dialog.querySelector("footer button") as HTMLButtonElement).click();
+    await flushPromises();
+    expect(closeTerminal).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("asks outside the pane that asked, so a terminal that is not on screen still shows its question", async () => {
+    // The measured bug: `SessionPane` keeps every terminal mounted with `v-show`, so a pane that is
+    // not the active one is `display: none` rather than gone — and it still answers. A dialog drawn
+    // inside that pane existed in the DOM and could not be seen, which is why closing a background
+    // terminal with a build in it asked a question nobody could reach. Only `body` is outside it.
+    vi.mocked(getTerminalStatus).mockResolvedValue({
+      state: "running",
+      foregroundProcess: true,
+      foregroundApp: "pnpm",
+    });
+    const hidden = document.createElement("div");
+    hidden.style.display = "none";
+    document.body.appendChild(hidden);
+    const wrapper = mount(TerminalSession, {
+      props: { checkoutId: "checkout:repo", name: "web", active: true },
+      attachTo: hidden,
+    });
+    await flushPromises();
+
+    await wrapper.vm.requestClose();
+    await flushPromises();
+
+    const dialog = document.body.querySelector('[role="dialog"]');
+    expect(dialog).not.toBeNull();
+    // Outside the hidden subtree, which is the only thing that could have taken it out of sight.
+    expect(hidden.contains(dialog)).toBe(false);
+    expect(dialog?.textContent).toContain("pnpm");
+    expect(closeTerminal).not.toHaveBeenCalled();
+
+    // And the answer still reaches the terminal that asked, from outside its own pane.
+    const buttons = dialog?.querySelectorAll("footer button") ?? [];
+    (buttons[buttons.length - 1] as HTMLButtonElement).click();
+    await flushPromises();
+    expect(closeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new");
+
+    wrapper.unmount();
+    hidden.remove();
+  });
+
+  it("stops the process once the question is answered yes", async () => {
+    vi.mocked(getTerminalStatus).mockResolvedValue({
+      state: "running",
+      foregroundProcess: true,
+      foregroundApp: "pnpm",
+    });
+    const wrapper = mount(TerminalSession, {
+      props: { checkoutId: "checkout:repo", name: "web", active: true },
+    });
+    await flushPromises();
+
+    await wrapper.vm.requestClose();
+    await flushPromises();
+    const buttons = document.body.querySelectorAll('[role="dialog"] footer button');
+    (buttons[buttons.length - 1] as HTMLButtonElement).click();
+    await flushPromises();
+    expect(closeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new");
+    expect(wrapper.emitted("closed")).toHaveLength(1);
+    wrapper.unmount();
+  });
+
+  it("closes nothing when the status read fails, because 'unknown' is not 'nothing running'", async () => {
+    vi.mocked(getTerminalStatus).mockRejectedValue(new Error("the backend is unreachable"));
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    await wrapper.vm.requestClose();
+    await flushPromises();
+    expect(closeTerminal).not.toHaveBeenCalled();
+    expect(document.body.querySelector('[role="dialog"]')).toBeNull();
+    expect(wrapper.get('[role="alert"]').text()).toContain("the backend is unreachable");
+    wrapper.unmount();
   });
 
   it("launches a terminal without any prompt, because reviews go to the agent bridge", async () => {
@@ -985,7 +1083,7 @@ describe("TerminalSession UI", () => {
     expect(terminalSession.exists()).toBe(true);
     vi.mocked(writeTerminal).mockRejectedValueOnce(error);
 
-    await wrapper.vm.moveSession(created.session.id, target.id);
+    await wrapper.vm.moveSession(created.session.id, target.id, 0);
     await flushPromises();
 
     expect(moveTerminal).toHaveBeenCalledWith(checkout.id, created.session.id, target.id);

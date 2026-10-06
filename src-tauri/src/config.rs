@@ -421,7 +421,10 @@ mod tests {
         std::fs::write(
             &path,
             concat!(
-                "ui:\n  fontSize: .nan\n  zoom: 99\n  theme: solarized\n",
+                // `sidebarLayout` is a key an older build wrote and this one has no field for. It is
+                // here to say what happens to it: an unknown key is ignored, like any other line a
+                // person typed, and the file still loads. Nothing reads it and nothing migrates it.
+                "ui:\n  fontSize: .nan\n  zoom: 99\n  theme: solarized\n  sidebarLayout: wide\n",
                 "terminal:\n  fontSize: 2\n  cursorStyle: beam\n  scrollbar: sometimes\n",
                 "editor:\n  fontSize: 400\n  indentation:\n    size: 0\n",
             ),

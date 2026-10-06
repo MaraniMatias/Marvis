@@ -264,12 +264,21 @@ describe("UI foreground tokens", () => {
     expect(fileDiffTemplate).toContain(".diff-line-syntax-raw");
   });
 
-  it("keeps pinned agent labels readable on hovered and selected rows", () => {
-    const rule = block(".workdir-item:hover .workdir-meta-pinned .agent-chip,", sidebarStyles);
-    expect(rule).toContain("color: var(--marvis-text);");
+  it("keeps the sidebar's two row surfaces readable", () => {
+    // The panel has two surfaces again and both carry text: the hover surface, and — now that
+    // selection has its own — the selected tint. The primary ink has to be readable on each in both
+    // palettes, and the close cross paints whichever of the two its row is on, so it never reads as
+    // a hole in the row.
+    expect(block(".workdir-row:hover {", sidebarStyles)).toContain("background: var(--marvis-el-hover);");
+    expect(block(".workdir-row.selected {", sidebarStyles)).toContain("background: var(--marvis-el-selected);");
+    expect(block(".workdir-row.selected {", sidebarStyles)).toContain("color: var(--marvis-text);");
+    expect(block(".workdir-close {", sidebarStyles)).toContain("background: var(--marvis-bg-1);");
     for (const theme of Object.values(themes)) {
       const foreground = token(theme, "--marvis-text");
       expectReadable(foreground, token(theme, "--marvis-el-hover"));
+      expectReadable(foreground, token(theme, "--marvis-el-selected"));
+      // The selected row's glyph is primary ink rather than the secondary one a context glyph wears,
+      // because on the selected tint the secondary ink is under the contrast floor.
       expectReadable(foreground, token(theme, "--marvis-el-selected"));
     }
   });

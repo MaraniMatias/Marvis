@@ -71,6 +71,37 @@ pub async fn agent_sessions(
     .map_err(operation_error)?
 }
 
+/// The candidate sessions a sidebar row matches its terminal's own title against.
+///
+/// Deliberately separate from `agent_sessions`: that one is scoped to the worktree because a review
+/// round must not be sent somewhere the reader did not ask about, and a row needs a wider list than
+/// that. See [`AgentService::candidate_sessions`].
+#[tauri::command]
+pub async fn agent_candidate_sessions(
+    checkout_id: String,
+    database: State<'_, Database>,
+    agents: State<'_, Arc<AgentService>>,
+) -> Result<Vec<AgentSession>, IpcError> {
+    let generation = agents
+        .checkout_generation(&checkout_id)
+        .map_err(agent::map_error)?;
+    let database = database.inner().clone();
+    let agents: Arc<AgentService> = Arc::clone(agents.inner());
+    tauri::async_runtime::spawn_blocking(move || {
+        let directory = checkout_directory(&database, &checkout_id)?;
+        with_current_checkout(
+            &database,
+            &agents,
+            &checkout_id,
+            &directory,
+            generation,
+            || agents.candidate_sessions(&checkout_id, &directory),
+        )
+    })
+    .await
+    .map_err(operation_error)?
+}
+
 #[tauri::command]
 pub async fn agent_agents(
     checkout_id: String,

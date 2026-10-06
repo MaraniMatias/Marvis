@@ -195,6 +195,23 @@ export function listAgentSessions(checkoutId: string): Promise<AgentSession[]> {
   return invoke<AgentSession[]>("agent_sessions", { checkoutId });
 }
 
+/**
+ * The candidate sessions a terminal row matches its own title against.
+ *
+ * Deliberately not `listAgentSessions`: that list is scoped to the worktree, which is what a review
+ * round needs, while a terminal's session is not necessarily located in the worktree the terminal is
+ * filed under. A terminal grouped under one worktree can have a session open that lives in a sibling
+ * one, and a scoped list can never name it — so the row says it identified nothing, with no state and
+ * no colour, while the agent is working.
+ *
+ * As wide as the service answers, which is wider than this repository: nothing here is trusted, and a
+ * candidate only becomes a row's state when its title matches exactly one of them. Prompting one by id
+ * still refuses a session from another directory.
+ */
+export function listAgentCandidateSessions(checkoutId: string): Promise<AgentSession[]> {
+  return invoke<AgentSession[]>("agent_candidate_sessions", { checkoutId });
+}
+
 /** Every agent the checkout's server offers, with the color OpenCode paints it with. */
 export function listAgentAgents(checkoutId: string): Promise<AgentAgent[]> {
   return invoke<AgentAgent[]>("agent_agents", { checkoutId });

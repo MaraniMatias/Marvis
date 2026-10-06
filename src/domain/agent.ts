@@ -119,3 +119,50 @@ export function headlineSession(sessions: AgentSession[], targetId: string | nul
 export function isTurnEvent(kind: AgentEventKind): boolean {
   return turnEvents.includes(kind);
 }
+
+/** The character OpenCode appends when it cuts a session title short for the terminal title. */
+const TITLE_ELLIPSIS = "…";
+
+/**
+ * The session a terminal is showing, when its own terminal title names exactly one.
+ *
+ * **This is inference, not a mapping, and the panel is written as if it knows that.** The service
+ * offers no route, header or event that says which session a given TUI process has open (see
+ * `services/agent.rs`), so the only thing available is a string the TUI wrote about itself, matched
+ * against the titles of the sessions this worktree has. Three things are therefore possible and none
+ * of them can be told apart here: a correct match, two terminals showing one session between them,
+ * and a worktree whose sessions have been renamed out from under a terminal. What can be refused is
+ * being wrong in a way that shows: an open question is `null`, and `null` draws no state rather than
+ * a state borrowed from the nearest session.
+ *
+ * The order is exact first, then prefix, because an exact title is the strongest thing here and
+ * must not be passed over for a looser reading of it:
+ *
+ * - An exact match that is unique wins outright.
+ * - An exact match that is not unique — two sessions carrying one title — is `null`. Falling through
+ *   to the prefix pass would turn a duplicate into a prefix, and the duplicate is the fact.
+ * - Only a title carrying the TUI's own ellipsis is read as a prefix, and only when exactly one
+ *   session starts with what is left of it. The ellipsis is the signal that the title was cut; how
+ *   many characters the cut was is the TUI's business, changes between releases, and is not checked.
+ */
+export function agentSessionForTitle<Session extends { title: string }>(
+  sessions: Session[],
+  title: string | null,
+): Session | null {
+  if (!title) return null;
+  const exact = sessions.filter((session) => session.title === title);
+  if (exact.length === 1) return exact[0] ?? null;
+  if (exact.length > 1) return null;
+
+  if (!title.endsWith(TITLE_ELLIPSIS)) return null;
+  const stem = title.slice(0, -TITLE_ELLIPSIS.length);
+  // How wide the TUI cuts the title is the TUI's business and it has changed between releases — the
+  // installed 2.0.24 still slices at 37, but nothing guarantees that is the number arriving here. A
+  // fixed length is the wrong shape of check: it refused a title that was plainly a cut one, and the
+  // refusal is invisible, because an unidentified row draws no state and only says "sin sesión". The
+  // ellipsis IS the signal that the title was cut, so what has to be checked is the CONSEQUENCE — that
+  // exactly one session starts with what is left — and not an arithmetic detail about how many
+  // characters the cut happened to be.
+  const matches = sessions.filter((session) => session.title.startsWith(stem));
+  return matches.length === 1 ? (matches[0] ?? null) : null;
+}

@@ -5,6 +5,8 @@ import {
   FolderX as FolderXIcon,
   GitBranch as GitBranchIcon,
   House as HouseIcon,
+  LoaderCircle as LoaderCircleIcon,
+  Sparkles as SparklesIcon,
   SquareTerminal as SquareTerminalIcon,
 } from "@lucide/vue";
 import type { WorkdirIconKind } from "../domain/workspace";
@@ -24,4 +26,14 @@ export const WORKDIR_ICONS: Record<WorkdirIconKind, Component> = {
   /** The directory is gone: a folder with a cross, painted in the disabled colour by the row. */
   missing: FolderXIcon,
   terminal: SquareTerminalIcon,
+  /**
+   * An agent, which is what the row already says in its name and icon colour. The glyph is the only
+   * place the row names the program, so it replaces a prefix in the text rather than joining it.
+   */
+  agent: SparklesIcon,
+  /**
+   * A turn that is running. A spinner rather than the agent's sparkles, because it is the one state
+   * that moves: "a turn is open somewhere" is the one thing a static list cannot say about itself.
+   */
+  working: LoaderCircleIcon,
 };

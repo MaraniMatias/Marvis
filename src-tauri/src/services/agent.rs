@@ -1754,7 +1754,42 @@ impl AgentService {
         Ok(sessions)
     }
 
-    /// Every agent the checkout's server offers, with the color OpenCode paints it with.
+    /// Every session the service answers for, whatever directory each one is located in.
+    ///
+    /// `sessions` answers "what belongs to this worktree", which is what a review round needs: a
+    /// prompt sent to a session in another worktree would put the round somewhere the reader did not
+    /// ask about. That is not the question a sidebar row asks. A row asks WHICH SESSION THIS
+    /// TERMINAL HAS OPEN, and the only thing that can answer it is the title the terminal's own TUI
+    /// wrote — and a terminal's session is not necessarily located in the worktree the terminal is
+    /// filed under. Measured against the real service: a terminal grouped under
+    /// `.worktrees/feedback-shell` had a session open that lives in `.worktrees/feat/sidebar-layouts`,
+    /// so the scoped list could never name it, and the row fell back to "session not identified" — no
+    /// state, no colour — while the agent was plainly working.
+    ///
+    /// **The list is as wide as the service, not as wide as the repository.** `/api/session` answers
+    /// for every directory that service knows, and one service is not guaranteed to be one
+    /// repository's: measured against the real one, it returned fifty sessions across many
+    /// directories. So this does not filter by repository either — pretending to, by name or by
+    /// comment, is what made the earlier claim about it wrong.
+    ///
+    /// Nothing is trusted here. A candidate is only ever a candidate: it is refused unless the title
+    /// matches exactly one of them, and prompting one by id still refuses a session from another
+    /// directory. A wrong candidate therefore draws no state rather than a wrong one.
+    pub fn candidate_sessions(
+        &self,
+        checkout_id: &str,
+        directory: &Path,
+    ) -> Result<Vec<AgentSession>, BridgeError> {
+        let bridge = self.bridge(checkout_id, directory)?;
+        let listed: Vec<ApiSession> = bridge.get_json("/api/session")?;
+        let running = bridge.running_sessions()?;
+        Ok(listed
+            .into_iter()
+            .map(|raw| bridge.to_agent_session(&raw, running.contains(&raw.id)))
+            .collect())
+    }
+
+    /// Every agent the checkout's service offers, with the color OpenCode paints it with.
     ///
     /// The list is the same for every session in the checkout, so this is one call behind a
     /// cache rather than one per session.
@@ -2389,6 +2424,48 @@ mod tests {
             event_from_payload(b"not-json", &bridge).unwrap_err().kind(),
             io::ErrorKind::InvalidData
         );
+    }
+
+    #[test]
+    fn candidate_sessions_offer_a_sibling_worktrees_session_while_sessions_do_not() {
+        // The measured case: a terminal filed under one worktree had a session open that lives in a
+        // sibling one, so the scoped list could not name it and the row drew no state at all.
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let owned = serde_json::json!({
+            "id": "ses_owned",
+            "title": "Owned session",
+            "location": {"directory": first.path().to_string_lossy()},
+            "time": {"created": 1, "updated": 2, "idle": 3}
+        });
+        let sibling = serde_json::json!({
+            "id": "ses_sibling",
+            "title": "Session from the sibling worktree",
+            "location": {"directory": second.path().to_string_lossy()},
+            "time": {"created": 4, "updated": 5}
+        });
+        let (port, _server) = mock_json_responses(vec![
+            serde_json::json!({"data": [owned.clone(), sibling.clone()]}),
+            serde_json::json!({"data": {"ses_sibling": {"type": "running"}}}),
+            serde_json::json!({"data": [owned.clone(), sibling.clone()]}),
+            serde_json::json!({"data": {"ses_sibling": {"type": "running"}}}),
+        ]);
+        let agents = AgentService::with_test_server(port);
+
+        // What a review round gets: this worktree's own sessions only.
+        let scoped = agents.sessions("first", first.path()).unwrap();
+        assert_eq!(scoped.len(), 1);
+        assert_eq!(scoped[0].id, "ses_owned");
+        // What a terminal row gets: both, because a row asks which session THIS TERMINAL has open and
+        // the only evidence for that is the title the terminal wrote. The candidate that is running is
+        // the sibling's, and it is running because the service said so.
+        let repo = agents.candidate_sessions("first", first.path()).unwrap();
+        assert_eq!(repo.len(), 2);
+        let sibling_row = repo
+            .iter()
+            .find(|session| session.id == "ses_sibling")
+            .unwrap();
+        assert!(sibling_row.running);
     }
 
     #[test]

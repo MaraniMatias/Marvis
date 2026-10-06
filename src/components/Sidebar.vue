@@ -8,8 +8,10 @@ import type { Component } from "vue";
 import { computed, nextTick, onUnmounted, ref, shallowRef, toRef } from "vue";
 import {
   ArchiveRestore as ArchiveRestoreIcon,
+  ChevronDown as ChevronDownIcon,
   Ellipsis as EllipsisIcon,
   FolderMinus as FolderMinusIcon,
+  FolderPlus as FolderPlusIcon,
   GitBranchPlus as GitBranchPlusIcon,
   Plus as PlusIcon,
   SquareTerminal as SquareTerminalIcon,
@@ -23,8 +25,10 @@ import {
   DropdownMenuTrigger,
 } from "reka-ui";
 import type { ArchivedCheckout, Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
-import { sessionTitle, workdirIconKind, workdirTitle } from "../domain/workspace";
-import type { AgentHeadline, TerminalAgentRow } from "../presentation/agent-sessions";
+import { AGENT_APP, agentSessionTitle, sessionRowTitle, workdirIconKind, workdirTitle } from "../domain/workspace";
+import type { AgentAttention } from "../domain/agent";
+import { agentSessionForTitle } from "../domain/agent";
+import type { TerminalAgentRow } from "../presentation/agent-sessions";
 import { useDiffStats } from "../presentation/diff-stats";
 import { WORKDIR_ICONS } from "../presentation/workdir-icons";
 
@@ -39,12 +43,21 @@ const props = withDefaults(
     isOpening: boolean;
     sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
     /**
-     * The OpenCode state of each checkout that has terminals, keyed by checkout id.
+     * The order each checkout's terminals are listed in, keyed by checkout id, as the pane saved it.
      *
-     * Keyed by checkout rather than handed over as one headline because a row is about one
-     * terminal in one worktree: two terminals in different worktrees are different rows, and each
-     * reads only its own. OpenCode 2.0.22 cannot report which session a given terminal has open,
-     * so a row speaks for its worktree's sessions and its tooltip says exactly that.
+     * Absent for a checkout whose layout has not been read yet, and the panel falls back to the
+     * order it was given rather than inventing one.
+     */
+    sessionOrder?: Record<string, string[]>;
+    /**
+     * The OpenCode sessions of each checkout that has terminals, keyed by checkout id.
+     *
+     * Keyed by checkout rather than handed over as one summary because a row is about one terminal
+     * in one worktree: two terminals in different worktrees are different rows, and each reads only
+     * its own. OpenCode 2.0.22 cannot report which session a given terminal has open, so this is
+     * every session of the worktree and the row matches them by the title its own terminal carried
+     * (`agentSessionForTitle`). A row that matches none draws no state at all, which is what keeps
+     * a worktree's unrelated sessions off a terminal that is not showing them.
      */
     agentRows?: Record<string, TerminalAgentRow>;
     /**
@@ -57,6 +70,7 @@ const props = withDefaults(
   {
     homeCheckoutId: null,
     sessionRuntimeStatuses: () => ({}),
+    sessionOrder: () => ({}),
     agentRows: () => ({}),
     archivedWorktrees: () => [],
   },
@@ -75,8 +89,63 @@ const emit = defineEmits<{
   closeSession: [sessionId: string];
   renameSession: [sessionId: string, name: string];
   /** Hands a live terminal to another worktree of the same repository. */
-  moveSession: [sessionId: string, targetCheckoutId: string];
+  moveSession: [sessionId: string, targetCheckoutId: string, index: number];
 }>();
+
+/** Whether the terminal under the pointer came out of this checkout's list. */
+function isDraggedFrom(checkout: Checkout): boolean {
+  const drag = pointerDrag.value;
+  return Boolean(drag?.started && drag.session.checkoutId === checkout.id);
+}
+
+/**
+ * The slot this row sits in, counted the way `dropIndexAtPoint` counts.
+ *
+ * The drop line is drawn before a row, so its condition needs the same number the measurement
+ * produced — and the measurement leaves the dragged terminal out. Comparing it against the drawn
+ * index instead put the line one row too high, which is worse than an offset: inserting a row there
+ * moved every row below it down, so the next measurement of the same still pointer landed on a
+ * different row and the line vanished.
+ */
+function dropSlotFor(checkout: Checkout, itemIndex: number): number {
+  if (!isDraggedFrom(checkout)) return itemIndex;
+  const draggedIndex = orderedSessions(checkout).findIndex((session) => session.id === pointerDrag.value?.session.id);
+  return draggedIndex >= 0 && itemIndex > draggedIndex ? itemIndex - 1 : itemIndex;
+}
+
+/**
+ * How many slots this list has while the dragged terminal is out of the way.
+ *
+ * The slot past the last row is drawn separately, and it needs the same count: with the dragged row
+ * still counted, "past the end" is one slot too far and the line for the real end never appears.
+ */
+function dropSlotCount(checkout: Checkout): number {
+  return orderedSessions(checkout).length - (isDraggedFrom(checkout) ? 1 : 0);
+}
+
+/**
+ * Whether the drop line belongs immediately above this row.
+ *
+ * The whole condition lives here rather than in the template because it says the same thing in two
+ * places, and a template that spells it out twice is one that will spell it out slightly differently
+ * twice.
+ */
+function dropLineBefore(checkout: Checkout, itemIndex: number): boolean {
+  return (
+    Boolean(pointerDrag.value?.started) &&
+    dropCheckoutId.value === checkout.id &&
+    dropIndex.value === dropSlotFor(checkout, itemIndex)
+  );
+}
+
+/** And whether it belongs past the last row instead, which is a slot of its own. */
+function dropLineAfter(checkout: Checkout): boolean {
+  return (
+    Boolean(pointerDrag.value?.started) &&
+    dropCheckoutId.value === checkout.id &&
+    dropIndex.value >= dropSlotCount(checkout)
+  );
+}
 
 /** The one session whose name is being typed, and the text as typed so far. */
 const editingId = ref<string | null>(null);
@@ -153,16 +222,29 @@ const DRAG_THRESHOLD = 5;
 const AUTO_SCROLL_EDGE = 36;
 const pointerDrag = ref<PointerDrag | null>(null);
 const dropCheckoutId = ref<string | null>(null);
+/** The slot in that checkout's list the dragged terminal would land in. */
+const dropIndex = ref(0);
+/** The pointer's own y, so a drop above or below a row can be told without re-reading the event. */
+const dropPointerY = ref(0);
 const sidebarScroll = ref<HTMLElement | null>(null);
 let autoScrollFrame: number | undefined;
 let suppressedClickSessionId: string | null = null;
 let suppressedClickTimer: number | undefined;
 
 /** A session may land on another live worktree of the same repository, never elsewhere. */
-function moveDestination(session: Session, target: Checkout): string | null {
-  if (target.isMissing || target.id === session.checkoutId) return null;
+function moveDestination(session: Session, target: Checkout, index: number): string | null {
+  if (target.isMissing) return null;
   const sourceRepo = props.repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === session.checkoutId));
-  return sourceRepo?.checkouts.some((checkout) => checkout.id === target.id && !checkout.isMissing) ? target.id : null;
+  const known = sourceRepo?.checkouts.some((checkout) => checkout.id === target.id && !checkout.isMissing);
+  if (!known) return null;
+  // Its own worktree is now a destination too, because a terminal can be reordered inside it. The slot
+  // it already sits in is not a destination: dropping a row where it is would report a move that
+  // changes nothing.
+  if (target.id === session.checkoutId) {
+    const current = orderedSessions(target).findIndex((item) => item.id === session.id);
+    return current < 0 || current === index ? null : target.id;
+  }
+  return target.id;
 }
 
 function selectSession(sessionId: string, event: MouseEvent) {
@@ -178,8 +260,13 @@ function selectSession(sessionId: string, event: MouseEvent) {
 function startPointerDrag(session: Session, event: PointerEvent) {
   // Mouse only: a touch pointer must retain the normal vertical scroll gesture of the tree.
   if (event.pointerType !== "mouse" || !event.isPrimary || event.button !== 0) return;
-  const sourceRepo = props.repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === session.checkoutId));
-  if (!sourceRepo?.checkouts.some((checkout) => moveDestination(session, checkout))) return;
+  const home = props.repos.flatMap((repo) => repo.checkouts).find((checkout) => checkout.id === session.checkoutId);
+  // A drag is worth starting when another worktree can take it, or when its own worktree holds more
+  // than one terminal and it can therefore be reordered.
+  const elsewhere = props.repos
+    .flatMap((repo) => repo.checkouts)
+    .some((checkout) => moveDestination(session, checkout, 0));
+  if (!home || (!elsewhere && orderedSessions(home).length < 2)) return;
   const source = event.currentTarget as HTMLElement;
   pointerDrag.value = {
     session,
@@ -206,18 +293,46 @@ function startPointerDrag(session: Session, event: PointerEvent) {
   window.addEventListener("blur", cancelPointerDrag);
 }
 
-function checkoutAtPoint(x: number, y: number): Checkout | null {
+/**
+ * Where in the target's list the dragged terminal would land: which slot, counted from the top.
+ *
+ * **The dragged row is not one of the rows counted.** It is drawn at its old position until it is
+ * dropped, so a slot counted with it in place would mean one thing for a terminal travelling up and
+ * another for the same terminal travelling down — and the difference is a row, which is where the
+ * terminal ends up. Measured without it, one number is the same before the drop line is drawn, in the
+ * line itself and in the layout that gets saved.
+ *
+ * It is also measured against the pointer's own position rather than the one the last move carried,
+ * which is a frame late and therefore a slot wrong at every edge of a row.
+ */
+function dropIndexAtPoint(target: HTMLElement, dragging: Session | null): number {
+  const rows = [...target.querySelectorAll<HTMLElement>(".workdir-child[data-session-id]")].filter(
+    (row) => !row.classList.contains("new-item") && row.dataset.sessionId !== dragging?.id,
+  );
+  const index = rows.findIndex((row) => {
+    const box = row.getBoundingClientRect();
+    return dropPointerY.value < box.top + box.height / 2;
+  });
+  return index < 0 ? rows.length : index;
+}
+
+function checkoutAtPoint(x: number, y: number, dragging: Session | null): { checkout: Checkout; index: number } | null {
   const target = document.elementFromPoint(x, y)?.closest<HTMLElement>("[data-workdir-checkout]");
   const checkoutId = target?.dataset.workdirCheckout;
-  return checkoutId
-    ? (props.repos.flatMap((repo) => repo.checkouts).find((checkout) => checkout.id === checkoutId) ?? null)
+  const checkout = checkoutId
+    ? props.repos.flatMap((repo) => repo.checkouts).find((item) => item.id === checkoutId)
     : null;
+  return checkout && target ? { checkout, index: dropIndexAtPoint(target, dragging) } : null;
 }
 
 function updateDropTarget(x: number, y: number) {
   const drag = pointerDrag.value;
-  const target = checkoutAtPoint(x, y);
-  dropCheckoutId.value = drag?.started && target ? moveDestination(drag.session, target) : null;
+  // The pointer's own y is set before it is measured against anything: measuring first would answer
+  // with the previous move's position.
+  dropPointerY.value = y;
+  const at = checkoutAtPoint(x, y, drag?.started ? drag.session : null);
+  dropCheckoutId.value = drag?.started && at ? moveDestination(drag.session, at.checkout, at.index) : null;
+  dropIndex.value = dropCheckoutId.value ? (at?.index ?? 0) : 0;
 }
 
 function onPointerMove(event: PointerEvent) {
@@ -252,8 +367,9 @@ function onPointerUp(event: PointerEvent) {
   const sessionId = drag.session.id;
   const shouldMove = drag.started && destination !== null;
   finishPointerDrag();
+  const index = dropIndex.value;
   if (drag.started) suppressNextClick(sessionId);
-  if (shouldMove && destination) emit("moveSession", sessionId, destination);
+  if (shouldMove && destination) emit("moveSession", sessionId, destination, index);
 }
 
 function onDragKeydown(event: KeyboardEvent) {
@@ -328,20 +444,55 @@ function openMoveMenu(sessionId: string) {
   moveMenuFor.value = moveMenuFor.value === sessionId ? null : sessionId;
 }
 
-/** The list closes on the move itself, so a rejected move can be aimed again without a second click. */
+/**
+ * The list closes on the move itself, so a rejected move can be aimed again without a second click.
+ *
+ * The menu has no position to give: it names a worktree, and a worktree takes the terminal at the end
+ * of its list, which is where the row is appended when nothing else says otherwise.
+ */
 function chooseDestination(sessionId: string, targetCheckoutId: string) {
   moveMenuFor.value = null;
-  emit("moveSession", sessionId, targetCheckoutId);
+  const target = props.repos.flatMap((repo) => repo.checkouts).find((checkout) => checkout.id === targetCheckoutId);
+  // A menu names a worktree and cannot name a row inside it, so it takes the end of the list: that is
+  // the slot below every terminal the worktree already has, and no row of the destination is offered
+  // as a position because none was chosen.
+  emit("moveSession", sessionId, targetCheckoutId, target ? orderedSessions(target).length : 0);
 }
 
-/** The one program in front of a shell that is also an agent, and so owns the row's agent line. */
-const AGENT_APP = "opencode";
+/**
+ * The one thing a row's icon can say, and the colour it says it in.
+ *
+ * The icon *is* the state in this design: there is no corner badge, no chip and no second line, so
+ * what the row is doing is drawn by which glyph it wears and which colour that glyph has. Only
+ * `working` moves; the rest are states, and a state is noticed without moving.
+ */
+type RowState = "working" | "waiting" | "failed" | "running" | "idle";
 
 /**
- * What the terminal is doing, as the row's left bar paints it: blue while it runs, red when it
- * ended badly, and no bar at all when it is simply idle or finished cleanly.
+ * What each agent state is called, beside the glyph and the colour it wears.
+ *
+ * `blocked` is the service reporting a turn stuck on a permission this server version cannot
+ * answer, which is the only honest reading of "waiting for you" available here: nothing in the
+ * protocol says who is supposed to answer, only that the turn has not moved.
  */
-type SessionTone = "running" | "error" | "idle";
+const AGENT_STATE: Record<AgentAttention, { state: RowState; text: string }> = {
+  busy: { state: "working", text: "Working" },
+  blocked: { state: "waiting", text: "Waiting for your reply" },
+  failed: { state: "failed", text: "Last turn failed" },
+  none: { state: "idle", text: "Idle" },
+};
+
+/**
+ * What a row with the agent in front of it says when nothing said which session it has open.
+ *
+ * OpenCode 2.0.22 offers no route that maps a TUI process to a session, so an agent terminal whose
+ * own title named nothing has no session to draw a state from — and "idle" is the one reading the
+ * row must not assert: nothing observed a turn to be still, and nothing observed one to be running.
+ * So the glyph stays the agent's and goes grey, exactly as an idle agent's does, and the honest
+ * difference is spelled out in words beside the name: `sin sesión`, the reference's own sentence,
+ * which says a session is missing rather than inventing one.
+ */
+const NO_AGENT_SESSION = "sin sesión";
 
 interface WorkdirItem {
   session: Session;
@@ -354,24 +505,51 @@ interface WorkdirItem {
    */
   destinations: { id: string; label: string; title: string }[];
   active: boolean;
-  exited: boolean;
-  /** Drives the colour of the row's left bar, independently of whether the row is selected. */
-  tone: SessionTone;
-  /** The program in front of the shell, when one is: `opencode`, `nvim`. */
-  app?: string;
-  /** What the row is called on screen: the program in front, or the shell it was opened as. */
+  /**
+   * The row's own name: the agent session's own title where this terminal's title names one, and
+   * the program in front of the shell or the session's own name otherwise. See `toWorkdir`, which
+   * is where the attribution is decided.
+   */
   title: string;
-  /** The agent this terminal runs, and only when it is the one running it. */
-  agent: AgentHeadline | null;
-  /** Whether a turn is running in this terminal's worktree, per the service's own answer. */
-  running: boolean;
+  /**
+   * The secondary detail, inline and muted, and the first thing to give way when the row is short.
+   *
+   * Three answers, all of them a fact rather than a filler:
+   *
+   * - An identified agent session's mode: `plan`, `coder`. It is the one word the service named for
+   *   this terminal's own session, and it sits beside the session's title rather than under it.
+   * - `sin sesión`, when OpenCode is in front but nothing identified which session. The row's name is
+   *   already `opencode`, so this says the missing thing rather than repeating the present one.
+   *
+   * A plain terminal has none, and that is the user's call after seeing it: the worktree name beside
+   * `zsh` repeated the group row directly above it, three rows under it, spelling the same branch
+   * four times in one block. Indentation already says which group a row is in, so repeating it says
+   * nothing new and costs the name the width. Two idle shells in one worktree therefore read as two
+   * identical rows — which is true, because nothing observed them apart.
+   */
+  detail?: string;
+  /** The glyph the row wears: what it is. */
+  icon: Component;
+  /** What the glyph says about it, in colour. The state lives here and nowhere else. */
+  state: RowState;
+  /**
+   * How long ago the session this terminal has open was last updated, drawn compactly.
+   *
+   * Real or nothing: the only clock this app has for a session is the service's own `updatedAt`,
+   * so a row with no identified session has no time to draw and draws none. Never a duration
+   * measured from when the panel happened to open or from when a row was created.
+   */
+  elapsed: string | null;
+  /**
+   * The state in words, for the row's tooltip and its accessible name. Empty on a row that is only
+   * a shell, because a shell at a prompt has nothing to report.
+   */
+  note: string;
 }
 
 interface Workdir {
   checkout: Checkout;
   title: string;
-  /** The name cut for drawing: see `branchLabel`. Empty `head` means the name is drawn whole. */
-  label: { head: string; tail: string };
   /** The checkout's own line counts, absent when Git has none to show. */
   additions?: number;
   deletions?: number;
@@ -391,7 +569,25 @@ interface Workdir {
    */
   missing: boolean;
   home: boolean;
+  /**
+   * The current checkout, which is context and not selection.
+   *
+   * It is what the app is pointed at, and it is said by neutral ink — see the group glyph rule — never
+   * by the accent, because the accent means one thing only and that thing is `selected`. A checkout
+   * holding the terminal being read is a place you are in, not a row you have chosen.
+   */
   active: boolean;
+  /**
+   * The one row in the whole panel that is selected: this checkout row, when this checkout is the
+   * current one *and* has no terminal of its own selected.
+   *
+   * That conjunction is what makes the invariant hold without a rule that has to be defended. A
+   * terminal row is selected by its own session, so while one of this checkout's terminals is
+   * selected the branch row gives the selection up and the terminal wears it alone; when none is, the
+   * branch is what is selected and takes it. Either way exactly one row in the panel carries the
+   * accent edge, which is the only thing the edge is allowed to mean.
+   */
+  selected: boolean;
   items: WorkdirItem[];
 }
 
@@ -498,26 +694,42 @@ function hasChanges(workdir: Workdir): boolean {
   return Boolean(workdir.additions || workdir.deletions);
 }
 
-/**
- * A checkout's name, cut to what identifies it. A ticket-based branch such as
- * `bug/13133933180-fix-login` carries two things the row has no room for at once: the kind
- * (`bug/`) and the ticket number, which is the same noise on every row. The kind stays, the
- * number becomes an ellipsis, and the slug that follows is what the row is really called.
- *
- * The head ends right after the `/` that precedes the ticket segment; the tail begins at the `-`
- * that closes the digits. A name with no ticket in it, like `main` or `release/1.2.0`, has
- * nothing to cut and is drawn whole. The full name is always in the row's tooltip.
- */
-function branchLabel(title: string): { head: string; tail: string } {
-  const segment = title.slice(title.lastIndexOf("/") + 1);
-  const ticket = /^(.*?\d)-(.+)$/.exec(segment);
-  if (!ticket) return { head: "", tail: title };
-  return { head: title.slice(0, title.length - segment.length) + "…", tail: "-" + ticket[2] };
-}
-
 /** The row's name at full length, which the row cannot fit, and where the checkout lives. */
 function workdirTooltip(checkout: Checkout): string {
   return checkout.branch ? `${checkout.branch} — ${checkout.path}` : checkout.path;
+}
+
+/**
+ * How long ago a session was last touched, drawn the way a person writes it: `12s`, `2m`, `1h`.
+ *
+ * The service's own `updatedAt` is the only clock here, so a row whose session was never
+ * identified has no number to draw and this is never called for it. Anything a minute old or more
+ * is rounded rather than floored, because `59s` and `60s` say the same thing and the shorter one
+ * would be a lie about how long.
+ */
+function elapsedSince(updatedAt: number): string {
+  const seconds = Math.max(0, Math.round((Date.now() - updatedAt) / 1000));
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  return `${Math.round(minutes / 60)}h`;
+}
+
+/**
+ * The terminals of a checkout in the order they are listed, which is not the order the database
+ * hands them out.
+ *
+ * The pane owns that order — it is what gets saved, and it is where a drag puts a terminal — so it
+ * publishes it and this reads it. A list drawn in the database's order would show a reorder as
+ * nothing at all: persisted, correct, and invisible on the only screen that draws it.
+ */
+function orderedSessions(checkout: Checkout): Session[] {
+  const order = props.sessionOrder?.[checkout.id];
+  if (!order) return checkout.sessions;
+  const byId = new Map(checkout.sessions.map((session) => [session.id, session] as const));
+  const ordered = order.flatMap((id) => (byId.get(id) ? [byId.get(id)!] : []));
+  const seen = new Set(ordered.map((session) => session.id));
+  return [...ordered, ...checkout.sessions.filter((session) => !seen.has(session.id))];
 }
 
 function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
@@ -528,7 +740,6 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     checkout,
     // Git roots use their branch (or "Base" when detached); plain workdirs use the repo name.
     title,
-    label: branchLabel(title),
     additions: counts?.additions || undefined,
     deletions: counts?.deletions || undefined,
     // The one failure that belongs to a single workdir (E.4): it names the checkout whose
@@ -539,9 +750,46 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     missing: checkout.isMissing,
     home: checkout.id === props.homeCheckoutId,
     active: checkout.id === props.activeCheckoutId,
-    items: checkout.sessions.map((session) => {
+    // Exactly one row in the panel wears the accent edge. A terminal row is selected by its own
+    // session, so a branch that holds the selected terminal gives the selection up; a branch with
+    // no selected terminal of its own takes it, and that is the branch being what is open.
+    selected:
+      checkout.id === props.activeCheckoutId &&
+      !checkout.sessions.some((session) => session.id === props.activeSessionId),
+    items: orderedSessions(checkout).map((session) => {
       const status = props.sessionRuntimeStatuses[session.id];
       const app = status?.foregroundApp;
+      /**
+       * The session this terminal is showing, read from this terminal's own worktree and matched by
+       * this terminal's own title.
+       *
+       * Two conditions, both about this row rather than about the worktree, and both refused rather
+       * than relaxed: the runtime has to confirm OpenCode is the program in front of this terminal
+       * right now (`agentSessionTitle`), and the title that program wrote has to name exactly one
+       * session of this worktree (`agentSessionForTitle`). A worktree can hold a checkout's worth of
+       * unrelated sessions, so nothing falls back to the newest, the loudest or the only one: two
+       * OpenCode terminals in one worktree with no live title are both unidentified rather than one
+       * of them wearing the other's name. The match is inference, not a mapping the service
+       * confirms — `agentSessionForTitle` says what cannot be told apart here — so an unconfirmed
+       * answer draws no state rather than a borrowed one.
+       */
+      const agentTerminal = app === AGENT_APP;
+      const identified = agentTerminal
+        ? agentSessionForTitle(props.agentRows[checkout.id]?.sessions ?? [], agentSessionTitle(status))
+        : null;
+      /**
+       * One attention for the whole row, and the session's own answer wins.
+       *
+       * A session the service reports as running is working whether or not it has an agent to name.
+       * `attention` is only carried for a session that HAS an agent, so reading it alone drew a
+       * running turn as idle grey: the row said nothing was happening while the service said a turn
+       * was open. A session that names no agent and runs no turn is idle, which is a fact rather than
+       * a shrug.
+       */
+      const attention: AgentAttention = identified
+        ? (identified.agent?.attention ?? (identified.running ? "busy" : "none"))
+        : "none";
+      const agent = identified ? AGENT_STATE[attention] : undefined;
       return {
         session,
         destinations: repo.checkouts
@@ -552,87 +800,157 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
             title: sibling.path,
           })),
         active: session.id === props.activeSessionId,
-        exited: sessionState(session) === "exited",
-        tone: sessionTone(session),
-        app,
         /**
-         * The row's name, by the rule the titlebar crumb reads too: `sessionTitle`. The title is
-         * separate from process identity, which still owns agent detection.
+         * The row's name, which `sessionRowTitle` writes: the session this terminal is showing when
+         * its own title names one, the program in front of the shell otherwise, and the name it was
+         * opened with — or renamed to — when nothing is. Nothing about the workdir: that is the
+         * muted half beside it, and it is there so two identical shells are not identical rows.
          */
-        title: sessionTitle(session, status),
+        title: sessionRowTitle(session, status),
+        detail: identified
+          ? (identified.agent?.label ?? NO_AGENT_SESSION)
+          : agentTerminal
+            ? NO_AGENT_SESSION
+            : undefined,
         /**
-         * The agent behind this terminal, read from this terminal's own worktree.
+         * The glyph and its colour, which between them are the whole of the row's state.
          *
-         * Keyed by checkout, so a terminal in a worktree nobody has selected still gets its own
-         * answer instead of the active checkout's, and two worktrees never share one. It is
-         * shown only where the foreground process is the agent: an idle shell row has no OpenCode
-         * behind it, and painting one would claim a turn that is not this row's.
+         * - An identified session draws the state the service reported, and only that session's:
+         *   the spinner in the accent while it works, the sparkles in the warning colour while it
+         *   waits for a reply, the sparkles in the danger colour when its last turn failed.
+         * - A plain terminal with something in front of the shell is a process that is up, which is
+         *   green and which nothing else in the panel is.
+         * - Everything else is idle: the agent's own glyph or a terminal's, both grey. An OpenCode
+         *   whose session nobody identified lands here too, which is why it also says `sin sesión` —
+         *   a colour cannot say "nothing was observed" without lying about the state.
          */
-        agent: app === AGENT_APP ? (props.agentRows[checkout.id]?.agent ?? null) : null,
-        running: app === AGENT_APP ? (props.agentRows[checkout.id]?.running ?? false) : false,
+        icon: agentTerminal
+          ? agent?.state === "working"
+            ? WORKDIR_ICONS.working
+            : WORKDIR_ICONS.agent
+          : WORKDIR_ICONS.terminal,
+        // An OpenCode whose session nobody identified has no state to draw, so it is idle rather
+        // than green: `running` on a row with an agent glyph in front would claim a process that
+        // the panel cannot identify, and the word beside it already says what is missing.
+        state: agent?.state ?? (agentTerminal ? "idle" : status?.foregroundProcess ? "running" : "idle"),
+        // Only a row that identified a session has a clock to read, and that row is the only one
+        // that draws a time.
+        elapsed: identified ? elapsedSince(identified.updatedAt) : null,
+        // The words say the same thing the glyph says, and a session that was identified and is
+        // simply quiet says it is idle rather than claiming that nothing could be found.
+        note: agent ? agent.text : agentTerminal ? "Session not identified" : "",
       };
     }),
   };
 }
 
-function sessionState(session: Session) {
-  return props.sessionRuntimeStatuses[session.id]?.state ?? (session.status === "active" ? "running" : "exited");
-}
-
 /**
- * Running is blue, a shell that ended with a non-zero code is red, anything else is quiet.
- * `exitCode` is read defensively: if the runtime status does not carry one, an exited terminal
- * is simply idle rather than wrongly accused.
+ * The row the ghost under the pointer is a copy of, so the name under the cursor is the name the
+ * row it came from wears. Read from the same model rather than named a second time.
  */
-function sessionTone(session: Session): SessionTone {
-  if (sessionState(session) !== "exited") return "running";
-  const status = props.sessionRuntimeStatuses[session.id] as { exitCode?: number | null } | undefined;
-  return status?.exitCode ? "error" : "idle";
-}
-
-/** A session that is working, stuck or failed stays on screen through a hover. */
-function rowPinnedForAttention(item: { agent: AgentHeadline | null }): boolean {
-  return item.agent !== null && item.agent.attention !== "none" && item.agent.attention !== undefined;
-}
+const draggedItem = computed(
+  () =>
+    groups.value
+      .flatMap((group) => group.workdirs)
+      .flatMap((workdir) => workdir.items)
+      .find((item) => item.session.id === pointerDrag.value?.session.id) ?? null,
+);
 
 /**
- * Says whose agent it is, which the row cannot work out on its own.
+ * The groups that are folded away, by checkout id.
  *
- * It names the workdir rather than this terminal, because that is the scope the service can
- * answer in: OpenCode 2.0.22 exposes no route, header or event that maps a TUI process to a
- * session, so "the session this terminal has open" is not a question with an answer to read.
- * Claiming one from the last-viewed session would be wrong the moment two TUIs share a checkout.
+ * Local state and nothing else, on purpose. A fold is one person's view of a list they are reading
+ * right now, not a preference they set once and expect to still be there tomorrow — and a preference
+ * is a field in `config.yml` and a line in the Settings dialog, with its own key on both sides. If it
+ * should be remembered, that is a separate decision; it is not smuggled in here as a field nobody
+ * declared.
  */
-function agentTitle(item: WorkdirItem): string {
-  if (!item.agent) return "No OpenCode agent running in this workdir";
-  return item.running
-    ? `OpenCode agent: ${item.agent.label} (running in this workdir)`
-    : `OpenCode agent: ${item.agent.label} (in this workdir)`;
+const collapsedGroups = ref(new Set<string>());
+
+function isCollapsed(workdir: Workdir): boolean {
+  return collapsedGroups.value.has(workdir.checkout.id);
+}
+
+function toggleGroup(workdir: Workdir) {
+  const next = new Set(collapsedGroups.value);
+  if (!next.delete(workdir.checkout.id)) next.add(workdir.checkout.id);
+  collapsedGroups.value = next;
+}
+
+/**
+ * The repositories folded away, by repo id.
+ *
+ * Separate from the checkouts' own fold rather than the same set: a repo folded shut has its
+ * checkouts hidden, so their chevrons are not on screen to say anything, and a set that held both
+ * would let one control answer for the other.
+ */
+const collapsedRepos = ref(new Set<string>());
+
+function isRepoCollapsed(group: Group): boolean {
+  return collapsedRepos.value.has(group.id);
+}
+
+function toggleRepo(group: Group) {
+  const next = new Set(collapsedRepos.value);
+  if (!next.delete(group.id)) next.add(group.id);
+  collapsedRepos.value = next;
+}
+
+/**
+ * What the row announces: its name, its detail, and the state in words.
+ *
+ * The state is drawn as a colour on a glyph, and a colour is not something a screen reader reads, so
+ * it is spelled out here. Both answers come from the same `item.state`, so the drawn colour and the
+ * announced word can never disagree.
+ */
+function rowLabel(item: WorkdirItem): string {
+  const said = [`${item.title}${item.detail ? `, ${item.detail}` : ""}`];
+  if (item.elapsed) said.push(item.elapsed);
+  if (item.note) said.push(item.note);
+  return said.join(" — ");
 }
 </script>
 
 <template>
   <aside
-    class="app-sidebar flex h-full min-h-0 flex-col border-r text-sm"
+    class="app-sidebar flex h-full min-h-0 flex-col border-r"
     :class="{ 'is-terminal-dragging': pointerDrag?.started }"
   >
     <!-- The right padding is the scrollbar's: macOS draws its own overlay scrollbar over the
-         content, so a row whose title and counts end at the edge are read through it. -->
-    <div ref="sidebarScroll" class="min-h-0 flex-1 overflow-y-auto pr-2">
-      <div v-for="group in groups" :key="group.id" class="workdir-group">
+         content, so a row whose name and counts end at the edge are read through it. -->
+    <div ref="sidebarScroll" class="sidebar-scroll">
+      <div
+        v-for="group in groups"
+        :key="group.id"
+        class="workdir-group"
+        :class="{ 'is-collapsed': isRepoCollapsed(group) }"
+      >
         <!-- The header is where the repo as a whole is acted on, and all of it lives in one menu:
              the three dots, or a right click anywhere on the header. Adding a worktree is the only
              frequent one, but a button that sat two pixels from "remove" made the two easy to
-             confuse, so the rare and destructive actions are one click further away. -->
+             confuse, so the rare and destructive actions are one click further away.
+
+             The name folds the repository, which is why it is a button and not a `div` with a click
+             on it: folding a list has to be reachable by keyboard, and `aria-expanded` is what says
+             which way it goes — the header carries no glyph for it, because a folded repository is
+             already legible as one: its row and nothing under it. The menu button is a sibling
+             rather than a child, because a button inside a button is not a control a person can
+             operate. -->
         <div
           class="group-heading"
           :class="{ 'menu-open': groupMenuFor === group.id }"
           @contextmenu.prevent="group.hasMenu && openGroupMenu(group.id)"
         >
-          <div class="group-heading-text" :title="group.path || group.label">
+          <button
+            type="button"
+            class="group-heading-text"
+            :title="group.path || group.label"
+            :aria-expanded="!isRepoCollapsed(group)"
+            @click="toggleRepo(group)"
+          >
             <span class="group-name">{{ group.label }}</span>
             <span v-if="group.shortPath" class="group-path">{{ group.shortPath }}</span>
-          </div>
+          </button>
 
           <!-- reka's menu, the same one the titlebar crumbs open, so the outside press, the
                Escape, the arrows and the focus back to the button are the library's to get right.
@@ -695,134 +1013,150 @@ function agentTitle(item: WorkdirItem): string {
           </DropdownMenuRoot>
         </div>
 
-        <template v-for="workdir in group.workdirs" :key="workdir.checkout.id">
+        <!-- One group per checkout, and the fold is the group's own: `col` is what hides its
+             children and turns its chevron, so the two can never disagree about whether it is
+             open. The chevron is the control rather than the whole row because the row itself
+             selects the checkout, and folding is not selecting. -->
+        <div
+          v-for="workdir in group.workdirs"
+          :key="workdir.checkout.id"
+          class="workdir-checkouts grp"
+          :class="{
+            col: isCollapsed(workdir),
+            'has-active': workdir.items.some((item) => item.active),
+            'is-drop-target': dropCheckoutId === workdir.checkout.id,
+          }"
+          :data-workdir-checkout="workdir.checkout.id"
+        >
           <div
-            class="workdir-item workdir-parent"
-            :data-workdir-checkout="workdir.checkout.id"
-            :class="{
-              active: workdir.active,
-              'has-active': workdir.items.some((item) => item.active),
-              'has-action': workdir.worktree && !workdir.home,
-              'is-drop-target': dropCheckoutId === workdir.checkout.id,
-            }"
+            class="workdir-row workdir-parent"
+            :class="{ active: workdir.active, selected: workdir.selected, missing: workdir.missing }"
           >
-            <div class="workdir-row">
-              <button
-                type="button"
-                class="workdir-select"
-                :aria-current="workdir.active ? 'page' : undefined"
-                :aria-disabled="workdir.missing || undefined"
-                :title="workdirTooltip(workdir.checkout)"
-                @click="!workdir.missing && emit('selectCheckout', workdir.checkout.id, hasChanges(workdir))"
-              >
-                <component :is="workdir.icon" class="workdir-status-icon" aria-hidden="true" />
-                <div class="workdir-main">
-                  <div class="workdir-title">
-                    <!-- The name in two halves, so the ellipsis falls on the tail. The split is a
-                         drawing decision and not a change to the name: the two halves sit next to
-                         each other with nothing between them, which is what a screen reader, a
-                         copy and a test all read. -->
-                    <span class="workdir-name">
-                      <span v-if="workdir.label.head" class="workdir-name-head">{{ workdir.label.head }}</span>
-                      <span class="workdir-name-tail">{{ workdir.label.tail }}</span>
-                    </span>
-                  </div>
-                  <!-- One slot for the row's right-hand text. The error takes it whole: a missing
-                       directory has no counts, and a line that mixed a failure with figures
-                       would read as two different facts. -->
-                  <div class="workdir-meta" :class="{ 'workdir-meta-error': !!workdir.error }">
-                    <span v-if="workdir.error">{{ workdir.error }}</span>
-                    <template v-else>
-                      <span v-if="workdir.additions" class="diff-add">+{{ workdir.additions }}</span>
-                      <span v-if="workdir.deletions" class="diff-del">-{{ workdir.deletions }}</span>
-                    </template>
-                  </div>
-                </div>
-              </button>
+            <button
+              type="button"
+              class="workdir-fold"
+              :aria-expanded="!isCollapsed(workdir)"
+              :aria-label="`${isCollapsed(workdir) ? 'Expand' : 'Collapse'} ${workdir.title}`"
+              @click="toggleGroup(workdir)"
+            >
+              <ChevronDownIcon class="chv" aria-hidden="true" />
+            </button>
 
-              <!-- A worktree is the only row with an action of its own. A repo root's actions are
-                   in the group header above. -->
-              <div v-if="workdir.worktree && !workdir.home" class="workdir-actions">
-                <!-- A missing directory has nothing to remove from disk, so the row offers
-                     the one thing left to do with it: take it off the list. -->
-                <button
-                  v-if="workdir.missing"
-                  type="button"
-                  class="workdir-action"
-                  :aria-label="`Close missing checkout: ${workdir.title}`"
-                  title="Remove from list"
-                  @click="emit('closeMissing', workdir.checkout.id)"
-                >
-                  <XIcon class="icon-xs" aria-hidden="true" />
-                </button>
-                <!-- Archiving and deleting are two answers to one question, so the row asks it
-                     once: the cross opens the dialog that holds both, and nothing is removed,
-                     hidden or deleted before the answer comes back. -->
-                <button
-                  v-else
-                  type="button"
-                  class="workdir-action"
-                  :aria-label="`Remove or archive worktree ${workdir.title}`"
-                  title="Remove or archive worktree"
-                  @click="emit('removeWorktree', workdir.checkout.id)"
-                >
-                  <XIcon class="icon-xs" aria-hidden="true" />
-                </button>
-              </div>
-            </div>
+            <button
+              type="button"
+              class="workdir-select"
+              :aria-current="workdir.active ? 'page' : undefined"
+              :aria-disabled="workdir.missing || undefined"
+              :title="workdirTooltip(workdir.checkout)"
+              @click="!workdir.missing && emit('selectCheckout', workdir.checkout.id, hasChanges(workdir))"
+            >
+              <component :is="workdir.icon" class="workdir-icon" aria-hidden="true" />
+              <span class="lbl">
+                <span class="nm">{{ workdir.title }}</span>
+              </span>
+            </button>
+
+            <!-- The row's own trailing slot. The counts live here and nowhere else, in the
+                 monospace the reference draws them in and right against the row's edge, and a
+                 worktree that can be taken off the panel yields this slot to that action rather
+                 than having the action painted over the counts. -->
+            <span class="workdir-end" :class="{ 'workdir-end-error': !!workdir.error }">
+              <span v-if="workdir.error" class="workdir-end-note">{{ workdir.error }}</span>
+              <span v-else-if="workdir.additions || workdir.deletions" class="workdir-diff">
+                <span v-if="workdir.additions" class="ad">+{{ workdir.additions }}</span>
+                <span v-if="workdir.deletions" class="rm">−{{ workdir.deletions }}</span>
+              </span>
+            </span>
+
+            <!-- A worktree is the only row with an action of its own, and it is out of flow so it
+                 cannot reflow the name beside it: the counts give up the slot's width instead. A
+                 repo root's own actions are in the group header above. -->
+            <button
+              v-if="workdir.worktree && !workdir.home"
+              type="button"
+              class="workdir-action workdir-close"
+              :aria-label="
+                workdir.missing
+                  ? `Close missing checkout: ${workdir.title}`
+                  : `Remove or archive worktree ${workdir.title}`
+              "
+              :title="workdir.missing ? 'Remove from list' : 'Remove or archive worktree'"
+              @click="
+                workdir.missing
+                  ? emit('closeMissing', workdir.checkout.id)
+                  : emit('removeWorktree', workdir.checkout.id)
+              "
+            >
+              <XIcon class="icon-xs" aria-hidden="true" />
+            </button>
           </div>
 
-          <!-- Child items: the same row as the workdir, minus the diff, plus a close.
-               "New terminal" is deliberately NOT gated on having terminals open, unlike the
-               mockup: picking a workdir no longer opens a terminal by itself, so a workdir
-               with nothing running would otherwise offer no way to start one from here. A
-               directory that is gone has no live sessions and nothing to run one in.
-               The whole list is the rest of the workdir's drop zone: a terminal is dropped on
-               the worktree it should belong to, not on whichever of its rows is under it. -->
-          <div v-if="!workdir.missing" class="workdir-items" :data-workdir-checkout="workdir.checkout.id">
-            <div
-              v-for="item in workdir.items"
-              :key="item.session.id"
-              class="workdir-item workdir-child"
-              :class="[
-                `tone-${item.tone}`,
-                {
-                  active: item.active,
-                  'is-being-dragged': pointerDrag?.started && pointerDrag.session.id === item.session.id,
-                },
-              ]"
-            >
-              <div class="workdir-row">
+          <!-- The group's terminals, one level in and behind a guide that only appears while the
+               pointer is over the group itself, so the line never reads as a selection. The whole
+               list is also the rest of the workdir's drop zone: a terminal is dropped on the
+               worktree it should belong to, not on whichever of its rows is under it.
+
+               "New terminal" is deliberately not gated on having terminals open: picking a workdir
+               no longer opens a terminal by itself, so a workdir with nothing running would
+               otherwise offer no way to start one from here. A directory that is gone has no live
+               sessions and nothing to run one in. -->
+          <div v-if="!workdir.missing" class="kids workdir-kids">
+            <template v-for="(item, itemIndex) in workdir.items" :key="item.session.id">
+              <!-- The line that says where the terminal lands. It is drawn in the slot itself rather
+                 than once at the end of the list, because a line that does not move while the rows
+                 above it do says nothing about the position being offered. It is a `workdir-row`
+                 because it IS the row at that slot: it takes its box, its indent and its glyph axis
+                 from the same rules, and a line with a geometry of its own sat a few pixels left of
+                 the terminals above and below it. -->
+              <div
+                v-if="dropLineBefore(workdir.checkout, itemIndex)"
+                class="workdir-row workdir-child terminal-drop-insertion"
+                aria-hidden="true"
+              >
+                <SquareTerminalIcon class="workdir-icon" />
+                <span>Drop terminal here</span>
+              </div>
+
+              <div
+                class="workdir-row workdir-child"
+                :data-session-id="item.session.id"
+                :class="[
+                  `state-${item.state}`,
+                  {
+                    active: item.active,
+                    selected: item.active,
+                    'is-being-dragged': pointerDrag?.started && pointerDrag.session.id === item.session.id,
+                  },
+                ]"
+              >
                 <!-- Editing swaps the button for the field, rather than nesting an input inside
-                     one: a control inside a control cannot be focused or read on its own. The
-                     row keeps its shape because both are laid out the same way. -->
+                   one: a control inside a control cannot be focused or read on its own. The row
+                   keeps its shape because both are laid out the same way. -->
                 <div v-if="editingId === item.session.id" class="workdir-select">
-                  <component :is="WORKDIR_ICONS.terminal" class="workdir-status-icon" aria-hidden="true" />
-                  <div class="workdir-main">
-                    <input
-                      :ref="captureRenameField"
-                      v-model="draftName"
-                      class="workdir-rename"
-                      type="text"
-                      maxlength="60"
-                      aria-label="Terminal session name"
-                      @keydown.enter.prevent="commitRename(item.session)"
-                      @keydown.esc.prevent="cancelRename"
-                      @blur="commitRename(item.session)"
-                    />
-                  </div>
+                  <component :is="item.icon" class="workdir-icon" aria-hidden="true" />
+                  <input
+                    :ref="captureRenameField"
+                    v-model="draftName"
+                    class="workdir-rename"
+                    type="text"
+                    maxlength="60"
+                    aria-label="Terminal session name"
+                    @keydown.enter.prevent="commitRename(item.session)"
+                    @keydown.esc.prevent="cancelRename"
+                    @blur="commitRename(item.session)"
+                  />
                 </div>
                 <!-- A terminal moves by mouse after a small pointer threshold; an ordinary click
-                     still selects it. The menu remains the keyboard equivalent. -->
+                   still selects it. The menu remains the keyboard equivalent. -->
                 <button
                   v-else
                   type="button"
                   class="workdir-select"
                   :aria-current="item.active ? 'page' : undefined"
-                  :aria-label="`Terminal session: ${item.title}`"
+                  :aria-label="`Terminal session: ${rowLabel(item)}`"
                   :aria-haspopup="item.destinations.length ? 'menu' : undefined"
                   :aria-expanded="item.destinations.length ? moveMenuFor === item.session.id : undefined"
-                  :title="item.title"
+                  :title="rowLabel(item)"
                   @pointerdown="startPointerDrag(item.session, $event)"
                   @lostpointercapture="onLostPointerCapture"
                   @click="selectSession(item.session.id, $event)"
@@ -831,54 +1165,39 @@ function agentTitle(item: WorkdirItem): string {
                   @keydown.shift.f10.prevent="item.destinations.length && openMoveMenu(item.session.id)"
                   @contextmenu.prevent="item.destinations.length && openMoveMenu(item.session.id)"
                 >
-                  <component :is="WORKDIR_ICONS.terminal" class="workdir-status-icon" aria-hidden="true" />
-                  <div class="workdir-main">
-                    <div class="workdir-title">
-                      <span class="workdir-name">{{ item.title }}</span>
-                    </div>
-                  </div>
-                  <!-- The one slot for the row's right-hand text. What is there is context for
-                       the row's name and never the thing it is for, so it steps aside for the
-                       actions like the counts do. Except a session that wants attention, which
-                       stays put because that is the news. The agent belongs to the terminal only
-                       while OpenCode is the one running in it: a terminal in Neovim is not an
-                       agent's terminal, and saying so next to `nvim` would be a claim about a
-                       process that is not in front. -->
-                  <div
-                    v-if="item.agent"
-                    class="workdir-meta"
-                    :class="{
-                      'workdir-meta-error': rowPinnedForAttention(item),
-                      'workdir-meta-pinned': rowPinnedForAttention(item),
-                    }"
-                  >
-                    <span class="agent-chip" :title="agentTitle(item)">
-                      <span
-                        class="agent-dot"
-                        :style="{ background: item.agent.color ?? 'var(--marvis-accent)' }"
-                        aria-hidden="true"
-                      />
-                      <span>{{ item.agent.label }}</span>
-                      <span v-if="item.agent.attention === 'busy'" class="agent-spinner" aria-hidden="true" />
-                    </span>
-                  </div>
+                  <!-- The glyph carries the state, in colour and in motion: a spinner while a turn
+                     runs, the sparkles while it waits for a reply or after a turn failed, a
+                     terminal's square while a plain process is up, and the same glyph in grey when
+                     nothing is. There is no badge, no chip and no second line, so the icon is the
+                     only place the state can live and it has to be right. -->
+                  <component :is="item.icon" class="workdir-icon" aria-hidden="true" />
+                  <span class="lbl">
+                    <span class="nm">{{ item.title }}</span>
+                    <span v-if="item.detail" class="dm">{{ item.detail }}</span>
+                  </span>
                 </button>
 
-                <div class="workdir-actions">
-                  <button
-                    type="button"
-                    class="workdir-action"
-                    :aria-label="`Close terminal session: ${item.title}`"
-                    :title="`Close ${item.title}`"
-                    @click="emit('closeSession', item.session.id)"
-                  >
-                    <XIcon class="icon-xs" aria-hidden="true" />
-                  </button>
-                </div>
+                <!-- The time and the cross share this slot, and the slot is exactly as wide as the
+                   cross: the time is `display: none` on hover rather than moved, so nothing in the
+                   row can shift when the pointer arrives. A row with no session has no time and
+                   only ever had the empty slot. -->
+                <span class="workdir-end">
+                  <span v-if="item.elapsed" class="workdir-end-time">{{ item.elapsed }}</span>
+                </span>
+
+                <button
+                  type="button"
+                  class="workdir-action workdir-close"
+                  :aria-label="`Close terminal session: ${item.title}`"
+                  :title="`Close ${item.title}`"
+                  @click="emit('closeSession', item.session.id)"
+                >
+                  <XIcon class="icon-xs" aria-hidden="true" />
+                </button>
 
                 <!-- The destinations as a menu, for the move a drag cannot make. It hangs below the
-                     row rather than pushing it, so a list of worktrees never changes the
-                     panel it is read from. -->
+                   row rather than pushing it, so a list of worktrees never changes the panel it is
+                   read from. -->
                 <ul
                   v-if="item.destinations.length && moveMenuFor === item.session.id"
                   class="marvis-menu move-menu"
@@ -899,36 +1218,34 @@ function agentTitle(item: WorkdirItem): string {
                   </li>
                 </ul>
               </div>
-            </div>
+            </template>
 
             <div
-              v-if="pointerDrag?.started && dropCheckoutId === workdir.checkout.id"
-              class="terminal-drop-insertion workdir-child"
+              v-if="dropLineAfter(workdir.checkout)"
+              class="workdir-row workdir-child terminal-drop-insertion"
               aria-hidden="true"
             >
-              <SquareTerminalIcon class="workdir-status-icon" />
+              <SquareTerminalIcon class="workdir-icon" />
               <span>Drop terminal here</span>
             </div>
 
-            <div class="workdir-item workdir-child">
-              <div class="workdir-row">
-                <button
-                  type="button"
-                  class="workdir-select new-item"
-                  :aria-label="`New terminal for ${workdir.title}`"
-                  @click="emit('newTerminal', workdir.checkout.id)"
-                >
-                  <PlusIcon class="workdir-status-icon" aria-hidden="true" />
-                  <div class="workdir-main">
-                    <div class="workdir-title">
-                      <span class="workdir-name">New terminal</span>
-                    </div>
-                  </div>
-                </button>
-              </div>
+            <div class="workdir-row workdir-child new-item">
+              <button
+                type="button"
+                class="workdir-select"
+                :aria-label="`New terminal for ${workdir.title}`"
+                @click="emit('newTerminal', workdir.checkout.id)"
+              >
+                <!-- The same glyph slot a terminal wears, so this row's label starts on the axis the
+                     terminals' labels start on rather than on the branch row's. -->
+                <PlusIcon class="workdir-icon" aria-hidden="true" />
+                <span class="lbl">
+                  <span class="nm">New terminal</span>
+                </span>
+              </button>
             </div>
           </div>
-        </template>
+        </div>
       </div>
 
       <p v-if="!groups.length" class="pane-state" role="status">
@@ -936,24 +1253,21 @@ function agentTitle(item: WorkdirItem): string {
       </p>
     </div>
 
-    <div class="workdir-item workdir-child shrink-0 border-t-gray-700 border-t">
-      <div class="workdir-row">
-        <button
-          type="button"
-          class="workdir-select new-item"
-          aria-label="Open directory"
-          title="Open directory"
-          :disabled="isOpening"
-          @click="emit('openFolder')"
-        >
-          <PlusIcon class="workdir-status-icon" aria-hidden="true" />
-          <div class="workdir-main">
-            <div class="workdir-title">
-              <span class="workdir-name">Open directory</span>
-            </div>
-          </div>
-        </button>
-      </div>
+    <div class="sidebar-footer">
+      <div class="sep" />
+      <button
+        type="button"
+        class="workdir-row add-item"
+        aria-label="Open directory"
+        title="Open directory"
+        :disabled="isOpening"
+        @click="emit('openFolder')"
+      >
+        <FolderPlusIcon class="workdir-icon" aria-hidden="true" />
+        <span class="lbl">
+          <span class="nm">Open directory</span>
+        </span>
+      </button>
     </div>
     <Teleport to="body">
       <div
@@ -962,60 +1276,88 @@ function agentTitle(item: WorkdirItem): string {
         aria-hidden="true"
         :style="{ left: pointerDrag.x + 14 + 'px', top: pointerDrag.y + 14 + 'px' }"
       >
-        <SquareTerminalIcon class="size-3.5 shrink-0" />
-        <span>{{ sessionTitle(pointerDrag.session, sessionRuntimeStatuses[pointerDrag.session.id]) }}</span>
+        <SquareTerminalIcon class="workdir-icon" />
+        <span>{{ draggedItem?.title }}</span>
       </div>
     </Teleport>
   </aside>
 </template>
 
 <style scoped>
+/* ---------------------------------------------------------------------------------------------
+   The panel, from the reference: one line per row, dense and flat, the state in the colour of the
+   icon. Every rule below is a decision about pixels or about what a row is allowed to claim, and
+   the comments say which. Nothing here draws a chip, a badge or a second line.
+   --------------------------------------------------------------------------------------------- */
+
+/* Air between two repos, and only between two repos: the gap above each header is what says this is
+   a new list. Two checkouts of the same repo have none between them \u2014 they are one list, and a gap
+   there would read as a division the repo does not have. */
 .workdir-group {
-  padding: 2px 0 6px;
+  padding: 2px 0 8px;
 }
 
 /* Group header: the repo's name at a size and weight that read as a section, its location
-   underneath, and one menu button on the right that appears on hover. */
+   underneath in the muted 11px the reference uses, and one menu button on the right that appears
+   on hover.
+
+   It is set apart by weight and size rather than by a surface: nothing here is a row, so nothing
+   here is painted like one. The name is medium rather than bold because a repository is a heading,
+   not an announcement. */
 .group-heading {
   position: relative;
   display: flex;
-  align-items: center;
-  padding: 12px 8px 6px 10px;
+  align-items: baseline;
+  gap: 8px;
+  padding: 8px 8px 4px 10px;
 }
 
+/* The name is the control that folds the repository, so it is a button wearing the heading's own
+   type: it takes the row the pointer is over, it says which way it goes with `aria-expanded`, and it
+   carries a chevron rather than leaving a reader to infer the state from what happens to be
+   underneath it. Reset here rather than inherited, because what it would inherit is the button
+   treatment every other control in the app has — a surface and a border a heading must not have. */
 .group-heading-text {
   min-width: 0;
   flex: 1;
   display: flex;
-  flex-direction: column;
-  gap: 1px;
-  transition: padding-right 0.12s ease;
+  align-items: baseline;
+  gap: 8px;
+  /* The button's gutter is always there: a header whose text moved as the pointer arrived would
+     move the name of everything under it. */
+  padding: 0 30px 0 0;
+  background: transparent;
+  border: none;
+  color: inherit;
+  text-align: left;
+  cursor: pointer;
+  font-family: inherit;
+}
+
+/* A repository folded shut is its header and nothing else, the way a folded worktree is its row.
+   Nothing marks it: the empty space under the header says it, and a glyph beside the name would put
+   an icon on a row that is a heading rather than one of the list's own rows. */
+.workdir-group.is-collapsed .workdir-checkouts {
+  display: none;
 }
 
 .group-name {
   overflow: hidden;
+  flex-shrink: 1;
   color: var(--marvis-text);
   font-size: 0.875rem;
-  font-weight: 600;
-  line-height: 1.25;
+  font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
 .group-path {
   overflow: hidden;
+  flex: 0 1 auto;
   color: var(--marvis-text-faint);
   font-size: 0.6875rem;
-  line-height: 1.2;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-
-/* One 24px button, so the text only gives up a gutter for it. */
-.group-heading:hover .group-heading-text,
-.group-heading:focus-within .group-heading-text,
-.group-heading.menu-open .group-heading-text {
-  padding-right: 30px;
 }
 
 .group-more {
@@ -1066,7 +1408,7 @@ function agentTitle(item: WorkdirItem): string {
    follows the row the way the shared rule does: `data-highlighted` is what reka puts on the row the
    arrows are on, which a CSS `:focus-visible` cannot see, because the menu moves that focus itself. */
 .group-menu .group-menu-danger {
-  margin-top: 4px;
+  margin-top: 6px;
   border-top: 1px solid var(--marvis-control-hover);
 }
 
@@ -1075,96 +1417,150 @@ function agentTitle(item: WorkdirItem): string {
   color: var(--marvis-danger-fg);
 }
 
-/* Row wrapper: keeps the hover/active surface, the select button fills it */
-.workdir-item {
-  width: 100%;
-  display: flex;
-  flex-direction: column;
-  padding: 5px 8px 5px 10px;
-}
-
-/* Select + overlaid actions share a row */
+/* ---------------------------------------------------------------------------------------------
+   The row. One line, 26px, and square like everything else in Marvis: a rounded row carrying a
+   two-pixel accent edge down its left is a shape saying "this one" twice, and the edge says it once.
+   Every row here — a branch, a terminal, an action — is the same square box, so which of them it is
+   is said by the glyph and the name rather than by the outline.
+   --------------------------------------------------------------------------------------------- */
 .workdir-row {
   position: relative;
   display: flex;
   align-items: center;
+  gap: 7px;
   width: 100%;
+  height: 26px;
+  padding: 0 8px;
 }
 
-.workdir-items {
-  display: flex;
-  flex-direction: column;
-}
-
-/* Child items: one level in from the workdir row. Relative, because the destination list hangs
-   below the row it belongs to rather than being placed against the panel. */
-.workdir-child {
-  position: relative;
-  padding-left: 24px;
-}
-
-.workdir-item:hover {
-  background: var(--marvis-control-hover);
-}
-
-/* Selection, split by level so that blue marks exactly one thing.
-   The terminal is the focus: it takes the selected surface and the accent icon.
-   The workdir that holds it is only "where you are": a plain grey, no bar, no accent. */
-.workdir-child.active {
-  background: var(--marvis-el-selected);
-}
-
-.workdir-child.active .workdir-status-icon {
-  color: var(--marvis-accent);
-}
-
-.workdir-parent.active,
-.workdir-parent.has-active {
-  background: var(--marvis-control-bg);
-}
-
-.workdir-parent.active .workdir-status-icon,
-.workdir-parent.has-active .workdir-status-icon {
+/* A group that holds the terminal being read is said by its own row's glyph, never by a surface:
+   a second tinted row above the selected one would put two claims about "where you are" in the same
+   list. It comes *before* the selection rules below, because on a row that is both the current
+   checkout and the selected one the selection has to win: this is context, and context never
+   outranks a choice. */
+.workdir-checkouts.has-active .workdir-parent .workdir-icon {
   color: var(--marvis-text-secondary);
 }
 
-/* A workdir selected with no terminal under it is the real focus, so it is the one parent
-   that does take the selected surface. */
-.workdir-parent.active:not(.has-active) {
+/* Hover and selection are told apart, and this is the whole of the panel's vocabulary for them.
+   A hover is the subtle surface and nothing else: no edge and no accent, because the row under the
+   pointer is a row being acted on, not a row being chosen. Selection is a different surface again,
+   plus a two-pixel accent edge down its own left, so it can be picked out from across the panel
+   without reading the ink. The edge is an inset shadow, so it is drawn inside the row's box and
+   cannot spill onto the group guide beside it. */
+.workdir-row:hover {
+  background: var(--marvis-el-hover);
+}
+
+/* Selection is one row in the whole panel, and it is whichever row carries `selected`: the terminal
+   being read, or the branch when no terminal of it is selected. A checkout that merely HOLDS the
+   selected terminal is context, and it used to wear the same tint and the same blue edge, so the
+   panel showed two rows claiming the selection at once. */
+.workdir-row.selected {
   background: var(--marvis-el-selected);
+  color: var(--marvis-text);
   box-shadow: inset 2px 0 0 var(--marvis-accent);
 }
 
-.workdir-parent.active:not(.has-active) .workdir-status-icon {
-  color: var(--marvis-accent);
+/* There is deliberately NO rule here for the selected row's glyph. A rule would outrank every
+   `.state-*` rule below — `.workdir-row.selected .workdir-icon` is three classes against their two —
+   so selecting a terminal with a process in it repainted its green glyph in primary ink, and the row
+   said, for as long as it was selected, that nothing was running in it. Selection is not a state: it is
+   already said by the tint and the accent edge, and the glyph keeps saying what it means. The grey of
+   an idle row is lifted below instead, so it reads on the selected tint without repainting anything. */
+
+/* The repo header is a row too, and hovers like one: the same surface, the same padding, the same
+   square corners. The surface belongs to the heading itself rather than to the button inside it, so
+   the empty stretch past the name is part of the click that folds the repository. It has no selected
+   state, because what is selected is a checkout and that is the row underneath it. */
+.group-heading:hover {
+  background: var(--marvis-el-hover);
 }
 
-/* The left bar of a terminal says what it is doing, whether or not it is selected.
-   Running is blue (softened when the row is not the selected one, so a long list of live shells
-   does not shout), an error is red at full strength, and an idle terminal has no bar. */
-.workdir-child {
-  --row-bar: transparent;
-  box-shadow: inset 2px 0 0 var(--row-bar);
+/* The panel's own type: the reference's 13px, which is a step under the interface's 14px because
+   every row in here is one line and the rows are read in columns rather than one at a time. */
+.app-sidebar {
+  font-size: 13px;
 }
 
-.workdir-child.tone-running {
-  --row-bar: color-mix(in srgb, var(--marvis-accent) 45%, transparent);
+.sidebar-scroll {
+  min-height: 0;
+  flex: 1;
+  overflow-y: auto;
+  /* The right padding is the scrollbar's: macOS draws its own overlay scrollbar over the content,
+     so a row whose name and counts end at the edge are read through it. */
+  padding-right: 8px;
 }
 
-.workdir-child.tone-running.active {
-  --row-bar: var(--marvis-accent);
+/* The fold, which is a button of its own rather than the whole row: the row selects the checkout,
+   and folding a group is not selecting it. */
+.workdir-fold {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  margin-left: -4px;
+  flex-shrink: 0;
+  padding: 0;
+  background: transparent;
+  border: none;
+  color: var(--marvis-text-faint);
+  cursor: pointer;
 }
 
-.workdir-child.tone-error {
-  --row-bar: var(--marvis-danger-fg);
+.workdir-fold:hover {
+  color: var(--marvis-text);
 }
 
+/* One turn, and the only motion in the panel. */
+.chv {
+  transition: transform 0.12s ease;
+}
+
+.col .chv {
+  transform: rotate(-90deg);
+}
+
+/* A folded group is its row and nothing else. The chevron is what says it, and it says it by
+   pointing at the list that is not there. */
+.col > .kids {
+  display: none;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   The group's children, and the guide that says they belong to it.
+   --------------------------------------------------------------------------------------------- */
+.kids {
+  display: flex;
+  flex-direction: column;
+  margin-left: 14px;
+  /* Transparent at rest and taken only while the pointer is over the group. A guide that is always
+     there is a second vertical line in the panel, and a reader cannot tell an indent from a
+     selection; this one is only ever drawn while it is being pointed at, which is also the only
+     moment its meaning is being used. */
+  border-left: 1px solid transparent;
+  transition: border-color 0.15s ease;
+}
+
+.grp:hover > .kids {
+  border-left-color: var(--marvis-border);
+}
+
+.kids .workdir-row {
+  padding-left: 12px;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   The label: a name that gives way last and a detail that gives way first.
+   --------------------------------------------------------------------------------------------- */
 .workdir-select {
   flex: 1;
   min-width: 0;
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
+  height: 100%;
   padding: 0;
   background: transparent;
   border: none;
@@ -1174,226 +1570,257 @@ function agentTitle(item: WorkdirItem): string {
   font-family: inherit;
 }
 
+.lbl {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+/* The name gives way, but last: `flex: 0 1 auto` lets it shrink, and `min-width: 0` is what lets it
+   be narrower than its text so the ellipsis has a width to work in at all. */
+.nm {
+  flex: 0 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  color: var(--marvis-text);
+  text-overflow: ellipsis;
+}
+
+/* The detail goes first, and this is the whole rule for it.
+   `flex: 1 1 0` looked like it did that and did not: a zero basis means the detail's own share of the
+   shrink is zero, so a long name absorbed every pixel taken and the detail collapsed to nothing rather
+   than being cut — `Review the duplicated rows in the sidebar` with no mode beside it at all, which is
+   the one thing a two-part label cannot do. So the detail is sized by its own contents, like the name.
+
+   Shrink 2 against the name's 1 is what makes it go first: both lose room in proportion to how much
+   each brought, and the detail gives up twice as fast, so its tail is cut before the name is touched.
+   There is deliberately NO `max-width` here. A cap was tried — `50%` of `.lbl` — and it cut a branch
+   name to `feat/feedbac…` on a 203px label that had 176px spare, purely because a cap is a ceiling
+   rather than a share: it trims a row with nothing competing for the space. Without one, the detail
+   shows in full whenever the row can hold it, and is cut only when something is actually in the way.
+
+   `min-width` is the other half and it is a floor, not a ceiling: the detail is never trimmed to
+   nothing (measured at 2px on a 240px panel, which is not a truncation, it is a deletion), and once
+   it reaches the floor the NAME is what gives way — `min-width: 0` on `.nm` is what lets it be
+   narrower than its text so the ellipsis has a width to work in. Six characters is enough for a mode
+   like `plan` or `coder` to read whole, and a longer one still gets a cut. */
+.dm {
+  flex: 0 2 auto;
+  min-width: 6ch;
+  overflow: hidden;
+  color: var(--marvis-text-faint);
+  font-size: 0.75rem;
+  text-overflow: ellipsis;
+}
+
+/* The glyph, and the whole of the row's state. 14px is one line of this type, so it sits on the
+   name's own line box with no nudge. */
+.workdir-icon {
+  width: 14px;
+  height: 14px;
+  flex-shrink: 0;
+  color: var(--marvis-text-faint);
+}
+
 /* A row whose directory is gone stays listed to say so and to be closed. Its label reads as
    unavailable: nothing behind it can be selected, and the single action beside it is the only
    thing the row still does. */
+.workdir-parent.missing .workdir-select {
+  color: var(--marvis-text-disabled);
+  cursor: not-allowed;
+}
+
+.workdir-parent.missing .workdir-icon,
+.workdir-parent.missing .nm {
+  color: var(--marvis-text-disabled);
+}
+
 .workdir-select[aria-disabled="true"] {
   color: var(--marvis-text-disabled);
   cursor: not-allowed;
 }
 
-.workdir-select[aria-disabled="true"] .workdir-title,
-.workdir-select[aria-disabled="true"] .workdir-status-icon {
-  color: var(--marvis-text-disabled);
-}
-
-.workdir-select.new-item .workdir-name {
-  color: var(--marvis-text-dim);
-  font-size: 0.75rem;
-}
-
-.workdir-select.new-item:hover .workdir-name {
-  color: var(--marvis-text);
-}
-
-/* Keep the plus in the same 14px layout slot as the terminal icon. Its 1px inset keeps the 12px
-   glyph visually light without moving the label two pixels to the left. */
-.workdir-select.new-item .workdir-status-icon {
-  width: 14px;
-  height: 14px;
-  padding: 1px;
-}
-
-/* Row actions: hover only, never on the selected row. Out of flow, so a resting
-   row reserves no gutter for them and the title/diff keep their old alignment.
-   Flush to the right edge, so the strip lines up with the diff stats. */
-.workdir-actions {
-  position: absolute;
-  top: 50%;
-  right: 0;
-  transform: translateY(-50%);
+/* ---------------------------------------------------------------------------------------------
+   The trailing slot: a row's time, or a branch's counts, and the cross that replaces it on hover.
+   --------------------------------------------------------------------------------------------- */
+.workdir-end {
+  position: relative;
+  flex: none;
   display: flex;
   align-items: center;
-  gap: 2px;
+  justify-content: flex-end;
+  min-width: 20px;
+  color: var(--marvis-text-faint);
+  font-size: 0.6875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.workdir-end-note {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.workdir-end-error {
+  color: var(--marvis-danger-fg);
+}
+
+/* The counts: monospaced, because they are read down a column of rows rather than one at a time,
+   and a proportional digit moves them sideways. Green for additions and red for deletions, which
+   are the two colours the reference uses and the two the palette already has. */
+.workdir-diff {
+  display: flex;
+  gap: 5px;
+  font-family: var(--marvis-font);
+}
+
+.ad {
+  color: var(--marvis-content-added);
+}
+
+.rm {
+  color: var(--marvis-content-removed);
+}
+
+/* The cross, out of flow at the trailing slot's own width so the row never reflows and the name
+   never moves. It paints the surface of the row it belongs to — the panel at rest, the hover surface
+   under the pointer, the selected tint on a selected row — so whatever it does land over, it lands
+   over the row rather than letting text show through it.
+
+   At rest it is `opacity: 0`: invisible, and nothing around it either, because the reference draws
+   no cross on a resting row and a grey cell at the end of every branch is an object that list does
+   not have. It is faded rather than `display: none`, which is the one deliberate departure from the
+   reference and the reason is the tab order: a removed button cannot be reached, so a close a
+   keyboard cannot find is a close that does not exist for half the people who use this. Invisible and
+   focusable is the pair that works, and the rule below is what makes it visible the moment it is
+   either pointed at or focused. */
+.workdir-close {
+  position: absolute;
+  top: 50%;
+  /* The row's right edge, so it lands exactly on top of whatever sits there — the diff figures or the
+     elapsed time — the way an actions menu opens over a row rather than pushing it along. */
+  right: 8px;
+  width: 20px;
+  height: 20px;
+  transform: translateY(-50%);
+  /* Above the trailing slot, which is itself positioned: two positioned siblings would be painted in
+     DOM order anyway, and the cross is last, but stacking is stated rather than inferred so moving a
+     child in the template cannot silently put the figures on top of the glyph. */
+  z-index: 1;
+  background: var(--marvis-bg-1);
   opacity: 0;
   transition: opacity 0.12s ease;
 }
 
-.workdir-item:hover .workdir-actions,
-.workdir-item:focus-within .workdir-actions {
+/* The surface the cross paints is the row's own, and it follows the row: the panel at rest, the hover
+   surface under the pointer, the selected tint on a selected row. That opaque fill is what makes it
+   read as a menu opening *on* the row rather than as content moving underneath it — nothing shows
+   through it, and the glyph is never left under the figures it is covering. The two rules are one
+   selector apart and the selected one comes second, so a hovered selected row wears its own tint. */
+.workdir-row:hover > .workdir-close {
+  background: var(--marvis-el-hover);
+}
+
+.workdir-row.selected > .workdir-close {
+  background: var(--marvis-el-selected);
+}
+
+/* Visible whenever it is pointed at or focused — three ways, and no fourth. */
+.workdir-row:hover > .workdir-close,
+.workdir-row:focus-within > .workdir-close,
+.workdir-close:focus-visible {
   opacity: 1;
 }
 
-/* Make room under the overlay so a long title ellipsizes instead of running beneath the icon.
-   Every row that has an action has exactly one, so the gutter is one 24px icon plus a margin. */
-.workdir-item.has-action:hover .workdir-select,
-.workdir-child:hover .workdir-select {
-  padding-right: 30px;
-  transition: padding-right 0.12s ease;
-}
+/* **Nothing on a row moves when the pointer arrives.** There is no yield rule, and that is the whole
+   of it: the trailing slot's box is identical at rest and hovered, so a branch's change figures and a
+   terminal's elapsed time stay exactly where they were drawn. The cross covers what is under it
+   rather than asking it to step aside, because a count that slides left the instant the pointer lands
+   is a number a reader has to re-find at the exact moment they are looking at the row. */
 
-.workdir-action {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 24px;
-  height: 24px;
-  padding: 0;
-  background: transparent;
-  border: none;
-  border-radius: 0;
-  color: var(--marvis-text-secondary);
-  cursor: pointer;
-}
-
-.workdir-action:hover {
-  background: var(--marvis-control-hover);
-  color: var(--marvis-text);
-}
-
-/* The destination list, hanging below the row it belongs to. It is out of flow so a list of
-   worktrees does not push the rows after it, and it does not fade with a hover: a menu that
-   disappears when the pointer leaves the row cannot be read. */
-.move-menu {
-  position: absolute;
-  top: 26px;
-  left: 0;
-  z-index: 20;
-  min-width: 200px;
-}
-
-/* The row a dragged terminal would land in, which is the only thing about a drop that is
-   announced before the pointer is let go. */
-.workdir-item.is-drop-target {
-  background: var(--marvis-control-bg);
-  box-shadow: inset 2px 0 0 var(--marvis-accent);
-}
-
-.app-sidebar.is-terminal-dragging,
-.app-sidebar.is-terminal-dragging * {
-  user-select: none !important;
-  cursor: grabbing !important;
-}
-
-.workdir-child.is-being-dragged {
-  opacity: 0.42;
-}
-
-.terminal-drop-insertion {
-  display: flex;
-  min-height: 30px;
-  flex-direction: row;
-  align-items: center;
-  gap: 6px;
-  border: 1px dashed var(--marvis-accent);
+/* ---------------------------------------------------------------------------------------------
+   The state, in the icon's colour. Five answers, and the words are in the row's accessible name.
+   --------------------------------------------------------------------------------------------- */
+.state-working .workdir-icon {
   color: var(--marvis-accent);
-  font-size: 0.6875rem;
+  animation: row-spin 1.1s linear infinite;
 }
 
-.terminal-drag-ghost {
-  position: fixed;
-  z-index: 1000;
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  max-width: 240px;
-  padding: 6px 10px;
-  overflow: hidden;
-  border: 1px solid var(--marvis-accent);
-  background: var(--marvis-control-bg);
-  color: var(--marvis-text);
-  box-shadow: 0 4px 14px rgb(0 0 0 / 30%);
-  pointer-events: none;
-  white-space: nowrap;
+.state-waiting .workdir-icon {
+  color: var(--marvis-warning);
 }
 
-.terminal-drag-ghost span {
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-/* Centered on the title's line box, so it needs no nudging */
-.workdir-status-icon {
-  width: 14px;
-  height: 14px;
-  color: var(--marvis-text-faint);
-  flex-shrink: 0;
-}
-
-.workdir-main {
-  min-width: 0;
-  flex: 1;
-  display: flex;
-  gap: 4px;
-}
-
-.workdir-title {
-  color: var(--marvis-text);
-  white-space: nowrap;
-  overflow: hidden;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-  flex: 1;
-  min-width: 0;
-}
-
-/* The flex box only clips, so the ellipsis lives on the name itself. And on the name's tail
-   rather than on the name, because the tail is the half that says which branch this is. */
-.workdir-name {
-  display: flex;
-  min-width: 0;
-  overflow: hidden;
-}
-
-/* The head never gives way: it is the kind of branch (`bug/…`, `feat/…`), short and constant, so
-   shrinking it only throws away room the tail could have used. The cap is in characters rather
-   than in percent of the row, because it is a budget for a prefix: a prefix long enough to miss
-   it is cut with an ellipsis instead of taking the row. */
-.workdir-name-head {
-  flex: 0 0 auto;
-  max-width: 18ch;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-.workdir-name-tail {
-  flex: 0 1 auto;
-  min-width: 0;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-}
-
-/* Diff stats share the title's baseline: same line, same center. They step aside
-   for the row actions, which is why the box needs no transition of its own. */
-.workdir-meta {
-  display: flex;
-  align-items: center;
-  align-self: center;
-  gap: 4px;
-  color: var(--marvis-text-faint);
-  font-size: 0.6875rem;
-}
-
-/* Hover drops the counts to clear the row actions. An error and a session asking for
-   attention stay: the hover gutter already reserves the room, and a row that is being
-   hovered at is exactly the row being read. */
-.workdir-item:hover .workdir-meta:not(.workdir-meta-error):not(.workdir-meta-pinned) {
-  display: none;
-}
-
-.workdir-meta-error {
+.state-failed .workdir-icon {
   color: var(--marvis-danger-fg);
 }
 
-.workdir-item.has-active .workdir-meta:not(.workdir-meta-error),
-.workdir-item.active .workdir-meta:not(.workdir-meta-error) {
+.state-running .workdir-icon {
+  color: var(--marvis-success);
+}
+
+/* Idle is the one state with no colour of its own, so its ink is the panel's own muted foreground —
+   lifted one step from the faintest token, because this glyph now has to read on the selected row's
+   tint as well as on the panel, and faint does not. Nothing else about the state is touched. */
+.state-idle .workdir-icon {
+  color: var(--marvis-text-muted);
+}
+
+@keyframes row-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .state-working .workdir-icon {
+    animation: none;
+  }
+
+  .chv {
+    transition: none;
+  }
+}
+
+/* ---------------------------------------------------------------------------------------------
+   The two rows that add something rather than name what exists.
+   --------------------------------------------------------------------------------------------- */
+.add-item,
+.new-item {
+  color: var(--marvis-text-faint);
+}
+
+.add-item .workdir-icon,
+.new-item .workdir-icon,
+.add-item .nm,
+.new-item .nm {
+  color: inherit;
+}
+
+.add-item:hover,
+.new-item:hover,
+.add-item:focus-visible,
+.new-item:focus-visible {
   color: var(--marvis-text);
 }
 
-/* The rename field takes the row's own type so the text does not jump when it appears. */
+/* The hairline the reference draws between the list and the panel's own last action. */
+.sep {
+  height: 1px;
+  margin: 6px 8px;
+  background: var(--marvis-border);
+}
+
+.sidebar-footer {
+  flex-shrink: 0;
+}
+
+/* ---------------------------------------------------------------------------------------------
+   The rename field takes the row's own type so the text does not jump when it appears.
+   --------------------------------------------------------------------------------------------- */
 .workdir-rename {
   min-width: 0;
   flex: 1;
@@ -1409,57 +1836,101 @@ function agentTitle(item: WorkdirItem): string {
   outline-offset: -1px;
 }
 
-.agent-chip {
+/* ---------------------------------------------------------------------------------------------
+   Row actions, and the button every one of them wears. The focus case is not a courtesy: a
+   keyboard reaches these with Tab, and a button that only appears on hover is a button a keyboard
+   user cannot see.
+   --------------------------------------------------------------------------------------------- */
+.workdir-action {
   display: flex;
   align-items: center;
-  gap: 4px;
-  white-space: nowrap;
-}
-
-/* The agent, in the color OpenCode paints it with. A quiet agent is dimmed like the counts;
-   one that is working is not, because that is the reason the reader is looking. */
-.agent-chip {
-  max-width: 12ch;
-  overflow: hidden;
-}
-
-.agent-dot {
-  width: 6px;
-  height: 6px;
-  flex-shrink: 0;
-  border-radius: 0;
-}
-
-.workdir-meta-pinned .agent-chip {
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  padding: 0;
+  background: transparent;
+  border: none;
   color: var(--marvis-text-secondary);
+  cursor: pointer;
 }
 
-.workdir-item:hover .workdir-meta-pinned .agent-chip,
-.workdir-item.active .workdir-meta-pinned .agent-chip {
+.workdir-action:hover {
+  background: var(--marvis-control-hover);
   color: var(--marvis-text);
 }
 
-/* A spinner for "working": the turn reports no percentage, so this says only that one is
-   open, and the agent's own color is what tells the two apart. */
-.agent-spinner {
-  width: 7px;
-  height: 7px;
-  flex-shrink: 0;
-  border-radius: 0;
-  border: 1px solid currentColor;
-  border-top-color: transparent;
-  animation: agent-turn 0.7s linear infinite;
+/* The drop target, and the row under a drag that is being held over the panel. */
+.workdir-checkouts.is-drop-target > .workdir-parent {
+  box-shadow: inset 2px 0 0 var(--marvis-accent);
 }
 
-@keyframes agent-turn {
-  to {
-    transform: rotate(360deg);
-  }
+.app-sidebar.is-terminal-dragging,
+.app-sidebar.is-terminal-dragging * {
+  user-select: none !important;
+  cursor: grabbing !important;
 }
 
-@media (prefers-reduced-motion: reduce) {
-  .agent-spinner {
-    animation: none;
-  }
+.workdir-child.is-being-dragged {
+  opacity: 0.42;
+}
+
+/* The destination list, hanging below the row it belongs to. It is out of flow so a list of
+   worktrees does not push the rows after it, and it does not fade with a hover: a menu that
+   disappears when the pointer leaves the row cannot be read. */
+.move-menu {
+  position: absolute;
+  top: 26px;
+  left: 12px;
+  z-index: 20;
+  min-width: 200px;
+}
+
+/* The drop line is a row of the list, and says nothing but what it is. Its box, its indent and its
+   glyph axis come from `.workdir-row` and `.kids .workdir-row` — which is the whole point: it used
+   to be a box with a margin of its own, four pixels left of the terminals above and below it, so the
+   glyph it drew on the cursor's way in was not on the axis of the row it was about to become. */
+.terminal-drop-insertion {
+  /* An outline rather than a border, for one measurable reason: a border takes a pixel of the row's
+     own content box, so the line's glyph would sit one pixel right of every terminal's — the exact
+     misalignment the row classes were brought in to remove. Drawn inside the box, it costs nothing. */
+  outline: 1px dashed var(--marvis-accent);
+  outline-offset: -1px;
+  color: var(--marvis-accent);
+  font-size: 0.6875rem;
+}
+
+.terminal-drag-ghost {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  align-items: center;
+  /* The same row again, this time under the pointer rather than in the list, so it carries the same
+   * indent the row it came from wears. The pointer sits inside it at an offset, as it does in the
+   * reference; the glyph does not move away from the column it will land in.
+   *
+   * The type is named here rather than inherited, because this box is teleported to the body and
+   * therefore sits outside `.app-sidebar` — which is where the panel's 13px lives. Inheriting the
+   * body's size made the dragged row's name larger than the row it was a copy of, which is the same
+   * misalignment as an icon off its column and just as wrong. */
+  gap: 7px;
+  height: 26px;
+  padding: 0 12px;
+  font-family: inherit;
+  font-size: 13px;
+  /* Never wider than the panel's own minimum, so the ghost stays a chip over the workspace rather
+     than a banner drawn across it — and so it is never wider than the row it is a copy of. */
+  max-width: 240px;
+  overflow: hidden;
+  border: 1px solid var(--marvis-accent);
+  background: var(--marvis-control-bg);
+  color: var(--marvis-text);
+  box-shadow: 0 4px 14px rgb(0 0 0 / 30%);
+  pointer-events: none;
+  white-space: nowrap;
+}
+
+.terminal-drag-ghost span {
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 </style>

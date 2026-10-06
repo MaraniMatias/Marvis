@@ -8,6 +8,8 @@ import {
   addSessionToLayout,
   createTerminalLayout,
   normalizeTerminalLayout,
+  moveSessionId,
+  orderedSessionIds,
   removeSessionFromLayout,
 } from "../domain/terminal-layout";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
@@ -44,6 +46,14 @@ const emit = defineEmits<{
   openFolder: [];
   workspaceUpdated: [workspace: WorkspaceState];
   sessionStatusChanged: [sessionId: string, status: TerminalSessionStatus | null];
+  /**
+   * The order this checkout's terminals are now listed in, published on every save.
+   *
+   * The sidebar row and this layout are one list drawn twice, and the panel is the only place the
+   * order is decided — so it is announced rather than recomputed there. Without it the sidebar draws
+   * whatever order the database hands out and a reorder is persisted, invisible and useless.
+   */
+  sessionOrder: [checkoutId: string, order: string[]];
   openFile: [path: string];
 }>();
 
@@ -98,6 +108,7 @@ function reportTerminalError(cause: unknown) {
 
 function saveLayout(checkoutId: string, layout: CheckoutTerminalLayout) {
   layouts.value[checkoutId] = layout;
+  emit("sessionOrder", checkoutId, [...layout.sessionOrder]);
   const snapshot = JSON.parse(JSON.stringify(layout)) as CheckoutTerminalLayout;
   const previous = layoutSaveQueues.get(checkoutId) ?? Promise.resolve();
   const pending = previous
@@ -106,6 +117,18 @@ function saveLayout(checkoutId: string, layout: CheckoutTerminalLayout) {
     .catch(reportTerminalError);
   layoutSaveQueues.set(checkoutId, pending);
   return pending;
+}
+
+/**
+ * The order a checkout's terminals are drawn in: what its saved layout says, then the rest.
+ *
+ * Written in full rather than as a delta, because a layout that only knows the terminals created in
+ * this run knows nothing about the ones that were here when it was loaded — and a reorder aimed at
+ * one of those is a reorder of a list it does not contain.
+ */
+function currentOrder(checkoutId: string): string[] {
+  const checkout = (props.checkouts ?? []).find((item) => item.id === checkoutId);
+  return orderedSessionIds(checkout?.sessions ?? [], layouts.value[checkoutId]);
 }
 
 function initializeLayout(target: Checkout) {
@@ -178,11 +201,19 @@ async function requestClose(sessionId: string) {
  * shell with something running in front of it is left where it is, and says so: typing `cd` into a
  * build would feed the build.
  */
-async function moveSession(sessionId: string, targetCheckoutId: string) {
+async function moveSession(sessionId: string, targetCheckoutId: string, index: number) {
   const view = views.value.find((item) => item.session?.id === sessionId);
   const target = (props.checkouts ?? []).find((checkout) => checkout.id === targetCheckoutId);
-  if (!view || !view.session || !target || target.isMissing || view.checkoutId === targetCheckoutId) return;
+  if (!view || !view.session || !target || target.isMissing) return;
   const source = view.checkoutId;
+  // A drop in the terminal's own worktree is a reorder: the list it belongs to is the one that moves,
+  // and nothing else changes — not the terminal's directory, not which terminal is in front, not the
+  // backend, which has no notion of an order to keep.
+  if (source === targetCheckoutId) {
+    const layout = layouts.value[source] ?? createTerminalLayout([]);
+    void saveLayout(source, { ...layout, sessionOrder: moveSessionId(currentOrder(source), sessionId, index) });
+    return;
+  }
   let workspace: WorkspaceState;
   try {
     workspace = await moveTerminal(source, sessionId, targetCheckoutId);
@@ -191,12 +222,19 @@ async function moveSession(sessionId: string, targetCheckoutId: string) {
     return;
   }
   view.checkoutId = targetCheckoutId;
-  view.session = { ...view.session, checkoutId: targetCheckoutId };
+  const moved = { ...view.session, checkoutId: targetCheckoutId };
+  view.session = moved;
   void saveLayout(source, removeSessionFromLayout(layouts.value[source] ?? createTerminalLayout([]), sessionId));
-  void saveLayout(
-    targetCheckoutId,
-    addSessionToLayout(layouts.value[targetCheckoutId] ?? createTerminalLayout([]), view.session),
-  );
+  const targetLayout = layouts.value[targetCheckoutId] ?? createTerminalLayout([]);
+  // Inserted where the drop aimed rather than at the end: a terminal dragged onto the second row of
+  // another worktree belongs second there, and a move that quietly reordered its list by appending
+  // would answer a question nobody asked. The incoming id is filtered out of the order first
+  // because `moveSessionId` removes it anyway, and a layout still naming the session's old worktree
+  // would have it twice.
+  void saveLayout(targetCheckoutId, {
+    ...addSessionToLayout(targetLayout, moved),
+    sessionOrder: moveSessionId(orderedSessionIds(target.sessions, targetLayout), moved.id, index),
+  });
   emit("workspaceUpdated", workspace);
   if (!props.terminalSettings?.changeDirectoryOnMove) return;
   // The pane's own checkout prop is what the session is written under, and the new one only
@@ -322,6 +360,7 @@ onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
           :ref="(instance) => setTerminalRef(view.key, instance)"
           :key="view.key"
           :checkout-id="view.checkoutId"
+          :name="view.session?.name"
           :active="view.checkoutId === checkout?.id && view.key === activeView?.key"
           :visible="isVisible"
           :focused="isVisible && view.session?.id === activeSessionId"
