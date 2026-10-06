@@ -135,7 +135,7 @@ const referenceSwatches = {
 };
 const referenceContentSwatches = {
   dark: {
-    "--marvis-content-bg-0": "#282c33",
+    "--marvis-content-bg-0": "#222436",
     "--marvis-content-bg-1": "#2f343e",
     "--marvis-content-bg-2": "#363c46",
     "--marvis-content-border": "#464b57",

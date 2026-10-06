@@ -91,16 +91,21 @@ let pendingRefreshCheckoutId: string | null = null;
 
 /**
  * Every row of both lists is this tall, and `--tree-row-height` below is set from it, so the
- * `.file-row` box is `3px + (22 - 6px) line box + 3px` = 22px exactly. Change one without the
- * other and the virtual window drifts from the rendered rows. 80 rows x 28px was 2240px of
- * tree; the same surface at 22px is ~64 rows, with ~10 of them as overscan.
+ * `.file-row` box is `3px + (26 - 6px) line box + 3px` = 26px exactly. Change one without the
+ * other and the virtual window drifts from the rendered rows.
  *
- * It is the height at the 14px the design is drawn at, and the row scales with `ui.fontSize`
- * because the row's own `font-size: 0.75rem` does: a row left at 22px held a 17px label in a
- * 16px line box at the top of the range and clipped it. The scale is a prop rather than read
- * back off the root so the number the window math multiplies is the number the box is drawn at.
+ * 26px is the sidebar's own row height (`.workdir-row`), and it is the height at the 14px the
+ * design is drawn at. Both lists read as a column of one-line rows beside the sidebar rather than
+ * as a list of its own, and a row height is what says that before any color does. The cost is
+ * rows: the inspector is about 1400px of scroll at the default window, so 26px is ~54 of them
+ * against 22px's ~64.
+ *
+ * It scales with `ui.fontSize` because the row's own `font-size` does: a row left at 26px held a
+ * 17px label in a 20px line box at the top of the range and clipped it. The scale is a prop
+ * rather than read back off the root so the number the window math multiplies is the number the
+ * box is drawn at.
  */
-const TREE_ROW_HEIGHT = 22;
+const TREE_ROW_HEIGHT = 26;
 const TREE_WINDOW_SIZE = 64;
 const TREE_OVERSCAN = 10;
 
@@ -422,8 +427,9 @@ function rowStatus(path: string): string | undefined {
   return gitStatuses.value.get(path);
 }
 
+/** The gutter, and one 14px step per level: the sidebar's own indent, at its own 8px base. */
 function rowIndent(depth: number): string {
-  return `${6 + depth * 14}px`;
+  return `${8 + depth * 14}px`;
 }
 
 /** Both lists are flat and every row is rowHeight tall, so one window serves both. */
@@ -564,7 +570,7 @@ const matchedSearchEntries = searchEntries.value
           This checkout is empty.
         </p>
         <template v-else>
-          <p v-if="directoryStates['.'] === 'truncated'" class="file-row file-note" :style="{ paddingLeft: '6px' }">
+          <p v-if="directoryStates['.'] === 'truncated'" class="file-row file-note" :style="{ paddingLeft: '8px' }">
             Some entries omitted (folder is large).
           </p>
           <div
@@ -666,7 +672,7 @@ const matchedSearchEntries = searchEntries.value
             <p
               v-if="gitSnapshot.changesWatchError"
               class="file-row file-note"
-              :style="{ paddingLeft: '6px' }"
+              :style="{ paddingLeft: '8px' }"
               :title="`Live updates unavailable: ${gitSnapshot.changesWatchError}`"
             >
               Live updates unavailable: {{ gitSnapshot.changesWatchError }}
@@ -774,18 +780,22 @@ const matchedSearchEntries = searchEntries.value
  * window multiplies and divides by the same number, so this box and that constant have to move
  * together.
  */
+/* The row, and it is the sidebar's row. 26px, an 8px gutter, a 7px gap and the panel's own 13px:
+   the same box in the same panel type, so a file and a terminal are read as two rows of one app
+   rather than as two lists that happen to sit next to each other. Nothing here is rounded, and
+   nothing here moves on hover. */
 .file-row {
   display: flex;
   align-items: center;
-  gap: 6px;
+  gap: 7px;
   width: 100%;
   height: var(--tree-row-height);
-  padding: 3px 6px;
+  padding: 3px 8px;
   border: none;
   background: transparent;
   color: var(--marvis-text-secondary);
   font-family: inherit;
-  font-size: 0.75rem;
+  font-size: 13px;
   line-height: calc(var(--tree-row-height) - 6px);
   text-align: left;
   white-space: nowrap;
@@ -793,15 +803,23 @@ const matchedSearchEntries = searchEntries.value
   cursor: pointer;
 }
 
+/* Hover and selection are the panel's own vocabulary, taken from the sidebar rather than invented
+   again: the subtle surface for the row being acted on, a different one plus a two-pixel accent
+   edge for the row being chosen. */
 .file-row:hover {
-  background: var(--marvis-control-hover);
+  background: var(--marvis-el-hover);
   color: var(--marvis-text);
 }
 
-/* What is open, or the change under review, is the one row with a surface (E.3) */
+/* What is open, or the change under review, is the one row with a surface (E.3).
+
+   The edge is an inset shadow for the same reason the sidebar's is: drawn inside the row's box it
+   cannot spill onto the gutter a row is indented into, so a deep row's accent still starts at the
+   panel's own edge instead of one level in. */
 .file-row.is-selected {
   background: var(--marvis-el-selected);
   color: var(--marvis-text);
+  box-shadow: inset 2px 0 0 var(--marvis-accent);
 }
 
 .file-folder {
@@ -834,7 +852,13 @@ const matchedSearchEntries = searchEntries.value
   color: var(--marvis-text-faint);
 }
 
+/* The fold, in a fixed 16px slot, so a folder's glyph and a file's icon land on one column the way
+   they do in the sidebar. A file row draws the slot empty rather than nothing at all: a file with
+   no chevron is still a file under a folder, and a row whose name moves a glyph's width when the
+   pointer arrives is a name a reader has to re-find. */
 .chevron {
+  width: 16px;
+  height: 16px;
   transition: transform 0.12s ease;
 }
 
@@ -843,8 +867,8 @@ const matchedSearchEntries = searchEntries.value
 }
 
 .chevron-spacer {
-  width: 10px;
-  height: 10px;
+  width: 16px;
+  height: 16px;
   flex-shrink: 0;
 }
 
@@ -898,14 +922,17 @@ const matchedSearchEntries = searchEntries.value
   color: var(--marvis-text);
 }
 
-/* Group header sits on the panel gutter, its rows one level in */
+/* The group header is a heading and not a row, and says so by not taking one: no surface at rest, no
+   hover, nothing to select. That is the sidebar's repo heading exactly — the name reads at the
+   panel's own 13px in the faint ink, set apart by size rather than by a box, and the rows under it
+   are the ones that answer the pointer. */
 .details-group-header {
   display: flex;
   align-items: center;
   height: var(--tree-row-height);
-  padding: 0 6px;
+  padding: 0 8px;
   color: var(--marvis-text-faint);
-  font-size: 0.6875rem;
+  font-size: 13px;
   line-height: var(--tree-row-height);
   letter-spacing: 0.02em;
   white-space: nowrap;
@@ -913,7 +940,9 @@ const matchedSearchEntries = searchEntries.value
   text-overflow: ellipsis;
 }
 
+/* One level in from its header: the 8px gutter plus the same 14px step the file tree indents by,
+   so a change row and a file row are at the same depth under the same name. */
 .change-row {
-  padding-left: 20px;
+  padding-left: 22px;
 }
 </style>

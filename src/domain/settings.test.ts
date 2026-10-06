@@ -17,7 +17,7 @@ import { ZOOM_STEPS } from "./zoom";
 describe("the settings file", () => {
   it("names the three surfaces and everything they carry", () => {
     expect(DEFAULT_SETTINGS).toEqual({
-      ui: { fontSize: 14, zoom: 1, theme: "system" },
+      ui: { fontSize: 14, zoom: 1, theme: "system", contentBackground: "#222436" },
       terminal: {
         fontSize: 16,
         ligatures: true,
@@ -32,7 +32,7 @@ describe("the settings file", () => {
 
   it("reads what was written, and a file with lines missing from it", () => {
     const written = {
-      ui: { fontSize: 16, zoom: 1.2 as const, theme: "light" as const },
+      ui: { fontSize: 16, zoom: 1.2 as const, theme: "light" as const, contentBackground: "#aabbcc" },
       terminal: {
         fontSize: 18,
         ligatures: false,
@@ -77,6 +77,11 @@ describe("the settings file", () => {
     // A preference rather than state worth refusing a file over, and there is a default that
     // answers for whatever the system is set to.
     expect(normalizeSettings({ ui: { theme: "solarized" } }).ui.theme).toBe("system");
+  });
+
+  it("accepts six-digit hex content backgrounds and defaults invalid values", () => {
+    expect(normalizeSettings({ ui: { contentBackground: "#A1b2C3" } }).ui.contentBackground).toBe("#a1b2c3");
+    expect(normalizeSettings({ ui: { contentBackground: "red" } }).ui.contentBackground).toBe("#222436");
   });
 
   it("keeps a scrollbar mode it knows and falls back to hidden for one it does not", () => {

@@ -185,6 +185,16 @@ function onDialogKeydown(event: KeyboardEvent) {
                   </span>
                 </div>
 
+                <input
+                  v-else-if="field.kind === 'color'"
+                  :id="controlId(field.path)"
+                  type="color"
+                  :disabled="saving"
+                  class="marvis-input h-8 w-full cursor-pointer p-1"
+                  :value="String(valueAt(draft, field.path))"
+                  @input="change(field.path, ($event.target as HTMLInputElement).value)"
+                />
+
                 <SelectControl
                   v-else
                   :id="controlId(field.path)"

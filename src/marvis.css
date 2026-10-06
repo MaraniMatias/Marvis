@@ -111,7 +111,7 @@
   --marvis-field-hover: var(--marvis-bg-0);
   --marvis-control-focus: var(--marvis-focus);
   --marvis-control-danger: var(--marvis-danger);
-  --marvis-content-bg-0: #282c33;
+  --marvis-content-bg-0: #222436;
   --marvis-content-bg-1: #2f343e;
   --marvis-content-bg-2: #363c46;
   --marvis-content-border: #464b57;
@@ -126,7 +126,7 @@
   --marvis-selection: #74ade83d;
   /* The cursor, for the terminal and for the editor's caret, which is the same block in the same
      color. A lavender rather than the palette's brightest ink: a block is a fill, so the cell it
-     covers has to stand off the surface, and this stands off `#282c33` without being the first
+     covers has to stand off the surface, and this stands off `#222436` without being the first
      thing the eye lands on. The light answer is below, and it is deliberately not a tint of this. */
   --marvis-cursor: #c2c9f1;
 

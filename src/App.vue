@@ -797,11 +797,16 @@ function applyTheme() {
   const resolved: Theme = preference === "system" ? (systemPrefersDark.matches ? "dark" : "light") : preference;
   theme.value = resolved;
   document.documentElement.dataset.theme = resolved;
+  if (resolved === "dark") {
+    document.documentElement.style.setProperty("--marvis-content-bg-0", settings.value.ui.contentBackground);
+  } else {
+    document.documentElement.style.removeProperty("--marvis-content-bg-0");
+  }
 }
 
 const systemPrefersDark = window.matchMedia("(prefers-color-scheme: dark)");
 
-watch(() => settings.value.ui.theme, applyTheme, { immediate: true });
+watch(() => [settings.value.ui.theme, settings.value.ui.contentBackground], applyTheme, { immediate: true });
 systemPrefersDark.addEventListener("change", applyTheme);
 
 /**

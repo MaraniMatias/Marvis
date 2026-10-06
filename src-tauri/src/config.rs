@@ -56,6 +56,7 @@ pub struct UiSettings {
     pub font_size: f64,
     pub zoom: f64,
     pub theme: String,
+    pub content_background: String,
 }
 
 impl Default for UiSettings {
@@ -64,6 +65,7 @@ impl Default for UiSettings {
             font_size: 14.0,
             zoom: 1.0,
             theme: "system".into(),
+            content_background: "#222436".into(),
         }
     }
 }
@@ -140,6 +142,11 @@ impl AppSettings {
         if !matches!(self.ui.theme.as_str(), "system" | "light" | "dark") {
             self.ui.theme = "system".into();
         }
+        if !valid_hex_color(&self.ui.content_background) {
+            self.ui.content_background = "#222436".into();
+        } else {
+            self.ui.content_background.make_ascii_lowercase();
+        }
         self.terminal.font_size = bounded(
             self.terminal.font_size,
             TERMINAL_FONT_SIZE_MIN,
@@ -171,6 +178,11 @@ impl AppSettings {
             .clamp(INDENTATION_SIZE_MIN, INDENTATION_SIZE_MAX);
         self
     }
+}
+
+fn valid_hex_color(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() == 7 && bytes[0] == b'#' && bytes[1..].iter().all(u8::is_ascii_hexdigit)
 }
 
 /// A file the user typed into also carries `.nan` and `1e999`, which no font size can be, so
@@ -320,6 +332,7 @@ mod tests {
                 font_size: 16.0,
                 zoom: 1.2,
                 theme: "light".into(),
+                content_background: "#222436".into(),
             },
             terminal: TerminalSettings {
                 font_size: 18.0,
@@ -424,7 +437,7 @@ mod tests {
                 // `sidebarLayout` is a key an older build wrote and this one has no field for. It is
                 // here to say what happens to it: an unknown key is ignored, like any other line a
                 // person typed, and the file still loads. Nothing reads it and nothing migrates it.
-                "ui:\n  fontSize: .nan\n  zoom: 99\n  theme: solarized\n  sidebarLayout: wide\n",
+                "ui:\n  fontSize: .nan\n  zoom: 99\n  theme: solarized\n  contentBackground: not-a-color\n  sidebarLayout: wide\n",
                 "terminal:\n  fontSize: 2\n  cursorStyle: beam\n  scrollbar: sometimes\n",
                 "editor:\n  fontSize: 400\n  indentation:\n    size: 0\n",
             ),
@@ -434,6 +447,7 @@ mod tests {
         assert_eq!(loaded.ui.font_size, 14.0);
         assert_eq!(loaded.ui.zoom, ZOOM_MAX);
         assert_eq!(loaded.ui.theme, "system");
+        assert_eq!(loaded.ui.content_background, "#222436");
         assert_eq!(loaded.terminal.font_size, TERMINAL_FONT_SIZE_MIN);
         assert_eq!(loaded.terminal.cursor_style, "block");
         assert_eq!(loaded.terminal.scrollbar, "hidden");
@@ -461,6 +475,7 @@ mod tests {
                     font_size: 15.0,
                     zoom: 1.0,
                     theme: "dark".into(),
+                    content_background: "#222436".into(),
                 },
                 ..AppSettings::default()
             },

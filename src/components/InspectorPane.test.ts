@@ -28,7 +28,7 @@ const { toasts, dismiss } = useToasts();
 
 /** Mirrors TREE_ROW_HEIGHT, TREE_WINDOW_SIZE and TREE_OVERSCAN: the window math is only right
  *  when the rendered rows are exactly this tall, so the test pins both sides. */
-const ROW_HEIGHT = 22;
+const ROW_HEIGHT = 26;
 const WINDOW_SIZE = 64;
 const OVERSCAN = 10;
 
@@ -447,11 +447,11 @@ describe("InspectorPane", () => {
     expect(mocks.listCheckoutFiles).toHaveBeenCalledWith("nested", "src/nested");
     const tree = wrapper.get('[aria-label="Checkout files"]');
     expect(tree.text()).toContain("main.ts");
-    // The depth gutter is the mockup's: 6px plus 14px per level.
+    // The depth gutter is the sidebar's: 8px plus 14px per level.
     expect(tree.findAll("button").map((row) => row.attributes("style"))).toEqual([
-      "padding-left: 6px;",
-      "padding-left: 20px;",
-      "padding-left: 34px;",
+      "padding-left: 8px;",
+      "padding-left: 22px;",
+      "padding-left: 36px;",
     ]);
     await tree.findAll("button")[0]!.trigger("click");
     expect(wrapper.get('[aria-label="Checkout files"]').findAll("button")).toHaveLength(1);

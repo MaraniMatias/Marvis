@@ -2535,7 +2535,7 @@ describe("App UI integration", () => {
 
       resolveSettings({
         ...cloneSettings(DEFAULT_SETTINGS),
-        ui: { fontSize: 18, zoom: 1, theme: "system" as const },
+        ui: { fontSize: 18, zoom: 1, theme: "system" as const, contentBackground: "#222436" },
       });
       await flushPromises();
       expect(wrapper.find('[data-testid="settings-button"]').exists()).toBe(true);
@@ -2723,6 +2723,40 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
+    it("applies the selected content background in dark mode and keeps the light surface unchanged", async () => {
+      const wrapper = await openSettings({
+        ...DEFAULT_SETTINGS,
+        ui: { ...DEFAULT_SETTINGS.ui, theme: "dark" },
+      });
+      const color = wrapper.get("#settings-ui-contentBackground");
+      await color.setValue("#334455");
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Apply")!
+        .trigger("click");
+      await flushPromises();
+
+      expect(document.documentElement.style.getPropertyValue("--marvis-content-bg-0")).toBe("#334455");
+      expect(mocks.saveSettings).toHaveBeenCalledWith({
+        ...DEFAULT_SETTINGS,
+        ui: { ...DEFAULT_SETTINGS.ui, theme: "dark", contentBackground: "#334455" },
+      });
+      wrapper.unmount();
+
+      const light = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        {
+          settings: {
+            ...cloneSettings(DEFAULT_SETTINGS),
+            ui: { ...DEFAULT_SETTINGS.ui, theme: "light", contentBackground: "#334455" },
+          },
+        },
+      );
+      expect(document.documentElement.style.getPropertyValue("--marvis-content-bg-0")).toBe("");
+      light.unmount();
+    });
+
     it("says nothing has been written when Cancel throws the draft away", async () => {
       const wrapper = await openSettings();
       const fontSize = wrapper.get("#settings-terminal-fontSize");
@@ -2793,7 +2827,7 @@ describe("App UI integration", () => {
         {
           settings: {
             ...cloneSettings(DEFAULT_SETTINGS),
-            ui: { fontSize: 16, zoom: 1, theme: "system" as const },
+            ui: { fontSize: 16, zoom: 1, theme: "system" as const, contentBackground: "#222436" },
           },
         },
       );
