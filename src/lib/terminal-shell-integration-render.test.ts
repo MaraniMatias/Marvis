@@ -131,10 +131,30 @@ describe("what a terminal shows after it sets up shell integration", () => {
     for (const name of SESSIONS) {
       const stream = new TextDecoder().decode(capture(name));
       expect(stream, `${name} never reported the install`).toContain("\x1b]133;D;0\x07");
-      expect(stream, `${name} never announced a starting command`).toContain("\x1b]133;A\x07");
       // And the clear is in the stream, which is what the control capture above varies.
       expect(stream, `${name} never emitted the clear`).toContain("\x1b[3J\x1b[H\x1b[2J");
     }
+  });
+
+  // Separate from the block above because the shells disagree here, and one of the disagreements is
+  // deliberate. bash reports the start of a command from `PS0`, which arrived in bash 4.4; `/bin/bash`
+  // on macOS is 3.2.57 and is what this app spawns when `$SHELL` says so, so the `bash-login` capture
+  // has no started marker in it and asserting one there would be asserting a bash that does not exist
+  // on the machine. The consequence is stated in `shell_integration_script`: a bash 3.2 keeps the
+  // sidebar row the colour the previous command left it, rather than turning blue the moment the next
+  // one starts. zsh has `preexec` and is unaffected.
+  it("announces a starting command on every shell that can know one", async () => {
+    const withStartedMarker = SESSIONS.filter((name) => !name.startsWith("bash"));
+    for (const name of withStartedMarker) {
+      const stream = new TextDecoder().decode(capture(name));
+      expect(stream, `${name} never announced a starting command`).toContain("\x1b]133;A\x07");
+    }
+    // And the bash capture is not silently passing because it is empty: it carries a real session, and
+    // it carries no started marker. Asserting the gap is what keeps it from becoming a hole that a
+    // future bash without `PS0` would widen without anybody noticing.
+    const bash = new TextDecoder().decode(capture("bash-login"));
+    expect(bash).toContain("\x1b]133;D;1\x07");
+    expect(bash.includes("\x1b]133;A\x07"), "bash 3.2 has no PS0, so this should be absent").toBe(false);
   });
 
   it("shows the failing command and its prompt, so the capture is a real session and not an empty one", async () => {

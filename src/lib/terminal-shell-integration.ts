@@ -16,7 +16,7 @@
  *
  * What `A` means is worth being precise about, because the protocol's name for it and the name it
  * carries here are not the same thing. `A` is *prompt start* in OSC 133; it is emitted from zsh's
- * `preexec_functions` and bash's DEBUG trap, which fire when a command is about to execute, so it is
+ * `preexec_functions` and bash's `PS0`, which fire when a command is about to execute, so it is
  * used here as a proxy for "a command is starting". The marker for that is `C`, and neither it nor
  * `B` (prompt end, which no shell hook can report) is emitted, because producing them correctly needs
  * prompt state this integration does not track. That is a decision about who reads these bytes: the

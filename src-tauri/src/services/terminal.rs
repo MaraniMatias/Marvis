@@ -334,27 +334,32 @@ const CLEAR_SCREEN: &str = r"\033[3J\033[H\033[2J";
 /// first. That was measured too: `PROMPT_COMMAND=(a b)` runs `a` alone on 3.2 and `a` then `b` on
 /// 5.3.
 ///
-/// `trap … DEBUG` stands in for zsh's `preexec`, which bash has no named hook for. It replaces
-/// whatever DEBUG trap the user had, and bash does not keep the old one anywhere — but it *does* print
-/// it: `trap -p DEBUG` reports `trap -- '<body>' DEBUG`, and that is enough to chain it, since the
-/// body is the trap's own quoted text and evaluating it re-arms exactly what was there. Verified
-/// against bodies containing single quotes, semicolons and variable references. So the previous trap
-/// is read back, stripped of the `trap -- ` prefix and the ` DEBUG` suffix, evaluated once to
-/// unquote it, and run after the marker. `PS0` would avoid all of this — it is expanded before a
-/// command runs and, measured in a real PTY through a real xterm.js render, its output is *not*
-/// printed to the screen, so a marker emitted there is invisible. But `PS0` does not exist in bash
-/// 3.2, which is what `/bin/bash` is on macOS and what this app spawns when `$SHELL` says so:
-/// measured, a bash 3.2 with `PS0` set emits nothing at all for `cd`, `[ -f … ]` or `false`, where
-/// the DEBUG trap fires for all three. Using it would silently drop the marker on the version of bash
-/// most likely to be on the machine, so the DEBUG trap stays and the user's is chained instead.
+/// `PS0` stands in for zsh's `preexec`, which bash has no named hook for. bash expands it
+/// immediately before it runs a command, which is the same point in the sequence, and it is an
+/// ordinary variable: `$PS0` reads the user's value back, so prepending the marker to it needs no
+/// trap introspection at all. Measured in a real PTY: the marker lands between the echoed line and
+/// the command's own output, for `cd` and `[ -f … ]` as readily as for `echo`, and a user's own
+/// `PS0` still fires after ours rather than being replaced by it.
 ///
-/// One thing about the DEBUG trap that is *not* fixed here, because it is a property of bash 3.2
-/// rather than of this script: a `trap` set inside a sourced file does not survive the sourcing
-/// command on 3.2 — bash restores the trap state it saved when the `.` ran. Measured: on 3.2 the
-/// user's DEBUG trap is what is armed after the hook is sourced, and no `A` marker is emitted at all;
-/// on 5.3 the hook's is. So on bash 3.2 the chaining below is a no-op and the marker never fires,
-/// which is the pre-existing behaviour of installing from a sourced file and not something this
-/// script can fix from inside one.
+/// This replaces a `trap … DEBUG`, which cannot be read back from here. bash *suspends* the DEBUG
+/// trap for the duration of a sourced file and restores it afterwards, so `trap -p DEBUG` inside one
+/// prints nothing on either a bash 3.2 or a 5.3, while the same command typed at the prompt prints
+/// the trap. Measured, and so is every other route to it — `trap -p`, a command substitution, a
+/// redirect to a file and reading that file back, all empty. A trap *set* inside the sourced file is
+/// reported normally; it is the inherited one that cannot be seen. That is what made a chain dead
+/// code rather than a chain: the read-back was always the empty string, so the `eval` ran nothing,
+/// and the cost was the opposite of the intent — on a 5.3 the user's trap was destroyed silently,
+/// and on a 3.2 the hook's marker never fired either.
+///
+/// ## What it costs
+///
+/// `PS0` arrived in bash 4.4. `/bin/bash` on macOS is 3.2.57, which is what this app spawns when
+/// `$SHELL` says so, and a bash 3.2 with `PS0` set emits nothing at all for `cd`, `[ -f /etc/hosts ]`
+/// or `false`, where a 5.3 emits one for each. So on a bash 3.2 the sidebar row keeps the previous
+/// command's colour while the next one runs, instead of turning blue the moment it starts. That is
+/// the trade taken over taking over somebody's `DEBUG` trap. Setting `PS0` on a 3.2 is inert rather
+/// than broken — the user's own `PS0` does not fire there either — so nothing of theirs is taken
+/// away for our marker not arriving.
 fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
     match program.file_name().and_then(|name| name.to_str()) {
         Some("zsh") => Some((
@@ -393,12 +398,8 @@ fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
                  else\n\
                  \x20 PROMPT_COMMAND=\"__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}\"\n\
                  fi\n\
-                 __marvis_previous_debug=$(trap -p DEBUG)\n\
-                 if [[ -n $__marvis_previous_debug ]]; then \
-                 __marvis_previous_debug=${{__marvis_previous_debug#trap -- }}; \
-                 __marvis_previous_debug=${{__marvis_previous_debug% DEBUG}}; eval \
-                 \"__marvis_previous_debug=$__marvis_previous_debug\"; fi\n\
-                 trap 'printf \"{OSC_STARTED_BASH}\"; eval \"$__marvis_previous_debug\"' DEBUG\n\
+                 __marvis_previous_ps0=${{PS0-}}\n\
+                 printf -v PS0 '{OSC_STARTED_BASH}'\"$__marvis_previous_ps0\"\n\
                  printf '{CLEAR_SCREEN}'\n"
             ),
         )),
@@ -691,7 +692,7 @@ mod tests {
     /// itself — and asserts a marker is drawn for each.
     ///
     /// The second half is what makes the marker's *position* the subject rather than its existence. `A`
-    /// is prompt start in OSC 133 and this emits it from `preexec`/DEBUG, which is command-execution
+    /// is prompt start in OSC 133 and this emits it from `preexec`/`PS0`, which is command-execution
     /// start, so it stands in for `C` and the comment on `OSC_STARTED` says so. That is only true if
     /// the marker lands *before* the command's own output, and measured, a prompt hook
     /// (`precmd`/`PROMPT_COMMAND`) puts it after the output instead — it fires once the next prompt is
@@ -699,14 +700,19 @@ mod tests {
     /// output that command produced, which is what tells the hook this uses from the hook it does not.
     ///
     /// Two builtins rather than one command per line, because the shells fire at different granularity —
-    /// bash's DEBUG trap once per simple command, zsh's `preexec` once per line — and a marker wired to
+    /// bash's `PS0` once per simple command, zsh's `preexec` once per line — and a marker wired to
     /// the wrong one of those still looks right for a single simple command.
+    ///
+    /// Bash is not in here. Its marker comes from `PS0`, which arrived in 4.4 and does not exist in
+    /// the 3.2 that `/bin/bash` is on macOS, so a marker cannot be required of every bash on the
+    /// machine. `the_bash_started_marker_fires_before_the_command_it_marks` asks each one and asserts
+    /// the position where there is a `PS0` to expand.
     #[test]
     fn the_started_marker_fires_for_builtins_and_before_their_output() {
         // What `echo` prints, chosen so that finding it means finding that command's output rather than
         // the line editor drawing the typed command back.
         const OUTPUT: &str = "MARVIS_MARKER_ORDERING_PROBE";
-        for (shell, args) in [("/bin/zsh", ["-f", "-i"]), ("/bin/bash", ["--norc", "-i"])] {
+        for (shell, args) in [("/bin/zsh", ["-f", "-i"])] {
             if Command::new(shell).arg("--version").output().is_err() {
                 continue;
             }
@@ -981,18 +987,24 @@ mod tests {
         assert!(shell_integration_script(Path::new("/bin/sh")).is_none());
     }
 
-    /// Every bash the machine has, oldest first.
+    /// Every bash the machine has.
     ///
     /// The script has to be right on all of them rather than on whichever one happens to come first,
     /// because `inherited_shell` spawns `$SHELL` and a person who has installed a bash has usually put
-    /// it there on purpose. `/bin/bash` leads because on macOS that is the one most terminals get, and
-    /// it is the oldest bash there is.
+    /// it there on purpose. `/bin/bash` is always in the list even when nothing else is, because on
+    /// macOS that is the one most terminals get and the oldest bash there is.
+    ///
+    /// `PATH` holds directories, so each one is asked for a `bash` inside it rather than being mistaken
+    /// for one. Looking for a `PATH` entry that *is* a bash finds nothing on an ordinary system, which
+    /// left this returning only the `/bin/bash` fallback — and since that is the 3.2, which is the one
+    /// bash without `PS0`, every bash assertion in this file had been running against the single
+    /// version that cannot exercise the interesting half of the script.
     fn bashes() -> Vec<String> {
         let mut found: Vec<String> = std::env::var("PATH")
             .unwrap_or_default()
             .split(':')
-            .map(String::from)
-            .filter(|path| path.ends_with("/bash") && Path::new(path).is_file())
+            .map(|directory| format!("{directory}/bash"))
+            .filter(|path| Path::new(path).is_file())
             .filter(|path| {
                 Command::new(path)
                     .arg("--version")
@@ -1020,6 +1032,48 @@ probe_two() { printf '[TWO]'; }
 ";
         // `true` is there to draw one more prompt, and the answer is on it.
         bash_session_with(bash, run, &[b"true\n"], b"\x1b]133;D;0\x07").contains("[ONE][TWO]")
+    }
+
+    /// Whether this bash expands `PS0`, which is where the started marker comes from.
+    ///
+    /// Asked of the shell rather than read off its version number, because it is the property the
+    /// script depends on and therefore the one that has to hold. Measured false on bash 3.2, which
+    /// is what `/bin/bash` is on macOS and the version this app is most likely to spawn, and true on
+    /// bash 4.4 and later — where `PS0` arrived.
+    ///
+    /// Measured *through the install*, because the script prepends to `PS0` and a probe that ran
+    /// against an untouched shell would be asking a different question than the one production
+    /// asks: whether the value still fires once ours is on the front of it.
+    fn bash_expands_ps0(bash: &str) -> bool {
+        let run = "PS0='<MARVIS_PS0_PROBE>'\n";
+        // `true` is there to draw one more prompt, and the answer is on it.
+        bash_session_with(bash, run, &[b"true\n"], b"\x1b]133;D;0\x07")
+            .contains("<MARVIS_PS0_PROBE>")
+    }
+
+    /// A session's output from after the hook was sourced, and nothing before it.
+    ///
+    /// The startup line is the hook, so everything ahead of this sentinel is the shell starting up and
+    /// the user's rc file doing its own work — including firing their own `DEBUG` trap, which is
+    /// exactly what an assertion about whether the hook kept that trap would be looking for. A whole
+    /// stream cannot tell "the trap survived the install" from "the trap fired before the install
+    /// happened", and a test that cannot tell them passes against a shell the trap was taken from.
+    /// The sentinel is printed by the first command typed, so it is after the install by construction.
+    fn bash_session_after_install(
+        bash: &str,
+        rc: &str,
+        commands: &[&[u8]],
+        ends_with: &[u8],
+    ) -> String {
+        const SENTINEL: &str = "MARVIS_AFTER_INSTALL";
+        let sentinel = format!("printf '{SENTINEL}\\n'\n");
+        let mut typed: Vec<&[u8]> = vec![sentinel.as_bytes()];
+        typed.extend_from_slice(commands);
+        let stream = bash_session_with(bash, rc, &typed, ends_with);
+        let (_, after) = stream
+            .split_once(SENTINEL)
+            .expect("the sentinel never printed, so nothing after the install can be told apart");
+        after.to_string()
     }
 
     /// Opens a bash with a startup file of the test's own, runs the real install script against it, and
@@ -1085,20 +1139,17 @@ probe_two() { printf '[TWO]'; }
 
     /// A bash script that installs itself has to leave the shell it lands in as it found it.
     ///
-    /// Two things in it do reach into somebody's configuration, and both were doing it silently. The
-    /// `PROMPT_COMMAND` assignment replaced a multi-element array a person had set up, taking every
-    /// prompt command but the first with it; and `trap … DEBUG` replaced a DEBUG trap they had, with
-    /// no error anywhere and no way back. A user on a bash 5.1+ who had two or three prompt commands
-    /// in the array opened a terminal and found one of them gone.
+    /// Two things in it do reach into somebody's configuration. The `PROMPT_COMMAND` assignment
+    /// replaced a multi-element array a person had set up, taking every prompt command but the first
+    /// with it; and a `trap … DEBUG` replaced a DEBUG trap they had, with no error anywhere and no way
+    /// back. A user on a bash 5.1+ who had two or three prompt commands in the array opened a terminal
+    /// and found one of them gone.
     ///
-    /// Both are asserted against a real bash with a real rc file rather than by comparing the script's
-    /// text, because the subject is what the shell *does* with the text, and that is the class of bug
-    /// that shipped a syntactically perfect `PROMPT_COMMAND="…"` in the first place.
+    /// Asserted against a real bash with a real rc file rather than by comparing the script's text,
+    /// because the subject is what the shell *does* with the text, and that is the class of bug that
+    /// shipped a syntactically perfect `PROMPT_COMMAND="…"` in the first place.
     #[test]
-    fn the_bash_script_keeps_a_prompt_and_a_debug_trap_that_were_already_there() {
-        // A DEBUG trap of the user's own, which is the state every shell framework that manages a
-        // prompt ends up in.
-        const DEBUG_TRAP: &str = "trap 'printf \"<USER_DEBUG>\"' DEBUG\n";
+    fn the_bash_script_keeps_a_prompt_that_was_already_there() {
         // The same three prompt commands as an array, which is what bash 5.1 and later use, and as a
         // string, which is what every bash before it uses and what a person who set one by hand has.
         const FUNCTIONS: &str = "\
@@ -1109,17 +1160,13 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         for bash in bashes() {
             let arrays_honoured = bash_honours_prompt_command_arrays(&bash);
             let rc = format!(
-                "{FUNCTIONS}{DEBUG_TRAP}PROMPT_COMMAND=(user_prompt_one user_prompt_two user_prompt_three)\n"
+                "{FUNCTIONS}PROMPT_COMMAND=(user_prompt_one user_prompt_two user_prompt_three)\n"
             );
-            let stream = bash_session_with(
+            let stream = bash_session_after_install(
                 &bash,
                 &rc,
                 &[b"declare -p PROMPT_COMMAND\n", b"false\n"],
                 b"\x1b]133;D;1\x07",
-            );
-            assert!(
-                stream.contains("<USER_DEBUG>"),
-                "{bash}: installing the integration silently dropped the user's DEBUG trap:\n{stream}"
             );
             // Still an array, with the user's entries where they were. A prompt framework that reads
             // or rewrites `PROMPT_COMMAND` is looking at exactly this.
@@ -1147,9 +1194,9 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
             // The string form, which every bash runs in full — a bash before 5.1 runs only element 0 of
             // an array, so this is the one shape where all three can be watched running everywhere.
             let rc = format!(
-                "{FUNCTIONS}{DEBUG_TRAP}PROMPT_COMMAND='user_prompt_one; user_prompt_two; user_prompt_three'\n"
+                "{FUNCTIONS}PROMPT_COMMAND='user_prompt_one; user_prompt_two; user_prompt_three'\n"
             );
-            let stream = bash_session_with(&bash, &rc, &[b"false\n"], b"\x1b]133;D;1\x07");
+            let stream = bash_session_after_install(&bash, &rc, &[b"false\n"], b"\x1b]133;D;1\x07");
             for prompt in ["[ONE:", "[TWO:", "[THREE:"] {
                 assert!(
                     stream.contains(prompt),
@@ -1165,6 +1212,104 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
                 stream.contains("[ONE:1]"),
                 "{bash}: the first prompt command after ours saw $? = 0 rather than the command's status:\n{stream}"
             );
+        }
+    }
+
+    /// The started marker comes from `PS0`, so it must land where `preexec` does in zsh: after the
+    /// line the person typed and before anything the command prints.
+    ///
+    /// Both halves matter and neither is checkable without the other. That a marker appears at all
+    /// only says `PS0` is expanded — `precmd` would do that too, and a marker in the wrong place still
+    /// clears the row, one command late. Position is what separates a pre-command hook from a
+    /// post-command one, so it is the position that is asserted here, against a real bash with a
+    /// real rc file, and a user's own `PS0` is checked in the same breath because prepending to a
+    /// value somebody else set is the easy way to break it.
+    ///
+    /// `bash_expands_ps0` is asked of each shell rather than assumed, so the test says the same thing
+    /// on every bash the machine has and expects the honest answer where `PS0` does not exist.
+    #[test]
+    fn the_bash_started_marker_fires_before_the_command_it_marks() {
+        const USER_PS0: &str = "PS0='[USER_PS0]'\n";
+        for bash in bashes() {
+            let expands_ps0 = bash_expands_ps0(&bash);
+            // `cd` and `[ … ]` are the two that would be missed by anything watching for a process,
+            // and `false` is the one the feature exists for.
+            let stream = bash_session_after_install(
+                &bash,
+                USER_PS0,
+                &[
+                    b"cd /tmp\n",
+                    b"[ -f /etc/hosts ]\n",
+                    b"false\n",
+                    b"echo \"probe$((6*7))\"\n",
+                ],
+                b"\x1b]133;D;1\x07",
+            );
+
+            if expands_ps0 {
+                for command in ["cd /tmp", "[ -f /etc/hosts ]", "false"] {
+                    assert!(
+                        stream.contains(command),
+                        "{bash}: {command} never ran, so this says nothing about a marker for it:\n{stream}"
+                    );
+                }
+                // One marker per command, the sentinel included. Counting is what catches a hook that
+                // fires for `echo` and not for a builtin, which is the failure this script had with
+                // the trap it replaced: `cd` and `[ … ]` are builtins and `false` is the one the
+                // feature is for.
+                assert!(
+                    stream.matches("\x1b]133;A\x07").count() >= 5,
+                    "{bash}: {} markers for 5 commands, so PS0 is not firing for every command:\n{stream}",
+                    stream.matches("\x1b]133;A\x07").count()
+                );
+                // And it lands where `preexec` does in zsh: after the line that was typed, before
+                // anything the command prints. The output is searched for as `probe42` rather than as
+                // the command text, because the terminal echoes the command back and a search for the
+                // text itself finds the echo and settles the question backwards.
+                let echoed = stream.find("probe$((6*7))").unwrap_or_else(|| {
+                    panic!(
+                        "{bash}: the probe command was never echoed, so its output cannot be told \
+                             from its command line:\n{stream}"
+                    )
+                });
+                let marker = stream[echoed..]
+                    .find("\x1b]133;A\x07")
+                    .map(|at| echoed + at)
+                    .unwrap_or_else(|| {
+                        panic!("{bash}: PS0 is expanded but the probe command got no marker:\n{stream}")
+                    });
+                let output = stream.find("probe42").unwrap_or_else(|| {
+                    panic!("{bash}: the probe command produced no output:\n{stream}")
+                });
+                assert!(
+                    echoed < marker && marker < output,
+                    "{bash}: the started marker is not between the command being typed and its \
+                     output, so it is not marking the command starting:\n{stream}"
+                );
+                // And the value we prepended to is still the user's, firing after ours.
+                assert!(
+                    stream.contains("[USER_PS0]"),
+                    "{bash}: prepending the marker to PS0 cost the user their own PS0:\n{stream}"
+                );
+            } else {
+                // A bash without `PS0` reports the end of a command and not the start of one, which is
+                // the documented cost of not taking a `DEBUG` trap it cannot chain. What must still
+                // hold is that nothing of the user's is harmed and the failure report still works.
+                assert!(
+                    !stream.contains("\x1b]133;A\x07"),
+                    "{bash}: a started marker appeared although this bash does not expand PS0:\n{stream}"
+                );
+                assert!(
+                    !stream.contains("[USER_PS0]"),
+                    "{bash}: PS0 fired on a bash that has no PS0, so the user lost something that \
+                     was never theirs to lose:\n{stream}"
+                );
+                assert!(
+                    stream.contains("\x1b]133;D;1\x07"),
+                    "{bash}: the exit code is missing on a bash without PS0, so a failure would not \
+                     turn the row red:\n{stream}"
+                );
+            }
         }
     }
 
