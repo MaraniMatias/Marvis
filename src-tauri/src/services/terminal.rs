@@ -198,16 +198,41 @@ fn inherited_shell_args(program: &Path) -> Vec<String> {
 
 /// The OSC 133 markers the sourced script below makes the shell print, spelled once.
 ///
-/// `D;<code>` after every command is the shell's own `$?`, and `A` when the next one starts is what
-/// tells the row to stop being red. OSC 133 is the ident every shell-integration script uses, and
-/// xterm.js ships no handler for it, so nothing else contends for these bytes.
+/// `D;<code>` is the shell's own `$?` after a command, and `A` when the next one starts is what tells
+/// the row to stop being red. OSC 133 is the ident every shell-integration script uses, and xterm.js
+/// ships no handler for it, so nothing else contends for these bytes.
+///
+/// ## What `A` means, and what it stands in for
+///
+/// In OSC 133, `A` is **prompt start** and `C` is **command execution start**. They are different
+/// points in the sequence, and the hook emits `A` from a hook that fires at the second one: zsh's
+/// `preexec_functions` runs after the prompt has been drawn and the line submitted, and bash's DEBUG
+/// trap runs immediately before each command is executed. So `A` here is a **proxy for "a command is
+/// starting"**, emitted from the point in the sequence where that is knowable.
+///
+/// What it stands in for is `C`, and `B` and `C` are **not implemented**: `B` is prompt *end*, and
+/// there is no hook for it at all — nothing runs once the line editor has finished drawing a prompt —
+/// so a correct `A`/`B`/`C` run would mean tracking prompt state this integration does not have and
+/// cannot get from a shell.
+///
+/// That is a decision about who reads these bytes, not a claim that the protocol is satisfied. The only
+/// consumer is `terminal-shell-integration.ts` in this app's own xterm.js, which asks one question —
+/// has a command started — and keeps no prompt state to correlate a `C` against, so `A` and `C` carry
+/// the same information to it. Nothing else ever sees them.
+///
+/// The reason it comes from `preexec`/DEBUG rather than from `precmd`/`PROMPT_COMMAND` is *where* it
+/// lands, not only that it fires: both hooks fire for a builtin, and measured, a prompt hook puts the
+/// marker *after* the command's output while a command-execution hook puts it before. That is the
+/// difference between saying a command started and saying the previous one is over.
+/// `the_started_marker_fires_for_builtins_and_before_their_output` is the test for both halves.
 ///
 /// `print -P` rather than `printf` for zsh, which takes the escapes as two characters where `printf`
 /// needs four: `\e` against `\033` and `\a` against `\007`.
 const OSC_EXIT: &str = r"\e]133;D;$?\a";
 const OSC_STARTED: &str = r"\e]133;A\a";
 
-/// The same two markers for bash, which has no `print` and so spells the escapes the long way.
+/// The same two markers for bash, which has no `print` and so spells the escapes the long way. Read
+/// `OSC_STARTED` above for what `A` means and why it is the marker.
 const OSC_EXIT_BASH: &str = r"\033]133;D;%s\007";
 const OSC_STARTED_BASH: &str = r"\033]133;A\007";
 
@@ -571,11 +596,42 @@ mod tests {
     /// Opens a real shell with the script written where `script_dir` says, and checks that a failing
     /// command is reported.
     fn assert_script_installs(shell: &str, args: &[&str], session: &str, script_dir: &Path) {
+        shell_stream(
+            shell,
+            args,
+            session,
+            script_dir,
+            &[b"false\n"],
+            b"\x1b]133;D;1\x07",
+            |_| (),
+        );
+    }
+
+    /// Spawns a real shell with the real script, types `commands` at it, and hands the whole stream to
+    /// `check` once the last prompt has been drawn.
+    ///
+    /// Every chunk is kept rather than drained at the end, because `wait_for_output` consumes the
+    /// channel to find its marker and what came *before* that marker is usually the subject.
+    fn shell_stream(
+        shell: &str,
+        args: &[&str],
+        session: &str,
+        script_dir: &Path,
+        commands: &[&[u8]],
+        ends_with: &[u8],
+        check: impl Fn(&str),
+    ) {
         let line = script_in(script_dir, shell);
         let backend = TerminalBackend::default();
         let (sender, receiver) = std::sync::mpsc::channel();
-        let output: OutputSink =
-            Box::new(move |bytes| sender.send(bytes.to_vec()).map_err(|e| e.to_string()));
+        let collected: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = Arc::clone(&collected);
+        let output: OutputSink = Box::new(move |bytes| {
+            kept.lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .extend_from_slice(bytes);
+            sender.send(bytes.to_vec()).map_err(|e| e.to_string())
+        });
         backend
             .spawn(
                 session.to_string(),
@@ -594,11 +650,18 @@ mod tests {
         // The script's own last command reports a clean exit, so this wait also proves the shell read
         // the file rather than being handed a line it could not find.
         wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(15));
-
-        backend.write(session, b"false\n").unwrap();
-        // `false` is the smallest command that fails, and the one every shell agrees on.
-        wait_for_output(&receiver, b"\x1b]133;D;1\x07", Duration::from_secs(10));
+        for command in commands {
+            backend.write(session, command).unwrap();
+        }
+        // The last prompt drawn is where the effects of those commands are all in the stream, and which
+        // marker ends it depends on the command: `false` ends a prompt with `D;1`, `true` with `D;0`.
+        wait_for_output(&receiver, ends_with, Duration::from_secs(10));
         backend.close(session).unwrap();
+        let stream = collected
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+        check(&String::from_utf8_lossy(&stream));
     }
 
     /// A failed command is what the sidebar bar is for, and it is invisible to the backend: `clang`
@@ -615,6 +678,79 @@ mod tests {
                 continue;
             }
             assert_shell_reports_a_failing_command(shell, &["-l", "-i"], shell);
+        }
+    }
+
+    /// The marker that clears a red row has to say *a command is starting*, and it has to say it for a
+    /// **builtin**.
+    ///
+    /// A user runs `cd`, `clear`, `[ -f … ]` far more often than they run a program, and a marker hung
+    /// off command *execution* would miss every one of them: there is no child process to notice and no
+    /// exit status to read. So the first half of this asks each shell to do something only a builtin can
+    /// do — `cd` changes the shell's own working directory, `[` is a conditional the shell evaluates
+    /// itself — and asserts a marker is drawn for each.
+    ///
+    /// The second half is what makes the marker's *position* the subject rather than its existence. `A`
+    /// is prompt start in OSC 133 and this emits it from `preexec`/DEBUG, which is command-execution
+    /// start, so it stands in for `C` and the comment on `OSC_STARTED` says so. That is only true if
+    /// the marker lands *before* the command's own output, and measured, a prompt hook
+    /// (`precmd`/`PROMPT_COMMAND`) puts it after the output instead — it fires once the next prompt is
+    /// being drawn. So the marker is required to sit between the command line being echoed and the
+    /// output that command produced, which is what tells the hook this uses from the hook it does not.
+    ///
+    /// Two builtins rather than one command per line, because the shells fire at different granularity —
+    /// bash's DEBUG trap once per simple command, zsh's `preexec` once per line — and a marker wired to
+    /// the wrong one of those still looks right for a single simple command.
+    #[test]
+    fn the_started_marker_fires_for_builtins_and_before_their_output() {
+        // What `echo` prints, chosen so that finding it means finding that command's output rather than
+        // the line editor drawing the typed command back.
+        const OUTPUT: &str = "MARVIS_MARKER_ORDERING_PROBE";
+        for (shell, args) in [("/bin/zsh", ["-f", "-i"]), ("/bin/bash", ["--norc", "-i"])] {
+            if Command::new(shell).arg("--version").output().is_err() {
+                continue;
+            }
+            shell_stream(
+                shell,
+                &args,
+                &format!("ordering:{shell}"),
+                tempdir().unwrap().path(),
+                &[
+                    b"cd /tmp\n".as_slice(),
+                    b"[ -d /tmp ]\n".as_slice(),
+                    format!("echo {OUTPUT}\n").as_bytes(),
+                ],
+                b"\x1b]133;D;0\x07",
+                |stream| {
+                    // Counted from the point the script was sourced: everything before that is the shell
+                    // starting up rather than a command anybody ran.
+                    let (_, after) = stream
+                        .split_once("hook.")
+                        .expect("the script was never sourced, so no marker is attributable to it");
+                    let started = after.matches("\x1b]133;A\x07").count();
+                    assert!(
+                        started >= 3,
+                        "{shell}: three commands produced {started} started markers:\n{stream}"
+                    );
+                    // Cut at the command's output, because a marker after it belongs to the *next*
+                    // command — which is exactly the confusion this assertion is about.
+                    let before_output =
+                        &after[..after.rfind(OUTPUT).expect("the command produced no output")];
+                    let (echoed, marker) = (
+                        before_output
+                            .rfind("echo ")
+                            .expect("the command line was never echoed"),
+                        before_output
+                            .rfind("\x1b]133;A\x07")
+                            .expect("no marker came before the command's output"),
+                    );
+                    assert!(
+                        echoed < marker,
+                        "{shell}: the marker is not between the command being typed and its output, \
+                         so it is not marking the command starting:\n{stream}"
+                    );
+                },
+            );
         }
     }
 
