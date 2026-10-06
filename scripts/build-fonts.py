@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
-"""Strip TrueType hinting out of the bundled woff2 faces.
+"""Strip TrueType hinting out of the bundled text faces.
 
-Every bundled face shipped Fira Code's full hinting bytecode: a 3.6KB `fpgm`,
-a `prep`, a `cvt `, and a `gasp` asking for grid-fitting at every ppem with no
+Both text faces shipped Fira Code's full hinting bytecode: a 3.6KB `fpgm`, a
+`prep`, a `cvt `, and a `gasp` asking for grid-fitting at every ppem with no
 large-ppem escape hatch. CoreText, which macOS uses, ignores that bytecode
 entirely, so the app already looked right there. FreeType, which Linux uses,
 executes it, and at 1x a 14px cell is exactly where snapping stems to the pixel
@@ -15,10 +15,9 @@ outlines -- which is what macOS already drew, and what `src/marvis.css` says
 bundling these faces is for. Outlines, advance widths and the GSUB/GPOS
 features Fira Code's ligatures depend on are left untouched.
 
-Inputs are the prepared woff2 files described in `src/assets/fonts/README.md`:
-the Fira Code 6.2 release `woff2/` folder, and the already-subset
-NerdSymbols.woff2. Re-running this on an already-stripped file rewrites the
-same bytes, so it doubles as the check that the committed fonts are hint-free.
+Inputs are the Fira Code 6.2 release `woff2/` folder. Re-running this on an
+already-stripped file rewrites the same bytes, so it doubles as the check that
+the committed faces are hint-free.
 
 Note that emptying a glyph's `program` is not enough: `_g_l_y_f.py` decides
 whether to emit an instruction block from `hasattr(glyph, "program")`, so the
@@ -54,6 +53,13 @@ HINT_TABLES = ("fpgm", "prep", "cvt ", "gasp")
 # `head.flags` bit 2: "instructions may depend on pointsize".
 POINTSIZE_FLAG = 1 << 2
 BUNDLED_FONTS = Path(__file__).resolve().parent.parent / "src" / "assets" / "fonts"
+# Only the text faces get de-hinted, and only they are expected to be unhinted
+# afterwards. NerdSymbols is shipped as upstream patched it: 9 of its 10089 drawn
+# glyphs carry instructions (`.notdef` and U+EE00-EE09), none of them in the
+# powerline range the terminal loads, against every drawn glyph of the text
+# faces. Rewriting a 908KB third-party icon file to move 2KB of bytecode is not
+# a trade worth making, so it stays byte-identical to the file it was built from.
+DEHINTED_FACES = ("FiraCode-Regular.woff2", "FiraCode-Bold.woff2")
 
 
 def glyphs_with_bytecode(font):
@@ -187,12 +193,10 @@ def self_test(paths):
 
 def main(argv):
     if argv and argv[0] == "--self-test":
-        paths = argv[1:] or [
-            str(path) for path in sorted(BUNDLED_FONTS.glob("*.woff2"))
-        ]
+        paths = argv[1:] or [str(BUNDLED_FONTS / name) for name in DEHINTED_FACES]
         self_test(paths)
         print(
-            f"self-test ok over {len(paths)} face(s): shipped faces are unhinted, and instructions in an unexpanded glyph are still counted"
+            f"self-test ok over {len(paths)} face(s): de-hinted faces carry no instructions, and instructions in an unexpanded glyph are still counted"
         )
         return 0
     if not argv:

@@ -17,9 +17,9 @@ from the same base Fira Code with the Nerd Fonts glyphs patched in. It is cut
 down to the 10,093 glyphs used for icons: the private-use range, plus the ten
 symbols patched outside it (`U+23FB-23FE`, `U+26A1`, `U+276C-276F`,
 `U+2B58`). The outlines and advance widths are those of the patched font, so
-the icons keep their terminal-cell width; the hinting comes out the same way as
-the text faces. The source glyph-license inventory has not been verified; the
-Fira Code OFL notice does not establish the license for separate patched glyphs.
+the icons keep their terminal-cell width. It is shipped exactly as built. The
+source glyph-license inventory has not been verified; the Fira Code OFL notice
+does not establish the license for separate patched glyphs.
 
 They are bundled so terminal and editor typography is consistent regardless of
 which fonts happen to be installed on the machine. The terminal waits for these
@@ -44,6 +44,12 @@ result it is about to write: outlines, advances, cmap, `name` and the GSUB/GPOS
 feature lists all have to match the input, and no glyph may still carry
 bytecode.
 
+`NerdSymbols.woff2` is left hinted, deliberately. 9 of its 10089 drawn glyphs
+carry instructions -- `.notdef` and `U+EE00-EE09`, none of them in the powerline
+range the terminal loads -- against every drawn glyph of the text faces. Making
+that consistent would mean rewriting a 908KB third-party file to move 2KB of
+bytecode, so it stays byte-identical to what the subset produced.
+
 ## Why the icons are a separate file
 
 They used to be inside both text faces, which meant a face nobody reads was
@@ -62,11 +68,11 @@ python3 -m fontTools.subset FiraCodeNerdFontMono-Regular.ttf \
   --flavor=woff2 --output-file=NerdSymbols.woff2
 ```
 
-Then take the hinting out of all three:
+Then take the hinting out of the two text faces:
 
 ```sh
 python3 scripts/build-fonts.py \
-  FiraCode-Regular.woff2 FiraCode-Bold.woff2 NerdSymbols.woff2
+  FiraCode-Regular.woff2 FiraCode-Bold.woff2
 ```
 
 The compressed bytes depend on the fontTools version, so after regenerating,
