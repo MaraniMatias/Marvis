@@ -157,8 +157,13 @@ function finishPreviewResize(event: PointerEvent) {
     >
       <div class="relative h-full min-h-0 w-full">
         <section v-show="documentView" id="main-view-document" class="absolute inset-0">
+          <!-- A height, not a position, for the reason the diff's says below: this pane's root is
+               `relative` too, so an `absolute inset-0` handed down here is overruled by it and
+               `inset-0` stops giving the pane a height. With no height its scroll container has
+               nothing to scroll in, the document is drawn at its full length under a panel that
+               clips it, and the wheel has no box to turn. -->
           <DocumentPane
-            class="absolute inset-0"
+            class="h-full"
             :checkout="checkout"
             :path="documentView?.path ?? null"
             :origin="documentView?.origin ?? 'checkout'"

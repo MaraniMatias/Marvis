@@ -985,6 +985,28 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("fills the box it is given, and says so with a height rather than with a position", async () => {
+    // The panel hands the document a height and the document keeps its own position, because it is
+    // the box the overlay scrollbars' rails are absolutely positioned against. Tailwind emits
+    // `.absolute` before `.relative`, so a panel that also said `absolute` would be overruled by
+    // this pane's own `relative`, `inset-0` would stop giving it a height, and the pane's scroll
+    // container would have nothing to scroll in: the document drawn at full length under a panel
+    // that clips it, with the wheel turning nothing and no bar to say where it had got to.
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const value = 1;" });
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps("src/app.ts", "code", checkout("checkout:one")),
+      attrs: { class: "h-full" },
+    });
+    await flushPromises();
+    const root = wrapper.get("main").classes();
+    expect(root).toContain("h-full");
+    expect(root).toContain("relative");
+    expect(root).not.toContain("absolute");
+    // And the scroll container inside it is what a wheel turns, which is the chain the height is for.
+    expect(wrapper.get('[aria-label="File contents"]').classes()).toContain("overflow-auto");
+    wrapper.unmount();
+  });
+
   it("refreshes a figure the document references when its own text did not change", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
