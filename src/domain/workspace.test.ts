@@ -6,6 +6,7 @@ import {
   createWorkspaceState,
   getActiveCheckout,
   openRepo,
+  resolveActiveSession,
   selectCheckout,
   selectSession,
   sessionRowTitle,
@@ -201,6 +202,55 @@ describe("workspace domain", () => {
     expect(state).toMatchObject({ activeCheckoutId: worktree.id, activeSessionId: worktreeShell.id });
     expect(primary.sessions).toEqual([shell]);
     expect(worktree.sessions).toEqual([worktreeShell]);
+  });
+
+  it("resolves the selected terminal, and the newest one when the selection names nothing", () => {
+    // The one rule the sidebar row and the main panel both ask, and the reason they cannot disagree:
+    // closing the selected terminal clears `activeSessionId` and selecting another workdir clears it
+    // too, and a reader that answered from the stored id alone showed nothing while the panel was
+    // showing a terminal.
+    const checkout = createCheckout({
+      repoId: "repo:/work/app",
+      path: "/work/app",
+      canonicalPath: "/work/app",
+      isPrimary: true,
+      sessions: [
+        {
+          id: "session-one",
+          type: "shell",
+          checkoutId: "checkout:/work/app",
+          name: "zsh",
+          createdAt: "1",
+          status: "active",
+        },
+        {
+          id: "session-two",
+          type: "shell",
+          checkoutId: "checkout:/work/app",
+          name: "zsh",
+          createdAt: "2",
+          status: "active",
+        },
+      ] satisfies Session[],
+    });
+
+    // The selection wins, whatever its position in the list.
+    expect(resolveActiveSession(checkout, "session-one")?.id).toBe("session-one");
+    // Nothing stored — the close, or the workdir switch: the newest, which is what the pane's last
+    // view already was.
+    expect(resolveActiveSession(checkout, null)?.id).toBe("session-two");
+    // A stale id, or one belonging to a workdir that is no longer open, is nothing: the panel is
+    // about to show the newest, so the row that marks it has to say so.
+    expect(resolveActiveSession(checkout, "session:gone")?.id).toBe("session-two");
+    // A workdir with no terminal, and no workdir at all, are both honestly nothing.
+    const empty = createCheckout({
+      repoId: "repo:/work/app",
+      path: "/work/app",
+      canonicalPath: "/work/app",
+      isPrimary: true,
+    });
+    expect(resolveActiveSession(empty, null)).toBeNull();
+    expect(resolveActiveSession(null, "session-one")).toBeNull();
   });
 
   it("names a session after what is in front of it, and after the name it was opened with", () => {

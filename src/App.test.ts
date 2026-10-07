@@ -397,6 +397,7 @@ import App from "./App.vue";
 
 const SidebarStub = defineComponent({
   name: "SidebarStub",
+  props: { activeSessionId: String },
   emits: [
     "selectCheckout",
     "selectSession",
@@ -407,9 +408,10 @@ const SidebarStub = defineComponent({
     "renameSession",
     "newTerminal",
   ],
-  setup(_, { emit }) {
+  setup(props, { emit }) {
     return () =>
       h("div", [
+        h("span", { "data-testid": "sidebar-active-session" }, props.activeSessionId ?? "none"),
         h("button", { "data-testid": "select-checkout-two", onClick: () => emit("selectCheckout", "checkout:two") }),
         h("button", { "data-testid": "select-session-one", onClick: () => emit("selectSession", "session:one") }),
         h("button", { "data-testid": "select-session-two", onClick: () => emit("selectSession", "session:two") }),
@@ -438,12 +440,14 @@ const SidebarStub = defineComponent({
 
 const SessionPaneStub = defineComponent({
   name: "SessionPane",
-  emits: ["sessionStatusChanged"],
-  setup(_, { expose }) {
+  props: { activeSessionId: String },
+  emits: ["sessionStatusChanged", "workspaceUpdated"],
+  setup(props, { expose }) {
     onMounted(() => (mocks.sessionPaneMounts += 1));
     expose({ focusActiveTerminal: vi.fn() });
     return () =>
       h("div", { "data-testid": "session-pane" }, [
+        h("span", { "data-testid": "pane-active-session" }, props.activeSessionId ?? "none"),
         h("div", { class: "xterm" }, [h("textarea", { "data-testid": "terminal-input" })]),
       ]);
   },
@@ -1085,6 +1089,48 @@ describe("App UI integration", () => {
         "OpenCode: review task",
         "Neovim",
       ]);
+      wrapper.unmount();
+    });
+
+    it("keeps the sidebar row and the main panel on the same terminal after one is closed", async () => {
+      // The case this exists for. Closing the selected terminal clears `active_session_id` in the
+      // database, so the row and the pane were each asked on their own: the row answered "nothing is
+      // selected" and the pane fell through to the terminal it opened last. Same panel, two answers.
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one", [session("session:one", "zsh"), session("session:two", "Neovim")])),
+      );
+      mocks.workspaceRef!.value = { ...mocks.workspaceRef!.value, activeSessionId: "session:two" };
+      await flushPromises();
+
+      const bothRead = () => [
+        wrapper.get('[data-testid="sidebar-active-session"]').text(),
+        wrapper.get('[data-testid="pane-active-session"]').text(),
+      ];
+
+      expect(bothRead()).toEqual(["session:two", "session:two"]);
+
+      // The close: the backend clears the selection and reports the workdir without it.
+      wrapper.getComponent({ name: "SessionPane" }).vm.$emit("workspaceUpdated", {
+        ...mocks.workspaceRef!.value,
+        repos: [
+          {
+            ...mocks.workspaceRef!.value.repos[0]!,
+            checkouts: [
+              {
+                ...checkout("checkout:one"),
+                sessions: [session("session:one", "zsh")],
+              },
+            ],
+          },
+        ],
+        activeSessionId: null,
+      });
+      await flushPromises();
+
+      // What is left is what both of them name now: the row is marked and the pane shows it, rather
+      // than a row saying nothing beside a panel still showing a terminal.
+      expect(mocks.workspaceRef!.value.activeSessionId).toBeNull();
+      expect(bothRead()).toEqual(["session:one", "session:one"]);
       wrapper.unmount();
     });
 

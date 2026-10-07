@@ -16,7 +16,7 @@ import {
 import type { Checkout, Repo } from "./domain/workspace";
 import type { CheckoutFileActivity } from "./domain/git";
 import type { ReviewTarget } from "./domain/review";
-import { sessionTitle, terminalHasProcess } from "./domain/workspace";
+import { resolveActiveSession, sessionTitle, terminalHasProcess } from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
 import type { TitlebarMenuItem, TitlebarMenuSection } from "./domain/titlebar-menu";
@@ -271,16 +271,18 @@ const lifecycleRepo = computed(
     ) ?? null,
 );
 const activeMainView = computed(() => resolveMainView(mainViews.value, activeCheckout.value?.id ?? null));
-/** The active session of the active checkout, or its last one. */
-const activeSession = computed(() => {
-  const checkout = activeCheckout.value;
-  if (!checkout) return null;
-  return (
-    checkout.sessions.find((session) => session.id === workspace.value.activeSessionId) ??
-    checkout.sessions.at(-1) ??
-    null
-  );
-});
+/**
+ * The terminal the window is on, and the one answer every reader of the selection shares.
+ *
+ * The sidebar row, the main panel and the titlebar menu are the same terminal drawn three times, so
+ * they are handed `resolveActiveSession` rather than `activeSessionId` on its own: what is stored is
+ * cleared whenever the selection stops naming anything (a close, another workdir), and a reader that
+ * answered from the raw id showed nothing while the panel was showing a terminal. `activeSessionId`
+ * is one input to that rule, not the rule.
+ */
+const activeSession = computed(() => resolveActiveSession(activeCheckout.value, workspace.value.activeSessionId));
+/** What the sidebar row and the main pane are handed, so both draw the terminal this resolves to. */
+const activeSessionId = computed(() => activeSession.value?.id ?? null);
 /**
  * The open session under the name the sidebar row gives it.
  *
@@ -447,7 +449,7 @@ const terminalMenu = computed<TitlebarMenuSection[]>(() => {
       id: session.id,
       label: name,
       title: name,
-      checked: session.id === workspace.value.activeSessionId,
+      checked: session.id === activeSessionId.value,
       run: () => void activateTerminalSession(session.id),
     };
   });
@@ -541,7 +543,7 @@ function viewPath(view: MainView | undefined): string | null {
  */
 function closePreview(checkoutId: string) {
   if (mainViews.value[checkoutId]?.kind === "terminal") return;
-  showView(checkoutId, { kind: "terminal", sessionId: activeSession.value?.id ?? null }, { giveBackToTerminal: true });
+  showView(checkoutId, { kind: "terminal", sessionId: activeSessionId.value }, { giveBackToTerminal: true });
 }
 
 function openFileDocument(selection: { checkoutId: string; path: string }) {
@@ -1845,7 +1847,7 @@ function reportWarning(message: string) {
           :repos="workspace.repos"
           :home-checkout-id="workspace.homeCheckoutId"
           :active-checkout-id="workspace.activeCheckoutId"
-          :active-session-id="workspace.activeSessionId"
+          :active-session-id="activeSessionId"
           :session-runtime-statuses="sessionRuntimeStatuses"
           :session-order="sessionOrder"
           :agent-rows="terminalAgents.byCheckout"
@@ -1891,7 +1893,7 @@ function reportWarning(message: string) {
           :ready="checkoutUiReady"
           :git-snapshot="gitSnapshot"
           :review="review"
-          :active-session-id="workspace.activeSessionId"
+          :active-session-id="activeSessionId"
           :is-opening="isOpening"
           :shell-request="shellRequest"
           :registered-session-ids="registeredSessionIds"

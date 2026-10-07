@@ -8,6 +8,18 @@ here still gets its generated notes.
 
 ## Unreleased
 
+- **Closing a terminal no longer leaves the sidebar pointing at nothing while the panel shows
+  something.** The selected terminal is stored in the database, and everything that makes that stored
+  selection stop naming a terminal clears it: closing the terminal that was selected, and opening
+  another workdir. The row in the sidebar read that stored id on its own, so it marked nothing there,
+  while the main panel — which kept the terminal it opened last — carried on showing one. Same panel,
+  two answers: the workdir row wore the selection the terminal row used to, and the crumb in the
+  titlebar kept naming a terminal the sidebar said was not there. There is now one rule for which
+  terminal the window means — the selected one, or the newest the workdir has — and the sidebar row,
+  the main panel, the titlebar menu and the crumb all read that same answer. The panel is unchanged
+  (it already showed the newest); what changed is that the sidebar, the menu and the crumb now agree
+  with it, and they also agree when switching workdirs.
+
 - **A right-click no longer opens the system menu.** Marvis is a webview, and the webview answers a
   right-click with a menu of its own — Reload, Look Up, Inspect Element — which is how an unsaved
   draft in the editor used to go away without a word. That menu was kept where text is selected

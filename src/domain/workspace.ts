@@ -323,6 +323,29 @@ export function selectSession(state: WorkspaceState, sessionId: string): Workspa
   return state;
 }
 
+/**
+ * The terminal the window means, for a workdir that has any: the selected one, or the newest.
+ *
+ * The selection is stored (`activeSessionId`) but it is not the whole answer, and a rule kept per
+ * reader is how the sidebar and the main panel come to disagree about it. They are one terminal
+ * drawn twice — a row in the sidebar, a live pane beside it — and every way of losing the stored id
+ * leaves the panel still showing something while the row says nothing: closing the selected terminal
+ * drops it in the database, and selecting another workdir drops it in `selectCheckout`. The row used
+ * to answer "nothing is selected" there and the pane answered "the last terminal it opened", so the
+ * two named different terminals for the same panel.
+ *
+ * So the fallback is part of the rule rather than each reader's own: the newest terminal of this
+ * workdir. `sessions` arrives in creation order (the backend reads them by rowid) and the pane
+ * creates its views in that same order, so "newest" is the one terminal both readings already mean.
+ *
+ * An id that names no session of this workdir — stale, or a session of a workdir that is no longer
+ * open — falls to that newest one too rather than to nothing, because the panel is about to show it.
+ */
+export function resolveActiveSession(checkout: Checkout | null, activeSessionId: string | null): Session | null {
+  if (!checkout) return null;
+  return checkout.sessions.find((session) => session.id === activeSessionId) ?? checkout.sessions.at(-1) ?? null;
+}
+
 export function getActiveCheckout(state: WorkspaceState): Checkout | null {
   return (
     state.repos.flatMap((repo) => repo.checkouts).find((checkout) => checkout.id === state.activeCheckoutId) ?? null

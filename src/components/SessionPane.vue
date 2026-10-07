@@ -80,6 +80,16 @@ const terminalRefs = new Map<string, TerminalSessionHandle>();
 const nextViewId = ref(1);
 const { push: pushToast } = useToasts();
 const checkout = computed(() => props.checkout);
+/**
+ * The view this workdir is showing.
+ *
+ * The id arrives already resolved by `App.vue` (`resolveActiveSession`: the selected session, or the
+ * newest this workdir has), so the row in the sidebar and the pane here are the same terminal and
+ * cannot name two. The last fallback is the safety net under that, not a rule of its own: a session
+ * with no view here cannot exist — no PTY outlives the process that spawned it, so the backend clears
+ * every stored session when the window reopens and each one in the panel has a live view — and if it
+ * ever did, the pane shows its newest terminal rather than an empty panel where a terminal is open.
+ */
 const activeView = computed(() => {
   const checkoutViews = views.value.filter((view) => view.checkoutId === checkout.value?.id);
   return (
