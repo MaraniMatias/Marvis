@@ -22,6 +22,7 @@ let provider: ILinkProvider | null;
 let decorations: { x: number; width: number; foregroundColor?: string }[] = [];
 let markerOffsets: number[] = [];
 let open: ReturnType<typeof vi.fn<(path: string) => void>>;
+let openUrl: ReturnType<typeof vi.fn<(url: string) => void>>;
 
 async function write(text: string) {
   await new Promise<void>((resolve) => terminal.write(text, resolve));
@@ -33,6 +34,7 @@ function mount() {
   decorations = [];
   markerOffsets = [];
   open = vi.fn<(path: string) => void>();
+  openUrl = vi.fn<(url: string) => void>();
   const real = terminal as unknown as Record<string, unknown>;
   real.registerLinkProvider = (registered: ILinkProvider) => {
     provider = registered;
@@ -46,7 +48,7 @@ function mount() {
     decorations.push(options);
     return { dispose: () => (decorations = decorations.filter((item) => item !== options)) };
   };
-  return registerFilePathLinks(terminal as never, { checkoutId: "checkout:one", open });
+  return registerFilePathLinks(terminal as never, { checkoutId: "checkout:one", open, openUrl });
 }
 
 /** What the provider offers for one 1-based row, which is what xterm underlines. */
@@ -253,5 +255,69 @@ describe("registerFilePathLinks behaviour", () => {
     await pending;
 
     expect(probe).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("registerFilePathLinks web links", () => {
+  it("underlines the address curl printed, without asking the disk about it", async () => {
+    await write("curl https://www.example.com/\r\n");
+    mount();
+
+    const [link] = (await linksOn(1))!;
+
+    expect(link.text).toBe("https://www.example.com/");
+    // The address starts at column 6 and is 24 characters, so it covers columns 6 through 29.
+    expect(link.range).toEqual({ start: { x: 6, y: 1 }, end: { x: 29, y: 1 } });
+    expect(link.decorations).toEqual({ pointerCursor: true, underline: true });
+    // Nothing to confirm: a page is not a file in this checkout, so the one thing that would decide
+    // a path never runs for it. The whole line costs no IPC at all.
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("opens the address on ctrl+click and nothing at all on a plain click", async () => {
+    await write("curl https://www.example.com/\r\n");
+    mount();
+
+    const [link] = (await linksOn(1))!;
+    link.activate({} as MouseEvent, link.text);
+    expect(openUrl).not.toHaveBeenCalled();
+
+    link.activate({ ctrlKey: true } as MouseEvent, link.text);
+    link.activate({ metaKey: true } as MouseEvent, link.text);
+    expect(openUrl).toHaveBeenCalledTimes(2);
+    expect(openUrl).toHaveBeenCalledWith("https://www.example.com/");
+    // The browser is not the preview's business: neither handler is the other one's.
+    expect(open).not.toHaveBeenCalled();
+  });
+
+  it("offers the path and the address on a line that prints both", async () => {
+    await write("docs https://example.com/guide, see src/lib/foo.ts\r\n");
+    probe.mockImplementation(async (_checkoutId, path) => (path === "src/lib/foo.ts" ? { path } : null));
+    mount();
+
+    const links = await linksOn(1);
+
+    expect(links?.map((link) => link.text)).toEqual(["https://example.com/guide", "src/lib/foo.ts"]);
+  });
+
+  it("leaves alone anything that names a file or an app rather than a page", async () => {
+    // The opener on the other end opens `http` and `https` and refuses the rest, so underlining one
+    // of these would promise a click that cannot work.
+    await write("file:///etc/passwd and vscode://file/tmp/x\r\n");
+    mount();
+
+    expect(await linksOn(1)).toBeUndefined();
+    // Both are refused here rather than sent over the bridge to be refused there.
+    expect(probe).not.toHaveBeenCalled();
+  });
+
+  it("takes the addresses back with the provider", async () => {
+    await write("curl https://www.example.com/\r\n");
+    const links = mount();
+    await linksOn(1);
+
+    links.dispose();
+
+    expect(provider).toBeNull();
   });
 });

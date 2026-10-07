@@ -116,6 +116,9 @@ describe("Sidebar workdir rows", () => {
     expect(openDirectory.classes()).toContain("add-item");
     expect(rule(".add-item")).toContain("color: var(--marvis-text-faint);");
     expect(rule(".sep")).toContain("background: var(--marvis-border);");
+    expect(rule(".sep")).toContain("margin: 0;");
+    expect(rule(".sidebar-footer .workdir-row")).toContain("justify-content: center;");
+    expect(rule(".sidebar-footer .lbl")).toContain("flex: none;");
     await openDirectory.trigger("click");
     expect(wrapper.emitted("openFolder")).toHaveLength(1);
   });

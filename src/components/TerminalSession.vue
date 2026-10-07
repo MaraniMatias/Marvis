@@ -63,6 +63,7 @@ const emit = defineEmits<{
   statusChanged: [status: TerminalSessionStatus];
   failed: [message: string];
   openFile: [path: string];
+  openExternalUrl: [url: string];
 }>();
 
 const terminalElement = ref<HTMLElement | null>(null);
@@ -612,7 +613,7 @@ async function answerClose(confirmed: boolean) {
 }
 
 /**
- * Puts the file links on the tree this terminal currently belongs to.
+ * Puts the file links and the web links on the tree this terminal currently belongs to.
  *
  * Read fresh on every registration rather than captured once, because a terminal moved to another
  * worktree keeps its process, its scrollback and this component: the only thing that changed is
@@ -626,6 +627,9 @@ function registerFileLinks() {
       return props.checkoutId;
     },
     open: (path) => emit("openFile", path),
+    // A page is the browser's to open, which is where `curl`'s own output goes: the webview is
+    // not a browser, so the address travels back over the bridge like the preview's links do.
+    openUrl: (url) => emit("openExternalUrl", url),
   });
 }
 

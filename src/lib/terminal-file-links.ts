@@ -1,5 +1,6 @@
 /**
- * Paths in the terminal that open in the preview on ctrl+click.
+ * Paths in the terminal that open in the preview on ctrl+click, and web links that open in the
+ * browser on the same key.
  *
  * xterm.js has a link provider for exactly this: it asks, once per hovered line, what that line
  * offers, and underlines whatever comes back. But it has no way to know whether a path names a
@@ -7,6 +8,13 @@
  * provider answers asynchronously: it asks the backend whether each candidate is a file this
  * checkout holds and the preview can draw, and only hands xterm the ones that are. A path that
  * does not exist is never underlined, which is the whole behaviour.
+ *
+ * A URL is the other half of the same feature and needs none of that: it names a page rather
+ * than a file, so there is nothing to confirm and nothing to ask the disk about. It is offered
+ * from the text itself and can be underlined on the same tick the mouse arrives. `https` or
+ * `http` only, which is the pair the opener on the other end opens and everything else it
+ * refuses — a terminal that prints `file:///…` or `vscode://…` gets no underline rather than a
+ * link that opens the wrong thing.
  *
  * The cost is one IPC per hovered line rather than per mouse move, because xterm asks per line
  * and stops asking until the line changes. The answers are cached because a terminal prints the
@@ -22,13 +30,14 @@
  * renderer draws it.
  *
  * Activation is deliberately narrow: xterm activates a link on any click, so `activate` opens
- * nothing unless ctrl or cmd is held. A plain click on a path stays what it was: a click that
- * selects nothing, which the selection copy already ignores.
+ * nothing unless ctrl or cmd is held. A plain click on a path or a link stays what it was: a click
+ * that selects nothing, which the selection copy already ignores. Terminal output is not the
+ * user's own text, so nothing in a build log can open a browser on its own.
  */
 import type { IDisposable, ILink, ILinkProvider, Terminal } from "@xterm/xterm";
 import { probeCheckoutFile } from "./ipc";
-import { cellRuns, readLogicalLine } from "./terminal-buffer-line";
-import { terminalPathsIn } from "./terminal-paths";
+import { cellRuns, readLogicalLine, type LogicalLine } from "./terminal-buffer-line";
+import { terminalPathsIn, terminalUrlsIn } from "./terminal-paths";
 
 /**
  * How long a probe's answer is trusted.
@@ -60,6 +69,13 @@ export interface FileLinkOptions {
   readonly checkoutId: string;
   /** Opens a confirmed file in the preview. */
   open: (path: string) => void;
+  /**
+   * Opens a web address in the browser, which is the only place one can be opened.
+   *
+   * Refused on the other end too: this is only handed something `terminalUrlsIn` already called a
+   * page, so nothing here can name a file or an app, whatever the terminal printed.
+   */
+  openUrl: (url: string) => void;
 }
 
 interface CachedProbe {
@@ -68,9 +84,47 @@ interface CachedProbe {
 }
 
 /**
- * Puts the paths in the terminal on screen where ctrl+click opens them.
+ * One link over the whole run, however many rows it wraps onto, or `null` when it covers no cell.
  *
- * Returns the disposable that takes it back, because a terminal outlives most of what is
+ * xterm draws the underline itself and does it for the entire range — every row a link spans is
+ * underlined, not only the one holding the pointer — and it draws it in the terminal's own
+ * foreground, so the run reads as underlined rather than recoloured. A link per row would ask
+ * xterm for the same underline N times and get N half-paths.
+ *
+ * Nothing is registered to draw here on purpose: `registerDecoration` fires
+ * `onDecorationRegistered`, which makes xterm clear and repaint the whole screen, and that repaint
+ * drops the underline it had just drawn for the hovered link. Painting the accent from a hover
+ * handler is what made a hovered path look un-underlined.
+ *
+ * `open` is the narrow key for both kinds of link: xterm activates on any click, and a plain click
+ * has to stay a click that selects nothing.
+ */
+function linkOver(
+  line: LogicalLine,
+  span: { start: number; end: number },
+  text: string,
+  open: (text: string) => void,
+): ILink | null {
+  const runs = cellRuns(line.cells, span.start, span.end);
+  const first = runs[0];
+  const last = runs[runs.length - 1];
+  if (!first || !last) return null;
+  return {
+    // xterm's link ranges are 1-based and the end is the last cell, not the one past it.
+    range: { start: { x: first.from + 1, y: first.row + 1 }, end: { x: last.to, y: last.row + 1 } },
+    text,
+    decorations: { pointerCursor: true, underline: true },
+    activate(event, linkText) {
+      if (!event.ctrlKey && !event.metaKey) return;
+      open(linkText);
+    },
+  };
+}
+
+/**
+ * Puts the paths and the web links in the terminal on screen where ctrl+click opens them.
+ *
+ * Returns the disposable that takes them back, because a terminal outlives most of what is
  * configured around it: a checkout closing, a panel hiding, a session being replaced.
  */
 export function registerFilePathLinks(terminal: Terminal, options: FileLinkOptions): IDisposable {
@@ -115,9 +169,14 @@ export function registerFilePathLinks(terminal: Terminal, options: FileLinkOptio
       // xterm's rows are 1-based and `getLine` is 0-based, so the row it hands over is not the row
       // it can be read from. Reading it as given underlines the line below the one under the mouse.
       const line = readLogicalLine(buffer, bufferLineNumber);
+      // A URL is its own evidence, so these are settled before anything is asked of the disk and
+      // they are the whole answer on a line like the one `curl` prints.
+      const urlLinks = terminalUrlsIn(line.text)
+        .map((candidate) => linkOver(line, candidate, candidate.url, options.openUrl))
+        .filter((link): link is ILink => link !== null);
       const candidates = terminalPathsIn(line.text);
       if (candidates.length === 0) {
-        callback(undefined);
+        callback(urlLinks.length > 0 ? urlLinks : undefined);
         return;
       }
       // Every candidate is asked about at once and the slowest answer decides, so a line with
@@ -126,41 +185,16 @@ export function registerFilePathLinks(terminal: Terminal, options: FileLinkOptio
         // A panel that closed mid-probe has nothing left to underline, and answering anyway would
         // draw into a terminal that is being disposed.
         if (disposed) return;
-        const links: ILink[] = [];
+        const links: ILink[] = [...urlLinks];
         for (const [index, candidate] of candidates.entries()) {
           const opened = probed[index];
           // No answer means no link: the path did not survive the check that it is a file this
           // checkout holds, and xterm is not told about it at all, so it cannot underline it.
           if (!opened) continue;
-          const runs = cellRuns(line.cells, candidate.start, candidate.end);
-          const first = runs[0];
-          const last = runs[runs.length - 1];
-          if (!first || !last) continue;
-          // One link for the whole path, however many rows it wraps over. xterm draws the
-          // underline itself and does it for the entire range — every row a link spans is
-          // underlined, not only the one holding the pointer — and it draws it in the terminal's
-          // own foreground, so the path reads as underlined rather than recoloured. A link per row
-          // would ask xterm for the same underline N times and get N half-paths.
-          //
-          // Nothing is registered to draw here on purpose: `registerDecoration` fires
-          // `onDecorationRegistered`, which makes xterm clear and repaint the whole screen, and
-          // that repaint drops the underline it had just drawn for the hovered link. Painting the
-          // accent from a hover handler is what made a hovered path look un-underlined.
-          links.push({
-            // xterm's link ranges are 1-based and the end is the last cell, not the one past it.
-            range: {
-              start: { x: first.from + 1, y: first.row + 1 },
-              end: { x: last.to, y: last.row + 1 },
-            },
-            // The path the probe confirmed rather than the one the line printed: the confirmed
-            // spelling is the checkout-relative one the preview is asked to open.
-            text: opened,
-            decorations: { pointerCursor: true, underline: true },
-            activate(event, text) {
-              if (!event.ctrlKey && !event.metaKey) return;
-              options.open(text);
-            },
-          });
+          // The path the probe confirmed rather than the one the line printed: the confirmed
+          // spelling is the checkout-relative one the preview is asked to open.
+          const link = linkOver(line, candidate, opened, options.open);
+          if (link) links.push(link);
         }
         callback(links.length > 0 ? links : undefined);
       });

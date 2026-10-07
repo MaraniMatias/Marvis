@@ -55,6 +55,7 @@ const emit = defineEmits<{
    */
   sessionOrder: [checkoutId: string, order: string[]];
   openFile: [path: string];
+  openExternalUrl: [url: string];
 }>();
 
 interface TerminalView {
@@ -370,6 +371,7 @@ watch(
           @status-changed="onStatusChanged(view.session?.id ?? view.key, $event)"
           @failed="onFailed(view.key, $event)"
           @open-file="emit('openFile', $event)"
+          @open-external-url="emit('openExternalUrl', $event)"
         />
       </div>
 

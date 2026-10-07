@@ -1825,15 +1825,31 @@ function rowLabel(item: WorkdirItem): string {
   color: var(--marvis-text);
 }
 
-/* The hairline the reference draws between the list and the panel's own last action. */
+/* The hairline the reference draws between the list and the panel's own last action. It runs the
+   panel's whole width and takes no margin at all: an inset on either side reads as a line that
+   stops short of the edges, and a margin under it reads as a gap between the line and the row. */
 .sep {
   height: 1px;
-  margin: 6px 8px;
+  margin: 0;
   background: var(--marvis-border);
 }
 
 .sidebar-footer {
   flex-shrink: 0;
+}
+
+/* The footer row is not a label for anything above it the way the list rows are, so it sits on the
+   panel's centre line instead of on the axis the rest of the rows are read from. The label stops
+   growing first: `.lbl` is `flex: 1` everywhere else, and a label that fills the row leaves the
+   centring nothing to move. The row's own padding is left alone — it is even on both sides, so it
+   moves nothing the centring did not already move, and it is what the row's height is measured in. */
+.sidebar-footer .workdir-row {
+  justify-content: center;
+  cursor: pointer;
+}
+
+.sidebar-footer .lbl {
+  flex: none;
 }
 
 /* ---------------------------------------------------------------------------------------------

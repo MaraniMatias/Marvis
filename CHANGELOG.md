@@ -8,6 +8,18 @@ here still gets its generated notes.
 
 ## Unreleased
 
+- **A URL in the terminal can now be clicked open in the browser.** The terminal underlines the paths
+  it can open in the preview, and it refused to underline an address because `https://…` names no file
+  in the checkout — which is true, and left the one thing a terminal prints most often (`curl`, a
+  deprecation warning, an npm error pointing at its own docs) as the one thing it could not follow.
+  An address is now underlined next to those paths and ctrl/click opens it in the browser, the same
+  key and the same key-only rule the paths have: a plain click still selects, because a terminal
+  prints what other programs wrote and nothing in a build log should be able to open a browser by
+  itself. Only `http` and `https` are underlined — `file:///…`, `vscode://…` and `mailto:` name an app
+  or a file rather than a page, and are left alone here exactly as they already were in the preview.
+  A path and an address on the same line are both offered, and an address costs no lookup on the disk
+  the way a path does, so the underline appears as soon as the mouse arrives.
+
 - **Closing a terminal no longer leaves the sidebar pointing at nothing while the panel shows
   something.** The selected terminal is stored in the database, and everything that makes that stored
   selection stop naming a terminal clears it: closing the terminal that was selected, and opening

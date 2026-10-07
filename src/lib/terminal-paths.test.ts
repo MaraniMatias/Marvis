@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { terminalPathIn, terminalPathsIn } from "./terminal-paths";
+import { terminalPathIn, terminalPathsIn, terminalUrlsIn } from "./terminal-paths";
 
 /** The characters a path covers, which is what an underline has to land on. */
 function at(line: string, path: string) {
@@ -65,5 +65,60 @@ describe("terminalPathsIn", () => {
   it("finds nothing on a line that mentions no file", () => {
     expect(terminalPathsIn("Compiling 3 files, nothing to report")).toEqual([]);
     expect(terminalPathsIn("")).toEqual([]);
+  });
+});
+
+describe("terminalUrlsIn", () => {
+  it("reads the address off the line curl printed", () => {
+    const line = "curl https://www.example.com/ -o /dev/null";
+    expect(terminalUrlsIn(line)).toEqual([
+      { url: "https://www.example.com/", ...at(line, "https://www.example.com/") },
+    ]);
+  });
+
+  it("reads every address off a line, in the order printed", () => {
+    const line = "docs at https://example.com/guide, mirror http://127.0.0.1:1420/";
+    expect(terminalUrlsIn(line)).toEqual([
+      { url: "https://example.com/guide", ...at(line, "https://example.com/guide") },
+      { url: "http://127.0.0.1:1420/", ...at(line, "http://127.0.0.1:1420/") },
+    ]);
+  });
+
+  it("keeps a parenthesis the address itself carries", () => {
+    // The trailing `)` is the sentence's and goes; the one inside the title is part of the page
+    // and stays, because trimming it hands the browser an article that does not exist.
+    const line = "see https://en.wikipedia.org/wiki/Terminal_emulator_(OS) for more";
+    const url = "https://en.wikipedia.org/wiki/Terminal_emulator_(OS)";
+    expect(terminalUrlsIn(line)).toEqual([{ url, ...at(line, url) }]);
+  });
+
+  it("keeps the underline off a quoted address", () => {
+    const line = 'npm WARN deprecated, see "https://example.com/migration" instead';
+    expect(terminalUrlsIn(line)).toEqual([
+      { url: "https://example.com/migration", ...at(line, "https://example.com/migration") },
+    ]);
+  });
+
+  it("refuses everything that is not a page", () => {
+    // The opener on the other end opens `http` and `https` and nothing else, so a scheme that names
+    // a file, an app or the platform gets no underline rather than a link that opens the wrong thing.
+    for (const line of [
+      "file:///etc/passwd",
+      "vscode://file/tmp/x",
+      "mailto:someone@example.com",
+      "javascript:alert(1)",
+      // No scheme at all, which is a word in a sentence rather than an address.
+      "example.com",
+      "see example.com/docs for more",
+      // A quoted address with a space in it is one the opener would refuse as a command line.
+      '"https://example.com/a b"',
+      "",
+    ]) {
+      expect(terminalUrlsIn(line)).toEqual([]);
+    }
+  });
+
+  it("keeps a page out of the paths, because a page is not a file here", () => {
+    expect(terminalPathsIn("curl https://www.example.com/ now")).toEqual([]);
   });
 });

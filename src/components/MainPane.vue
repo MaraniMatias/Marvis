@@ -133,6 +133,7 @@ function finishPreviewResize(event: PointerEvent) {
         @workspace-updated="$emit('workspaceUpdated', $event)"
         @session-status-changed="(sessionId, status) => $emit('sessionStatusChanged', sessionId, status)"
         @open-file="$emit('openFile', $event)"
+        @open-external-url="$emit('openExternalUrl', $event)"
       />
     </section>
     <div
