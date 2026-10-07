@@ -23,7 +23,7 @@
 # The second command finds the manifests already at 0.2.1 and the tag already made, and only has the
 # tag to push. It also resumes a release whose build failed, which `gh run rerun <id>` would also do.
 #
-# The tests run before anything is written, and only on the way to writing something: the tag is the
+# The gate runs before anything is written, and only on the way to writing something: the tag is the
 # one step here that cannot be undone, so the tree it points at is proved here rather than by the
 # run the tag starts.
 #
@@ -107,11 +107,19 @@ if ((tag_remote)); then
 else
   # The gate runs on the tree that is about to be tagged, and only when something is about to be
   # written: a resume waits for a run and publishes nothing, so it has nothing of its own to prove.
-  # A tag on a tree whose tests fail cannot be taken back, and this is where that is caught rather
-  # than minutes later on a machine that is not this one.
-  step "Running the tests the workflow gates the tag on"
-  pnpm test || die "the tests fail here, so nothing was written and no tag was made.
-Fix them and push; then run this again."
+  # A tag on a tree that fails cannot be taken back, and this is where that is caught rather than
+  # minutes later on a machine that is not this one.
+  #
+  # These are the steps the `checks` workflow runs that answer the same thing on every machine:
+  # version consistency, formatting, both linters, the type checker and the tests. What is left out
+  # is everything whose answer is the machine rather than the tree -- the Linux build, the audits
+  # and the coverage report -- because a network hiccup during an audit should not hold a release,
+  # and none of them can be proved here anyway.
+  for gate in release:check fmt:check lint typecheck lint:rust test; do
+    step "pnpm $gate"
+    pnpm "$gate" || die "pnpm $gate failed here, so nothing was written and no tag was made.
+Fix it, commit, and run this again."
+  done
 
   if [[ "$current" == "$requested" ]]; then
     if ((tag_local)); then
