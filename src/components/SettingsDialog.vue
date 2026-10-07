@@ -12,9 +12,11 @@
  * while it is being picked.
  */
 import { computed, nextTick, ref, watch } from "vue";
-import { ACKNOWLEDGEMENT, CREDITS, REPOSITORY } from "../domain/credits";
+import { ChevronRight as ChevronRightIcon } from "@lucide/vue";
+import { ACKNOWLEDGEMENT, CREDITS, CREDITS_TITLE, REPOSITORY } from "../domain/credits";
 import { DEFAULT_SETTINGS, SETTINGS_SECTIONS, cloneSettings, valueAt, withValue } from "../domain/settings";
 import type { AppSettings, SettingsField, SettingsPath, SettingsValue } from "../domain/settings";
+import { SHORTCUT_GROUPS, shortcutChord } from "../domain/shortcuts";
 import { trapDialogTab } from "../lib/dialog-focus";
 import Button from "./ui/button/Button.vue";
 import SelectControl from "./ui/select/SelectControl.vue";
@@ -23,12 +25,23 @@ const props = defineProps<{
   open: boolean;
   settings: AppSettings;
   saving: boolean;
+  /**
+   * The version of the build, or nothing while it is still being read or if it cannot be.
+   *
+   * It is a prop rather than something this dialog fetches because the window already knows what it
+   * is, and a dialog that opened a second read of the same fact would be answering from its own
+   * copy of it. Nothing here falls back to a version written by hand: a build that could not read
+   * its own version shows no version rather than one that is nearly right.
+   */
+  version?: string | null;
 }>();
 
 const emit = defineEmits<{
   close: [];
   /** The whole set, because the file holds the whole set and a partial save is not one. */
   apply: [settings: AppSettings];
+  /** A web link to hand to the browser the machine has. The dialog opens no window of its own. */
+  openExternalUrl: [url: string];
 }>();
 
 const draft = ref<AppSettings>(props.settings);
@@ -241,29 +254,91 @@ function onDialogKeydown(event: KeyboardEvent) {
           </div>
         </section>
 
+        <!-- Also a matter of record rather than of preference, for the same reason About is, and so
+             it is drawn rather than generated from the schema: a chord has no value to write, and a
+             control beside it would be a control that cannot do anything. `App.test.ts` reads this
+             list and checks the window answers every chord in it. -->
+        <section data-testid="shortcuts-section" class="border-t border-(--marvis-border) pt-5">
+          <h3 class="mb-2 text-[0.6875rem] font-semibold tracking-wide text-(--marvis-text-faint) uppercase">
+            Shortcuts
+          </h3>
+          <div v-for="group in SHORTCUT_GROUPS" :key="group.title" class="mb-3 last:mb-0">
+            <p class="mb-1 text-[0.6875rem] text-(--marvis-text-faint)">{{ group.title }}</p>
+            <!-- One pair per chord, the way a field is one pair per preference: the keys on the left
+                 and what they do on the right, so a chord is never read against another chord's
+                 meaning. The chord is drawn as this platform presses it, because `⌘/` and `Ctrl+/` are
+                 different keys and printing both of them would be printing one that does nothing. -->
+            <dl class="grid grid-cols-[5.5rem_1fr] items-baseline gap-x-4 gap-y-1.5">
+              <template v-for="shortcut in group.shortcuts" :key="shortcut.description">
+                <dt>
+                  <kbd class="marvis-key">{{ shortcutChord(shortcut.keys) }}</kbd>
+                </dt>
+                <dd class="text-xs text-(--marvis-text-secondary)">{{ shortcut.description }}</dd>
+              </template>
+            </dl>
+          </div>
+        </section>
+
         <!-- What the app is made of, which is a matter of record rather than of preference: no row
              here is written to the config file, and nothing about it is applied by the footer. The
              rule above it is what says so, because until then the whole dialog was about changing
              something and this is the one part of it that is only reading. -->
         <section data-testid="about-section" class="border-t border-(--marvis-border) pt-5">
           <h3 class="mb-2 text-[0.6875rem] font-semibold tracking-wide text-(--marvis-text-faint) uppercase">About</h3>
-          <p class="text-xs text-(--marvis-text-secondary)">{{ ACKNOWLEDGEMENT }}</p>
 
-          <dl class="mt-4 space-y-3">
-            <div v-for="group in CREDITS" :key="group.title">
-              <dt class="text-[0.6875rem] text-(--marvis-text-faint)">{{ group.title }}</dt>
-              <dd class="mt-1 space-y-1">
-                <p v-for="entry in group.entries" :key="entry.name">
-                  <span class="text-xs text-(--marvis-text)">{{ entry.name }}</span>
-                  <span class="text-(--marvis-text-faint)"> — {{ entry.role }}, {{ entry.license }}</span>
-                </p>
-              </dd>
-            </div>
-          </dl>
-
-          <p class="mt-4 text-xs text-(--marvis-text-faint)">
-            Source and releases: <span class="text-(--marvis-text-secondary)">{{ REPOSITORY }}</span>
+          <!-- What this build is. The version is the one fact a person opens this section for that
+               nothing else on screen can tell them, and it is read from the binary rather than
+               written here, so it cannot be a release behind the app it is in. It is drawn only once
+               it is known: a half-read version is not a version. -->
+          <p class="text-sm text-(--marvis-text)" data-testid="about-version">
+            {{ version ? `Marvis v${version}` : "Marvis" }}
           </p>
+
+          <p class="mt-2 text-xs text-(--marvis-text-secondary)">{{ ACKNOWLEDGEMENT }}</p>
+
+          <!-- An `<a>`, not a button dressed as one: the address is text a person may want to
+               select and copy, and this window's right-click menu is denied everywhere, so a link
+               whose only way out is a click has no way out at all. `href` is here for that copy and
+               for the focus ring; the navigation is prevented, because the webview is not a browser
+               and following one would replace the window that has the drafts in it. -->
+          <p class="mt-3 text-xs text-(--marvis-text-faint)">
+            Source and releases:
+            <a
+              :href="REPOSITORY"
+              class="marvis-link"
+              data-testid="about-repository"
+              @click.prevent="emit('openExternalUrl', REPOSITORY)"
+            >
+              {{ REPOSITORY }}
+            </a>
+          </p>
+
+          <!-- The credits, folded. There are four groups and every entry carries a licence, which is
+               longer than the whole rest of the section and is the answer to a question nobody came
+               here with — so it stays one closed row, and the row says what is in it rather than
+               inviting them to find out. The notices themselves are not here at all: the full
+               licence texts ship as `THIRD-PARTY-NOTICES.txt` inside the bundle, which is where a
+               notice has to travel to count as one. -->
+          <details data-testid="about-credits" class="group mt-4">
+            <summary
+              class="flex cursor-pointer list-none items-center gap-1.5 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+            >
+              <ChevronRightIcon class="icon-xs transition-transform group-open:rotate-90" aria-hidden="true" />
+              {{ CREDITS_TITLE }}
+            </summary>
+
+            <dl class="mt-3 space-y-3">
+              <div v-for="group in CREDITS" :key="group.title">
+                <dt class="text-[0.6875rem] text-(--marvis-text-faint)">{{ group.title }}</dt>
+                <dd class="mt-1 space-y-1">
+                  <p v-for="entry in group.entries" :key="entry.name">
+                    <span class="text-xs text-(--marvis-text)">{{ entry.name }}</span>
+                    <span class="text-(--marvis-text-faint)"> — {{ entry.role }}, {{ entry.license }}</span>
+                  </p>
+                </dd>
+              </div>
+            </dl>
+          </details>
         </section>
       </div>
 
@@ -291,5 +366,39 @@ function onDialogKeydown(event: KeyboardEvent) {
 <style scoped>
 .marvis-check {
   margin-left: auto;
+}
+
+/*
+ * A chord, drawn as the key it names: one key's worth of surface, the app's own face at the size
+ * the rest of the dialog reads at, and a rule around it so `⌘` is not read as text. Two chords on one
+ * row would wrap into each other, so the column they sit in is wide enough for the longest one.
+ */
+.marvis-key {
+  display: inline-block;
+  border: 1px solid var(--marvis-border);
+  border-radius: 0.25rem;
+  background: var(--marvis-el);
+  padding: 0.0625rem 0.375rem;
+  color: var(--marvis-text);
+  font-family: var(--marvis-font);
+  font-size: 0.6875rem;
+  line-height: 1.5;
+  white-space: nowrap;
+}
+/*
+ * A web link in the chrome. It keeps the colour the rest of the line is drawn in and is underlined
+ * instead, because it is one address on a line of dim text rather than a thing among the app's own
+ * controls, and the accent would say it was a control. The underline is what says it is clickable,
+ * which matters more than usual here: the webview's right-click menu is denied on every surface, so
+ * the address cannot be opened by right-click and copied from a context menu either.
+ *
+ * The focus ring is the stylesheet's, which already covers `a`.
+ */
+.marvis-link {
+  color: var(--marvis-text-secondary);
+  text-decoration: underline;
+}
+.marvis-link:hover {
+  color: var(--marvis-text);
 }
 </style>

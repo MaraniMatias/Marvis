@@ -9,7 +9,8 @@ import type { InjectionKey, Ref } from "vue";
 import { DEFAULT_APP_LAYOUT, DEFAULT_CHECKOUT_UI_STATE } from "./domain/ui-state";
 import * as uiStateDomain from "./domain/ui-state";
 import type { AppLayoutState } from "./domain/ui-state";
-import { ACKNOWLEDGEMENT, CREDITS, REPOSITORY } from "./domain/credits";
+import { ACKNOWLEDGEMENT, CREDITS, CREDITS_TITLE, REPOSITORY } from "./domain/credits";
+import { SHORTCUT_GROUPS, shortcutChord } from "./domain/shortcuts";
 import { DEFAULT_SETTINGS, SETTINGS_SECTIONS, cloneSettings } from "./domain/settings";
 import type { AppSettings } from "./domain/settings";
 import type { ReviewNote } from "./domain/review";
@@ -33,6 +34,7 @@ const mocks = vi.hoisted(() => ({
   saveCheckoutUiState: vi.fn(),
   prepareAppExit: vi.fn(),
   reportFrontendDiagnostic: vi.fn(),
+  getVersion: vi.fn().mockResolvedValue("9.9.9"),
   getTerminalStatus: vi.fn(),
   loadReviewTarget: vi.fn(),
   saveReviewTarget: vi.fn(),
@@ -44,6 +46,7 @@ const mocks = vi.hoisted(() => ({
   renameTerminal: vi.fn(),
   listRecentPaths: vi.fn(),
   openPath: vi.fn(),
+  openExternalUrl: vi.fn(),
   selectCheckout: vi.fn(),
   restoreWorkspace: vi.fn(),
   toggleMaximize: vi.fn(),
@@ -251,6 +254,10 @@ vi.mock("@tauri-apps/api/window", () => ({
   }),
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
+// The version the About section prints. Resolved rather than rejected because the read happens at
+// startup and the default case is the one a build normally is in; the refusal is a build that cannot
+// read its own version, which the About test below draws as a missing line.
+vi.mock("@tauri-apps/api/app", () => ({ getVersion: mocks.getVersion }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
 vi.mock("./lib/diagnostics", () => ({ reportFrontendDiagnostic: mocks.reportFrontendDiagnostic }));
 vi.mock("./lib/ipc", () => ({
@@ -276,6 +283,7 @@ vi.mock("./lib/ipc", () => ({
   // reach it from the titlebar, so it also reports that a terminal was asked for.
   selectCheckout: mocks.selectCheckout,
   restoreWorkspace: mocks.restoreWorkspace,
+  openExternalUrl: mocks.openExternalUrl,
 }));
 vi.mock("./presentation/workspace", async () => {
   const { computed, ref } = await import("vue");
@@ -641,6 +649,11 @@ describe("App UI integration", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.resetAllMocks();
+    // Marvis is a macOS app, so ⌘ is the modifier these tests press, and saying it here is what
+    // keeps the machine running them from deciding it: `navigator.platform` comes from the host's
+    // own OS, which on a Linux runner reports Linux, and then every ⌘ in this file answers as Ctrl
+    // and no shortcut fires. A test about the other platform says so itself.
+    reportsPlatform("MacIntel");
     Object.defineProperty(window, "innerWidth", { configurable: true, value: 1400 });
     mocks.initialWorkspace = null;
     mocks.workspaceRef = null;
@@ -668,6 +681,7 @@ describe("App UI integration", () => {
     mocks.loadCheckoutUiState.mockResolvedValue({ ...DEFAULT_CHECKOUT_UI_STATE });
     mocks.saveAppLayout.mockResolvedValue(undefined);
     mocks.saveSettings.mockResolvedValue(undefined);
+    mocks.openExternalUrl.mockResolvedValue(undefined);
     mocks.saveCheckoutUiState.mockResolvedValue(undefined);
     mocks.prepareAppExit.mockResolvedValue(undefined);
     mocks.reportFrontendDiagnostic.mockResolvedValue(undefined);
@@ -675,6 +689,7 @@ describe("App UI integration", () => {
     mocks.loadReviewTarget.mockResolvedValue("markdown");
     mocks.saveReviewTarget.mockResolvedValue(undefined);
     mocks.exportReviewMarkdown.mockResolvedValue("2026-03-14-1532.md");
+    mocks.getVersion.mockResolvedValue("9.9.9");
     mocks.toggleMaximize.mockResolvedValue(undefined);
     mocks.minimize.mockResolvedValue(undefined);
     // A window with a frame of its own is the case the app was written against, so it is what
@@ -2905,21 +2920,84 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
-    it("draws every credit the About section carries, each with the licence it travels under", async () => {
+    it("draws the version it read out of the build", async () => {
+      const wrapper = await openSettings();
+      // What the About section is opened for, and the one fact on screen that nothing else can
+      // say. It is the version the window asked the runtime for, not a string written into the
+      // dialog, so a release cannot leave it naming the build before it.
+      expect(wrapper.get('[data-testid="about-version"]').text()).toContain("9.9.9");
+      wrapper.unmount();
+    });
+
+    it("draws no version rather than a wrong one when the build cannot be asked", async () => {
+      mocks.getVersion.mockRejectedValueOnce(new Error("no version here"));
+      const wrapper = await openSettings();
+      // The alternative is a fallback written by hand, which is a version that is right until the
+      // next release and silently wrong after it.
+      expect(wrapper.get('[data-testid="about-version"]').text()).not.toMatch(/\d+\.\d+\.\d+/);
+      wrapper.unmount();
+    });
+
+    it("writes every chord down as the platform it is drawn on presses it", async () => {
       const wrapper = await openSettings();
       // Read the list rather than a copy of it, for the reason the field test above does: what
-      // matters is that nothing in `credits.ts` is dropped on the way to the screen.
-      const about = wrapper.get('[data-testid="about-section"]').text();
-      expect(about).toContain(ACKNOWLEDGEMENT);
-      for (const group of CREDITS) {
-        expect(about, group.title).toContain(group.title);
-        for (const entry of group.entries) {
-          expect(about, entry.name).toContain(entry.name);
-          expect(about, entry.name).toContain(entry.license);
+      // matters is that nothing in `shortcuts.ts` is dropped on the way to the screen.
+      const section = wrapper.get('[data-testid="shortcuts-section"]').text();
+      for (const group of SHORTCUT_GROUPS) {
+        expect(section, group.title).toContain(group.title);
+        for (const shortcut of group.shortcuts) {
+          // The spelling this window's platform uses: `navigator.platform` is what the default
+          // argument reads, and a chord printed the other way round is one key nobody has.
+          expect(section, shortcutChord(shortcut.keys)).toContain(shortcutChord(shortcut.keys));
+          expect(section, shortcut.description).toContain(shortcut.description);
         }
       }
+      expect(section).not.toContain("MOD");
+      wrapper.unmount();
+    });
+
+    it("draws the credits folded away, and still draws all of them", async () => {
+      const wrapper = await openSettings();
+      // Read the list rather than a copy of it, for the reason the field test above does: what
+      // matters is that nothing in `credits.ts` is dropped on the way to the screen. The whole list
+      // is longer than the rest of About and is the answer to a question nobody opened the dialog
+      // with, so it is one closed row — closed, not gone.
+      const credits = wrapper.get('[data-testid="about-credits"]');
+      expect(credits.attributes("open")).toBeUndefined();
+      expect(credits.text()).toContain(CREDITS_TITLE);
+      for (const group of CREDITS) {
+        expect(credits.text(), group.title).toContain(group.title);
+        for (const entry of group.entries) {
+          expect(credits.text(), entry.name).toContain(entry.name);
+          expect(credits.text(), entry.name).toContain(entry.license);
+        }
+      }
+      wrapper.unmount();
+    });
+
+    it("names the app, its licence and where the source is", async () => {
+      const wrapper = await openSettings();
+      const about = wrapper.get('[data-testid="about-section"]').text();
+      expect(about).toContain(ACKNOWLEDGEMENT);
       // And the repository, which is the one thing a person in this section is most likely to want.
       expect(about).toContain(REPOSITORY);
+      // The acknowledgement used to promise a list that sat under it; that list is folded now, so a
+      // line saying what is "below" it would be a claim about what is on screen.
+      expect(about).not.toMatch(/below/);
+      wrapper.unmount();
+    });
+
+    it("hands the repository to the browser instead of following it", async () => {
+      const wrapper = await openSettings();
+      // The webview is not a browser: following the link would replace the window that has the
+      // drafts and the terminals in it. The href is kept anyway, because a link whose only way out
+      // is a click cannot be copied — this window denies its own right-click menu everywhere.
+      const link = wrapper.get('[data-testid="about-repository"]');
+      expect(link.attributes("href")).toBe(REPOSITORY);
+      const openExternalUrl = mocks.openExternalUrl;
+      openExternalUrl.mockClear();
+      await link.trigger("click");
+      expect(openExternalUrl).toHaveBeenCalledWith(REPOSITORY);
       wrapper.unmount();
     });
 

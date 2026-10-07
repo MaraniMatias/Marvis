@@ -8,6 +8,31 @@ here still gets its generated notes.
 
 ## Unreleased
 
+- **Settings now says what the keyboard does.** The chords the window answers were written down in
+  the source and nowhere else, so learning them meant reading `App.vue`. There is now a Shortcuts
+  section in Settings that writes them down: the side panels, a new terminal and the three zoom
+  keys, then the few keys that mean something only where they are pressed — confirming a session
+  name, `Esc`, ctrl/click on a terminal link, and the inspector's `Home`/`End`. Each chord is drawn
+  the way the platform it is read on presses it, so a Mac shows `⌘/` and everything else shows
+  `Ctrl+/` rather than both, because a chord printed the other way round is a key nobody has. It is
+  a list and nothing more: no chord is configurable, and none of it is written to `config.yml`.
+
+- **F2 no longer pretends to rename a session.** The sidebar rows carried `@keydown.f2`, which
+  could only fire on a row that already had the focus, and a click does not focus a row: on macOS
+  the webview does not move focus to a button it is clicked, so the binding was reachable only by
+  tabbing to a row nobody tabs to. Double-click still renames. The binding is gone rather than left
+  where it is a lie about a shortcut Settings now lists.
+
+- **About says which build it is, and stops leading with the licences.** The section opened with an
+  acknowledgement and four groups of credits — artwork, colours, the typeface and every library —
+  which is longer than the rest of it and is the answer to a question nobody opened Settings with.
+  The version is now the first line, read from the binary rather than written into the dialog, so it
+  cannot name a release behind the app it is in; a build that cannot read its own version draws no
+  version rather than one that is nearly right. The credits are still all there, folded into a
+  "Credits and licences" row that says what is inside it. The notices themselves were never only
+  there: the full licence texts ship as `THIRD-PARTY-NOTICES.txt` inside the bundle, which is where
+  a notice has to travel to count as one.
+
 - **A URL in the terminal can now be clicked open in the browser.** The terminal underlines the paths
   it can open in the preview, and it refused to underline an address because `https://…` names no file
   in the checkout — which is true, and left the one thing a terminal prints most often (`curl`, a

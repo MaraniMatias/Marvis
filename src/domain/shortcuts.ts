@@ -37,3 +37,69 @@ export function isMacPlatform(platform: string): boolean {
 export function carriesAppModifier(event: ModifierKey, platform: string = navigator.platform): boolean {
   return isMacPlatform(platform) ? event.metaKey : event.ctrlKey;
 }
+
+/**
+ * What the window answers to, written down so Settings can say so.
+ *
+ * These are not preferences, which is why they are not in `SETTINGS_SECTIONS`: none of them is
+ * written to `~/.marvis/config.yml`, none is restored, and a person cannot change one. They are a
+ * record of fact about this build, the same way the credits are, so the dialog draws them and
+ * writes nothing.
+ *
+ * A chord is a list of keys in press order rather than one string, because the modifier is a
+ * different key on each platform and a chord written out once is wrong everywhere else. `MOD` is
+ * that key: `shortcutChord` spells it the way the window this is read on presses it.
+ */
+export interface Shortcut {
+  /** The keys in the order they are pressed. `MOD` is ⌘ on macOS and Ctrl everywhere else. */
+  keys: readonly string[];
+  /** What it does, in a line: the keys alone say nothing about what a person is trying to do. */
+  description: string;
+}
+
+export interface ShortcutGroup {
+  title: string;
+  shortcuts: Shortcut[];
+}
+
+/**
+ * The chords the window answers wherever it has the focus, and the few it answers inside one place.
+ *
+ * A chord here that the app stopped answering is a line of help that lies, and one it gained is a
+ * line of help that is missing: this list and the handlers are two facts about the same thing and
+ * `App.test.ts` is what keeps them from drifting apart.
+ */
+export const SHORTCUT_GROUPS: ShortcutGroup[] = [
+  {
+    title: "Window",
+    shortcuts: [
+      { keys: ["MOD", "/"], description: "Show or hide the side panels" },
+      { keys: ["MOD", "N"], description: "New terminal in the open workdir" },
+      { keys: ["MOD", "+"], description: "Make the window bigger" },
+      { keys: ["MOD", "−"], description: "Make the window smaller" },
+      { keys: ["MOD", "0"], description: "Back to 100%" },
+    ],
+  },
+  {
+    title: "In context",
+    shortcuts: [
+      { keys: ["Enter"], description: "Confirm the session name being typed" },
+      { keys: ["Esc"], description: "Close a dialog, cancel a rename, dismiss a message" },
+      { keys: ["MOD", "click"], description: "Open the file a link in the terminal points at" },
+      { keys: ["Home"], description: "First section in the inspector, from the tab strip" },
+      { keys: ["End"], description: "Last section in the inspector" },
+    ],
+  },
+];
+
+/**
+ * A chord as this platform presses it, which is `⌘/` on a Mac and `Ctrl+/` anywhere else.
+ *
+ * The keys are joined with nothing on macOS and with `+` elsewhere, because a Mac writes a chord as
+ * the glyphs sit on the keyboard — `⌘N` — while the other platforms have to say that the modifier is
+ * a separate key to be pressed along with it.
+ */
+export function shortcutChord(keys: readonly string[], platform: string = navigator.platform): string {
+  const mac = isMacPlatform(platform);
+  return keys.map((key) => (key === "MOD" ? (mac ? "⌘" : "Ctrl") : key)).join(mac ? "" : "+");
+}

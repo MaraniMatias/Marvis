@@ -1,6 +1,7 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-closing-bracket-newline, vue/html-indent */
 import { listen } from "@tauri-apps/api/event";
+import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { SplitterGroup, SplitterPanel, SplitterResizeHandle } from "reka-ui";
@@ -123,6 +124,14 @@ const settings = ref<AppSettings>(cloneSettings(DEFAULT_SETTINGS));
 const settingsButton = ref<HTMLButtonElement | null>(null);
 const settingsOpen = ref(false);
 const settingsSaving = ref(false);
+/**
+ * The version of the build this window is, read from the binary rather than from a file beside it.
+ *
+ * It is read once at startup and stays null if it cannot be: the About section draws a version only
+ * when there is one, and a version guessed from a manifest that a release could have written and not
+ * shipped is worse than no version at all.
+ */
+const appVersion = ref<string | null>(null);
 /** The scale the whole window is drawn at, which every measurement below has to agree with. */
 const appZoom = computed(() => settings.value.ui.zoom);
 const isNarrow = computed(
@@ -1117,6 +1126,13 @@ onMounted(async () => {
     appLayoutReady.value = true;
   }
   try {
+    appVersion.value = await getVersion();
+  } catch (cause) {
+    // One section of one dialog shows one line without it. The window knows nothing else that is
+    // wrong, so this is reported and the About section is drawn without a version.
+    reportCause(cause);
+  }
+  try {
     const dispose = await listen<CheckoutFileActivity[]>("checkout-file-activity", (event) => {
       // One watcher covers a whole repository, so a write in one worktree arrives naming the
       // worktree it landed in rather than the one that happened to be on screen.
@@ -2001,8 +2017,10 @@ function reportWarning(message: string) {
       :open="settingsOpen"
       :settings="settings"
       :saving="settingsSaving"
+      :version="appVersion"
       @close="closeSettings"
       @apply="applyFromDialog"
+      @open-external-url="openExternalUrl"
     />
     <ToastStack />
   </div>

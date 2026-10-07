@@ -23,6 +23,10 @@
 # The second command finds the manifests already at 0.2.1 and the tag already made, and only has the
 # tag to push. It also resumes a release whose build failed, which `gh run rerun <id>` would also do.
 #
+# The tests run before anything is written, and only on the way to writing something: the tag is the
+# one step here that cannot be undone, so the tree it points at is proved here rather than by the
+# run the tag starts.
+#
 # If a build fails the tag is already pushed, so nothing was published and the run can be retried
 # with `gh run rerun <id>`: the same tag, the same commit, no new version.
 #
@@ -61,7 +65,7 @@ requested="${args[0]#v}"
 tag="v$requested"
 
 step "Checking this repository can take a release"
-for tool in git gh node; do
+for tool in git gh node pnpm; do
   command -v "$tool" >/dev/null || die "$tool is not installed"
 done
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated; run: gh auth login"
@@ -101,6 +105,14 @@ if ((tag_remote)); then
   step "Resuming $tag, which is already on the remote"
   release_commit="$(git rev-parse "$tag^{commit}")"
 else
+  # The gate runs on the tree that is about to be tagged, and only when something is about to be
+  # written: a resume waits for a run and publishes nothing, so it has nothing of its own to prove.
+  # A tag on a tree whose tests fail cannot be taken back, and this is where that is caught rather
+  # than minutes later on a machine that is not this one.
+  step "Running the tests the workflow gates the tag on"
+  pnpm test || die "the tests fail here, so nothing was written and no tag was made.
+Fix them and push; then run this again."
+
   if [[ "$current" == "$requested" ]]; then
     if ((tag_local)); then
       # What --dry-run leaves behind: the version is committed and the tag was made with it.

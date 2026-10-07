@@ -128,17 +128,32 @@ export const CREDITS: CreditsGroup[] = [ARTWORK, COLORS, TYPE, LIBRARIES];
  * the notice that licence asks to travel with it. The licences themselves are not reproduced here
  * because a list of them is longer than the About section and reads as nothing; the notice is the
  * name and the terms, and the full text is a `LICENSE` file away in every one of those projects.
+ *
+ * It names the disclosure rather than the list because that is where the list is: a person reading
+ * this has the credits folded away under them, and a line saying they are below is a claim about
+ * what is on screen.
  */
 export const ACKNOWLEDGEMENT =
   "Marvis is MIT licensed. Most of what is drawn in it is not ours: the icons, the colors, the " +
-  "typeface and the libraries below belong to the projects named, each under a licence that allows " +
-  "this use. Marani Matias Ezequiel built the rest.";
+  "typeface and the libraries all belong to the projects named in the credits, each under a " +
+  "licence that allows this use. Marani Matias Ezequiel built the rest.";
 
 /**
- * Where the source is, as text rather than as a link.
+ * What the closed disclosure is called, which is the only name the list has when it is not drawn.
  *
- * Plain text on purpose: an `<a>` needs a click handler and a plugin to hand the URL to the
- * browser, and a person who wants the repository can read it and copy it. The macOS About panel
- * carries the same address and does make it a link, so the two agree about where this is.
+ * A closed `<details>` shows its summary and nothing else, so this is the whole of what a person
+ * knows about the licences travelling with the app until they open it. It says what is inside
+ * rather than inviting them to look, because a row that only says "Show more" is a row whose
+ * contents nobody opens.
+ */
+export const CREDITS_TITLE = "Credits and licences";
+
+/**
+ * Where the source is, which the About section draws as a link.
+ *
+ * The address is drawn as text inside an `<a>` rather than as a button, so a person who wants to
+ * send it to someone can select and copy it: this window's right-click menu is denied on every
+ * surface, so there is no "Copy Link Address" to fall back on. It is also the same address the
+ * macOS About panel carries as a link, so the two agree about where this is.
  */
 export const REPOSITORY = "https://github.com/MaraniMatias/Marvis";

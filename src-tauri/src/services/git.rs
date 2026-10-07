@@ -6507,15 +6507,19 @@ line.txt";
                 .unwrap();
         }
 
+        // Draining before the write is what keeps the startup event out of the write's answer.
+        // `notify` puts every watched path into one FSEventStream, FSEvents names each of those
+        // paths once when the stream starts, and the queue merges whatever arrives together into a
+        // single update -- so on a loaded runner the untouched checkout's name and the write are
+        // one update, and the assertion below would read as if the save had reached it.
+        while inbox.recv_timeout(Duration::from_millis(250)).is_ok() {}
+
         fs::write(worktree.join("terminal-edit.txt"), "changed\n").unwrap();
 
         // Only the worktree that was written to is named. The row beside it is untouched, and
         // saying otherwise would make a save in one worktree cost a re-read of every other.
         //
-        // FSEvents, the backend `recommended_watcher` uses on macOS, can name a watched directory
-        // once when its stream starts, and on a loaded runner that event arrives beside the write
-        // instead of before it. Reading only the first message would then assert on the startup
-        // event. So this waits for the update that names the written worktree, the same way
+        // The wait is for the update that names the written worktree, the same way
         // `assert_membership_signal` waits for the worktree it asked for: the claim under test
         // is still that one update, and it still has to name that worktree and nothing else.
         let deadline = Instant::now() + Duration::from_secs(5);

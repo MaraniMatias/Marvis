@@ -1178,7 +1178,6 @@ function rowLabel(item: WorkdirItem): string {
                   @lostpointercapture="onLostPointerCapture"
                   @click="selectSession(item.session.id, $event)"
                   @dblclick="startRename(item.session)"
-                  @keydown.f2.prevent="startRename(item.session)"
                   @contextmenu.prevent="item.destinations.length && openMoveMenu(item.session.id)"
                 >
                   <!-- The glyph carries the state, in colour and in motion: a spinner while a turn
