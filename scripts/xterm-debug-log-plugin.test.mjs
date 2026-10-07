@@ -25,17 +25,23 @@ function emitterFragment(modulePath) {
   return source.slice(start, marker + LISTENER_ERROR.length) + ";";
 }
 
-test("suppresses only the exact emitter throw in the three installed xterm modules", () => {
+test("collapses the three debug logs into one console.error in the three installed xterm modules", () => {
   const plugin = xtermDebugLogPlugin();
+  assert.equal(plugin.apply, "build", "the transform must stay build-only so dev keeps the original logs");
   for (const [modulePath, id] of MODULES) {
     const result = plugin.transform(emitterFragment(modulePath), id);
     assert.ok(result, `${modulePath} emitter must be transformed`);
     assert.doesNotMatch(result.code, /console\.log\("(?:disposed|size|arr)\?"/);
+    assert.match(
+      result.code,
+      /console\.error\("disposed\?", this\._disposed, "size\?", this\._size, "arr\?", JSON\.stringify\(this\._listeners\)\)/,
+      `${modulePath} must keep the emitted debug context on the error path`,
+    );
     assert.ok(result.code.includes(LISTENER_ERROR));
   }
 });
 
-test("suppression preserves argument effects, order, throw behavior, and undefined results", () => {
+test("keeps failure-path work, the exact throw and the debug context when the error path runs", () => {
   const source = `
     const data = { toJSON() { events.push("toJSON"); if (throwFromJSON) throw new Error("toJSON failed"); return "encoded"; } };
     function mark(value) { events.push(value); return value; }
@@ -45,37 +51,47 @@ test("suppression preserves argument effects, order, throw behavior, and undefin
   `;
   const transformed = suppressXtermDebugLogs(source);
   assert.ok(transformed);
-  const firstCall = transformed.match(/\("disposed\?", mark\("first"\), void 0\)/)?.[0];
-  assert.ok(firstCall, "the suppressed call must evaluate its arguments and yield undefined");
-  const undefinedEvents = [];
-  assert.equal(
-    runInNewContext(firstCall, {
-      mark(value) {
-        undefinedEvents.push(value);
-        return value;
-      },
-    }),
-    undefined,
+  assert.ok(transformed.includes("JSON.stringify(data)"), "failure-path serialization remains evaluated");
+  assert.match(
+    transformed,
+    /console\.error\("disposed\?", mark\("first"\), "size\?", mark\("second"\), "arr\?", JSON\.stringify\(data\)\)/,
+    "the labels and evaluated values are kept in a single call",
   );
-  assert.deepEqual(undefinedEvents, ["first"]);
+  assert.ok(
+    transformed.includes('new Error("Attempted to dispose unknown listener")'),
+    "the thrown error must be untouched",
+  );
 
-  for (const throwFromJSON of [false, true]) {
-    const execute = (code) => {
-      const events = [];
-      runInNewContext(code, {
-        events,
-        throwFromJSON,
-        console: {
-          log(...args) {
-            events.push(["console", args]);
-          },
+  const execute = (code, throwFromJSON) => {
+    const events = [];
+    runInNewContext(code, {
+      events,
+      throwFromJSON,
+      console: {
+        log(...args) {
+          events.push(["console.log", args]);
         },
-      });
-      return JSON.parse(JSON.stringify(events));
-    };
-    const originalEvents = execute(source).filter((event) => !Array.isArray(event) || event[0] !== "console");
-    assert.deepEqual(execute(transformed), originalEvents);
-  }
+        error(...args) {
+          events.push(["console.error", args]);
+        },
+      },
+    });
+    return JSON.parse(JSON.stringify(events));
+  };
+
+  assert.deepEqual(execute(transformed, false), [
+    "first",
+    "second",
+    "toJSON",
+    ["console.error", ["disposed?", "first", "size?", "second", "arr?", '"encoded"']],
+    ["caught", "Attempted to dispose unknown listener"],
+  ]);
+
+  // A JSON.stringify failure on the error path must still escape before the Error is thrown.
+  assert.deepEqual(
+    execute(transformed, true),
+    execute(source, true).filter((event) => event[0] !== "console.log"),
+  );
 });
 
 test("only a complete exact unknown-listener throw is eligible; other logs remain", () => {
@@ -106,4 +122,9 @@ test("only a complete exact unknown-listener throw is eligible; other logs remai
   assert.match(result.code, /console\.log\("disposed\? extra", keep\(\)\)/);
   assert.match(result.code, /console\.warn\("keep"\)/);
   assert.match(result.code, /console\.error\("keep"\)/);
+  assert.equal(
+    result.code.match(/console\.error\(/g).length,
+    2,
+    "only the pre-existing error and the emitter branch log; nothing is added outside it",
+  );
 });

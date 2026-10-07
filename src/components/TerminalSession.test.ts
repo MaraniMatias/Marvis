@@ -1,7 +1,7 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import type { Checkout } from "../domain/workspace";
+import type { Checkout, TerminalSessionStatus } from "../domain/workspace";
 import { DEFAULT_SETTINGS } from "../domain/settings";
 import {
   closeTerminal,
@@ -15,6 +15,7 @@ import {
 } from "../lib/ipc";
 import { useToasts } from "../presentation/toasts";
 import { theme } from "../presentation/theme";
+import { PTY_OUTPUT_REPORT_STEP_BYTES } from "../lib/terminal-renderer";
 import SessionPane from "./SessionPane.vue";
 import TerminalSession from "./TerminalSession.vue";
 
@@ -26,6 +27,11 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     titles: [] as Array<(title: string) => void>,
     scrolls: [] as Array<() => void>,
     output: [] as number[][],
+    /**
+     * The callbacks xterm owes the writer, one per write handed over and not parsed yet. A test
+     * that releases them is a renderer catching up; a test that does not is one that cannot.
+     */
+    writeCallbacks: [] as Array<() => void>,
     openCalls: 0,
     focusCalls: 0,
     clearTextureAtlasCalls: 0,
@@ -98,8 +104,9 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     get buffer() {
       return { active: { ...terminalMock.buffer, baseY: 0, rows: this.rows } };
     }
-    write(data: Uint8Array) {
+    write(data: Uint8Array, callback?: () => void) {
       terminalMock.output.push(Array.from(data));
+      if (callback) terminalMock.writeCallbacks.push(callback);
     }
     focus() {
       terminalMock.focusCalls += 1;
@@ -135,6 +142,7 @@ vi.mock("@tauri-apps/api/core", () => ({
 // asserted there. What this file owns is the wiring: a terminal on the page, with both.
 const terminalLib = vi.hoisted(() => ({
   attachTerminalRenderer: vi.fn(),
+  watchTerminalRendererRecovery: vi.fn(() => ({ dispose: vi.fn() })),
   setTerminalLigatures: vi.fn(),
   enableTerminalSelectionCopy: vi.fn(() => ({ dispose: vi.fn() })),
   fitCalls: 0,
@@ -179,6 +187,7 @@ vi.mock("../lib/marvis-terminal", () => ({
   setTerminalLigatures: terminalLib.setTerminalLigatures,
   enableTerminalSelectionCopy: terminalLib.enableTerminalSelectionCopy,
   attachTerminalRenderer: terminalLib.attachTerminalRenderer,
+  watchTerminalRendererRecovery: terminalLib.watchTerminalRendererRecovery,
   preloadTerminalFonts: () =>
     Promise.allSettled([
       document.fonts.load('16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace'),
@@ -206,6 +215,11 @@ vi.mock("../lib/ipc", () => ({
   saveTerminalLayout: vi.fn(),
   writeTerminal: vi.fn(),
 }));
+
+/** The window's only answer to the reader, which is a Tauri event. */
+const appEvents = vi.hoisted(() => ({ emit: vi.fn(async () => {}) }));
+
+vi.mock("@tauri-apps/api/event", () => ({ emit: appEvents.emit }));
 
 const workspace = { repos: [], activeCheckoutId: "checkout:repo", activeSessionId: "session:new" };
 const created = {
@@ -240,6 +254,7 @@ describe("TerminalSession UI", () => {
     terminalMock.titles = [];
     terminalMock.scrolls = [];
     terminalMock.output = [];
+    terminalMock.writeCallbacks = [];
     terminalMock.openCalls = 0;
     terminalMock.focusCalls = 0;
     terminalMock.clearTextureAtlasCalls = 0;
@@ -1122,5 +1137,273 @@ describe("TerminalSession UI", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  it("drops a status read that lands after the pane is gone", async () => {
+    // A poll still in flight when the view goes away answers to nobody: publishing it writes state
+    // on a component that is not there, and an `exited` in that reply would ask a session that is
+    // already gone to close itself.
+    let resolveStatus!: (status: TerminalSessionStatus) => void;
+    vi.mocked(getTerminalStatus)
+      .mockResolvedValueOnce({ state: "running", foregroundProcess: false })
+      .mockReturnValueOnce(
+        new Promise((resolve) => {
+          resolveStatus = resolve;
+        }),
+      );
+    // Before the mount, so the interval the session starts is the faked one and this poll can be
+    // made to happen at all.
+    vi.useFakeTimers();
+    // Listeners rather than `wrapper.emitted`, because the pane they belonged to is gone by the
+    // time the reply lands and only a listener outside it can still say whether it was called.
+    const onStatusChanged = vi.fn();
+    const onClosed = vi.fn();
+    try {
+      const wrapper = mount(TerminalSession, {
+        props: { checkoutId: "checkout:repo", active: true, onStatusChanged, onClosed },
+      });
+      await flushPromises();
+      expect(onStatusChanged).toHaveBeenCalledExactlyOnceWith({ state: "running", foregroundProcess: false });
+
+      await vi.advanceTimersByTimeAsync(750);
+      expect(vi.mocked(getTerminalStatus).mock.calls.length).toBe(2);
+      wrapper.unmount();
+      resolveStatus({ state: "exited", exitCode: 0 });
+      await vi.advanceTimersByTimeAsync(1);
+
+      // The exit is a real one and the pane that would have shown it is gone: nothing is published
+      // on the strength of a status nobody is left to read, and nothing is closed for it either.
+      expect(onStatusChanged).toHaveBeenCalledTimes(1);
+      expect(onClosed).not.toHaveBeenCalled();
+      expect(closeTerminal).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("drops a status error for a checkout the terminal no longer belongs to", async () => {
+    vi.useFakeTimers();
+    let rejectStatus!: (cause: unknown) => void;
+    vi.mocked(getTerminalStatus)
+      .mockResolvedValueOnce({ state: "running" })
+      .mockReturnValueOnce(
+        new Promise<TerminalSessionStatus>((_, reject) => {
+          rejectStatus = reject;
+        }),
+      )
+      .mockResolvedValue({ state: "running" });
+    const onStatusChanged = vi.fn();
+    try {
+      const wrapper = mount(TerminalSession, {
+        props: { checkoutId: "checkout:repo", active: true, onStatusChanged },
+      });
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(750);
+      expect(vi.mocked(getTerminalStatus).mock.calls).toHaveLength(2);
+
+      await wrapper.setProps({ checkoutId: "checkout:other" });
+      rejectStatus(new Error("stale checkout poll failed"));
+      await flushPromises();
+
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+      expect(onStatusChanged).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(getTerminalStatus).mock.calls.at(-1)).toEqual(["checkout:other", "session:new"]);
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds status polls, deduplicates transient errors, then recovers and detects exit", async () => {
+    vi.useFakeTimers();
+    const temporaryError = new Error("the backend is temporarily unavailable");
+    let rejectStatus!: (cause: unknown) => void;
+    vi.mocked(getTerminalStatus)
+      .mockResolvedValueOnce({ state: "running" })
+      .mockReturnValueOnce(
+        new Promise<TerminalSessionStatus>((_, reject) => {
+          rejectStatus = reject;
+        }),
+      )
+      .mockRejectedValueOnce(temporaryError)
+      .mockResolvedValueOnce({ state: "running" })
+      .mockResolvedValueOnce({ state: "exited", exitCode: 0 })
+      .mockResolvedValue({ state: "running" });
+    try {
+      const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(750);
+      expect(vi.mocked(getTerminalStatus).mock.calls).toHaveLength(2);
+
+      // A slow IPC read occupies the single poll slot, regardless of how many interval ticks pass.
+      await vi.advanceTimersByTimeAsync(3750);
+      expect(vi.mocked(getTerminalStatus).mock.calls).toHaveLength(2);
+      rejectStatus(temporaryError);
+      await flushPromises();
+      expect(wrapper.get('[role="alert"]').text()).toContain(temporaryError.message);
+
+      const alert = wrapper.get('[role="alert"]').element;
+      const mutations: MutationRecord[] = [];
+      const observer = new MutationObserver((records) => mutations.push(...records));
+      observer.observe(alert, { childList: true, subtree: true, characterData: true });
+      await vi.advanceTimersByTimeAsync(750);
+      await flushPromises();
+      expect(vi.mocked(getTerminalStatus).mock.calls).toHaveLength(3);
+      expect(wrapper.get('[role="alert"]').text()).toContain(temporaryError.message);
+      expect(mutations).toHaveLength(0);
+      observer.disconnect();
+
+      await vi.advanceTimersByTimeAsync(750);
+      await flushPromises();
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+      await vi.advanceTimersByTimeAsync(750);
+      await flushPromises();
+      expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({ state: "exited", exitCode: 0 });
+      expect(closeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new");
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("surfaces a missing session with a controlled retry and restores normal polling on recovery", async () => {
+    vi.useFakeTimers();
+    vi.mocked(getTerminalStatus)
+      .mockResolvedValueOnce({ state: "running" })
+      .mockRejectedValueOnce({
+        code: "terminal_session_missing",
+        message: "terminal session ID is not registered",
+      })
+      .mockResolvedValue({ state: "running" });
+    try {
+      const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(750);
+      await flushPromises();
+
+      expect(wrapper.get('[role="alert"]').text()).toContain("Terminal session is unavailable.");
+      expect(wrapper.get('[role="alert"]').text()).toContain("terminal session ID is not registered");
+      expect(wrapper.get('[role="alert"] button').text()).toBe("Retry");
+      await vi.advanceTimersByTimeAsync(4999);
+      expect(vi.mocked(getTerminalStatus).mock.calls).toHaveLength(2);
+
+      await wrapper.get('[role="alert"] button').trigger("click");
+      await flushPromises();
+      expect(wrapper.find('[role="alert"]').exists()).toBe(false);
+      await vi.advanceTimersByTimeAsync(750);
+      expect(vi.mocked(getTerminalStatus).mock.calls).toHaveLength(4);
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("asks a hidden terminal far less often, and at full pace again once it is on screen", async () => {
+    vi.useFakeTimers();
+    try {
+      const wrapper = mount(TerminalSession, {
+        props: { checkoutId: "checkout:repo", active: true, visible: false },
+      });
+      await flushPromises();
+      const afterStart = vi.mocked(getTerminalStatus).mock.calls.length;
+
+      // The row in the sidebar still has to name the process in front of the shell, so a terminal
+      // nobody is looking at keeps asking. It just stops asking four times a second about it.
+      await vi.advanceTimersByTimeAsync(5000);
+      expect(vi.mocked(getTerminalStatus).mock.calls.length).toBe(afterStart + 1);
+
+      await wrapper.setProps({ visible: true });
+      await flushPromises();
+      await vi.advanceTimersByTimeAsync(1500);
+      expect(vi.mocked(getTerminalStatus).mock.calls.length).toBe(afterStart + 3);
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("closes a session that exits on a hidden terminal's slower poll, and stops asking", async () => {
+    vi.useFakeTimers();
+    try {
+      vi.mocked(getTerminalStatus).mockResolvedValue({ state: "exited", exitCode: 0 });
+      const wrapper = mount(TerminalSession, {
+        props: { checkoutId: "checkout:repo", active: true, visible: false },
+      });
+      await flushPromises();
+
+      // The slow pace must not cost the exit its detection: `exit` still closes the session, and
+      // the interval that found it goes with it rather than polling a session nobody has.
+      expect(wrapper.emitted("statusChanged")).toEqual([[{ state: "exited", exitCode: 0 }]]);
+      expect(closeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new");
+      expect(wrapper.emitted("closed")).toEqual([[workspace]]);
+      const callsAfterExit = vi.mocked(getTerminalStatus).mock.calls.length;
+      await vi.advanceTimersByTimeAsync(20000);
+      expect(vi.mocked(getTerminalStatus).mock.calls.length).toBe(callsAfterExit);
+      wrapper.unmount();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("tells the reader how much of its output has been parsed, and stops telling it once the pane is gone", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+    appEvents.emit.mockClear();
+
+    // Two report steps' worth of output arriving while xterm parses none of it. The reader counted
+    // it the moment it handed it over, so there is nothing new to say here: the number it is being
+    // given is how much it has *parsed*, and that is still nothing.
+    terminalMock.channel?.onmessage(new Uint8Array(2 * PTY_OUTPUT_REPORT_STEP_BYTES).buffer);
+    expect(appEvents.emit).not.toHaveBeenCalled();
+
+    // The renderer catches up, and the total it reports is what the reader consumes against the
+    // bytes it sent — including the ones that were still in the channel a moment ago.
+    terminalMock.writeCallbacks.shift()?.();
+    expect(appEvents.emit).toHaveBeenLastCalledWith("terminal-output-flow", {
+      sessionId: "session:new",
+      parsed: 2 * PTY_OUTPUT_REPORT_STEP_BYTES,
+    });
+    // And a session that is still idle says nothing more: the reader only needs to hear the total
+    // move, and a report per chunk would be an event per 64 KiB of a busy build.
+    appEvents.emit.mockClear();
+    terminalMock.writeCallbacks.shift()?.();
+    expect(appEvents.emit).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+    // Nothing is going to parse this session's output any more, so the reader is told that rather
+    // than left holding the PTY until its own timeout, five seconds later.
+    expect(appEvents.emit).toHaveBeenCalledWith("terminal-output-flow", { sessionId: "session:new" });
+  });
+
+  it("loses no output and reorders none while the renderer falls behind", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    const burst = Array.from({ length: 8 }, (_, index) => Uint8Array.of(index));
+    for (const chunk of burst) terminalMock.channel?.onmessage(chunk.buffer as ArrayBuffer);
+    // Only the first chunk is with xterm while it is parsing it, and nothing is dropped to make
+    // room for the rest: once the renderer has worked through everything, every byte is there
+    // once and in the order it arrived.
+    expect(terminalMock.output.flat()).toEqual([0]);
+    while (terminalMock.writeCallbacks.length > 0) terminalMock.writeCallbacks.shift()?.();
+    expect(terminalMock.output.flat()).toEqual(burst.map((_, index) => index));
+    wrapper.unmount();
+  });
+
+  it("watches for a lost renderer context, so a terminal that lost one does not stay on the fallback", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    expect(terminalLib.watchTerminalRendererRecovery).toHaveBeenCalledWith(
+      expect.anything(),
+      terminalLib.attachTerminalRenderer.mock.results.at(-1)?.value,
+    );
+    wrapper.unmount();
+    // The listener goes with the pane: a terminal that is no longer on the page must not go on
+    // taking a WebGL context from the machine it is no longer drawing on.
+    const recovery = terminalLib.watchTerminalRendererRecovery.mock.results.at(-1)?.value as {
+      dispose: () => void;
+    };
+    expect(recovery.dispose).toHaveBeenCalled();
   });
 });

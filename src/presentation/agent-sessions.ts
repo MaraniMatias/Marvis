@@ -143,6 +143,14 @@ export function useAgentSessions(
   repo: ComputedRef<Repo | null>,
 ): ActiveAgentSessions {
   let generation = 0;
+  /** Whether a read asked for by a timer or by an event is still on its way. */
+  let refreshing = false;
+  /** Whether one more read is owed while the one on its way has not answered yet. */
+  let refreshAgain = false;
+  /** Whether the scope that owns the event subscription is already gone. */
+  let disposed = false;
+  /** The bridge's own release for the one subscription this hook holds, once it has answered. */
+  let unlistenAgentEvents: (() => void) | undefined;
   /**
    * Sessions the service reported as running at the previous read.
    *
@@ -210,11 +218,14 @@ export function useAgentSessions(
 
   async function reload() {
     const checkoutId = state.checkoutId;
-    if (!checkoutId) return false;
+    // A scope that is gone has no row left to fill in, so a read asked for after it is not even
+    // sent. The timers that ask are released with the scope, but the event handler is not, and a
+    // read that outlives the row it was asked for is work nobody is waiting on.
+    if (!checkoutId || disposed) return false;
     const request = ++generation;
     try {
       const sessions = await listAgentSessions(checkoutId);
-      if (state.checkoutId !== checkoutId || request !== generation) return false;
+      if (disposed || state.checkoutId !== checkoutId || request !== generation) return false;
       state.turnsCompleted += settledTurns(sessions, wasRunning);
       state.sessions = sessions;
       // Keep an explicit choice only while it still exists; otherwise follow the newest.
@@ -226,8 +237,39 @@ export function useAgentSessions(
       await refreshAgentsBehind(sessions);
       return true;
     } catch (cause) {
-      return state.checkoutId === checkoutId ? fail(cause) : false;
+      // Checked against the disposal and the generation as the success path checks them. A read
+      // that was superseded answering late has nothing left to say: without this, one stale failure
+      // wrote its error over whatever the newer read had already put in place.
+      return !disposed && state.checkoutId === checkoutId && request === generation ? fail(cause) : false;
     }
+  }
+
+  /**
+   * Asks for a read, but never two at once.
+   *
+   * Both timers and the event listener ask on a schedule of their own, so a service slower than
+   * `BUSY_POLL_MS` used to chain reads that each waited on the one before it and then threw the
+   * answer away: `generation` drops the answer, and this drops the work behind it. One read is on
+   * its way and one more is held behind that, which is what three callers firing in the same moment
+   * means. `reload()` stays the raw read rather than this wrapper because it answers whether it
+   * read anything, and folding one caller's read into another's answer would make that a lie.
+   *
+   * The read held behind the one on its way is dropped when the scope goes, not chained: the timers
+   * that ask are released with the scope, so a chain still running would be the last thing left
+   * reading a checkout nobody is drawing.
+   */
+  function refreshNow() {
+    if (refreshing) {
+      refreshAgain = true;
+      return;
+    }
+    refreshing = true;
+    void reload().finally(() => {
+      refreshing = false;
+      if (!refreshAgain || disposed) return;
+      refreshAgain = false;
+      refreshNow();
+    });
   }
 
   async function createSession(title: string) {
@@ -315,12 +357,12 @@ export function useAgentSessions(
    * reads. This polls only while something is running, so an idle app is not polled, and it
    * covers a turn started in the person's own TUI, which is the common case here.
    */
-  async function pollRunningSessions() {
+  function pollRunningSessions() {
     if (!state.sessions.some((session) => session.running)) return;
-    await reload();
+    refreshNow();
   }
 
-  const pollTimer = setInterval(() => void pollRunningSessions(), BUSY_POLL_MS);
+  const pollTimer = setInterval(pollRunningSessions, BUSY_POLL_MS);
 
   /**
    * Asks again while there is no service to talk to.
@@ -332,16 +374,20 @@ export function useAgentSessions(
    */
   const disconnectedTimer = setInterval(() => {
     if (state.state !== "error") return;
-    void reload();
+    refreshNow();
   }, SLOW_POLL_MS);
 
   onScopeDispose(() => {
+    disposed = true;
     clearInterval(pollTimer);
     clearInterval(disconnectedTimer);
+    unlistenAgentEvents?.();
+    unlistenAgentEvents = undefined;
   });
 
   // One subscription for the app's lifetime: events are filtered by checkout, so a single
-  // listener is cheaper than one per checkout and cannot be left dangling.
+  // listener is cheaper than one per checkout. It is still released with the scope, because a
+  // remount or a hot reload would otherwise stack a subscription behind every one before it.
   void listen<AgentEvent>(AGENT_EVENT, ({ payload }) => {
     const checkoutId = state.checkoutId;
     if (!checkoutId || payload.checkoutId !== checkoutId) return;
@@ -349,11 +395,22 @@ export function useAgentSessions(
     if (isTurnEvent(payload.kind)) {
       // `/api/session/active` is the authority on whether a turn is running and it lags the
       // event, so the list is re-read and that read is what settles a finished turn.
-      void reload();
+      refreshNow();
       return;
     }
     state.sessions = applyAgentEvent(state.sessions, payload);
-  });
+  })
+    .then((dispose) => {
+      // The scope can be gone before the bridge answers, in which case there is nothing left to
+      // receive events and the subscription would outlive the row that asked for it.
+      if (disposed) dispose();
+      else unlistenAgentEvents = dispose;
+    })
+    .catch(() => {
+      // No subscription, rather than a hook that cannot be built: the polls keep the row current
+      // on their own, so this costs live events and nothing else. The rejection is taken here
+      // because an unhandled one takes the effect scope with it.
+    });
 
   return Object.assign(state, { reload, createSession, selectTarget, stop });
 }
@@ -398,6 +455,33 @@ export interface TerminalAgentRows {
 }
 
 /**
+ * Which checkouts a pass is about.
+ *
+ * `"all"` asks about every checkout that has a terminal, which is the only right question once
+ * nothing is running: a turn can have started in the person's own TUI and nothing on this stream
+ * says so. `"busy"` asks only about the checkouts with a turn running in them, which is all that
+ * the fast poll can have changed.
+ */
+type RefreshScope = "all" | "busy";
+
+/**
+ * A cheap description of what a row would draw, so an answer that draws the same row is not written.
+ *
+ * It covers everything a terminal row reads out of its entry — the title it matches on, the agent it
+ * names, whether it is working, and the clock in its trailing slot — and nothing else, because the
+ * row is only ever read and there is nothing in it that a finer comparison would settle.
+ */
+function rowSignature(entry: TerminalAgentRow): string {
+  return entry.sessions
+    .map((session) => {
+      const agent = session.agent;
+      const named = agent ? `${agent.label}/${agent.color}/${agent.attention}` : "";
+      return `${session.title}|${named}|${session.running}|${session.updatedAt}`;
+    })
+    .join("\n");
+}
+
+/**
  * Reads the agent state of every checkout that has terminals, keyed by checkout.
  *
  * `useAgentSessions` follows the *active* checkout, while a sidebar row is about one terminal in
@@ -411,7 +495,18 @@ export interface TerminalAgentRows {
  * runs in, and that is what is scoped here.
  */
 export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): TerminalAgentRows {
-  let generation = 0;
+  /** Whether a pass is on its way, so no other pass is started beside it. */
+  let refreshing = false;
+  /** Whether another pass is owed while the one on its way has not answered yet. */
+  let refreshAgain = false;
+  /** Whether the queued pass owes a full read, or only the checkouts with a turn running. */
+  let againAll = false;
+  /** Whether the scope that owns these two polls is already gone. */
+  let disposed = false;
+  /** The callers whose ask was folded into the queued pass, told once that pass has answered. */
+  const waiting: Array<() => void> = [];
+  /** What each published row drew, so an answer that would draw the same row is not written. */
+  const published = new Map<string, string>();
   const byCheckout = reactive<Record<string, TerminalAgentRow>>({});
   /** Checkouts with a turn running, so the poll knows there is something to wait for. */
   const busy = new Set<string>();
@@ -442,15 +537,33 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
     };
   }
 
-  async function reload() {
-    const request = ++generation;
+  /**
+   * Writes an answer, unless it draws the row that is already there.
+   *
+   * `byCheckout` is reactive and every terminal row reads out of it, so an equal answer written as
+   * a fresh object re-renders the whole sidebar twice a second for the price of a poll that found
+   * nothing. The row is only ever read, so nothing in it can be patched into place and the cheap
+   * question is the one worth asking: would this answer draw the same row?
+   */
+  function publish(checkoutId: string, entry: TerminalAgentRow) {
+    const signature = rowSignature(entry);
+    if (published.get(checkoutId) === signature) return;
+    published.set(checkoutId, signature);
+    byCheckout[checkoutId] = entry;
+  }
+
+  async function refresh(scope: RefreshScope) {
     // A checkout that went away must stop answering, or a closed worktree keeps its row.
     const wanted = [...new Set(checkoutIds.value)];
     for (const checkoutId of Object.keys(byCheckout)) {
-      if (!wanted.includes(checkoutId)) delete byCheckout[checkoutId];
+      if (wanted.includes(checkoutId)) continue;
+      delete byCheckout[checkoutId];
+      busy.delete(checkoutId);
+      published.delete(checkoutId);
     }
+    const asked = scope === "busy" ? wanted.filter((checkoutId) => busy.has(checkoutId)) : wanted;
     const read_ = await Promise.all(
-      wanted.map(async (checkoutId) => {
+      asked.map(async (checkoutId) => {
         try {
           return [checkoutId, await read(checkoutId)] as const;
         } catch {
@@ -460,13 +573,62 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
         }
       }),
     );
-    // A reload that was superseded mid-flight must not publish over the newer one.
-    if (request !== generation) return;
-    for (const [checkoutId, entry] of read_) byCheckout[checkoutId] = entry;
-    busy.clear();
+    // A scope that is gone has no row left to draw into, and a terminal that closed while this read
+    // was in flight has no row left to draw. Both are answers to a question that no longer applies,
+    // and the pass behind this one would only have to take them back out again.
+    if (disposed) return;
+    const stillWanted = new Set(checkoutIds.value);
     for (const [checkoutId, entry] of read_) {
+      if (!stillWanted.has(checkoutId)) {
+        busy.delete(checkoutId);
+        published.delete(checkoutId);
+        continue;
+      }
+      publish(checkoutId, entry);
+      // Only what was asked about moves: a checkout the busy pass did not read is still busy, or
+      // the pass would not have left it in the set.
       if (entry.sessions.some((session) => session.running)) busy.add(checkoutId);
+      else busy.delete(checkoutId);
     }
+  }
+
+  /**
+   * Runs a pass, and holds the next ask until the one on its way has answered.
+   *
+   * The set of checkouts changing, the fast poll and the slow poll all ask at once and none of them
+   * waits for the read before it, so a service slower than the interval chained passes whose answers
+   * were each superseded by the next one. `refreshing` is what makes a superseded answer impossible
+   * here: a second pass cannot start while the first is still reading, so nothing to supersede.
+   *
+   * A held ask keeps its scope, and a held full read widens the queued pass rather than being
+   * dropped by it, which is how a terminal that opened mid-pass still gets a row out of the pass
+   * behind it.
+   */
+  function reload(scope: RefreshScope = "all"): Promise<void> {
+    // Nothing is left to ask once the scope is gone. The chain behind a slow read is what would
+    // outlive the timers this disposal clears, so it is answered here rather than run.
+    if (disposed) return Promise.resolve();
+    if (refreshing) {
+      refreshAgain = true;
+      againAll ||= scope === "all";
+      // Answered by the pass behind the one on its way, because that is the pass that will report
+      // for this ask: a read that began before it cannot. Held until the queue drains, so a caller
+      // that folded two asks into one pass is not told they are done before either of them ran.
+      return new Promise<void>((resolve) => waiting.push(resolve));
+    }
+    refreshing = true;
+    againAll = false;
+    return refresh(scope).finally(() => {
+      refreshing = false;
+      if (refreshAgain) {
+        refreshAgain = false;
+        void reload(againAll ? "all" : "busy");
+        againAll = false;
+        return;
+      }
+      // Nothing is owed behind this pass, so nobody is left waiting on a pass that will not happen.
+      for (const resolve of waiting.splice(0)) resolve();
+    });
   }
 
   watch(checkoutIds, () => void reload(), { immediate: true });
@@ -476,34 +638,39 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
    *
    * The service announces no turn-completed event, so this is how a row notices a turn ending,
    * and it covers a turn the person started in their own TUI. It stops the moment every row is
-   * idle, so an idle app is not polled.
+   * idle, so an idle app is not polled. It asks about the busy checkouts alone: nothing about an idle
+   * one can have changed since it was last read, and asking anyway is what made every open terminal
+   * cost a round trip twice a second to keep up with the one agent that was working.
    */
   const pollTimer = setInterval(() => {
-    if (busy.size > 0) void reload();
+    if (busy.size > 0) void reload("busy");
   }, BUSY_POLL_MS);
 
   /**
-   * Asks again whenever nothing is running, and slowly.
+   * Asks about every checkout, and slowly, whether or not anything is running.
    *
    * The service announces no turn-started event to this hook, and a turn started in the user's own TUI
-   * is the one nobody here can hear about. So a panel with sessions on it and nothing running still has
-   * to look: otherwise the row says idle while the agent has been working for minutes, and nothing
-   * would correct it until some other event happened to reload the list. It was worse than quiet before
-   * — a checkout with any session at all stopped both timers, so a service with fifty finished
-   * sessions was never asked about again.
+   * is the one nobody here can hear about. So a checkout this app has drawn as idle still has to be
+   * looked at: otherwise its row says idle while the agent has been working for minutes, and nothing
+   * would correct it until some other event happened to reload the list.
    *
-   * The two timers are a fast one and a slow one rather than two questions, because the fast poll is
-   * only ever the right question while something is running and the slow one is the only right question
-   * once it is not.
+   * It runs while other checkouts are busy too, and that is the whole point of asking at all. Gating
+   * it behind `busy.size === 0` made one long-running worktree silence the only question that can
+   * find an externally started turn: the fast poll cannot hear it, because a turn that began in a
+   * TUI leaves the idle worktree out of the set entirely. Every checkout would then keep whatever it
+   * was last drawn as for as long as some other checkout stayed busy.
+   *
+   * The cadence is the slow one and not the fast one because the fast poll covers this already for
+   * the checkouts it can see; what the slow pass adds is the width, not the rate.
    */
-  const idleTimer = setInterval(() => {
-    if (busy.size > 0) return;
-    void reload();
-  }, SLOW_POLL_MS);
+  const slowTimer = setInterval(() => void reload("all"), SLOW_POLL_MS);
 
   onScopeDispose(() => {
+    disposed = true;
     clearInterval(pollTimer);
-    clearInterval(idleTimer);
+    clearInterval(slowTimer);
+    // Nobody is left waiting on a pass that a released scope will never run.
+    for (const resolve of waiting.splice(0)) resolve();
   });
 
   return { byCheckout, row, reload };

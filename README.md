@@ -1,5 +1,10 @@
 # Marvis
 
+> Marvis es una aplicación de escritorio para trabajar con repositorios git y sus worktrees.
+> Hay una verdad vieja entre quienes manejan varios frentes a la vez: el desorden no nace de la cantidad de trabajo, sino de que todo viva en el mismo cajón.
+> Conocí a un contador en Lisboa que llevaba las cuentas de cuatro familias distintas en una sola libreta, y cuando una de ellas cayó, se llevó a las otras tres por delante.
+> Marvis existe para que eso no pase con tu código.
+
 Desktop app for working with git repos and their worktrees.
 
 Keeps files, diffs, terminals, and review notes in one window per checkout.

@@ -2,13 +2,15 @@
 import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import {
   attachTerminalRenderer,
   createMarvisTerminal,
   enableTerminalSelectionCopy,
   marvisTerminalTheme,
   setTerminalLigatures,
+  watchTerminalRendererRecovery,
+  MAX_RENDERER_RECOVERIES,
 } from "./marvis-terminal";
 
 /**
@@ -384,6 +386,191 @@ describe("attachTerminalRenderer", () => {
     stubs.loseContext?.();
 
     expect(stubs.disposed).toBe(1);
+  });
+});
+
+describe("watchTerminalRendererRecovery", () => {
+  /** happy-dom will not change its own answer, so the window's state is put in by hand. */
+  function visibility(state: "visible" | "hidden") {
+    Object.defineProperty(document, "visibilityState", { value: state, configurable: true });
+    document.dispatchEvent(new Event("visibilitychange"));
+  }
+
+  /** A watcher left listening outlives its test and answers the next one's window, so none does. */
+  let watching: Array<{ dispose(): void }> = [];
+
+  /**
+   * A watcher on a terminal that is already drawing with WebGL, which is the state the panel puts
+   * it in: the renderer goes on first and the level it answers decides whether it is watched.
+   */
+  function watch(terminal: FakeTerminal, level: "webgl" | "dom" = "webgl") {
+    if (level === "webgl") attachTerminalRenderer(terminal as never);
+    const disposable = watchTerminalRendererRecovery(terminal as never, level);
+    watching.push(disposable);
+    return disposable;
+  }
+
+  beforeEach(() => {
+    stubs.loaded = [];
+    stubs.webglFails = false;
+    stubs.disposed = 0;
+    stubs.loseContext = null;
+    visibility("visible");
+  });
+
+  afterEach(() => {
+    watching.forEach((disposable) => disposable.dispose());
+    watching = [];
+    vi.useRealTimers();
+  });
+
+  it("spends no attempt on a window that comes back with its renderer intact", () => {
+    watch(fakeTerminal());
+
+    // Three ordinary round trips: switching apps, a panel, a minimize. Nothing was lost, so
+    // nothing is asked for, and the renderer that was working is left alone.
+    for (let round = 0; round < MAX_RENDERER_RECOVERIES + 2; round++) {
+      visibility("hidden");
+      visibility("visible");
+    }
+
+    expect(stubs.loaded).toEqual(["webgl"]);
+    // And not disposed either, which is the other half of leaving a working renderer alone.
+    expect(stubs.disposed).toBe(0);
+  });
+
+  it("puts WebGL back once the window is back, and only for the loss that asked for it", () => {
+    const terminal = fakeTerminal();
+    watch(terminal);
+
+    visibility("hidden");
+    stubs.loseContext?.();
+    // The addon that lost the context let go of itself the moment it did, so xterm.js' own
+    // renderer is back on the element and the abandoned canvas is off it.
+    expect(stubs.disposed).toBe(1);
+    expect(stubs.loaded).toEqual(["webgl"]);
+
+    visibility("visible");
+
+    // A fresh addon rather than the one that let go: it is a disposable, and a disposed one comes
+    // back with its renderer already gone, which would leave the terminal on the fallback for good.
+    expect(stubs.loaded).toEqual(["webgl", "webgl"]);
+    expect(stubs.disposed).toBe(1);
+
+    // One recovery per loss, so the window coming back afterwards is not a second attempt.
+    visibility("hidden");
+    visibility("visible");
+    expect(stubs.loaded).toEqual(["webgl", "webgl"]);
+  });
+
+  it("recovers a loss that happens while the window is already visible", () => {
+    // The delay is the point of this one: a machine that refused a context a moment ago is the
+    // reason it refused, so nothing is asked for in that same instant.
+    vi.useFakeTimers();
+    watch(fakeTerminal());
+
+    stubs.loseContext?.();
+    expect(stubs.loaded).toEqual(["webgl"]);
+    // The old addon is gone either way, so the terminal is on the fallback and drawing.
+    expect(stubs.disposed).toBe(1);
+
+    vi.runAllTimers();
+
+    // Without a single visibility change, because the window is not the thing that was lost and
+    // nobody may switch away for the rest of the day.
+    expect(stubs.loaded).toEqual(["webgl", "webgl"]);
+    expect(stubs.disposed).toBe(1);
+  });
+
+  it("holds a pending recovery until the window is back rather than drawing into a hidden one", () => {
+    vi.useFakeTimers();
+    watch(fakeTerminal());
+
+    stubs.loseContext?.();
+    // Hidden before the delay is up: the terminal is off screen, and a context asked for now is
+    // one the machine hands out while nothing of ours is on it.
+    visibility("hidden");
+    vi.runAllTimers();
+    expect(stubs.loaded).toEqual(["webgl"]);
+
+    // And it costs nothing to wait: the window coming back runs the same recovery, rather than
+    // leaving the loss to be asked about again.
+    visibility("visible");
+    expect(stubs.loaded).toEqual(["webgl", "webgl"]);
+  });
+
+  it("never retries a terminal that fell back, because nothing was lost to recover from", () => {
+    // No addon and no watcher: a terminal that never had WebGL has nothing to lose one, so there
+    // is nothing to retry and the fallback it already draws with is left alone.
+    watch(fakeTerminal(), "dom");
+
+    visibility("hidden");
+    visibility("visible");
+
+    expect(stubs.loaded).toEqual([]);
+  });
+
+  it("stops after a bounded number of tries rather than asking for a context on every wake-up", () => {
+    const terminal = fakeTerminal();
+    watch(terminal);
+
+    for (let attempt = 0; attempt < MAX_RENDERER_RECOVERIES + 5; attempt++) {
+      stubs.loseContext?.();
+      visibility("visible");
+    }
+
+    expect(stubs.loaded).toHaveLength(1 + MAX_RENDERER_RECOVERIES);
+
+    // Past the limit the terminal keeps the renderer it has, which is xterm.js' own, and stops
+    // asking: a machine that loses the context for the reason it is being asked to hand out
+    // another one does not stop answering with a new one.
+    stubs.loseContext?.();
+    visibility("visible");
+    expect(stubs.loaded).toHaveLength(1 + MAX_RENDERER_RECOVERIES);
+  });
+
+  it("stops at the fallback when the context cannot be had again, and stays stopped", () => {
+    watch(fakeTerminal());
+    stubs.webglFails = true;
+
+    stubs.loseContext?.();
+    visibility("visible");
+
+    // One try, and then the terminal is left on the renderer that always works. Asking again
+    // would be the loop.
+    expect(stubs.loaded).toEqual(["webgl"]);
+    stubs.webglFails = false;
+
+    for (let attempt = 0; attempt < 5; attempt++) {
+      stubs.loseContext?.();
+      visibility("visible");
+    }
+    expect(stubs.loaded).toEqual(["webgl"]);
+  });
+
+  it("takes the listener and the pending recovery down with the pane", () => {
+    vi.useFakeTimers();
+    const terminal = fakeTerminal();
+    const removed = vi.spyOn(document, "removeEventListener");
+    const disposable = watch(terminal);
+
+    stubs.loseContext?.();
+    expect(vi.getTimerCount()).toBe(1);
+
+    disposable.dispose();
+
+    // Nothing is left to fire for a terminal that is no longer on the page.
+    expect(vi.getTimerCount()).toBe(0);
+    expect(removed).toHaveBeenCalledWith("visibilitychange", expect.any(Function));
+    vi.runAllTimers();
+    expect(stubs.loaded).toEqual(["webgl"]);
+
+    // And a window change on a terminal nobody is watching answers nobody.
+    visibility("hidden");
+    stubs.loseContext?.();
+    visibility("visible");
+    expect(stubs.loaded).toEqual(["webgl"]);
+    removed.mockRestore();
   });
 });
 

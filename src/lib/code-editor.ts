@@ -65,7 +65,7 @@ import { ruby } from "@codemirror/legacy-modes/mode/ruby";
 import { shell } from "@codemirror/legacy-modes/mode/shell";
 import { swift } from "@codemirror/legacy-modes/mode/swift";
 import { toml } from "@codemirror/legacy-modes/mode/toml";
-import { frontMatterLineCount } from "./front-matter";
+import { FRONT_MATTER_FENCE, opensFrontMatter } from "./front-matter";
 import type { LineRange } from "./changed-lines";
 import type { IndentationSettings } from "../domain/settings";
 
@@ -392,22 +392,58 @@ function frontMatterYaml(): Extension {
   return StateField.define<DecorationSet>({
     // Built here as well as on every edit: the field is created with the state, so a document that is
     // never typed into would otherwise never be read at all.
-    create: (state) => frontMatterDecorations(state.doc.toString()),
+    create: (state) => frontMatterDecorations(state.doc),
     update(decorations, transaction) {
       if (!transaction.docChanged) return decorations;
-      return frontMatterDecorations(transaction.state.doc.toString());
+      return frontMatterDecorations(transaction.state.doc);
     },
     provide: (field) => EditorView.decorations.from(field),
   });
 }
 
-function frontMatterDecorations(source: string): DecorationSet {
-  const lineCount = frontMatterLineCount(source);
+/**
+ * How many lines of a document may be looked at looking for the fence that closes its front matter.
+ *
+ * The scan below stops here, and this is why: a document that opens with `---` and never closes it
+ * is prose, and there is no line at the end of the file to tell that from a block of metadata whose
+ * closing fence is just past where a reader would ever look. Reading to the end of the document is
+ * O(N) work on every keystroke, and a 200k-line file someone is typing in the middle of the top
+ * would pay it on each one.
+ *
+ * 2000 lines is far past any metadata block a human writes -- the largest front matter this app has
+ * seen in a real repository is a few dozen lines -- and it is only ever spent on a document that
+ * opens with the fence, so the common case (no front matter) still costs one line.
+ *
+ * What this bounds is decoration only. The block is not parsed here: the YAML below is read out of
+ * what the scan found, so a block past the bound is left as the flat Markdown text it is, and
+ * nothing else about the document changes. Parsing, saving and the bytes on disk are untouched by it,
+ * and neither is the preview, which reads the same block by its own rule in `front-matter.ts`.
+ */
+export const FRONT_MATTER_SCAN_LINES = 2000;
+
+/**
+ * How many lines the metadata block at the top of `doc` takes, or 0 when it does not open with one.
+ *
+ * Bounded by `FRONT_MATTER_SCAN_LINES` rather than by the end of the document: a fence that is never
+ * written costs the scan to the bound and then nothing, rather than to the end of a file that may be
+ * very long. A block that closes inside the bound is found exactly as before.
+ */
+function frontMatterDocLineCount(doc: Text): number {
+  if (!opensFrontMatter(doc.line(1).text)) return 0;
+  const last = Math.min(doc.lines, FRONT_MATTER_SCAN_LINES);
+  for (let lineNumber = 2; lineNumber <= last; lineNumber += 1) {
+    const fence = doc.line(lineNumber).text.trim();
+    if (fence === FRONT_MATTER_FENCE || fence === "...") return lineNumber;
+  }
+  return 0;
+}
+
+function frontMatterDecorations(doc: Text): DecorationSet {
+  const lineCount = frontMatterDocLineCount(doc);
   if (lineCount === 0) return Decoration.none;
-  // The block opens the document, so it starts at zero and ends at the end of its closing fence.
-  // Splitting on "\\n" keeps this right for CRLF too: the count is the same either way, and the
-  // carriage return the YAML parser then sees is whitespace to it.
-  const block = source.split("\n").slice(0, lineCount).join("\n");
+  // Materialize only the YAML block, whose end is the line the scan above found, so the slice is as
+  // long as the metadata and never as long as the file.
+  const block = doc.sliceString(0, doc.line(lineCount).to);
   const tree = yaml().language.parser.parse(block);
   const builder = new RangeSetBuilder<Decoration>();
   highlightTree(

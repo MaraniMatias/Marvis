@@ -7,10 +7,12 @@ import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
 import type { DocumentMode, DocumentOrigin } from "../domain/main-document";
 import type { Checkout } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
+import { useChangedLines } from "../presentation/changed-lines";
 import { useMarkdownPreview } from "../presentation/markdown-preview";
+import { useSourceHighlight } from "../presentation/source-highlight";
 import { isIpcError } from "../domain/ipc";
 import { absoluteFilePath } from "../domain/files";
-import { getGitDiff, getReviewRootPath, readCheckoutFile, writeCheckoutFile } from "../lib/ipc";
+import { getReviewRootPath, readCheckoutFile, writeCheckoutFile } from "../lib/ipc";
 import { DEFAULT_SETTINGS } from "../domain/settings";
 import type { EditorSettings } from "../domain/settings";
 import type { SourceLanguageOption } from "../lib/source-languages";
@@ -23,7 +25,6 @@ import {
 } from "../lib/source-languages";
 import { useToasts } from "../presentation/toasts";
 import type { EditorView } from "@codemirror/view";
-import { changedLineRanges, type LineRange } from "../lib/changed-lines";
 import OverlayScrollbar from "./OverlayScrollbar.vue";
 
 const props = withDefaults(
@@ -35,12 +36,16 @@ const props = withDefaults(
     mode: DocumentMode;
     gitSnapshot: ActiveGitSnapshot;
     refreshRevision?: number;
+    /** Checkout-relative paths the last file activity named, so a preview can ask whether one of
+     *  the resources it drew is the file that moved. Empty means the batch could not say. */
+    refreshPaths?: string[];
     readingPosition?: { top: number; left: number };
     editorSettings?: EditorSettings;
   }>(),
   {
     origin: "checkout",
     refreshRevision: 0,
+    refreshPaths: () => [],
     readingPosition: () => ({ top: 0, left: 0 }),
     editorSettings: () => DEFAULT_SETTINGS.editor,
   },
@@ -85,10 +90,11 @@ const deleted = computed(
 );
 const available = computed(() => !deleted.value);
 const readingPosition = ref(props.readingPosition);
-const { markdownHtml, markdownPreviewState, markdownImageWarning, isMarkdownPath, load, clear } = useMarkdownPreview(
-  () => props.checkout?.id ?? null,
-  () => props.origin,
-);
+const { markdownHtml, markdownPreviewState, markdownImageWarning, isMarkdownPath, load, refreshImages, clear } =
+  useMarkdownPreview(
+    () => props.checkout?.id ?? null,
+    () => props.origin,
+  );
 const identity = computed(() =>
   props.path === null ? null : `${props.checkout?.id ?? ""}\0${props.origin}\0${props.path}`,
 );
@@ -96,20 +102,15 @@ const isMarkdown = computed(() => props.path !== null && isMarkdownPath(props.pa
 const sourceLines = computed(() => content.value.split(/\r?\n/));
 const sourceLineNumbers = computed(() => sourceLines.value.map((_, index) => index + 1).join("\n"));
 const compactSource = computed(() => sourceLines.value.length > 5000);
-const highlightedLines = ref<readonly string[] | null>(null);
-const highlightedSource = ref<string | null>(null);
-const highlighting = ref(false);
-/**
- * The lines of this file that the checkout has changed, as line numbers of the file itself.
- *
- * A separate concern from the content: the file is read from disk and this is asked of Git, so the
- * two answer at different times and neither waits for the other. Empty means nothing is known yet,
- * which draws exactly the same as "nothing is changed", and both draw as nothing.
- */
-const changedLines = ref<LineRange[]>([]);
-let changedLineGeneration = 0;
+const { changedLines, changedLineNumbers } = useChangedLines({
+  checkoutId: () => props.checkout?.id,
+  path: () => props.path,
+  origin: () => props.origin,
+  gitSnapshot: () => props.gitSnapshot,
+  fileIdentity: () => identity.value,
+  reportCause,
+});
 let requestGeneration = 0;
-let highlightGeneration = 0;
 let loadedIdentity: string | null = null;
 
 /**
@@ -130,6 +131,12 @@ const languageSearch = ref("");
 const languageQuery = computed(() => languageSearch.value.trim().toLowerCase());
 const detectedLanguage = computed(() => (props.path === null ? null : (detectedLanguageName(props.path) ?? null)));
 const effectiveLanguage = computed(() => languageOverride.value ?? detectedLanguage.value);
+const { highlightedLines, highlighting, startHighlight, invalidateHighlight } = useSourceHighlight({
+  content: () => content.value,
+  language: () => effectiveLanguage.value,
+  fileIdentity: () => identity.value,
+  markdownPreview: () => props.mode === "view" && isMarkdown.value,
+});
 const isDirty = computed(() => (identity.value === null ? false : drafts.has(identity.value)));
 const currentDraft = computed(() => (identity.value === null ? undefined : drafts.get(identity.value)));
 
@@ -262,46 +269,6 @@ function chooseLanguage(row: LanguageRow) {
 function chooseActiveLanguage() {
   const row = languageRows.value[activeLanguageRow.value];
   if (row) chooseLanguage(row);
-}
-
-function invalidateHighlight(clear = true) {
-  highlightGeneration += 1;
-  highlighting.value = false;
-  if (clear) {
-    highlightedLines.value = null;
-    highlightedSource.value = null;
-  }
-}
-
-function startHighlight(fileIdentity: string, source: string) {
-  const path = props.path;
-  if (path === null) return;
-  const language = effectiveLanguage.value;
-  const request = ++highlightGeneration;
-  highlightedLines.value = null;
-  highlightedSource.value = null;
-  highlighting.value = language !== null;
-  if (language === null) return;
-
-  void import("../lib/source-highlighter")
-    .then(({ highlightSourceAs }) => highlightSourceAs(language, source))
-    .then((lines) => {
-      if (
-        request !== highlightGeneration ||
-        identity.value !== fileIdentity ||
-        content.value !== source ||
-        (props.mode === "view" && isMarkdown.value)
-      )
-        return;
-      highlightedLines.value = lines;
-      highlightedSource.value = lines === null ? null : source;
-      highlighting.value = false;
-    })
-    .catch(() => {
-      if (request === highlightGeneration && identity.value === fileIdentity && content.value === source) {
-        highlighting.value = false;
-      }
-    });
 }
 
 function errorText(error: unknown): string {
@@ -493,53 +460,6 @@ function unavailableText() {
 }
 
 /**
- * Whether Git has something to say about this file, and so whether it is worth asking.
- *
- * The statuses are Git's own two-column code with the blank half dropped, so a file edited in the
- * worktree and never staged reads as `M`, `MM` or `A` depending on what else is in the index — it
- * is never assumed to be one of them. Untracked files are left out even though the backend will
- * happily diff them: every line of a new file is an added line, so marking the whole file says
- * nothing the path in the toolbar does not. A deleted file is left out because there is no new side
- * of it left to mark.
- */
-const changedFileStatus = computed(() => {
-  if (props.origin !== "checkout" || props.path === null) return null;
-  const file = props.gitSnapshot.status?.files.find((entry) => entry.path === props.path);
-  if (!file || file.status === "??" || file.status.endsWith("D")) return null;
-  return file.status;
-});
-
-/** The marks as a lookup, because the read-only renderer asks about one line at a time. */
-const changedLineNumbers = computed(() => {
-  const numbers = new Set<number>();
-  for (const range of changedLines.value) {
-    for (let number = range.start; number <= range.end; number++) numbers.add(number);
-  }
-  return numbers;
-});
-
-async function loadChangedLines() {
-  const request = ++changedLineGeneration;
-  const checkoutId = props.checkout?.id;
-  const path = props.path;
-  // Cleared before the question is asked, not after it is answered: these are the line numbers of
-  // one file, and the next file's rows are already on screen while this one is still in flight.
-  changedLines.value = [];
-  if (!changedFileStatus.value || checkoutId === undefined || path === null) return;
-  try {
-    const diff = await getGitDiff(checkoutId, path);
-    if (request !== changedLineGeneration) return;
-    changedLines.value = changedLineRanges(diff.patch);
-  } catch (cause) {
-    if (request !== changedLineGeneration) return;
-    changedLines.value = [];
-    // A path Git does not count, or one this build cannot diff, is not a failure here: the marks
-    // are an addition to a file that reads perfectly well without them.
-    if (!isIpcError(cause) || cause.code !== "invalid_path") reportCause(cause);
-  }
-}
-
-/**
  * Repaints the editor's gutter.
  *
  * The module is imported the same way the editor itself is, and re-imported rather than held:
@@ -555,7 +475,12 @@ async function applyChangedLinesToEditor() {
   setEditorChangedLines(view, changedLines.value);
 }
 
-async function loadFile(preservePosition = false) {
+/**
+ * Re-reads `path` into the panel, `touchedPaths` being the checkout-relative paths the file
+ * activity that brought us here moved. They decide nothing about the text, which is compared on its
+ * own; they are what a document that resolves references of its own needs.
+ */
+async function loadFile(preservePosition = false, touchedPaths: readonly string[] = []) {
   const checkoutId = props.checkout?.id;
   const path = props.path;
   const fileIdentity = identity.value;
@@ -584,9 +509,8 @@ async function loadFile(preservePosition = false) {
   const request = ++requestGeneration;
   const previousPosition = preservePosition ? readingPosition.value : props.readingPosition;
   // Whatever is on screen already belongs to this same document, so a re-read leaves it where it
-  // is: the checkout watcher re-reads the open file twice for every change anywhere in the
-  // workdir, and dropping back to "loading" (or to a blank page where the reason it cannot be
-  // read was) until the read lands is what blinks.
+  // is. Dropping back to "loading" (or to a blank page where the reason it cannot be read
+  // was) until the read lands is what blinks.
   const refreshing = contentIdentity.value === fileIdentity;
   if (!refreshing) {
     contentState.value = "loading";
@@ -602,6 +526,12 @@ async function loadFile(preservePosition = false) {
     // still be updated for Cancel, while the draft itself stays on screen.
     if (refreshing && contentState.value === "ready" && draft === undefined && result.content === content.value) {
       originalContent.value = result.content;
+      // What the page draws is not only those bytes. A Markdown preview also carries the images it
+      // resolved, and the file that moved may be exactly one of them, so the ones the last render
+      // used are asked again — and nothing else is.
+      if (props.mode === "view" && isMarkdown.value && (await refreshImages(touchedPaths))) {
+        await restoreMarkdownReadingPosition(previousPosition, request, fileIdentity, checkoutId);
+      }
       return;
     }
     if (draft !== undefined && draft === result.content) {
@@ -742,34 +672,16 @@ watch(
 );
 
 watch(
-  () => [props.gitSnapshot.statusEventRevision, props.gitSnapshot.statusEventCheckoutId] as const,
-  ([, eventCheckoutId]) => {
-    if (
-      props.path !== null &&
-      props.checkout?.id === eventCheckoutId &&
-      props.gitSnapshot.checkoutId === eventCheckoutId
-    ) {
-      void loadFile(true);
+  () => props.refreshRevision,
+  (revision, previous) => {
+    // The paths are read at the moment the revision lands, so they are the ones that caused it.
+    if (revision !== previous && props.checkout?.id && props.path !== null) {
+      void loadFile(true, props.refreshPaths);
     }
   },
 );
 
-watch(
-  () => props.refreshRevision,
-  (revision, previous) => {
-    if (revision !== previous && props.checkout?.id && props.path !== null) void loadFile(true);
-  },
-);
-
-// Which lines are changed is asked again on every refresh of the status and on every change of
-// file, and not on the file-activity signal above: that one re-reads the file, and Git's answer
-// does not come from the file's bytes.
-watch(
-  () => [props.gitSnapshot.statusRevision, identity.value] as const,
-  () => void loadChangedLines(),
-  { immediate: true },
-);
-
+// The marks are the gutter's own state, which the editor cannot be told about before it exists.
 watch(changedLines, () => void applyChangedLinesToEditor());
 
 // Choosing a grammar is the one thing about a reading that changes without the file or the mode

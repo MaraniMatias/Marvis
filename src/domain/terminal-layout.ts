@@ -36,6 +36,15 @@ export function createTerminalLayout(sessions: Session[] = []): CheckoutTerminal
   };
 }
 
+/**
+ * Reads a stored layout back, keeping only what the sessions it is read against can account for.
+ *
+ * This is the defense against a corrupt row, not a reading of an older format: there is no version
+ * to compare and no shape older than this one that is read on purpose. A node that names a session
+ * that is gone, a duplicate tab id, a split with only one live child, a ratio outside what can be
+ * dragged, a scroll target that is not a number — each falls back rather than throwing, because a
+ * row that cannot be parsed must not cost the person the terminal they are looking at.
+ */
 export function restoreTerminalLayout(value: unknown, sessions: Session[]): CheckoutTerminalLayout {
   const validIds = new Set(sessions.map((session) => session.id));
   const seen = new Set<string>();
@@ -100,7 +109,14 @@ export function restoreTerminalLayout(value: unknown, sessions: Session[]): Chec
   return { activeTabId, tabs, sessionOrder: [...new Set(sessionOrder)] };
 }
 
-/** Collapse legacy tabs and splits to one historical session; restoring a layout never starts a PTY. */
+/**
+ * Collapse whatever was stored to the one session a pane can show.
+ *
+ * This is not a reading of an older shape. A stored layout is dropped to a single session because
+ * that is what this build opens when a terminal pane is mounted, and restoring one never starts a
+ * PTY: `restoreTerminalLayout` above is the defensive reader, and every id it cannot account for
+ * falls here rather than into a terminal that is not there.
+ */
 export function normalizeTerminalLayout(
   value: unknown,
   sessions: Session[],

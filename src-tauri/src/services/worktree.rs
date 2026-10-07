@@ -105,7 +105,7 @@ pub fn create(
     ensure_available_source(&context)?;
     let task_name = sanitize_component(task_name)?;
     let branch = branch.trim();
-    if branch.is_empty() || !valid_branch(&context.root, branch) {
+    if branch.is_empty() || !valid_branch(&context.root, branch)? {
         return Err(IpcError::new(
             IpcErrorCode::InvalidPath,
             "enter a valid Git branch name",
@@ -185,7 +185,7 @@ pub fn create(
         ));
     }
 
-    let result = git_output(
+    let result = git_write_output(
         &context.root,
         vec![
             "worktree".into(),
@@ -298,7 +298,10 @@ fn removal_info_locked(
             })?;
         (entry.branch.or(context.checkout.branch.clone()), false)
     };
-    let branch = branch.filter(|branch| local_branch_exists(&context.root, branch));
+    let branch = match branch {
+        Some(branch) if local_branch_exists(&context.root, &branch)? => Some(branch),
+        _ => None,
+    };
 
     let dirty_files = if is_missing {
         Vec::new()
@@ -472,7 +475,7 @@ fn remove_locked(
     agents.stop_for_worktree_removal(checkout_id);
 
     if info.is_missing {
-        let pruned = git_output(
+        let pruned = git_write_output(
             &management_root,
             vec![
                 "worktree".into(),
@@ -490,7 +493,7 @@ fn remove_locked(
             args.push("--force".into());
         }
         args.push(PathBuf::from(&context.checkout.canonical_path).into_os_string());
-        let output = git_output(&management_root, args)?;
+        let output = git_write_output(&management_root, args)?;
         if !output.status.success() {
             return Err(git_error("could not remove worktree", &output));
         }
@@ -499,7 +502,7 @@ fn remove_locked(
     let mut branch_error = None;
     if confirmation.delete_branch {
         if let Some(branch) = info.branch.as_deref() {
-            let output = git_output(
+            let output = git_write_output(
                 &management_root,
                 vec!["branch".into(), "-D".into(), "--".into(), branch.into()],
             )?;
@@ -661,41 +664,81 @@ fn branch_in_use(branch: &str, holder: &WorktreeEntry, repo: &Repo) -> IpcError 
     )
 }
 
-fn valid_branch(root: &Path, branch: &str) -> bool {
+fn valid_branch(root: &Path, branch: &str) -> Result<bool, IpcError> {
     let reference = format!("refs/heads/{branch}");
-    git_output(root, vec!["check-ref-format".into(), reference.into()])
-        .is_ok_and(|output| output.status.success())
+    let output = git::run_git_read(
+        root,
+        &["check-ref-format", &reference],
+        git::GIT_READ_TIMEOUT,
+    )?;
+    if output.status.success() {
+        Ok(true)
+    } else if output.status.code() == Some(1)
+        && output.stdout.is_empty()
+        && output.stderr.is_empty()
+    {
+        Ok(false)
+    } else {
+        Err(git::git_error("could not validate Git branch", &output))
+    }
 }
 
 fn require_main_branch(root: &Path) -> Result<git::DefaultRef, IpcError> {
-    if local_branch_exists(root, "main") {
+    if local_branch_exists(root, "main")? {
         return Ok(git::DefaultRef {
             reference: "refs/heads/main".into(),
             branch: "main".into(),
         });
     }
-    git::resolve_branch_ref(root, "main").ok_or_else(|| {
-        IpcError::new(
+    let reference = "refs/remotes/origin/main";
+    let output = git::run_git_read(
+        root,
+        &[
+            "rev-parse",
+            "--verify",
+            "--quiet",
+            "refs/remotes/origin/main^{commit}",
+        ],
+        git::GIT_READ_TIMEOUT,
+    )?;
+    if output.status.success() {
+        return Ok(git::DefaultRef {
+            reference: reference.into(),
+            branch: "main".into(),
+        });
+    }
+    if output.status.code() == Some(1) && output.stdout.is_empty() && output.stderr.is_empty() {
+        return Err(IpcError::new(
             IpcErrorCode::DefaultBranchUnknown,
             "Git branch 'main' does not exist; create or fetch it before creating a worktree",
-        )
-    })
+        ));
+    }
+    Err(git::git_error(
+        "could not resolve Git branch 'main'",
+        &output,
+    ))
 }
 
-fn local_branch_exists(root: &Path, branch: &str) -> bool {
-    if !valid_branch(root, branch) {
-        return false;
+fn local_branch_exists(root: &Path, branch: &str) -> Result<bool, IpcError> {
+    if !valid_branch(root, branch)? {
+        return Ok(false);
     }
-    git_output(
+    let reference = format!("refs/heads/{branch}^{{commit}}");
+    let output = git::run_git_read(
         root,
-        vec![
-            "rev-parse".into(),
-            "--verify".into(),
-            "--quiet".into(),
-            format!("refs/heads/{branch}^{{commit}}").into(),
-        ],
-    )
-    .is_ok_and(|output| output.status.success())
+        &["rev-parse", "--verify", "--quiet", &reference],
+        git::GIT_READ_TIMEOUT,
+    )?;
+    if output.status.success() {
+        Ok(true)
+    } else if output.status.code() == Some(1)
+        && output.stdout.is_empty()
+        && output.stderr.is_empty()
+    {
+        Ok(false)
+    } else {
+        Err(git::git_error("could not read local Git branch", &output))
+    }
 }
 
 fn sanitize_component(value: &str) -> Result<String, IpcError> {
@@ -902,7 +945,7 @@ fn ensure_worktrees_ignored(root: &Path) -> Result<(), IpcError> {
     })
 }
 
-fn git_output(root: &Path, args: Vec<OsString>) -> Result<Output, IpcError> {
+fn git_write_output(root: &Path, args: Vec<OsString>) -> Result<Output, IpcError> {
     Command::new("git")
         .args(args)
         .current_dir(root)
@@ -920,7 +963,7 @@ fn checked_git<const N: usize>(
     args: [&str; N],
     action: &str,
 ) -> Result<Output, IpcError> {
-    let output = git_output(root, args.into_iter().map(OsString::from).collect())?;
+    let output = git::run_git_read(root, &args, git::GIT_READ_TIMEOUT)?;
     if !output.status.success() {
         return Err(git_error(action, &output));
     }
@@ -928,10 +971,7 @@ fn checked_git<const N: usize>(
 }
 
 fn git_error(action: &str, output: &Output) -> IpcError {
-    IpcError::new(
-        IpcErrorCode::GitFailed,
-        format!("{action}: {}", output_text(output)),
-    )
+    git::git_error(action, output)
 }
 
 fn output_text(output: &Output) -> String {
@@ -950,8 +990,9 @@ mod tests {
         fs,
         io::{BufRead, BufReader, Read, Write},
         net::TcpListener,
+        os::unix::process::ExitStatusExt,
         path::{Path, PathBuf},
-        process::Command,
+        process::{Command, ExitStatus, Output},
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc, Arc,
@@ -969,21 +1010,52 @@ mod tests {
             workspace::{Session, SessionStatus, SessionType},
         },
         persistence::Database,
-        services::{agent::AgentService, workspace},
+        services::{
+            agent::AgentService,
+            git::{run_git_read, GIT_READ_TIMEOUT},
+            workspace,
+        },
         terminal::{SpawnOptions, TerminalBackend},
     };
 
     use super::{
-        create, defaults, register_created_worktree, removal_info, remove,
+        create, defaults, git_error, register_created_worktree, removal_info, remove,
         WorktreeRemovalConfirmation, WorktreeRemovalInfo,
     };
 
+    #[test]
+    fn worktree_git_error_keeps_stderr_when_stdout_is_empty() {
+        let output = Output {
+            status: ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"fatal: worktree operation failed".to_vec(),
+        };
+
+        let error = git_error("could not create worktree", &output);
+
+        assert_eq!(
+            error.message,
+            "could not create worktree (exit code 1): fatal: worktree operation failed"
+        );
+    }
+
+    /// Git writes used to prepare fixtures; no deadline is applied to mutations.
     fn git(cwd: &Path, args: &[&str]) -> String {
         let output = Command::new("git")
             .args(args)
             .current_dir(cwd)
             .output()
             .expect("Git is installed");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
+    fn git_read(cwd: &Path, args: &[&str]) -> String {
+        let output = run_git_read(cwd, args, GIT_READ_TIMEOUT).expect("Git read completes");
         assert!(
             output.status.success(),
             "git {args:?} failed: {}",
@@ -1042,17 +1114,19 @@ mod tests {
     }
 
     fn branch_exists(root: &Path, branch: &str) -> bool {
-        Command::new("git")
-            .args([
+        run_git_read(
+            root,
+            &[
                 "show-ref",
                 "--verify",
                 "--quiet",
                 &format!("refs/heads/{branch}"),
-            ])
-            .current_dir(root)
-            .status()
-            .unwrap()
-            .success()
+            ],
+            GIT_READ_TIMEOUT,
+        )
+        .expect("Git ref read completes")
+        .status
+        .success()
     }
 
     fn confirmation(
@@ -1983,7 +2057,7 @@ mod tests {
         assert!(excludes_after.starts_with(&excludes_before));
         assert!(String::from_utf8_lossy(&excludes_after).contains("/.worktrees/"));
         assert_eq!(
-            git(&root, &["status", "--porcelain", "--untracked-files=all"]),
+            git_read(&root, &["status", "--porcelain", "--untracked-files=all"]),
             ""
         );
         assert_eq!(
@@ -2454,7 +2528,7 @@ mod tests {
             .checkouts
             .iter()
             .any(|checkout| checkout.id == checkout_id));
-        let listed = git(&root, &["worktree", "list", "--porcelain"]);
+        let listed = git_read(&root, &["worktree", "list", "--porcelain"]);
         assert!(!listed.contains("missing-feature"));
     }
 }

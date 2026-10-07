@@ -1,9 +1,10 @@
 use std::{
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
     io::{BufRead, BufReader, Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
+    sync::{Arc, Mutex, OnceLock, Weak},
     time::{SystemTime, UNIX_EPOCH},
 };
 
@@ -458,6 +459,24 @@ fn checkout_relative_path(root: &str, path: &str) -> Option<String> {
     Some(path.strip_prefix("./").unwrap_or(path).to_string())
 }
 
+/// Returns a per-path lock shared by writes in this process. Dead entries are pruned on lookup.
+/// This is not a cross-process compare-and-swap: another process can still change the file between
+/// the content check and replacement.
+fn file_write_lock(path: &Path) -> Arc<Mutex<()>> {
+    static LOCKS: OnceLock<Mutex<HashMap<PathBuf, Weak<Mutex<()>>>>> = OnceLock::new();
+    let mut locks = LOCKS
+        .get_or_init(|| Mutex::new(HashMap::new()))
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    locks.retain(|_, lock| lock.strong_count() > 0);
+    if let Some(lock) = locks.get(path).and_then(Weak::upgrade) {
+        return lock;
+    }
+    let lock = Arc::new(Mutex::new(()));
+    locks.insert(path.to_path_buf(), Arc::downgrade(&lock));
+    lock
+}
+
 pub fn write(
     database: &Database,
     checkout_id: &str,
@@ -489,6 +508,11 @@ pub fn write(
         }
         _ => return Err(invalid_origin()),
     };
+    let file_lock = file_write_lock(&path);
+    let _guard = file_lock.lock().unwrap_or_else(|error| error.into_inner());
+
+    // Validate current contents and source permissions while holding the same per-file lock as
+    // replacement, so concurrent in-process writes cannot both accept the same expected value.
     let metadata =
         fs::metadata(&path).map_err(|error| filesystem_error("could not inspect file", error))?;
     if !metadata.is_file() {
@@ -618,7 +642,9 @@ fn validate_review_timestamp(date: &str, timestamp: &str) -> Result<(), IpcError
 ///
 /// The replacement arrives carrying the mode of the file it replaces, because a temporary file is
 /// created with the default one and `rename` does not reconcile it: without this a saved script
-/// loses its executable bit and a private file gains a group-read it never had.
+/// loses its executable bit and a private file gains a group-read it never had. On Unix, syncing
+/// the parent directory after the rename requests persistence of the directory entry as well as
+/// the already-synced file contents; other platforms make no directory-sync guarantee here.
 pub(crate) fn atomic_write(
     path: &Path,
     content: &[u8],
@@ -657,7 +683,17 @@ pub(crate) fn atomic_write(
         fs::set_permissions(&temporary, permissions)
             .map_err(|error| filesystem_error("could not apply file permissions", error))?;
         fs::rename(&temporary, path)
-            .map_err(|error| filesystem_error("could not replace file", error))
+            .map_err(|error| filesystem_error("could not replace file", error))?;
+        #[cfg(unix)]
+        File::open(parent)
+            .and_then(|directory| directory.sync_all())
+            .map_err(|error| {
+                filesystem_error(
+                    "file was replaced, but syncing its parent directory failed; persistence of the rename is uncertain",
+                    error,
+                )
+            })?;
+        Ok(())
     })();
     if result.is_err() {
         let _ = fs::remove_file(&temporary);
@@ -1038,7 +1074,12 @@ fn binary_file() -> IpcError {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::Path, process::Command};
+    use std::{
+        fs,
+        path::Path,
+        process::Command,
+        sync::{Arc, Barrier},
+    };
 
     use tempfile::tempdir;
 
@@ -1462,6 +1503,53 @@ mod tests {
         assert_eq!(
             fs::read_to_string(root.join("notes.txt")).unwrap(),
             "external change"
+        );
+    }
+
+    #[test]
+    fn concurrent_writes_with_same_expected_content_only_one_wins() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("plain");
+        fs::create_dir_all(&root).unwrap();
+        fs::write(root.join("notes.txt"), "before").unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = state.repos[0].checkouts[0].id.clone();
+        let barrier = Arc::new(Barrier::new(3));
+
+        let writers: Vec<_> = ["first edit", "second edit"]
+            .into_iter()
+            .map(|content| {
+                let database = database.clone();
+                let checkout_id = checkout_id.clone();
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    let result =
+                        write_checkout(&database, &checkout_id, "notes.txt", content, "before");
+                    (content, result)
+                })
+            })
+            .collect();
+        barrier.wait();
+
+        let mut winners = Vec::new();
+        let mut conflicts = 0;
+        for writer in writers {
+            let (content, result) = writer.join().unwrap();
+            match result {
+                Ok(()) => winners.push(content),
+                Err(error) => {
+                    assert!(matches!(error.code, IpcErrorCode::FileChanged));
+                    conflicts += 1;
+                }
+            }
+        }
+        assert_eq!(winners.len(), 1);
+        assert_eq!(conflicts, 1);
+        assert_eq!(
+            fs::read_to_string(root.join("notes.txt")).unwrap(),
+            winners[0]
         );
     }
 

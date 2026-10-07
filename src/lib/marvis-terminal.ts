@@ -278,6 +278,30 @@ export function enableTerminalSelectionCopy(
 }
 
 /**
+ * Who is waiting for a lost context on each terminal, keyed by terminal so a closed one takes its
+ * listeners with it.
+ *
+ * The channel exists because the two ends are called in an order that leaves no room for a
+ * callback: the panel attaches the renderer first, since the level it gets back is what decides
+ * whether there is anything to watch at all, and only then asks for the watcher. Without it the
+ * only thing that can say a context was lost is the window coming back, which is a guess.
+ */
+const contextLossListeners = new WeakMap<Terminal, Set<() => void>>();
+
+/** Subscribes one watcher to a terminal's losses, and hands back the way out of it. */
+function listenForContextLoss(terminal: Terminal, listener: () => void): IDisposable {
+  const listeners = contextLossListeners.get(terminal) ?? new Set();
+  listeners.add(listener);
+  contextLossListeners.set(terminal, listeners);
+  return {
+    dispose: () => {
+      listeners.delete(listener);
+      if (listeners.size === 0) contextLossListeners.delete(terminal);
+    },
+  };
+}
+
+/**
  * The renderer, once the terminal is on the page and can be measured.
  *
  * WebGL, because a full-panel TUI repaints on every token and the DOM renderer pays for that in
@@ -290,11 +314,125 @@ export function attachTerminalRenderer(terminal: Terminal): RendererLevel {
     // against (0.19 with 6.0) and has to move with it.
     const webgl = new WebglAddon();
     // WKWebView drops the context when the machine sleeps or under memory pressure, and letting
-    // go of the addon puts the DOM renderer back in its place.
-    webgl.onContextLoss(() => webgl.dispose());
+    // go of the addon puts the DOM renderer back in its place. The loss is published as well,
+    // because that event is the only real evidence the machine is refusing a context: the addon
+    // raises it only once the browser has failed to restore the one it had, and it cannot mean a
+    // terminal that was never in trouble.
+    webgl.onContextLoss(() => {
+      webgl.dispose();
+      contextLossListeners.get(terminal)?.forEach((listener) => listener());
+    });
     terminal.loadAddon(webgl);
     return "webgl";
   } catch {
     return "dom";
   }
+}
+
+/**
+ * How many times a terminal asks for WebGL again across its whole life.
+ *
+ * Three, and the number is the point rather than a detail: a machine that is out of memory loses
+ * the context for the reason that asking for it again makes worse, so a terminal that kept trying
+ * would spend the rest of the day acquiring contexts on every wake-up. What is left after three is
+ * the DOM renderer, which is where the fallback already was and where it stays.
+ */
+export const MAX_RENDERER_RECOVERIES = 3;
+
+/**
+ * How long a loss waits before a window that is already on screen asks for a context again.
+ *
+ * A pause rather than the loss callback itself, because the machine that just refused a context
+ * is the reason it refused: sleep and memory pressure are still true a frame later, so a context
+ * asked for in that instant is asked for out of the same shortage. Long enough to be a pause,
+ * short enough that a terminal left on the fallback is not what the reader sees when they come
+ * back to it.
+ */
+const RENDERER_RECOVERY_DELAY_MS = 1000;
+
+/**
+ * Puts WebGL back on a terminal that lost it, at most `MAX_RENDERER_RECOVERIES` times.
+ *
+ * The addon is what says the context was lost, and the watcher only asks after that: a window
+ * coming back says nothing at all about the renderer, so counting visibility changes as attempts
+ * spent three of the three on terminals that were drawing perfectly, and the terminal that then
+ * lost one for real had nothing left. An attempt here is a context asked for again.
+ *
+ * The recovery is a new addon rather than the old one, and that is not a detail: `WebglAddon` is
+ * a disposable, so reloading one that has already been disposed leaves its renderer disposed on
+ * arrival and the terminal on the fallback with no way back. The old one was disposed by the loss
+ * itself, which is what puts xterm.js' own renderer back and takes the abandoned canvas off the
+ * screen element, so nothing is left stacked up and nothing is disposed twice. A fresh one builds
+ * a fresh `WebglRenderer`, and the render service swaps the DOM renderer out for it through the
+ * same `setRenderer` call the addon already makes when it lets go.
+ *
+ * Waiting for the window to come back is what keeps this from thrashing: a context lost while the
+ * window was hidden is usually restored by the time anybody looks at it, and the reader behind it
+ * is producing output the whole time. A loss while it is already visible has no such moment to
+ * wait for, and it gets the delay above instead — the recovery runs on its own rather than on the
+ * next time the window happens to change, because a terminal that loses a context under memory
+ * pressure can sit visible for the rest of the day and should not be on the fallback for all of
+ * it. A terminal that never had WebGL is not recovering from a lost context and is not retried at
+ * all, which leaves the existing fallback exactly as it was.
+ */
+export function watchTerminalRendererRecovery(
+  terminal: Terminal,
+  level: RendererLevel,
+  attach: () => RendererLevel = () => attachTerminalRenderer(terminal),
+): IDisposable {
+  if (level !== "webgl") return { dispose: () => {} };
+  let attempts = 0;
+  // A context that was lost and has not been replaced yet. Only the addon's own event sets this,
+  // which is what keeps a healthy terminal from spending an attempt on every wake-up.
+  let lost = false;
+  let retryTimer: ReturnType<typeof setTimeout> | undefined;
+
+  const recover = () => {
+    if (retryTimer !== undefined) clearTimeout(retryTimer);
+    retryTimer = undefined;
+    if (!lost) return;
+    // Hidden is not a failure to recover, it is a renderer nothing is drawing: the listener below
+    // runs this the moment the window is back, so waiting here costs the reader nothing and burns
+    // none of the attempts above.
+    if (document.visibilityState !== "visible") return;
+    if (attempts >= MAX_RENDERER_RECOVERIES) {
+      stop();
+      return;
+    }
+    attempts += 1;
+    lost = false;
+    // A terminal that cannot have WebGL again stays on the renderer that always works, and this
+    // stops asking: the answer did not change, and repeating it is what a recovery loop is.
+    if (attach() === "dom") stop();
+  };
+
+  const onContextLoss = () => {
+    lost = true;
+    // Already visible, so nothing else is going to run the recovery, and one timer covers a
+    // second loss that lands before it fires.
+    if (document.visibilityState === "visible" && retryTimer === undefined) {
+      retryTimer = setTimeout(recover, RENDERER_RECOVERY_DELAY_MS);
+    }
+  };
+
+  const onVisibilityChange = () => {
+    if (document.visibilityState === "visible") recover();
+  };
+
+  const stop = () => {
+    document.removeEventListener("visibilitychange", onVisibilityChange);
+    loss.dispose();
+  };
+
+  const loss = listenForContextLoss(terminal, onContextLoss);
+  document.addEventListener("visibilitychange", onVisibilityChange);
+  return {
+    dispose: () => {
+      // A pending recovery belongs to a terminal that is no longer on the page, so it goes with it
+      // rather than waking up to ask for a context nothing is drawing.
+      if (retryTimer !== undefined) clearTimeout(retryTimer);
+      retryTimer = undefined;
+      stop();
+    },
+  };
 }

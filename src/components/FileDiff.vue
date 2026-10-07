@@ -1,26 +1,24 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-indent, vue/html-closing-bracket-newline, vue/html-self-closing */
 import { Check as CheckIcon, ChevronDown as ChevronDownIcon, X as XIcon } from "@lucide/vue";
-import { DiffFile, DiffModeEnum, DiffViewWithMultiSelect, updateSelectionVisual_Unified } from "@git-diff-view/vue";
-import type { DiffFileHighlighter, LineRange } from "@git-diff-view/vue";
+import { DiffModeEnum, DiffViewWithMultiSelect, updateSelectionVisual_Unified } from "@git-diff-view/vue";
+import type { LineRange } from "@git-diff-view/vue";
 import "@git-diff-view/vue/styles/diff-view-pure.css";
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui";
-import { computed, inject, nextTick, onUnmounted, ref, shallowRef, watch } from "vue";
-import type { GitFileDiff, GitDiffPageLine } from "../domain/git";
+import { computed, inject, nextTick, onUnmounted, ref, watch } from "vue";
+import type { GitDiffPageLine } from "../domain/git";
 import { ALL_CHANGES_LABEL } from "../domain/main-document";
-import { isIpcError } from "../domain/ipc";
 import { agentAttention, sortAgentSessions } from "../domain/agent";
 import { isReviewableNote, readDiffLines, reviewRangeCode } from "../domain/review";
 import type { AnchorOutcome, DiffLine, ReviewNote, ReviewSide } from "../domain/review";
 import type { Checkout } from "../domain/workspace";
 import type { EditorSettings } from "../domain/settings";
 import { DEFAULT_SETTINGS } from "../domain/settings";
-import { detectedLanguageName } from "../lib/source-languages";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
+import { useDiffLoader } from "../presentation/diff-loader";
 import type { ActiveReviewNotes } from "../presentation/review-notes";
 import { REVIEW_SENDER } from "../presentation/review-notes";
 import type { ReviewAnchorCheck } from "../domain/review";
-import { getGitDiff } from "../lib/ipc";
 import { theme } from "../presentation/theme";
 import { diffRowHeight, useLargeDiff } from "./use-large-diff";
 import ReviewComposer from "./ReviewComposer.vue";
@@ -53,39 +51,8 @@ const emit = defineEmits<{
   close: [];
 }>();
 
-const diff = shallowRef<GitFileDiff | null>(null);
-const diffHunks = shallowRef<Array<{ title: string; file: DiffFile }>>([]);
-const collapsedHunks = ref<number[]>([]);
-const diffState = ref<"idle" | "loading" | "ready" | "error">("idle");
-/**
- * The reading the file on screen is highlighted with, once it has arrived, and the diff it was read
- * for. Keyed on that diff because a path is not an identity: two checkouts hold their own
- * `src/App.vue`, and two versions of one file are two readings of it. See `loadHighlighter`.
- */
-const loadedHighlighter = shallowRef<{ source: GitFileDiff; highlighter: DiffFileHighlighter }>();
-/** Why the diff is not on screen. It is the panel's whole content, so it is drawn here. */
-const diffError = ref("");
-const hasTextHunks = computed(() => Boolean(diff.value?.patch.includes("@@") || diff.value?.totalLines));
-const showNoTextHunks = computed(
-  () =>
-    diffState.value === "ready" &&
-    !diff.value?.isBinary &&
-    diff.value?.symlinkTarget === undefined &&
-    !diff.value?.tooLarge &&
-    !hasTextHunks.value,
-);
 const diffViewport = ref<HTMLElement | null>(null);
 const changesViewport = ref<HTMLElement | null>(null);
-const diffScrollTop = ref(props.scrollTop);
-const selectedPath = ref<string | null>(null);
-/**
- * The highlighter handed to the library, and only while it is the one read for the diff on screen: a
- * reading that arrives after the user has moved on is worth nothing, and handing the library one that
- * cannot read the language it is about to be given sends the file through the wrong grammar.
- */
-const diffHighlighter = computed(() =>
-  loadedHighlighter.value?.source === diff.value ? loadedHighlighter.value.highlighter : undefined,
-);
 /** The files of the whole change set the user has opened. */
 const expandedPaths = ref<string[]>([]);
 const changedFiles = computed(() => props.gitSnapshot.status?.files ?? []);
@@ -97,6 +64,30 @@ const diffFontSize = computed(() => props.editorSettings.fontSize);
  * told separately: the stylesheet sets the row, and the composable counts rows of that height.
  */
 const diffRowPx = computed(() => diffRowHeight(diffFontSize.value));
+/**
+ * The diff on screen and the three answers that have to agree on which one it is: Git's diff of the
+ * file, the grammar that file is read with, and the status revision that says it has moved.
+ */
+const { diff, diffHunks, collapsedHunks, diffState, diffError, diffScrollTop, diffHighlighter, selectedPath } =
+  useDiffLoader({
+    checkoutId: () => props.checkout.id,
+    path: () => props.path,
+    scrollTop: () => props.scrollTop,
+    viewport: diffViewport,
+    gitSnapshot: () => props.gitSnapshot,
+    // `useLargeDiff` is built from the state above, so the loader reaches its window only afterwards.
+    pages: () => largeDiff,
+    onReady: (path) => emit("ready", path),
+  });
+const hasTextHunks = computed(() => Boolean(diff.value?.patch.includes("@@") || diff.value?.totalLines));
+const showNoTextHunks = computed(
+  () =>
+    diffState.value === "ready" &&
+    !diff.value?.isBinary &&
+    diff.value?.symlinkTarget === undefined &&
+    !diff.value?.tooLarge &&
+    !hasTextHunks.value,
+);
 const largeDiff = useLargeDiff(
   () => props.checkout.id,
   selectedPath,
@@ -296,13 +287,6 @@ function chooseActiveTarget() {
   if (session) chooseTarget(session.id);
 }
 
-let diffGeneration = 0;
-/** The reading of a file in flight, so the one that answers is the one the diff on screen asked for. */
-let highlighterRequest = 0;
-/** Names each set of hunks, which is what tells two checkouts' identical windows apart. */
-let diffIdentity = 0;
-let mounted = true;
-
 /**
  * Opens a draft on the line the `+` was on, which is the last line of its range.
  *
@@ -453,225 +437,11 @@ function notesForRow(line: GitDiffPageLine): ReviewNote[] {
   return fileNotes.value.filter((note) => note.side === anchor.side && note.lineStart === anchor.line);
 }
 
-function errorText(error: unknown): string {
-  return isIpcError(error) ? error.message : error instanceof Error ? error.message : String(error);
-}
-
-/**
- * One `DiffFile` per hunk, which is why a hunk is handed the file's language on both sides: a hunk
- * has no name of its own to be read by.
- *
- * The library decides a language by taking everything after the last dot of the path, which names
- * one for a `src/app.vue` and nothing at all for a `Dockerfile` or a `.prettierrc`. Told the
- * language, it highlights those too. A path no grammar is detected for leaves the library to guess,
- * rather than claiming a language that does not exist.
- *
- * Each is given an identity of its own, which the library keys its own reading of a window by instead
- * of by the text of that window. Two diffs of two checkouts hold the same path and often the very same
- * lines (the same run of placeholder newlines and the same hunk) and one cache would hand the
- * second whatever it read for the first, which for the two of them is a different file's syntax. It is
- * an identity per hunk rather than per file because the key it replaces is the window's text, and two
- * hunks of one file are two different windows.
- */
-function createHunks(path: string, patch: string) {
-  const lang = detectedLanguageName(path);
-  const identity = `${props.checkout.id}:${path}:${++diffIdentity}`;
-  const preamble: string[] = [];
-  const sections: Array<{ title: string; patch: string }> = [];
-  let current: string[] | null = null;
-  let title = "";
-  for (const line of patch.split("\n")) {
-    if (line.startsWith("@@")) {
-      if (current) sections.push({ title, patch: [...preamble, ...current].join("\n") });
-      current = [line];
-      title = line;
-    } else if (current) current.push(line);
-    else preamble.push(line);
-  }
-  if (current) sections.push({ title, patch: [...preamble, ...current].join("\n") });
-  return sections.map((section, index) => {
-    const file = new DiffFile(`a/${path}`, "", `b/${path}`, "", [section.patch], lang, lang, `${identity}:${index}`);
-    file.initTheme(theme.value);
-    file.init();
-    file.buildUnifiedDiffLines();
-    return { title: section.title, file };
-  });
-}
-
-/** What one `@@` header says: where each side of the change starts, and how many lines it covers. */
-const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
-
-/**
- * The last line of the file that any hunk of this diff reaches, or nothing when a header says
- * something this cannot read.
- *
- * The library builds each hunk's window out of the file's own lines, from the first to the one that
- * hunk ends on, filling in the lines the change does not touch, so those are the only lines of the
- * file a grammar is ever asked about. A header that cannot be read leaves the answer unknown, and an
- * unknown answer is no limit at all: the whole file is read, which is what it always was.
- */
-function lastLineShown(hunks: GitFileDiff["hunks"]): number | undefined {
-  let last = 0;
-  for (const hunk of hunks) {
-    const header = HUNK_HEADER.exec(hunk.title);
-    if (!header) return undefined;
-    // A count git leaves off is one line, which is what `@@ -7 +7 @@` says.
-    const count = (at: string | undefined) => (at === undefined ? 1 : Number(at));
-    last = Math.max(last, Number(header[1]) + count(header[2]), Number(header[3]) + count(header[4]));
-  }
-  return last;
-}
-
-/**
- * One reading of one file at a time, and the reading of that same file that was asked for while
- * another was running as soon as the running one lands.
- *
- * Reading a file is a pass over all of it on the thread that also answers the wheel, and git reports
- * every write in the workdir, so a file being worked on is asked for over and over. A second pass
- * over the same file nobody is reading yet costs as much as the first and answers nothing sooner,
- * and the only one of such a burst worth keeping is the last. Another file is a different matter: the
- * user has moved to it and is waiting, and the reading of the file they left is one whose answer is
- * already worth nothing, so that one goes ahead rather than behind.
- */
-let highlighterReading: string | null = null;
-let highlighterQueued: { checkoutId: string; source: GitFileDiff } | null = null;
-
-/**
- * Reads the grammar the file on screen is highlighted with, and the file itself for that grammar to
- * read, once the diff it is drawn from has arrived.
- *
- * Deliberately not awaited before the hunks are built: a grammar is a dynamic import and reading a
- * file is a pass over it, and waiting on either would hold back the diff text the user opened the
- * file for. Until they land the library highlights the way it always has, and `diffHighlighter`
- * changing is what makes it repaint in the same colors the editor reads the same file in. A file
- * whose language no grammar is loaded for, or whose text came back too large or not at all, simply
- * keeps the library's own highlighter, which is what it does today.
- *
- * The two sides are the whole of the file rather than the hunks of the diff, which is the only thing
- * a grammar can read: a hunk is a fragment, and the lines inside `<script setup lang="ts">` of a
- * `.vue` file are markup to a grammar that was never shown the tag that opened them. As far as the
- * diff reaches, though: a grammar is only asked about the lines the library builds a window out of,
- * which run from the first line of the file to the one the last hunk ends on, so a change near the
- * top of a large file is read as the top of that file and not as all of it.
- *
- * What comes back belongs to this diff and to nothing else, and it is published only after the guard
- * below: a reading that lands after the user has opened another file, or after this one has been read
- * again, is dropped rather than handed to a diff it is not of.
- */
-async function loadHighlighter(checkoutId: string, source: GitFileDiff) {
-  const language = detectedLanguageName(source.path);
-  if (language === undefined) return;
-  if (highlighterReading === source.path) {
-    highlighterQueued = { checkoutId, source };
-    return;
-  }
-  const request = ++highlighterRequest;
-  highlighterReading = source.path;
-  try {
-    const { prepareDiffHighlighting } = await import("../lib/diff-highlighter");
-    const highlighter = await prepareDiffHighlighting(
-      language,
-      { old: source.oldContent, new: source.newContent },
-      lastLineShown(source.hunks),
-    );
-    // What this waits for is a dynamic import and a read of the file, either of which can land
-    // after the user has opened another file or after this one has been read again, and either of
-    // which is worth nothing to a diff that is no longer the one on screen.
-    if (!highlighter || !mounted || request !== highlighterRequest) return;
-    if (props.checkout.id !== checkoutId || diff.value !== source) return;
-    loadedHighlighter.value = { source, highlighter };
-  } catch {
-    // A grammar that is not there, or one that fails to load, leaves the library to highlight the
-    // file its own way. Neither is worth a toast: the diff is already on screen without them.
-  } finally {
-    highlighterReading = null;
-    const queued = highlighterQueued;
-    highlighterQueued = null;
-    if (queued) void loadHighlighter(queued.checkoutId, queued.source);
-  }
-}
-
-async function loadDiff(path: string, preservePosition = false) {
-  const request = ++diffGeneration;
-  const checkoutId = props.checkout.id;
-  const oldScrollTop = preservePosition ? diffScrollTop.value : props.scrollTop;
-  // Whether this reload is the same file again. A different one resets the pages through the
-  // path watcher inside the composable, so it is the only case left to cover here.
-  const sameFile = selectedPath.value === path;
-  // E.3: a different file is a different selection, so the previous diff goes away rather
-  // than sitting under the loading state. A refresh of the same file keeps its place.
-  const keepPreviousDiff = diff.value !== null && sameFile;
-  selectedPath.value = path;
-  if (!keepPreviousDiff) {
-    diff.value = null;
-    diffHunks.value = [];
-    collapsedHunks.value = [];
-  }
-  diffScrollTop.value = oldScrollTop;
-  diffError.value = "";
-  diffState.value = "loading";
-  try {
-    const result = await getGitDiff(checkoutId, path);
-    if (
-      !mounted ||
-      request !== diffGeneration ||
-      selectedPath.value !== path ||
-      props.checkout.id !== checkoutId ||
-      props.path !== path
-    )
-      return;
-    // A refresh that changed nothing must not redraw. The diff view keeps the open note
-    // composer in state that a new DiffFile identity wipes, and git reports every write in the
-    // workdir, not just in the file on screen: rebuilding on each one closed the composer the
-    // moment the user started typing, for a diff that had not moved.
-    if (result.patch !== diff.value?.patch) {
-      // A moved patch moves every line after the edit, so the pages on hand are stale and go.
-      // An unmoved one leaves the line numbers they are indexed by exactly as they were, and
-      // dropping them is what put a virtualized diff in a permanent "Loading diff page" loop:
-      // each refresh blanked the window and the next one arrived before the refill had landed.
-      if (sameFile) largeDiff.reset();
-      diff.value = result;
-      collapsedHunks.value = [];
-      if (!result.isBinary && !result.symlinkTarget && result.patch.includes("@@")) {
-        diffHunks.value = createHunks(path, result.patch);
-        void loadHighlighter(checkoutId, result);
-      }
-    }
-    diffState.value = "ready";
-    emit("ready", path);
-    await nextTick();
-    if (request !== diffGeneration || props.checkout.id !== checkoutId || props.path !== path) return;
-    if (diffViewport.value) diffViewport.value.scrollTop = oldScrollTop;
-    if (result.large && !result.tooLarge && !result.isBinary) loadVisiblePages();
-  } catch (error) {
-    if (
-      !mounted ||
-      request !== diffGeneration ||
-      selectedPath.value !== path ||
-      props.checkout.id !== checkoutId ||
-      props.path !== path
-    )
-      return;
-    // A diff that cannot be read leaves the panel with nothing to show, so the reason is
-    // drawn in it: a toast would expire and leave an empty panel unexplained.
-    diffError.value = errorText(error);
-    diffState.value = "error";
-  }
-}
-
 function toggleFile(path: string) {
   expandedPaths.value = expandedPaths.value.includes(path)
     ? expandedPaths.value.filter((open) => open !== path)
     : [...expandedPaths.value, path];
 }
-
-watch(
-  () => [props.checkout.id, props.path] as const,
-  ([, path]) => {
-    if (path !== null) void loadDiff(path);
-  },
-  { immediate: true, flush: "sync" },
-);
 
 /**
  * The library writes the theme onto the wrapper from the `DiffFile` it was handed, so a switch
@@ -726,33 +496,6 @@ watch(
   { deep: true },
 );
 
-// Git reports every write in the workdir, on a 220ms debounce, and an agent writing a file
-// produces a steady stream of them. Reloading on each one spends the whole stream fetching a
-// diff the user never sees land, so a burst collapses into the single reload it amounts to.
-const STATUS_REFRESH_DEBOUNCE = 400;
-
-watch(
-  () => props.gitSnapshot.statusRevision,
-  (revision, previous, onCleanup) => {
-    if (revision === previous || props.path === null) return;
-    if (props.gitSnapshot.checkoutId !== props.checkout.id || !props.gitSnapshot.status) return;
-    const path = props.path;
-    const timer = setTimeout(() => {
-      if (props.gitSnapshot.status?.files.some((file) => file.path === path)) {
-        void loadDiff(path, true);
-        return;
-      }
-      diffGeneration += 1;
-      diff.value = null;
-      diffHunks.value = [];
-      diffScrollTop.value = 0;
-      diffError.value = "This file is no longer in the current Git changes.";
-      diffState.value = "error";
-    }, STATUS_REFRESH_DEBOUNCE);
-    onCleanup(() => clearTimeout(timer));
-  },
-);
-
 function onDiffScroll(event: Event) {
   diffScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
   emit("scrollPositionChanged", diffScrollTop.value);
@@ -791,13 +534,6 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
   if (!target?.closest("tr[data-line$='-hunk']") || target.closest(".diff-widget-tooltip")) return;
   toggleHunk(index);
 }
-
-onUnmounted(() => {
-  mounted = false;
-  diffGeneration += 1;
-  // A reading queued for a file nobody is looking at any more is a whole pass over it for nothing.
-  highlighterQueued = null;
-});
 </script>
 
 <template>

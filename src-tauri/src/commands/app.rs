@@ -1,5 +1,6 @@
 use std::sync::Arc;
 
+use serde::Deserialize;
 use tauri::State;
 
 use crate::{
@@ -7,6 +8,42 @@ use crate::{
     services::agent::AgentService,
     terminal::TerminalBackend,
 };
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FrontendDiagnosticCategory {
+    FrontendVueError,
+    FrontendWindowError,
+    FrontendUnhandledRejection,
+    UiWritesDeadline,
+    ExitSweepDeadline,
+}
+
+fn frontend_diagnostic_message(category: FrontendDiagnosticCategory) -> &'static str {
+    match category {
+        FrontendDiagnosticCategory::FrontendVueError => {
+            "frontend diagnostic category=frontend_vue_error"
+        }
+        FrontendDiagnosticCategory::FrontendWindowError => {
+            "frontend diagnostic category=frontend_window_error"
+        }
+        FrontendDiagnosticCategory::FrontendUnhandledRejection => {
+            "frontend diagnostic category=frontend_unhandled_rejection"
+        }
+        FrontendDiagnosticCategory::UiWritesDeadline => {
+            "frontend diagnostic category=ui_writes_deadline"
+        }
+        FrontendDiagnosticCategory::ExitSweepDeadline => {
+            "frontend diagnostic category=exit_sweep_deadline"
+        }
+    }
+}
+
+/// Logs only the selected fixed category; the frontend cannot send diagnostic text or payloads.
+#[tauri::command]
+pub fn frontend_diagnostic(category: FrontendDiagnosticCategory) {
+    log::warn!(target: "marvis::frontend_diagnostic", "{}", frontend_diagnostic_message(category));
+}
 
 /// Ends every agent server and every terminal, which is what leaves none of them behind.
 ///
@@ -42,4 +79,49 @@ pub async fn app_prepare_exit(
                 format!("the sweep before exit did not finish: {error}"),
             )
         })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn diagnostic_message_contains_only_its_fixed_category() {
+        let cases = [
+            (
+                FrontendDiagnosticCategory::FrontendVueError,
+                "frontend diagnostic category=frontend_vue_error",
+            ),
+            (
+                FrontendDiagnosticCategory::FrontendWindowError,
+                "frontend diagnostic category=frontend_window_error",
+            ),
+            (
+                FrontendDiagnosticCategory::FrontendUnhandledRejection,
+                "frontend diagnostic category=frontend_unhandled_rejection",
+            ),
+            (
+                FrontendDiagnosticCategory::UiWritesDeadline,
+                "frontend diagnostic category=ui_writes_deadline",
+            ),
+            (
+                FrontendDiagnosticCategory::ExitSweepDeadline,
+                "frontend diagnostic category=exit_sweep_deadline",
+            ),
+        ];
+
+        for (category, expected) in cases {
+            assert_eq!(frontend_diagnostic_message(category), expected);
+        }
+    }
+
+    #[test]
+    fn diagnostic_category_rejects_unlisted_input() {
+        assert!(
+            serde_json::from_value::<FrontendDiagnosticCategory>(serde_json::json!(
+                "private payload"
+            ))
+            .is_err()
+        );
+    }
 }

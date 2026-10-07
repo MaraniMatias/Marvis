@@ -120,6 +120,17 @@ struct ApiLocation {
     directory: String,
 }
 
+/// One session as `GET /api/session` and `GET /api/session/{id}` answer it.
+///
+/// **The `#[serde(default)]`s here are tolerance of a third party's wire, not back-compat with an
+/// older Marvis.** Every one of these `Api*` types parses a response written by the OpenCode
+/// service, which is a separate program on its own release cadence: we do not ship it, we do not
+/// bump it and `SUPPORTED_MAJOR` only refuses a different major. A field that is absent from one
+/// response is a session with no agent, no model, no parent or no timestamps yet, and reading it as
+/// absent keeps the panel painting instead of turning a half-answered row into a bridge error. The
+/// fields that *identify* a session (`id`, `ApiModel::id`, `ApiAgent::id`) carry no default for
+/// the same reason in the other direction: without them there is nothing to attribute the answer
+/// to, so it is refused.
 #[derive(Debug, Deserialize)]
 struct ApiSession {
     id: String,
@@ -245,12 +256,20 @@ pub enum BridgeError {
     Unavailable(String),
     Foreign(String),
     Failed(String),
+    /// The endpoint this bridge holds is not the one the service answers on: either nothing
+    /// answered there, or the service refused the credentials this bridge carries. It is a variant
+    /// of its own because it is the only failure that says the address has to be found again, and
+    /// because a status the service chose for itself — a rejected validation, a route this version
+    /// does not have — says nothing about the endpoint and must not cost the app its bridge.
+    Stale(String),
 }
 
 impl BridgeError {
     fn into_ipc(self, fallback: IpcErrorCode) -> IpcError {
         let (code, message) = match self {
-            BridgeError::Unavailable(message) => (IpcErrorCode::AgentUnavailable, message),
+            BridgeError::Unavailable(message) | BridgeError::Stale(message) => {
+                (IpcErrorCode::AgentUnavailable, message)
+            }
             BridgeError::Foreign(message) => (IpcErrorCode::AgentOwnershipMismatch, message),
             BridgeError::Failed(message) => (fallback, message),
         };
@@ -261,6 +280,14 @@ impl BridgeError {
 pub struct AgentBridge {
     checkout_id: String,
     credentials: ServerCredentials,
+    /// The HTTP client every JSON request of this bridge goes through.
+    ///
+    /// One agent owns one connection pool, so an agent per request is a pool per request: every
+    /// read would open its own socket and pay for its handshake against a service one loopback hop
+    /// away. Sharing it across threads is what ureq is for. It carries no timeout of its own —
+    /// those travel with each request, because the budgets are not interchangeable (see
+    /// `with_timeout`).
+    client: ureq::Agent,
     /// A clone of the event socket, used to interrupt a blocking read during stop.
     event_socket: Mutex<Option<TcpStream>>,
     /// Set once the service is reached, so the event reader can be told to stop.
@@ -287,6 +314,7 @@ impl AgentBridge {
         Ok(Self {
             checkout_id: checkout_id.to_string(),
             credentials,
+            client: ureq::Agent::new_with_defaults(),
             event_socket: Mutex::new(None),
             reader: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
@@ -372,8 +400,7 @@ impl AgentBridge {
     ) -> Result<T, BridgeError> {
         let url = format!("{}{path}", self.base_url());
         let envelope: ApiEnvelope<T> = send_json(retry_interrupted(|| {
-            json_client(timeout)
-                .get(&url)
+            with_timeout(self.client.get(&url), timeout)
                 .query("directory", self.directory().to_string_lossy().as_ref())
                 .header("authorization", self.auth_header())
                 .header(
@@ -401,8 +428,7 @@ impl AgentBridge {
     ) -> Result<T, BridgeError> {
         let url = format!("{}{path}", self.base_url());
         let envelope: ApiEnvelope<T> = send_json(retry_interrupted(|| {
-            json_client(timeout)
-                .get(&url)
+            with_timeout(self.client.get(&url), timeout)
                 .header("authorization", self.auth_header())
                 .header("accept", "application/json")
                 .call()
@@ -417,15 +443,17 @@ impl AgentBridge {
         body: &B,
     ) -> Result<T, BridgeError> {
         let envelope: ApiEnvelope<T> = send_json(
-            json_client(JSON_REQUEST_TIMEOUT)
-                .post(&format!("{}{path}", self.base_url()))
-                .query("directory", self.directory().to_string_lossy().as_ref())
-                .header("authorization", self.auth_header())
-                .header(
-                    DIRECTORY_HEADER,
-                    self.directory().to_string_lossy().as_ref(),
-                )
-                .send_json(body),
+            with_timeout(
+                self.client.post(&format!("{}{path}", self.base_url())),
+                JSON_REQUEST_TIMEOUT,
+            )
+            .query("directory", self.directory().to_string_lossy().as_ref())
+            .header("authorization", self.auth_header())
+            .header(
+                DIRECTORY_HEADER,
+                self.directory().to_string_lossy().as_ref(),
+            )
+            .send_json(body),
         )?;
         envelope.into_scoped(self.directory())
     }
@@ -515,6 +543,9 @@ impl AgentBridge {
 }
 
 /// A single event frame from the stream.
+///
+/// The defaults are the third-party tolerance described on `ApiSession`: the service's SSE frames
+/// carry `location` only when the event is scoped and `data` only when the event has a payload.
 #[derive(Debug, Deserialize)]
 struct SseFrame {
     #[serde(rename = "type")]
@@ -830,6 +861,95 @@ fn event_stream(bridge: &AgentBridge) -> io::Result<SseReader> {
     })
 }
 
+/// Why the event reader is opening the stream again.
+///
+/// These are the cases a reader cannot otherwise tell apart, and only the cause is ever kept: an
+/// event frame carries session text, so no description of a failed frame may quote one.
+#[derive(Debug)]
+enum StreamLoss {
+    /// The service closed a stream that had been healthy, which is what a restart looks like.
+    Ended,
+    /// The stream never opened: nothing answered, or the service refused this bridge.
+    Refused(io::Error),
+    /// A stream that had opened failed on the wire.
+    Broken(io::Error),
+    /// A frame arrived that is not an event this reader can dispatch.
+    Malformed,
+}
+
+impl StreamLoss {
+    fn detail(&self) -> String {
+        match self {
+            StreamLoss::Ended => "the service closed the event stream".to_string(),
+            StreamLoss::Refused(error) if error.kind() == io::ErrorKind::PermissionDenied => {
+                format!("the service refused the event stream: {error}")
+            }
+            StreamLoss::Refused(error) => format!("could not open the event stream: {error}"),
+            StreamLoss::Broken(error) if error.kind() == io::ErrorKind::UnexpectedEof => {
+                format!("the event stream ended in the middle of a frame: {error}")
+            }
+            StreamLoss::Broken(error) => format!("the event stream failed: {error}"),
+            StreamLoss::Malformed => {
+                "the event stream carried a frame that is not an event".to_string()
+            }
+        }
+    }
+}
+
+/// Says why the stream was lost, once per backoff tier.
+///
+/// Two reasons it is not one line per attempt. The attempt is not news: a service that is down is
+/// retried forever, with the backoff already at thirty seconds, and a line each time would bury
+/// everything else. And the frame is not news either: the line names what failed and how long the
+/// wait was, never what the frame said, because an event payload carries session text.
+fn report_stream_loss(
+    bridge: &AgentBridge,
+    reported: &mut Duration,
+    backoff: Duration,
+    loss: &StreamLoss,
+) {
+    if backoff <= *reported {
+        return;
+    }
+    *reported = backoff;
+    match loss {
+        // A service that restarts closes the stream cleanly, so this is expected rather than a fault.
+        StreamLoss::Ended => log::debug!(
+            "the agent event stream for {} ended; reconnecting in {backoff:?}",
+            bridge.checkout_id
+        ),
+        _ => log::warn!(
+            "the agent event stream for {} was lost: {}; reconnecting in {backoff:?}",
+            bridge.checkout_id,
+            loss.detail()
+        ),
+    }
+}
+
+/// Turns frames into events until the stream cannot give any more, and says why it stopped.
+fn consume_events(bridge: &AgentBridge, mut reader: impl BufRead, sink: &EventSink) -> StreamLoss {
+    while !bridge.is_stopped() {
+        let payload = match read_sse_frame(&mut reader) {
+            Ok(Some(payload)) => payload,
+            Ok(None) => return StreamLoss::Ended,
+            // A frame this reader rejects on its own terms: the bounds and the encoding, never the
+            // connection.
+            Err(error) if error.kind() == io::ErrorKind::InvalidData => {
+                return StreamLoss::Malformed
+            }
+            Err(error) => return StreamLoss::Broken(error),
+        };
+        match event_from_payload(&payload, bridge) {
+            Ok(Some(event)) => sink(event),
+            // A frame for another location is not a failure: the stream is shared by every checkout
+            // the service knows, and this one is answered by its own bridge.
+            Ok(None) => continue,
+            Err(_) => return StreamLoss::Malformed,
+        }
+    }
+    StreamLoss::Ended
+}
+
 /// Consumes `/api/event` until the server dies, normalizing and forwarding each frame.
 ///
 /// Reconnects with a bounded backoff: a dropped stream is normal (laptop sleep, server
@@ -837,32 +957,28 @@ fn event_stream(bridge: &AgentBridge) -> io::Result<SseReader> {
 /// a reconnect rather than assume nothing was missed.
 fn read_events(bridge: Arc<AgentBridge>, sink: EventSink) {
     let mut backoff = Duration::from_millis(250);
+    let mut reported = Duration::ZERO;
     while !bridge.is_stopped() {
-        let mut reader = BufReader::new(match event_stream(&bridge) {
-            Ok(reader) => reader,
-            Err(_) => {
+        let loss = match event_stream(&bridge) {
+            Ok(reader) => {
+                // A stream that came up resets the wait: the service is answering again.
+                backoff = Duration::from_millis(250);
+                reported = Duration::ZERO;
+                let loss = consume_events(&bridge, BufReader::new(reader), &sink);
                 bridge.clear_event_socket();
-                if !sleep_unless_stopped(&bridge, backoff) {
-                    return;
-                }
-                backoff = (backoff * 2).min(MAX_RECONNECT_BACKOFF);
-                continue;
+                loss
             }
-        });
-        backoff = Duration::from_millis(250);
-        while !bridge.is_stopped() {
-            let payload = match read_sse_frame(&mut reader) {
-                Ok(Some(payload)) => payload,
-                Ok(None) | Err(_) => break,
-            };
-            match event_from_payload(&payload, &bridge) {
-                Ok(Some(event)) => sink(event),
-                Ok(None) => continue,
-                Err(_) => break,
+            Err(error) => {
+                bridge.clear_event_socket();
+                StreamLoss::Refused(error)
             }
+        };
+        // A stop is not a disconnect, and reporting it would make every checkout that closes write
+        // the same line on the way out.
+        if bridge.is_stopped() {
+            return;
         }
-        drop(reader);
-        bridge.clear_event_socket();
+        report_stream_loss(&bridge, &mut reported, backoff, &loss);
         if !sleep_unless_stopped(&bridge, backoff) {
             return;
         }
@@ -904,13 +1020,18 @@ fn join_reader(handle: std::thread::JoinHandle<()>, deadline: Instant) {
     }
 }
 
-fn json_client(timeout: Duration) -> ureq::Agent {
-    ureq::Agent::new_with_config(
-        ureq::Agent::config_builder()
-            .timeout_global(Some(timeout))
-            .timeout_connect(Some(timeout))
-            .build(),
-    )
+/// Gives one request the budget its own call asked for, from the bridge's pooled client.
+///
+/// The budgets are per call and not interchangeable: `ready` probes with whatever is left of its
+/// five second deadline, an ordinary read gets the whole request timeout. Fixing one timeout on the
+/// client would make one of the two wrong, so the pooled agent carries the connections and each
+/// request carries its own deadline.
+fn with_timeout<T>(request: ureq::RequestBuilder<T>, timeout: Duration) -> ureq::RequestBuilder<T> {
+    request
+        .config()
+        .timeout_global(Some(timeout))
+        .timeout_connect(Some(timeout))
+        .build()
 }
 
 impl Drop for AgentBridge {
@@ -949,6 +1070,7 @@ fn ready(
     let probe = AgentBridge {
         checkout_id: String::new(),
         credentials: credentials.clone(),
+        client: ureq::Agent::new_with_defaults(),
         event_socket: Mutex::new(None),
         reader: Mutex::new(None),
         stopped: std::sync::atomic::AtomicBool::new(false),
@@ -1030,7 +1152,12 @@ fn send_json<T: serde::de::DeserializeOwned>(
                 BridgeError::Failed(format!("unexpected agent server reply: {error}"))
             })
         }
-        // Status errors are reduced to safe, actionable details; their bodies are not echoed.
+        // Status errors are reduced to safe, actionable details; their bodies are not echoed. The
+        // two that refuse this password are the one status that is about the endpoint rather than
+        // about the request: the service answered, and what it refused was what this bridge is.
+        Err(ureq::Error::StatusCode(status)) if status == 401 || status == 403 => {
+            Err(BridgeError::Stale(status_detail(status)))
+        }
         Err(ureq::Error::StatusCode(status)) => Err(BridgeError::Failed(status_detail(status))),
         Err(ureq::Error::Timeout(_)) => Err(BridgeError::Unavailable(
             "the agent server request timed out".into(),
@@ -1040,7 +1167,10 @@ fn send_json<T: serde::de::DeserializeOwned>(
         Err(error) if is_interrupted(&error) => Err(BridgeError::Unavailable(format!(
             "{INTERRUPTED_REQUEST}: {error}"
         ))),
-        Err(error) => Err(BridgeError::Unavailable(format!(
+        // Nothing answered on the address this bridge holds, which is what a service restarted on
+        // another port or another password looks like from here. A timeout is deliberately not this
+        // one: a service busy answering a turn still answers, it just answers late.
+        Err(error) => Err(BridgeError::Stale(format!(
             "the agent server is not reachable: {error}"
         ))),
     }
@@ -1055,6 +1185,9 @@ fn status_detail(status: u16) -> String {
 }
 
 type BridgeLauncher = dyn Fn(&str, &Path) -> Result<Arc<AgentBridge>, BridgeError> + Send + Sync;
+/// Repeats discovery, which is the only way to find a service that has been restarted on another
+/// port or with another password while this app was holding a bridge to the previous one.
+type EndpointFinder = dyn Fn() -> Result<ServiceEndpoint, String> + Send + Sync;
 type ReaderStarter = dyn Fn(&Arc<AgentBridge>, &EventSink) + Send + Sync;
 type BridgeStopper = dyn Fn(&Arc<AgentBridge>, Duration) + Send + Sync;
 type SlotStopper = dyn Fn(Arc<BridgeSlot>, Duration) + Send + Sync;
@@ -1315,12 +1448,107 @@ struct CandidateRead {
     running: Arc<HashSet<String>>,
 }
 
+/// The service-wide list, and the read that is answering for it right now.
+///
+/// `reading` is what keeps one poll for nine checkouts from turning into nine identical reads: the
+/// first caller publishes itself, releases the lock and goes to the network, and the rest find that
+/// read and wait for its answer. Nothing else happens under the lock, and the network does not
+/// happen under it at all — two requests of thirty seconds each must not block every other reader
+/// of the cache, least of all the event reader, which can reach this cache from its own thread.
+struct CandidateSlot {
+    cached: Option<Cached<CandidateRead>>,
+    reading: Option<Arc<CandidateFetch>>,
+}
+
+impl CandidateSlot {
+    fn new() -> Self {
+        Self {
+            cached: None,
+            reading: None,
+        }
+    }
+}
+
+/// One read in flight and the answer every caller that arrived while it ran is waiting for.
+struct CandidateFetch {
+    outcome: Mutex<Option<Result<CandidateRead, BridgeError>>>,
+    published: Condvar,
+}
+
+impl CandidateFetch {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            outcome: Mutex::new(None),
+            published: Condvar::new(),
+        })
+    }
+
+    /// Hands the answer to the waiters. Only the first publication is the answer: this read is over
+    /// once, whoever is still waiting is waiting for what it decided.
+    fn publish(&self, outcome: Result<CandidateRead, BridgeError>) {
+        if let Ok(mut published) = self.outcome.lock() {
+            if published.is_none() {
+                *published = Some(outcome);
+            }
+        }
+        self.published.notify_all();
+    }
+
+    /// The answer of the read that is already running, shared rather than repeated.
+    ///
+    /// Bounded by that read's own worst case, because waiting longer than the read cannot buy an
+    /// answer and a wait with no bound at all is a caller that never returns.
+    fn wait(&self) -> Result<CandidateRead, BridgeError> {
+        let deadline = Instant::now() + CANDIDATE_READ_WAIT;
+        let mut published = self
+            .outcome
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent candidate read is poisoned".into()))?;
+        loop {
+            if let Some(outcome) = published.as_ref() {
+                return outcome.clone();
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return Err(BridgeError::Unavailable(
+                    "timed out waiting for the shared agent session list".into(),
+                ));
+            }
+            let (next, _) = self
+                .published
+                .wait_timeout(published, remaining)
+                .map_err(|_| BridgeError::Failed("the agent candidate read is poisoned".into()))?;
+            published = next;
+        }
+    }
+}
+
+/// How long a caller waits for a session list that is already being read.
+///
+/// Two requests make that read, and a signal may make either of them be asked again, so this is the
+/// read's own worst case rather than a budget invented for the waiter.
+const CANDIDATE_READ_WAIT: Duration =
+    Duration::from_secs(JSON_REQUEST_TIMEOUT.as_secs() * 2 * INTERRUPTED_READ_ATTEMPTS as u64);
+
+/// The two requests one read of the service-wide list is made of.
+fn read_candidates(bridge: &AgentBridge) -> Result<CandidateRead, BridgeError> {
+    let sessions: Vec<ApiSession> = bridge.get_unscoped_json(
+        &format!("/api/session?limit={CANDIDATE_SESSION_LIMIT}"),
+        JSON_REQUEST_TIMEOUT,
+    )?;
+    let running = bridge.running_sessions()?;
+    Ok(CandidateRead {
+        sessions: Arc::new(sessions),
+        running: Arc::new(running),
+    })
+}
+
 /// Owns one server per checkout for the app's lifetime.
 pub struct AgentService {
     bridges: Mutex<HashMap<String, Arc<BridgeSlot>>>,
     checkout_operations: Mutex<HashMap<String, Arc<Mutex<()>>>>,
     /// The service-wide session list, read once and answered from for every checkout's rows.
-    candidates: Mutex<Option<Cached<CandidateRead>>>,
+    candidates: Mutex<CandidateSlot>,
     /// The agent catalogs, per checkout: `/api/agent` answers for one directory, so a cache wider
     /// than that would hand one project's agents to another project's row. Measured against the
     /// real service: Marvis offers eight, a sibling repository eleven, three of them its own.
@@ -1329,6 +1557,7 @@ pub struct AgentService {
     busy_turns: Arc<Mutex<HashMap<String, HashMap<String, TrackedTurn>>>>,
     sink: Mutex<Option<EventSink>>,
     launcher: Arc<BridgeLauncher>,
+    finder: Arc<EndpointFinder>,
     reader_starter: Arc<ReaderStarter>,
     stopper: Arc<BridgeStopper>,
     slot_stopper: Arc<SlotStopper>,
@@ -1340,12 +1569,16 @@ impl AgentService {
     /// Finds the service the user runs. `home` is where that service registers itself, and it is
     /// kept for the life of the app so every later connect looks in the same place.
     pub fn new(home: PathBuf) -> Self {
+        let finder_home = home.clone();
         let mut service = Self::with_lifecycle(
             Arc::new(move |checkout_id, directory| {
                 AgentBridge::connect(&home, checkout_id, directory).map(Arc::new)
             }),
             Arc::new(|bridge, sink| bridge.start_reader(sink)),
             Arc::new(|bridge, timeout| bridge.stop_with_timeout(timeout)),
+            // The same registration `connect` reads: an endpoint that stops answering has to be
+            // looked up again, because the file it came from is rewritten by every start.
+            Arc::new(move || opencode::discover(&finder_home)),
             STARTUP_STOP_WAIT,
         );
         service.startup_wait = STARTUP_WAIT_TIMEOUT;
@@ -1356,6 +1589,7 @@ impl AgentService {
         launcher: Arc<BridgeLauncher>,
         reader_starter: Arc<ReaderStarter>,
         stopper: Arc<BridgeStopper>,
+        finder: Arc<EndpointFinder>,
         startup_stop_wait: Duration,
     ) -> Self {
         let slot_stopper_callback = Arc::clone(&stopper);
@@ -1363,6 +1597,7 @@ impl AgentService {
             launcher,
             reader_starter,
             stopper,
+            finder,
             startup_stop_wait,
             Arc::new(move |slot, timeout| {
                 slot.stop(slot_stopper_callback.as_ref(), timeout);
@@ -1372,18 +1607,21 @@ impl AgentService {
 
     #[cfg(test)]
     pub(crate) fn with_test_server(port: u16) -> Self {
+        let endpoint = ServiceEndpoint {
+            url: format!("http://127.0.0.1:{port}"),
+            port,
+            password: "test".into(),
+        };
+        let found = endpoint.clone();
         Self::with_lifecycle(
             Arc::new(move |checkout_id, directory| {
                 Ok(Arc::new(AgentBridge {
                     checkout_id: checkout_id.to_string(),
                     credentials: ServerCredentials {
-                        endpoint: ServiceEndpoint {
-                            url: format!("http://127.0.0.1:{port}"),
-                            port,
-                            password: "test".into(),
-                        },
+                        endpoint: endpoint.clone(),
                         directory: directory.to_path_buf(),
                     },
+                    client: ureq::Agent::new_with_defaults(),
                     event_socket: Mutex::new(None),
                     reader: Mutex::new(None),
                     stopped: std::sync::atomic::AtomicBool::new(false),
@@ -1391,6 +1629,9 @@ impl AgentService {
             }),
             Arc::new(|_, _| {}),
             Arc::new(|bridge, timeout| bridge.stop_with_timeout(timeout)),
+            // A fixture that does not move: discovery finds the port it already serves, so a
+            // refused request retires nothing.
+            Arc::new(move || Ok(found.clone())),
             Duration::from_millis(50),
         )
     }
@@ -1399,18 +1640,20 @@ impl AgentService {
         launcher: Arc<BridgeLauncher>,
         reader_starter: Arc<ReaderStarter>,
         stopper: Arc<BridgeStopper>,
+        finder: Arc<EndpointFinder>,
         startup_stop_wait: Duration,
         slot_stopper: Arc<SlotStopper>,
     ) -> Self {
         Self {
             bridges: Mutex::new(HashMap::new()),
             checkout_operations: Mutex::new(HashMap::new()),
-            candidates: Mutex::new(None),
+            candidates: Mutex::new(CandidateSlot::new()),
             catalogs: Mutex::new(HashMap::new()),
             removal_state: Arc::new(Mutex::new(RemovalState::default())),
             busy_turns: Arc::new(Mutex::new(HashMap::new())),
             sink: Mutex::new(None),
             launcher,
+            finder,
             reader_starter,
             stopper,
             slot_stopper,
@@ -1620,8 +1863,9 @@ impl AgentService {
                 }
             }
         };
-        let listed: Vec<ApiSession> =
-            bridge.get_json_with_timeout("/api/session", Duration::from_secs(5))?;
+        let listed: Vec<ApiSession> = self.read_and_refresh(checkout_id, &bridge, || {
+            bridge.get_json_with_timeout("/api/session", Duration::from_secs(5))
+        })?;
         let turns = self
             .busy_turns
             .lock()
@@ -1820,6 +2064,92 @@ impl AgentService {
         }
     }
 
+    /// Runs one exchange with the checkout's bridge and, when that exchange says the bridge's
+    /// endpoint is the service's no more, retires the bridge afterwards.
+    ///
+    /// The refresh is deliberately not a retry. A `POST` may already have reached the service even
+    /// though its answer was lost, and asking a second time would deliver a second prompt, so the
+    /// caller gets the error its own request produced and the replacement bridge is installed for
+    /// the next call. Every call site runs this *after* the exchange, which is also what keeps
+    /// discovery out of any lock the exchange held.
+    fn read_and_refresh<T>(
+        &self,
+        checkout_id: &str,
+        bridge: &Arc<AgentBridge>,
+        exchange: impl FnOnce() -> Result<T, BridgeError>,
+    ) -> Result<T, BridgeError> {
+        match exchange() {
+            Ok(answer) => Ok(answer),
+            Err(error) => {
+                if matches!(error, BridgeError::Stale(_)) {
+                    self.refresh_stale_endpoint(checkout_id, bridge);
+                }
+                Err(error)
+            }
+        }
+    }
+
+    /// Finds the service again and retires `bridge` when it is no longer where the service is.
+    ///
+    /// The service is the person's and can be restarted on another port or with another password,
+    /// and a bridge that keeps the address it was given then answers nothing while the app reports
+    /// that the agent is not running. Discovery runs with no lock held: it is one registration read
+    /// and one probe, and a probe against a busy service can take its whole timeout, which the
+    /// shared bridges map must not be held across. A discovery that finds the same address leaves
+    /// the bridge alone — a service that is merely unreachable right now is not a moved one.
+    fn refresh_stale_endpoint(&self, checkout_id: &str, bridge: &Arc<AgentBridge>) {
+        if let Ok(endpoint) = (self.finder)() {
+            if endpoint != bridge.credentials.endpoint {
+                self.retire_stale_bridge(checkout_id, bridge);
+            }
+        }
+    }
+
+    /// Removes the checkout's slot while it still publishes this bridge, and stops what it held.
+    ///
+    /// The removal is conditional on the slot *and* on the bridge it publishes, so a replacement
+    /// that arrived in the meantime is left alone. The generation moves the way a stop moves it:
+    /// the retired bridge's reader is stopped, and anything still holding events from it finds
+    /// itself a generation behind, so the next start publishes against the new one.
+    fn retire_stale_bridge(&self, checkout_id: &str, bridge: &Arc<AgentBridge>) {
+        let retired = {
+            let Ok(mut bridges) = self.bridges.lock() else {
+                return;
+            };
+            let Some(slot) = bridges.get(checkout_id).cloned() else {
+                return;
+            };
+            let publishes_bridge = slot.state.lock().is_ok_and(|state| {
+                matches!(&*state, BridgeState::Ready(current) if Arc::ptr_eq(current, bridge))
+            });
+            if !publishes_bridge {
+                return;
+            }
+            remove_slot_if_current(&mut bridges, checkout_id, &slot);
+            slot
+        };
+        if let Ok(mut state) = self.removal_state.lock() {
+            let generation = state
+                .generations
+                .entry(checkout_id.to_string())
+                .or_default();
+            *generation = generation.wrapping_add(1);
+        }
+        retired.stop(self.stopper.as_ref(), self.startup_stop_wait);
+        // Both caches are answers read through the address that no longer serves: the palette and
+        // the shared session list both have to be read again from the service that is there now.
+        if let Ok(mut catalogs) = self.catalogs.lock() {
+            catalogs.remove(checkout_id);
+        }
+        if let Ok(mut candidates) = self.candidates.lock() {
+            candidates.cached = None;
+            // A read in flight is answering through the address that no longer serves. Letting the
+            // next caller start its own is what makes the list be read again from the service that
+            // is there now, rather than having it wait for an answer that will not be cached.
+            candidates.reading = None;
+        }
+    }
+
     /// Every session the checkout's server knows about, with the service's own running answer.
     pub fn sessions(
         &self,
@@ -1827,19 +2157,21 @@ impl AgentService {
         directory: &Path,
     ) -> Result<Vec<AgentSession>, BridgeError> {
         let bridge = self.bridge(checkout_id, directory)?;
-        let listed: Vec<ApiSession> = bridge.get_json("/api/session")?;
-        // Asked once per list rather than per session: the route answers for the whole service,
-        // so membership is what scopes it to this directory.
-        let running = bridge.running_sessions()?;
-        let mut sessions = Vec::new();
-        for raw in listed {
-            // The list spans every directory the server knows, so foreign sessions are
-            // filtered out here. Addressing one by id is what rejects them, below.
-            if raw.check_scope(directory).is_ok() {
-                sessions.push(bridge.to_agent_session(&raw, running.contains(&raw.id)));
+        self.read_and_refresh(checkout_id, &bridge, || {
+            let listed: Vec<ApiSession> = bridge.get_json("/api/session")?;
+            // Asked once per list rather than per session: the route answers for the whole service,
+            // so membership is what scopes it to this directory.
+            let running = bridge.running_sessions()?;
+            let mut sessions = Vec::new();
+            for raw in listed {
+                // The list spans every directory the server knows, so foreign sessions are
+                // filtered out here. Addressing one by id is what rejects them, below.
+                if raw.check_scope(directory).is_ok() {
+                    sessions.push(bridge.to_agent_session(&raw, running.contains(&raw.id)));
+                }
             }
-        }
-        Ok(sessions)
+            Ok(sessions)
+        })
     }
 
     /// Every session the service answers for, whatever directory each one is located in.
@@ -1870,7 +2202,9 @@ impl AgentService {
         directory: &Path,
     ) -> Result<Vec<AgentSession>, BridgeError> {
         let bridge = self.bridge(checkout_id, directory)?;
-        let read = self.candidate_read(&bridge)?;
+        // Wrapped from the outside, so a read that turns out to be talking to a service which has
+        // moved discovers that one after the shared cache lock is released rather than under it.
+        let read = self.read_and_refresh(checkout_id, &bridge, || self.candidate_read(&bridge))?;
         Ok(read
             .sessions
             .iter()
@@ -1880,33 +2214,53 @@ impl AgentService {
 
     /// The service-wide list, read once for every checkout that asks in the same tick.
     ///
-    /// The lock is held across the request, so a poll arriving for nine checkouts at once cannot
-    /// turn into nine identical reads: the first one to arrive reads, and the rest find the window
-    /// closed by a read that is already answering them.
+    /// A poll arrives once per checkout, so a read every caller could start would be nine identical
+    /// requests a tick. The first one to arrive publishes itself as the read in flight and releases
+    /// the lock before it goes to the network; the rest find that read and wait for its answer
+    /// rather than ask again. The lock therefore only ever covers the state of the slot, never the
+    /// two requests of it, and a caller that has to react to a failure — the endpoint no longer
+    /// serving — still reacts once this has given the lock back.
     fn candidate_read(&self, bridge: &AgentBridge) -> Result<CandidateRead, BridgeError> {
-        let mut slot = self
-            .candidates
-            .lock()
-            .map_err(|_| BridgeError::Failed("the agent candidate cache is poisoned".into()))?;
-        if let Some(read) = slot.as_ref() {
-            if read.within(CANDIDATE_CACHE_TTL) {
-                return Ok(read.value.clone());
+        let fetch = {
+            let mut slot = self
+                .candidates
+                .lock()
+                .map_err(|_| BridgeError::Failed("the agent candidate cache is poisoned".into()))?;
+            if let Some(read) = slot.cached.as_ref() {
+                if read.within(CANDIDATE_CACHE_TTL) {
+                    return Ok(read.value.clone());
+                }
+            }
+            match slot.reading.clone() {
+                Some(reading) => {
+                    drop(slot);
+                    return reading.wait();
+                }
+                None => {
+                    let fetch = CandidateFetch::new();
+                    slot.reading = Some(Arc::clone(&fetch));
+                    fetch
+                }
+            }
+        };
+        let outcome = read_candidates(bridge);
+        if let Ok(mut slot) = self.candidates.lock() {
+            // Only the read that is still in flight publishes. One a moved service retired
+            // mid-flight answered through an address that no longer serves, so it caches nothing:
+            // the next caller has to read from the service that is there now.
+            if slot
+                .reading
+                .as_ref()
+                .is_some_and(|reading| Arc::ptr_eq(reading, &fetch))
+            {
+                slot.reading = None;
+                if let Ok(read) = &outcome {
+                    slot.cached = Some(Cached::taken(Instant::now(), read.clone()));
+                }
             }
         }
-        let sessions: Vec<ApiSession> = bridge.get_unscoped_json(
-            &format!("/api/session?limit={CANDIDATE_SESSION_LIMIT}"),
-            JSON_REQUEST_TIMEOUT,
-        )?;
-        let running = bridge.running_sessions()?;
-        let read = Cached::taken(
-            Instant::now(),
-            CandidateRead {
-                sessions: Arc::new(sessions),
-                running: Arc::new(running),
-            },
-        );
-        *slot = Some(read.clone());
-        Ok(read.value)
+        fetch.publish(outcome.clone());
+        outcome
     }
 
     /// Every agent the checkout's service offers, with the color OpenCode paints it with.
@@ -1928,7 +2282,8 @@ impl AgentService {
                 }
             }
         }
-        let listed: Vec<ApiAgent> = bridge.get_json("/api/agent")?;
+        let listed: Vec<ApiAgent> =
+            self.read_and_refresh(checkout_id, &bridge, || bridge.get_json("/api/agent"))?;
         let catalog: Arc<Vec<AgentAgent>> = Arc::new(
             listed
                 .into_iter()
@@ -1959,9 +2314,11 @@ impl AgentService {
         session_id: &str,
     ) -> Result<AgentSession, BridgeError> {
         let bridge = self.bridge(checkout_id, directory)?;
-        let raw = bridge.session(session_id)?;
-        let running = bridge.running_sessions()?.contains(session_id);
-        Ok(bridge.to_agent_session(&raw, running))
+        self.read_and_refresh(checkout_id, &bridge, || {
+            let raw = bridge.session(session_id)?;
+            let running = bridge.running_sessions()?.contains(session_id);
+            Ok(bridge.to_agent_session(&raw, running))
+        })
     }
 
     pub fn create_session(
@@ -2001,10 +2358,13 @@ impl AgentService {
                 "the agent bridge was stopped".into(),
             ));
         }
-        let created: ApiSession =
-            bridge.post_json("/api/session", &serde_json::json!({ "title": title }))?;
-        created.check_scope(directory)?;
-        Ok(bridge.to_agent_session(&created, bridge.running_sessions()?.contains(&created.id)))
+        self.read_and_refresh(checkout_id, &bridge, || {
+            let created: ApiSession =
+                bridge.post_json("/api/session", &serde_json::json!({ "title": title }))?;
+            created.check_scope(directory)?;
+            let running = bridge.running_sessions()?.contains(&created.id);
+            Ok(bridge.to_agent_session(&created, running))
+        })
     }
 
     /// Sends the review as one message. v2.0.18 wants {"text": …} on this route.
@@ -2064,16 +2424,25 @@ impl AgentService {
             ));
         }
         // Resolve first so a foreign id fails before anything is sent.
-        bridge.session(session_id)?;
+        self.read_and_refresh(checkout_id, &bridge, || {
+            bridge.session(session_id).map(|_| ())
+        })?;
         self.track_prompt_pending(checkout_id, session_id);
         // A transport error can arrive after OpenCode accepted the prompt, so retain the
         // pending activity marker until a turn ends or the bridge is explicitly stopped.
-        let _: serde_json::Value = bridge.post_json(
-            &format!("/api/session/{session_id}/prompt"),
-            &serde_json::json!({ "text": text }),
-        )?;
-        let raw = bridge.session(session_id)?;
-        Ok(bridge.to_agent_session(&raw, bridge.running_sessions()?.contains(session_id)))
+        // A refused send costs this send and nothing more: `read_and_refresh` retires a stale
+        // bridge but never repeats the request, so a prompt the service may already have taken is
+        // not delivered twice. The round marker in the transcript is what decides whether a lost
+        // send was in fact delivered, and only a caller that has established its absence re-sends.
+        self.read_and_refresh(checkout_id, &bridge, || {
+            let _: serde_json::Value = bridge.post_json(
+                &format!("/api/session/{session_id}/prompt"),
+                &serde_json::json!({ "text": text }),
+            )?;
+            let raw = bridge.session(session_id)?;
+            let running = bridge.running_sessions()?.contains(session_id);
+            Ok(bridge.to_agent_session(&raw, running))
+        })
     }
 
     /// Whether the session's transcript mentions `marker`.
@@ -2091,7 +2460,9 @@ impl AgentService {
             return Ok(false);
         }
         let bridge = self.bridge(checkout_id, directory)?;
-        Ok(bridge.session_transcript(session_id)?.contains(marker))
+        self.read_and_refresh(checkout_id, &bridge, || {
+            Ok(bridge.session_transcript(session_id)?.contains(marker))
+        })
     }
 
     pub(crate) fn session_mentions_at_generation(
@@ -2190,10 +2561,10 @@ mod tests {
     use std::{
         collections::HashMap,
         io::{self, BufRead, BufReader, Cursor, Read, Write},
-        net::{Shutdown, TcpListener},
+        net::{Shutdown, TcpListener, TcpStream},
         path::{Path, PathBuf},
         sync::{
-            atomic::{AtomicUsize, Ordering},
+            atomic::{AtomicBool, AtomicUsize, Ordering},
             mpsc, Arc, Mutex,
         },
         thread::sleep,
@@ -2207,10 +2578,11 @@ mod tests {
 
     use super::{
         event_from_payload, event_stream, generation_scoped_sink, is_interrupted, join_reader,
-        read_bounded_line, read_sse_frame, ready, remove_slot_if_current, retry_interrupted,
-        same_directory, send_json, status_detail, validate_session_id, AgentBridge, AgentEvent,
-        AgentService, BridgeError, BridgeState, BridgeStopper, EventSink, RemovalState,
-        ServerCredentials, CANDIDATE_SESSION_LIMIT, DIRECTORY_HEADER, INTERRUPTED_READ_ATTEMPTS,
+        read_bounded_line, read_events, read_sse_frame, ready, remove_slot_if_current,
+        report_stream_loss, retry_interrupted, same_directory, send_json, status_detail,
+        validate_session_id, AgentBridge, AgentEvent, AgentService, ApiAgent, ApiModel, ApiSession,
+        BridgeError, BridgeState, BridgeStopper, EventSink, RemovalState, ServerCredentials,
+        StreamLoss, CANDIDATE_SESSION_LIMIT, DIRECTORY_HEADER, INTERRUPTED_READ_ATTEMPTS,
         INTERRUPTED_REQUEST, MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES,
         MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
     };
@@ -2227,6 +2599,7 @@ mod tests {
                 },
                 directory: directory.to_path_buf(),
             },
+            client: ureq::Agent::new_with_defaults(),
             event_socket: Mutex::new(None),
             reader: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
@@ -2359,6 +2732,265 @@ mod tests {
         (port, server)
     }
 
+    /// Every request line the mock was asked, in order. Used to count sends.
+    type RecordedRequests = Arc<Mutex<Vec<String>>>;
+
+    /// A service that answers one status line per request method, recording what it was asked.
+    ///
+    /// Answering a GET while refusing a POST is the state a repeated prompt would show up in, so
+    /// the request lines are kept: a test can assert the send happened exactly once rather than
+    /// only that the call failed.
+    fn serving_status_per_method(
+        get: &'static str,
+        post: &'static str,
+        get_body: String,
+    ) -> (u16, RecordedRequests) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock service should bind");
+        let port = listener.local_addr().unwrap().port();
+        let recorded: RecordedRequests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&recorded);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+                    continue;
+                }
+                let mut content_length = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.trim_end().split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                // The body is read and dropped, never logged: it can carry a prompt.
+                let mut body = vec![0; content_length];
+                let _ = reader.read_exact(&mut body);
+                seen.lock().unwrap().push(request_line.trim().to_string());
+                let (status, payload) = if request_line.starts_with("POST") {
+                    (post, "{}")
+                } else {
+                    (get, get_body.as_str())
+                };
+                if write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    payload.len()
+                )
+                .is_err()
+                {
+                    return;
+                }
+                if stream.write_all(payload.as_bytes()).is_err() {
+                    return;
+                }
+            }
+        });
+        (port, recorded)
+    }
+
+    /// How much the mock candidate service was asked, and over how many sockets.
+    #[derive(Default)]
+    struct MockCounts {
+        requests: AtomicUsize,
+        connections: AtomicUsize,
+    }
+
+    /// A service that answers the two requests one read of the service-wide list is made of.
+    ///
+    /// Both counts are the point: `requests` says how many reads were made, and `connections` says
+    /// whether the client that made them pooled them. Connections are deliberately left open, which
+    /// is the only way a second request can arrive on the same socket. `delay` is served before the
+    /// session list is answered, which is what makes a read long enough for another caller to
+    /// arrive while it is running, and the returned channel says when that read reached the wire so
+    /// a test never has to guess.
+    fn serving_candidate_reads(
+        sessions: Vec<serde_json::Value>,
+        running: &[&str],
+        delay: Duration,
+    ) -> (u16, Arc<MockCounts>, mpsc::Receiver<()>) {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock service should bind");
+        let port = listener.local_addr().unwrap().port();
+        let counts = Arc::new(MockCounts::default());
+        let sessions = Arc::new(
+            serde_json::to_vec(&serde_json::json!({ "data": sessions }))
+                .expect("the session list should encode"),
+        );
+        let active = Arc::new(
+            serde_json::to_vec(&serde_json::json!({
+                "data": running
+                    .iter()
+                    .map(|id| (*id, serde_json::json!({ "type": "running" })))
+                    .collect::<HashMap<_, _>>()
+            }))
+            .expect("the active map should encode"),
+        );
+        let (arrived_tx, arrived) = mpsc::channel();
+        let served = Arc::clone(&counts);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(stream) = stream else { return };
+                served.connections.fetch_add(1, Ordering::SeqCst);
+                let connection = Connection {
+                    counts: Arc::clone(&served),
+                    sessions: Arc::clone(&sessions),
+                    active: Arc::clone(&active),
+                    arrived: arrived_tx.clone(),
+                    delay,
+                };
+                std::thread::spawn(move || connection.serve(stream));
+            }
+        });
+        (port, counts, arrived)
+    }
+
+    /// One accepted connection of `serving_candidate_reads`.
+    struct Connection {
+        counts: Arc<MockCounts>,
+        sessions: Arc<Vec<u8>>,
+        active: Arc<Vec<u8>>,
+        arrived: mpsc::Sender<()>,
+        delay: Duration,
+    }
+
+    impl Connection {
+        fn serve(self, mut stream: TcpStream) {
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            loop {
+                let mut request_line = String::new();
+                if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+                    return;
+                }
+                let mut content_length = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.trim_end().split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse().unwrap_or(0);
+                        }
+                    }
+                }
+                // The body is read and dropped, never logged: it can carry a prompt.
+                let mut body = vec![0; content_length];
+                let _ = reader.read_exact(&mut body);
+                let payload = if request_line.starts_with("GET /api/session/active") {
+                    Arc::clone(&self.active)
+                } else if request_line.starts_with("GET /api/session") {
+                    let _ = self.arrived.send(());
+                    sleep(self.delay);
+                    Arc::clone(&self.sessions)
+                } else {
+                    return;
+                };
+                self.counts.requests.fetch_add(1, Ordering::SeqCst);
+                if write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\n\r\n",
+                    payload.len()
+                )
+                .is_err()
+                {
+                    return;
+                }
+                if stream.write_all(&payload).is_err() {
+                    return;
+                }
+            }
+        }
+    }
+
+    /// The lines the code under test wrote to the log.
+    ///
+    /// `log` allows one logger per process and this binary installs none, so this captures into a
+    /// buffer a test can read: the point of these tests is what was reported, not where it went.
+    /// Capture is off until a test asks for it and the mutex serializes the tests that read it, so
+    /// two of them at once cannot read each other's lines — and other tests keep running untouched,
+    /// which is why every assertion below is about one checkout's own line.
+    static CAPTURED_LOGS: Mutex<Vec<String>> = Mutex::new(Vec::new());
+    static CAPTURING_LOGS: AtomicBool = AtomicBool::new(false);
+    static CAPTURE: Mutex<()> = Mutex::new(());
+    static CAPTURING: CapturingLogs = CapturingLogs;
+
+    struct CapturingLogs;
+
+    impl log::Log for CapturingLogs {
+        fn enabled(&self, _: &log::Metadata<'_>) -> bool {
+            CAPTURING_LOGS.load(Ordering::SeqCst)
+        }
+
+        fn log(&self, record: &log::Record<'_>) {
+            if !self.enabled(record.metadata()) {
+                return;
+            }
+            CAPTURED_LOGS
+                .lock()
+                .unwrap_or_else(|error| error.into_inner())
+                .push(record.args().to_string());
+        }
+
+        fn flush(&self) {}
+    }
+
+    /// Takes the process-wide log for the duration of a test. Hold the guard while capturing.
+    ///
+    /// One guard covers the whole test: `CAPTURE` is a plain mutex, so asking twice without
+    /// dropping the first guard would wait on itself.
+    fn capturing_log() -> std::sync::MutexGuard<'static, ()> {
+        let guard = CAPTURE.lock().unwrap_or_else(|error| error.into_inner());
+        let _ = log::set_logger(&CAPTURING);
+        // Only warnings: `ureq` traces every request at trace level, and what these tests are about
+        // is what the bridge reported, not what the transport underneath it did.
+        log::set_max_level(log::LevelFilter::Warn);
+        CAPTURED_LOGS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        CAPTURING_LOGS.store(true, Ordering::SeqCst);
+        guard
+    }
+
+    /// What has been captured so far, leaving capture on: a caller waiting for a line to appear
+    /// asks again rather than switching the recorder off under the thread that is writing to it.
+    fn captured_logs_so_far() -> Vec<String> {
+        CAPTURED_LOGS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clone()
+    }
+
+    /// Stops capturing and hands back what was written, leaving the guard in place.
+    fn take_captured_logs() -> Vec<String> {
+        CAPTURING_LOGS.store(false, Ordering::SeqCst);
+        captured_logs_so_far()
+    }
+
+    /// A loopback port nothing listens on, for a bridge whose endpoint must stop answering.
+    ///
+    /// Binding and dropping leaves the address free, and the number it hands back is one a
+    /// connect attempt will fail on immediately, which is what "the service moved" looks like to
+    /// a bridge that still holds the old endpoint.
+    fn closed_endpoint() -> ServiceEndpoint {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("port should bind");
+        let port = listener.local_addr().unwrap().port();
+        drop(listener);
+        test_endpoint(port)
+    }
+
     fn assert_event_response_rejected(directory: &Path, response: Vec<u8>) {
         let (bridge, server) = mock_event_response(directory, response);
         let error = match event_stream(&bridge) {
@@ -2383,6 +3015,29 @@ mod tests {
             Some(expected_directory.as_str()),
             "the SSE stream must be scoped to its checkout"
         );
+    }
+
+    /// The service is a third party on its own release cadence, so a session that names no agent,
+    /// no model, no parent and no timestamps still reads — while one that names no `id` is refused,
+    /// because there is nothing to attribute the answer to.
+    #[test]
+    fn a_session_absent_every_descriptive_field_still_reads_and_one_without_an_id_does_not() {
+        let bare = serde_json::json!({"id": "ses_bare"});
+        let session: ApiSession = serde_json::from_value(bare).expect("a bare session still reads");
+        assert_eq!(session.id, "ses_bare");
+        assert_eq!(session.title, "");
+        assert_eq!(session.agent, None);
+        assert!(session.model.is_none());
+        assert_eq!(session.time.updated, 0);
+
+        assert!(
+            serde_json::from_value::<ApiSession>(serde_json::json!({"title": "no id"})).is_err()
+        );
+        assert!(
+            serde_json::from_value::<ApiModel>(serde_json::json!({"providerID": "anthropic"}))
+                .is_err()
+        );
+        assert!(serde_json::from_value::<ApiAgent>(serde_json::json!({"name": "build"})).is_err());
     }
 
     #[test]
@@ -2665,6 +3320,153 @@ mod tests {
         assert_eq!(server.join().expect("mock server should finish").len(), 2);
     }
 
+    /// One session as the mock candidate service answers it, in `directory`.
+    fn listed_session(directory: &Path, id: &str) -> serde_json::Value {
+        serde_json::json!({
+            "id": id,
+            "title": "Listed",
+            "location": {"directory": directory.to_string_lossy()},
+            "time": {"created": 1, "updated": 2}
+        })
+    }
+
+    #[test]
+    fn nine_checkouts_polling_at_once_share_one_service_wide_read() {
+        // A poll arrives once per checkout, so nine of them in the same tick must cost one read: the
+        // mock counts the requests, and the list is served to whoever asked from the answer of the
+        // read that was already running. Nine callers arriving after that read finished would be
+        // answered from the one-second window instead, which is why this cannot tell the two apart —
+        // so the callers are all released while the read is on the wire.
+        let directory = tempfile::tempdir().unwrap();
+        let (port, counts, arrived) = serving_candidate_reads(
+            vec![listed_session(directory.path(), "ses_one")],
+            &["ses_one"],
+            Duration::from_millis(400),
+        );
+        let agents = Arc::new(AgentService::with_test_server(port));
+        let (answers, answered) = mpsc::channel();
+
+        let first = {
+            let agents = Arc::clone(&agents);
+            let answers = answers.clone();
+            let directory = directory.path().to_path_buf();
+            std::thread::spawn(move || {
+                let _ = answers.send(agents.candidate_sessions("first", &directory));
+            })
+        };
+        arrived
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first read should reach the service");
+        let mut callers = vec![first];
+        for index in 0..8 {
+            let agents = Arc::clone(&agents);
+            let directory = directory.path().to_path_buf();
+            let answers = answers.clone();
+            callers.push(std::thread::spawn(move || {
+                let _ = answers
+                    .send(agents.candidate_sessions(&format!("checkout-{index}"), &directory));
+            }));
+        }
+
+        for _ in 0..9 {
+            // The bound is the point of the assertion as much as the count is: a caller that queued
+            // behind a lock the read held would have to wait for the whole of it, and a deadlock
+            // would be a hang instead of a failure.
+            let sessions = answered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("every caller that shared the read should answer");
+            assert_eq!(sessions.expect("the read should succeed").len(), 1);
+        }
+        for caller in callers {
+            caller.join().expect("the caller thread should finish");
+        }
+        assert_eq!(
+            counts.requests.load(Ordering::SeqCst),
+            2,
+            "nine callers must share the list and the running answer, not make nine reads"
+        );
+    }
+
+    #[test]
+    fn a_caller_arriving_during_a_read_finds_the_cache_lock_free() {
+        // The read's two requests used to happen with the cache lock held, so everything that has to
+        // touch the cache — including the event reader, which reaches it from its own thread — was
+        // stuck for the whole of it. The lock is only ever held for the state now, which a test can
+        // take while a read is on the wire, and a caller that arrives then shares that read rather
+        // than start one of its own.
+        let directory = tempfile::tempdir().unwrap();
+        let (port, counts, arrived) = serving_candidate_reads(
+            vec![listed_session(directory.path(), "ses_one")],
+            &[],
+            Duration::from_millis(400),
+        );
+        let agents = Arc::new(AgentService::with_test_server(port));
+        let (answers, answered) = mpsc::channel();
+
+        let first = {
+            let agents = Arc::clone(&agents);
+            let answers = answers.clone();
+            let directory = directory.path().to_path_buf();
+            std::thread::spawn(move || {
+                let _ = answers.send(agents.candidate_sessions("first", &directory));
+            })
+        };
+        arrived
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the first read should reach the service");
+        assert!(
+            agents.candidates.try_lock().is_ok(),
+            "the candidate cache lock must not be held while a read is on the wire"
+        );
+        let second = {
+            let agents = Arc::clone(&agents);
+            let answers = answers.clone();
+            let directory = directory.path().to_path_buf();
+            std::thread::spawn(move || {
+                let _ = answers.send(agents.candidate_sessions("second", &directory));
+            })
+        };
+
+        for caller in [first, second] {
+            let sessions = answered
+                .recv_timeout(Duration::from_secs(10))
+                .expect("a caller arriving during a read should answer when that read does");
+            assert_eq!(sessions.expect("the shared read should succeed").len(), 1);
+            caller.join().expect("the caller thread should finish");
+        }
+        assert_eq!(
+            counts.requests.load(Ordering::SeqCst),
+            2,
+            "the caller that arrived during the read must share it"
+        );
+    }
+
+    #[test]
+    fn a_bridge_reads_over_one_pooled_connection() {
+        // One agent per request is one connection pool per request, so every read opened its own
+        // socket to a service one loopback hop away. The mock counts the sockets it had to accept,
+        // and a read that needs two requests has to need one connection.
+        let directory = tempfile::tempdir().unwrap();
+        let (port, counts, _arrived) = serving_candidate_reads(
+            vec![listed_session(directory.path(), "ses_one")],
+            &[],
+            Duration::ZERO,
+        );
+        let agents = AgentService::with_test_server(port);
+
+        let sessions = agents
+            .candidate_sessions("first", directory.path())
+            .expect("the read should succeed");
+
+        assert_eq!(sessions.len(), 1);
+        assert_eq!(counts.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            counts.connections.load(Ordering::SeqCst),
+            1,
+            "both requests of one read should travel over one pooled connection"
+        );
+    }
+
     #[test]
     fn the_agent_catalog_is_cached_per_checkout_and_never_shared_across_directories() {
         let first = tempfile::tempdir().unwrap();
@@ -2883,18 +3685,30 @@ mod tests {
         PathBuf::from(directory)
     }
 
+    /// A loopback service address. Port 1 is never one anything answers on, which is how the tests
+    /// that must not touch a service name an address that cannot reach anything.
+    fn test_endpoint(port: u16) -> ServiceEndpoint {
+        ServiceEndpoint {
+            url: format!("http://127.0.0.1:{port}"),
+            port,
+            password: "test".into(),
+        }
+    }
+
+    /// What `fake_bridge` holds, and what discovery answers with in the lifecycle tests.
+    fn fake_endpoint() -> ServiceEndpoint {
+        test_endpoint(1)
+    }
+
     fn fake_bridge(checkout_id: &str) -> Arc<AgentBridge> {
         // These tests cover the service lifecycle, not any connection to a service.
         Arc::new(AgentBridge {
             checkout_id: checkout_id.to_string(),
             credentials: ServerCredentials {
-                endpoint: ServiceEndpoint {
-                    url: "http://127.0.0.1:1".into(),
-                    port: 1,
-                    password: "test".into(),
-                },
+                endpoint: fake_endpoint(),
                 directory: PathBuf::new(),
             },
+            client: ureq::Agent::new_with_defaults(),
             event_socket: Mutex::new(None),
             reader: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
@@ -2924,6 +3738,10 @@ mod tests {
             Arc::new(move |_, _| {
                 stops.fetch_add(1, Ordering::SeqCst);
             }),
+            // The lifecycle tests are about starting, waiting and stopping, not about finding a
+            // service again: discovery finds the address `fake_bridge` already holds, so no request
+            // in them can retire a bridge.
+            Arc::new(|| Ok(fake_endpoint())),
             Duration::from_millis(400),
         )
     }
@@ -3356,6 +4174,7 @@ mod tests {
     fn error_message(error: &BridgeError) -> &str {
         match error {
             BridgeError::Unavailable(message)
+            | BridgeError::Stale(message)
             | BridgeError::Foreign(message)
             | BridgeError::Failed(message) => message,
         }
@@ -3524,6 +4343,7 @@ mod tests {
                     release_cleanup_rx.lock().unwrap().recv().unwrap();
                 }
             }),
+            Arc::new(|| Ok(fake_endpoint())),
             Duration::from_millis(400),
         ));
         service.bridge("a", Path::new(".")).unwrap();
@@ -3557,6 +4377,7 @@ mod tests {
             Arc::new(|_, _| panic!("stop_all should not launch bridges")),
             Arc::new(|_, _| {}),
             Arc::new(|_, _| {}),
+            Arc::new(|| Ok(fake_endpoint())),
             Duration::from_millis(400),
             Arc::new(move |slot, timeout| {
                 let call = {
@@ -3703,6 +4524,7 @@ mod tests {
                 },
                 directory: directory.to_path_buf(),
             },
+            client: ureq::Agent::new_with_defaults(),
             event_socket: Mutex::new(None),
             reader: Mutex::new(None),
             stopped: std::sync::atomic::AtomicBool::new(false),
@@ -3805,6 +4627,144 @@ mod tests {
     }
 
     #[test]
+    fn a_truncated_event_stream_is_reported_without_repeating_the_frame() {
+        // The reader used to drop the cause of every disconnect, which left a service that died
+        // mid-frame indistinguishable from one that had closed cleanly. The frame it did read
+        // carries `marker`, so a line that quoted the payload — the rule this file keeps everywhere
+        // else — is caught by the second assertion.
+        let directory = tempfile::tempdir().unwrap();
+        let marker = "SESSION-TEXT-THE-REPORT-MUST-NOT-REPEAT";
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("test listener should bind");
+        let port = listener.local_addr().unwrap().port();
+        let frame = format!(
+            "data: {}\n\n",
+            serde_json::json!({
+                "type": "session.idle",
+                "location": {"directory": directory.path().to_string_lossy()},
+                "data": {"sessionID": "ses_one", "text": marker}
+            })
+        );
+        let server = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().expect("SSE request should connect");
+            let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+            loop {
+                let mut line = String::new();
+                if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                    return;
+                }
+                if line == "\r\n" || line.is_empty() {
+                    break;
+                }
+            }
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n")
+                .expect("the stream headers should be writable");
+            // One complete frame, then a chunk header promising a body that never arrives: the
+            // service died between the two writes.
+            write!(stream, "{:x}\r\n", frame.len()).expect("the chunk header should be writable");
+            stream
+                .write_all(frame.as_bytes())
+                .expect("the frame should be writable");
+            stream
+                .write_all(b"\r\n400\r\n")
+                .expect("the chunk should be writable");
+            let _ = stream.shutdown(Shutdown::Both);
+        });
+        // The checkout this reader answers for, named so the assertions can ignore every other line the
+        // binary's other tests wrote while this one was capturing.
+        const CHECKOUT: &str = "truncated-report";
+        let bridge = Arc::new(bridge_at(CHECKOUT, directory.path(), port));
+        let (delivered, seen) = mpsc::channel();
+        let sink: EventSink = Arc::new(move |event: AgentEvent| {
+            let _ = delivered.send(event);
+        });
+        let _capture = capturing_log();
+        let reader = {
+            let bridge = Arc::clone(&bridge);
+            std::thread::spawn(move || read_events(bridge, sink))
+        };
+
+        let event = seen
+            .recv_timeout(Duration::from_secs(5))
+            .expect("the frame the service did send should be dispatched");
+        assert!(
+            event.data.to_string().contains(marker),
+            "the reader should have dispatched the frame it could read"
+        );
+
+        // The reader reports on its own schedule — it has to notice the break first — so the test
+        // waits for its line rather than assuming the thread got there before the stop below.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let logs = loop {
+            let logs = captured_logs_so_far();
+            if logs.iter().any(|line| line.contains(CHECKOUT)) {
+                break logs;
+            }
+            assert!(
+                Instant::now() < deadline,
+                "an abrupt end must be reported instead of dropped: {logs:?}"
+            );
+            sleep(Duration::from_millis(20));
+        };
+        bridge.stop_with_timeout(Duration::from_secs(2));
+        reader.join().expect("the reader thread should finish");
+        server.join().expect("mock server should finish");
+
+        let reported = logs
+            .iter()
+            .filter(|line| line.contains(CHECKOUT))
+            .collect::<Vec<_>>();
+        assert!(
+            reported
+                .iter()
+                .any(|line| line.contains("ended in the middle of a frame")),
+            "an abrupt end must say so instead of dropping the cause: {reported:?}"
+        );
+        assert!(
+            !reported.iter().any(|line| line.contains(marker)),
+            "an event payload carries session text and must never reach the log: {reported:?}"
+        );
+    }
+
+    #[test]
+    fn a_service_that_stays_down_is_reported_once_per_wait_not_once_per_attempt() {
+        // The reconnect loop runs forever, so a line per attempt is a log a service that is down
+        // fills by itself. The backoff is the throttle: one line per tier, and no line at all for
+        // the attempts in between.
+        let bridge = bridge_at("stuck-service", Path::new("/marvis-no-such-directory"), 1);
+        let loss = StreamLoss::Refused(io::Error::new(
+            io::ErrorKind::ConnectionRefused,
+            "nothing is listening",
+        ));
+        let _capture = capturing_log();
+        let mut reported = Duration::ZERO;
+
+        for _ in 0..50 {
+            report_stream_loss(&bridge, &mut reported, Duration::from_millis(250), &loss);
+        }
+        assert_eq!(
+            take_captured_logs().len(),
+            1,
+            "fifty attempts at the same wait are one line"
+        );
+
+        // A tier the backoff has not reached yet is worth saying, which is how a service that never
+        // came back still ends up visible.
+        CAPTURED_LOGS
+            .lock()
+            .unwrap_or_else(|error| error.into_inner())
+            .clear();
+        CAPTURING_LOGS.store(true, Ordering::SeqCst);
+        let mut reported = Duration::ZERO;
+        report_stream_loss(&bridge, &mut reported, Duration::from_millis(250), &loss);
+        report_stream_loss(&bridge, &mut reported, Duration::from_secs(30), &loss);
+        let logs = take_captured_logs();
+        assert_eq!(logs.len(), 2, "{logs:?}");
+        assert!(logs[0].contains("nothing is listening"), "{logs:?}");
+        assert!(logs[0].contains("stuck-service"), "{logs:?}");
+    }
+
+    #[test]
     fn a_panicking_reader_starter_does_not_poison_the_slot() {
         let starts = Arc::new(AtomicUsize::new(0));
         let readers = Arc::new(AtomicUsize::new(0));
@@ -3825,6 +4785,7 @@ mod tests {
             Arc::new(move |_, _| {
                 stop_calls.fetch_add(1, Ordering::SeqCst);
             }),
+            Arc::new(|| Ok(fake_endpoint())),
             Duration::from_millis(400),
         );
         service.set_event_sink(Arc::new(|_| {}));
@@ -3926,6 +4887,214 @@ mod tests {
     #[test]
     fn reports_rejected_credentials_distinctly() {
         assert!(status_detail(401).contains("rejected Marvis's credentials"));
+    }
+
+    /// A service whose address a test can move, the way a restart on another port moves it.
+    ///
+    /// Both the launcher and discovery read the same cell, which is what makes the case real: a
+    /// bridge holds the address the cell held when it started, and discovery answers with whatever
+    /// the cell holds now. Returns the service with the two counters a test asserts on — how many
+    /// bridges were launched and how many times the service was looked up again.
+    fn service_behind_a_movable_endpoint(
+        endpoint: ServiceEndpoint,
+    ) -> (
+        AgentService,
+        Arc<Mutex<ServiceEndpoint>>,
+        Arc<AtomicUsize>,
+        Arc<AtomicUsize>,
+    ) {
+        let address = Arc::new(Mutex::new(endpoint));
+        let launched = Arc::new(AtomicUsize::new(0));
+        let discovered = Arc::new(AtomicUsize::new(0));
+        let launch_address = Arc::clone(&address);
+        let launch_counts = Arc::clone(&launched);
+        let find_address = Arc::clone(&address);
+        let find_counts = Arc::clone(&discovered);
+        let service = AgentService::with_lifecycle(
+            Arc::new(move |checkout_id, directory| {
+                launch_counts.fetch_add(1, Ordering::SeqCst);
+                Ok(Arc::new(AgentBridge {
+                    checkout_id: checkout_id.to_string(),
+                    credentials: ServerCredentials {
+                        endpoint: launch_address.lock().unwrap().clone(),
+                        directory: directory.to_path_buf(),
+                    },
+                    client: ureq::Agent::new_with_defaults(),
+                    event_socket: Mutex::new(None),
+                    reader: Mutex::new(None),
+                    stopped: std::sync::atomic::AtomicBool::new(false),
+                }))
+            }),
+            Arc::new(|_, _| {}),
+            Arc::new(|_, _| {}),
+            Arc::new(move || {
+                find_counts.fetch_add(1, Ordering::SeqCst);
+                Ok(find_address.lock().unwrap().clone())
+            }),
+            Duration::from_millis(50),
+        );
+        (service, address, launched, discovered)
+    }
+
+    #[test]
+    fn a_service_that_moved_is_found_again_and_the_bridge_replaced_by_a_new_one() {
+        let directory = tempfile::tempdir().unwrap();
+        let (port, server) = mock_json_responses(vec![serde_json::json!({
+            "data": [{"id": "build", "name": "Build", "mode": "primary"}],
+        })]);
+        let (service, address, launched, discovered) =
+            service_behind_a_movable_endpoint(closed_endpoint());
+        // The bridge that exists holds the address nothing answers on, which is what a restart
+        // leaves behind: the service is running, on another port.
+        let stale = service.bridge("checkout", directory.path()).unwrap();
+        *address.lock().unwrap() = test_endpoint(port);
+
+        // The read against the stale endpoint reports the failure once: answering it by looking
+        // again is what keeps this from being "the agent is not running" forever while it plainly
+        // is.
+        assert!(service.agents("checkout", directory.path()).is_err());
+        assert_eq!(discovered.load(Ordering::SeqCst), 1);
+
+        let catalog = service
+            .agents("checkout", directory.path())
+            .expect("the next read should reach the service that is running");
+        assert_eq!(catalog[0].id, "build");
+        assert_eq!(
+            launched.load(Ordering::SeqCst),
+            2,
+            "the bridge was not replaced"
+        );
+        // The replacement is what later calls get, and the bridge that held the dead endpoint is
+        // stopped: its reader would otherwise keep reconnecting to an address nobody serves.
+        let current = service.bridge("checkout", directory.path()).unwrap();
+        assert_eq!(current.credentials.endpoint, test_endpoint(port));
+        assert!(
+            stale.is_stopped(),
+            "the retired bridge still has a live reader"
+        );
+        assert_eq!(
+            server.join().expect("mock service should finish").len(),
+            1,
+            "only the read on the live endpoint should have reached the service"
+        );
+    }
+
+    #[test]
+    fn a_replaced_bridge_moves_the_generation_its_events_were_scoped_to() {
+        // The retired reader is stopped and the sink it was given stops being current in the same
+        // step, so an event already in flight cannot cross into the replacement.
+        let directory = tempfile::tempdir().unwrap();
+        let (service, address, _launched, _discovered) =
+            service_behind_a_movable_endpoint(closed_endpoint());
+        assert_eq!(service.checkout_generation("checkout").unwrap(), 0);
+        service.bridge("checkout", directory.path()).unwrap();
+
+        *address.lock().unwrap() = test_endpoint(closed_endpoint().port);
+        assert!(service.agents("checkout", directory.path()).is_err());
+
+        assert_eq!(
+            service.checkout_generation("checkout").unwrap(),
+            1,
+            "the retired bridge's events would still count as current"
+        );
+    }
+
+    #[test]
+    fn a_service_that_is_only_unreachable_keeps_its_bridge() {
+        // Nothing answers right now, but discovery finds the same registration, so the address is
+        // not stale: replacing the bridge would trade a bridge that is about to answer for one that
+        // has not proved anything.
+        let directory = tempfile::tempdir().unwrap();
+        let (service, _address, launched, discovered) =
+            service_behind_a_movable_endpoint(closed_endpoint());
+
+        assert!(service.agents("checkout", directory.path()).is_err());
+        assert!(service.agents("checkout", directory.path()).is_err());
+
+        assert_eq!(discovered.load(Ordering::SeqCst), 2);
+        assert_eq!(
+            launched.load(Ordering::SeqCst),
+            1,
+            "the bridge was replaced for nothing"
+        );
+    }
+
+    #[test]
+    fn a_status_the_service_chose_does_not_invalidate_the_bridge() {
+        // A rejected request is the service's business, and it says nothing about the address: the
+        // bridge is still pointed at the running service, so it must survive the refusal.
+        let directory = tempfile::tempdir().unwrap();
+        let (port, requests) = serving_status_per_method(
+            "200 OK",
+            "400 Bad Request",
+            serde_json::json!({"data": []}).to_string(),
+        );
+        let (service, _address, launched, discovered) =
+            service_behind_a_movable_endpoint(test_endpoint(port));
+        let before = service.bridge("checkout", directory.path()).unwrap();
+
+        let refused = service
+            .create_session("checkout", directory.path(), "refused")
+            .expect_err("the service refused the creation");
+        assert!(error_message(&refused).contains("400"), "{refused:?}");
+
+        assert_eq!(
+            discovered.load(Ordering::SeqCst),
+            0,
+            "discovery ran for a business refusal"
+        );
+        assert_eq!(launched.load(Ordering::SeqCst), 1);
+        let after = service.bridge("checkout", directory.path()).unwrap();
+        assert!(
+            Arc::ptr_eq(&before, &after),
+            "a business error must not cost this app its bridge"
+        );
+        assert_eq!(
+            requests.lock().unwrap().len(),
+            1,
+            "the refused request is not made again"
+        );
+    }
+
+    #[test]
+    fn a_refused_prompt_is_never_sent_again() {
+        // The service that refuses the password is the one case where a stale endpoint looks like a
+        // refusal, so it must not turn a prompt into a retry: the body may already have been taken.
+        let directory = tempfile::tempdir().unwrap();
+        let session = serde_json::json!({
+            "id": "ses_owned",
+            "title": "Owned session",
+            "location": {"directory": directory.path().to_string_lossy()},
+            "time": {"created": 1, "updated": 2}
+        });
+        let (port, requests) = serving_status_per_method(
+            "200 OK",
+            "401 Unauthorized",
+            serde_json::json!({"data": session}).to_string(),
+        );
+        let (service, _address, _launched, discovered) =
+            service_behind_a_movable_endpoint(test_endpoint(port));
+
+        let refused = service
+            .prompt("checkout", directory.path(), "ses_owned", "one review")
+            .expect_err("the service refused the prompt");
+        assert!(
+            error_message(&refused).contains("rejected Marvis's credentials"),
+            "{refused:?}"
+        );
+
+        let asked = requests.lock().unwrap().clone();
+        let sends: Vec<&String> = asked
+            .iter()
+            .filter(|line| line.starts_with("POST"))
+            .collect();
+        assert_eq!(
+            sends.len(),
+            1,
+            "the prompt was sent more than once: {sends:?}"
+        );
+        // Discovery did run, because the refusal is about the endpoint rather than the request.
+        assert_eq!(discovered.load(Ordering::SeqCst), 1);
     }
 
     /// Proves the round marker really reaches the session, which is what makes the

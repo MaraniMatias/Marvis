@@ -925,12 +925,17 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
-  it("refreshes a changed file while keeping its reading position", async () => {
+  it("refreshes a changed file from file activity alone while keeping its reading position", async () => {
     mocks.readCheckoutFile
       .mockResolvedValueOnce({ path: "src/app.ts", content: "const first = true;" })
       .mockResolvedValueOnce({ path: "src/app.ts", content: "const second = true;" });
+    const currentCheckout = checkout("checkout:one");
+    const gitSnapshot = snapshot(currentCheckout.id);
     const wrapper = mount(DocumentPane, {
-      props: { ...documentPaneProps("src/app.ts"), refreshRevision: 0 },
+      props: {
+        ...documentPaneProps("src/app.ts", "code", currentCheckout, gitSnapshot),
+        refreshRevision: 0,
+      },
     });
     await flushPromises();
     const viewport = wrapper.get('[aria-label="File contents"]');
@@ -938,8 +943,10 @@ describe("DocumentPane", () => {
     (viewport.element as HTMLElement).scrollLeft = 40;
     await viewport.trigger("scroll");
 
+    // App.vue maps checkout-file-activity to this revision; no status event accompanies it.
     await wrapper.setProps({ refreshRevision: 1 });
     await flushPromises();
+    expect(gitSnapshot.statusEventRevision).toBe(0);
     expect(mocks.readCheckoutFile).toHaveBeenCalledTimes(2);
     expect(wrapper.text()).toContain("const second = true;");
     expect((wrapper.get('[aria-label="File contents"]').element as HTMLElement).scrollTop).toBe(120);
@@ -947,9 +954,213 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("refreshes a figure the document references when its own text did not change", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "docs/readme.md",
+      content: "![preview](images/pic.png)\n\n# Marvis",
+    });
+    mocks.readCheckoutMarkdownImage.mockResolvedValue({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgo=",
+      sizeBytes: 8,
+    });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("docs/readme.md", "view"),
+        refreshRevision: 0,
+        refreshPaths: [],
+      },
+    });
+    await vi.waitFor(() =>
+      expect(wrapper.get(".markdown-preview img").attributes("src")).toBe("data:image/png;base64,iVBORw0KGgo="),
+    );
+
+    // Another process replaced the figure and left the document exactly as it was, which is the
+    // whole of the staleness: the bytes match, and what the page draws no longer does.
+    mocks.readCheckoutMarkdownImage.mockResolvedValue({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgp=",
+      sizeBytes: 8,
+    });
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: ["docs/images/pic.png"] });
+    await vi.waitFor(() =>
+      expect(wrapper.get(".markdown-preview img").attributes("src")).toBe("data:image/png;base64,iVBORw0KGgp="),
+    );
+    expect(mocks.readCheckoutFile).toHaveBeenCalledTimes(2);
+    // The command is handed the URL as the document spells it and resolves it itself: the path the
+    // activity names is the resolved one, and the pane never reads a file by it.
+    expect(mocks.readCheckoutMarkdownImage).toHaveBeenLastCalledWith(
+      "checkout:one",
+      "docs/readme.md",
+      "images/pic.png",
+    );
+    wrapper.unmount();
+  });
+
+  it("leaves a preview and its figures alone when the activity moved something else", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "docs/readme.md",
+      content: "![preview](images/pic.png)\n\n# Marvis",
+    });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("docs/readme.md", "view"),
+        refreshRevision: 0,
+        refreshPaths: [],
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.get(".markdown-preview img").attributes("src")).toBeTruthy());
+    const figure = wrapper.get(".markdown-preview img").element;
+    const page = wrapper.get(".markdown-preview").html();
+
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: ["src/app.ts"] });
+    await flushPromises();
+
+    // Nothing that draws the page was asked again, and nothing was handed back to `v-html`, so no
+    // renderer ran over it either.
+    expect(mocks.readCheckoutMarkdownImage).toHaveBeenCalledTimes(1);
+    expect(wrapper.get(".markdown-preview img").element).toBe(figure);
+    expect(wrapper.get(".markdown-preview").html()).toBe(page);
+    wrapper.unmount();
+  });
+
+  it("asks every figure in use again when a batch could not say what it moved", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "docs/readme.md",
+      content: "![one](one.png)\n\n![two](two.png)",
+    });
+    mocks.readCheckoutMarkdownImage.mockResolvedValue({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgo=",
+      sizeBytes: 8,
+    });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("docs/readme.md", "view"),
+        refreshRevision: 0,
+        refreshPaths: [],
+      },
+    });
+    await vi.waitFor(() => expect(mocks.readCheckoutMarkdownImage).toHaveBeenCalledTimes(2));
+
+    // No paths at all is a batch past the watcher's own budget, which is not a checkout nothing
+    // touched: every reference in use is read again, and no more than those.
+    mocks.readCheckoutMarkdownImage.mockResolvedValue({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgp=",
+      sizeBytes: 8,
+    });
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: [] });
+    await vi.waitFor(() => expect(mocks.readCheckoutMarkdownImage).toHaveBeenCalledTimes(4));
+    expect(wrapper.get(".markdown-preview img").attributes("src")).toBe("data:image/png;base64,iVBORw0KGgp=");
+    wrapper.unmount();
+  });
+
+  it("warns and drops a figure whose file is gone, and takes the warning back when it returns", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "docs/readme.md",
+      content: "![preview](images/pic.png)\n\n# Marvis",
+    });
+    mocks.readCheckoutMarkdownImage.mockResolvedValue({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgo=",
+      sizeBytes: 8,
+    });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("docs/readme.md", "view"),
+        refreshRevision: 0,
+        refreshPaths: [],
+      },
+    });
+    await vi.waitFor(() => expect(wrapper.get(".markdown-preview img").attributes("src")).toBeTruthy());
+
+    mocks.readCheckoutMarkdownImage.mockRejectedValue(new Error("could not inspect image"));
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: ["docs/images/pic.png"] });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("Some Markdown images were missing"));
+    expect(wrapper.get(".markdown-preview img").attributes("src")).toBeUndefined();
+    expect(wrapper.text()).not.toContain("Rendering preview");
+
+    mocks.readCheckoutMarkdownImage.mockResolvedValue({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgp=",
+      sizeBytes: 8,
+    });
+    await wrapper.setProps({ refreshRevision: 2, refreshPaths: ["docs/images/pic.png"] });
+    await vi.waitFor(() =>
+      expect(wrapper.get(".markdown-preview img").attributes("src")).toBe("data:image/png;base64,iVBORw0KGgp="),
+    );
+    expect(wrapper.text()).not.toContain("Some Markdown images were missing");
+    wrapper.unmount();
+  });
+
+  it("publishes no figure that a newer document has already replaced", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "docs/readme.md",
+      content: "![preview](images/pic.png)\n\n# Marvis",
+    });
+    mocks.readCheckoutMarkdownImage.mockResolvedValueOnce({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgo=",
+      sizeBytes: 8,
+    });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("docs/readme.md", "view"),
+        refreshRevision: 0,
+        refreshPaths: [],
+      },
+    });
+    await vi.waitFor(() => expect(mocks.readCheckoutMarkdownImage).toHaveBeenCalledTimes(1));
+
+    let reImage!: (value: { mimeType: string; dataBase64: string; sizeBytes: number }) => void;
+    mocks.readCheckoutMarkdownImage.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          reImage = resolve;
+        }),
+    );
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: ["docs/images/pic.png"] });
+    await vi.waitFor(() => expect(mocks.readCheckoutMarkdownImage).toHaveBeenCalledTimes(2));
+
+    // The reader moves on while that read is still out.
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const moved = true;" });
+    await wrapper.setProps({ path: "src/app.ts", mode: "code" });
+    await vi.waitFor(() => expect(wrapper.text()).toContain("const moved = true;"));
+
+    reImage({ mimeType: "image/png", dataBase64: "b3RocmU=", sizeBytes: 8 });
+    await flushPromises();
+    // It answers for a page nobody is on, so it is not put up anywhere.
+    expect(wrapper.html()).not.toContain("b3RocmU=");
+    wrapper.unmount();
+  });
+
+  it("reads a file once when status and file activity arrive together", async () => {
+    const currentCheckout = checkout("checkout:one");
+    const gitSnapshot = snapshot(currentCheckout.id);
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const before = true;" });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("src/app.ts", "code", currentCheckout, gitSnapshot),
+        refreshRevision: 0,
+      },
+    });
+    await flushPromises();
+
+    mocks.readCheckoutFile.mockClear();
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const after = true;" });
+    gitSnapshot.statusEventCheckoutId = currentCheckout.id;
+    gitSnapshot.statusEventRevision += 1;
+    await wrapper.setProps({ refreshRevision: 1 });
+    await flushPromises();
+
+    expect(mocks.readCheckoutFile).toHaveBeenCalledOnce();
+    expect(wrapper.text()).toContain("const after = true;");
+    wrapper.unmount();
+  });
+
   it("keeps a file it cannot read on screen while the checkout reads it again", async () => {
-    // The watcher re-reads the open file twice for every change anywhere in the checkout, and a
-    // reason it cannot be read is not something to take away and hand back while that happens.
+    // A reason it cannot be read is not something to take away and hand back during a refresh.
     mocks.readCheckoutFile.mockRejectedValue({ code: "binary_file", message: "not utf-8" });
     const wrapper = mount(DocumentPane, { props: documentPaneProps("assets/logo.png") });
     await flushPromises();

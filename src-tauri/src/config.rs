@@ -47,6 +47,11 @@ pub fn config_file(home: &Path) -> ConfigFile {
 /// Every field defaults, unlike the rows in the database: this file is written by a person as
 /// well as by the dialog, and a line they deleted is a preference they did not set, not a shape
 /// this build cannot read.
+///
+/// That is the whole reason these `default`s exist, and it is not a reading of what an older build
+/// wrote. `~/.marvis/config.yml` survives every upgrade, is hand-edited, and is not covered by
+/// `SCHEMA_VERSION`: refusing a file because a key is absent would take the settings of everyone
+/// who never opened the dialog on a preference that has a default anyway.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 #[serde(default, rename_all = "camelCase")]
 pub struct AppSettings {
@@ -439,9 +444,9 @@ mod tests {
         std::fs::write(
             &path,
             concat!(
-                // `sidebarLayout` is a key an older build wrote and this one has no field for. It is
-                // here to say what happens to it: an unknown key is ignored, like any other line a
-                // person typed, and the file still loads. Nothing reads it and nothing migrates it.
+                // `sidebarLayout` is a key this build has no field for. It is here to say what
+                // happens to one: an unknown key is ignored, like any other line a person typed,
+                // and the file still loads. Nothing reads it and nothing migrates it.
                 "ui:\n  fontSize: .nan\n  zoom: 99\n  theme: solarized\n  contentBackground: not-a-color\n  sidebarLayout: wide\n",
                 "terminal:\n  fontSize: 2\n  cursorStyle: beam\n  scrollbar: sometimes\n",
                 "editor:\n  fontSize: 400\n  indentation:\n    size: 0\n",

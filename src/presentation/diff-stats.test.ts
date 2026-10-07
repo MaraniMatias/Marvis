@@ -11,6 +11,9 @@ const mocks = vi.hoisted(() => ({
   getGitDiffStats: vi.fn(),
   handlers: new Map<string, (event: { payload: string[] }) => void>(),
   unlisten: vi.fn(),
+  /** Set by a test that needs the subscription to arrive late, the way Tauri answers a listener
+   *  registered by a component that has already unmounted. */
+  listenGate: null as null | Promise<void>,
 }));
 
 vi.mock("../lib/ipc", () => ({
@@ -20,11 +23,14 @@ vi.mock("../lib/ipc", () => ({
 vi.mock("@tauri-apps/api/event", () => ({
   listen: vi.fn(async (name: string, handler: (event: { payload: string[] }) => void) => {
     mocks.handlers.set(name, handler);
+    await mocks.listenGate;
     return mocks.unlisten;
   }),
 }));
 
+import { listen } from "@tauri-apps/api/event";
 import { useDiffStats } from "./diff-stats";
+import type { DiffStats } from "./diff-stats";
 
 function checkout(id: string, isMissing = false): Checkout {
   return {
@@ -56,10 +62,22 @@ function countedFile(path: string, additions?: number, deletions?: number): GitC
   return { path, status: "M", additions, deletions };
 }
 
-function host(repos: Ref<Repo[]>, activeId: Ref<string | null>) {
+/** A promise a test releases by hand, for work that must finish on its own schedule. */
+function gate() {
+  let release!: () => void;
+  const promise = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  return { promise, release };
+}
+
+/** A host renders what the store says. A test that has to read the store itself after the host
+ *  is gone passes `held`, which keeps the same store the component was reading. */
+function host(repos: Ref<Repo[]>, activeId: Ref<string | null>, held?: { stats?: DiffStats }) {
   return defineComponent({
     setup() {
       const stats = useDiffStats(repos, activeId);
+      if (held) held.stats = stats;
       return () =>
         h(
           "div",
@@ -77,6 +95,7 @@ describe("useDiffStats", () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.handlers.clear();
+    mocks.listenGate = null;
     mocks.getGitCheckoutDiffStats.mockResolvedValue({
       "checkout:a": { additions: 5, deletions: 2 },
       "checkout:b": { additions: 0, deletions: 3 },
@@ -285,5 +304,70 @@ describe("useDiffStats", () => {
     await flushPromises();
 
     expect(mocks.unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a subscription that only arrives after the last reader is gone", async () => {
+    const registration = gate();
+    mocks.listenGate = registration.promise;
+    const repos = ref([repo([checkout("checkout:a")])]);
+    const wrapper = mount(host(repos, ref("checkout:a")));
+    await flushPromises();
+    // Nothing to release yet: Tauri has not handed the subscription back.
+    expect(mocks.unlisten).not.toHaveBeenCalled();
+
+    wrapper.unmount();
+    registration.release();
+    await flushPromises();
+
+    // A listener nobody reads through would keep refreshing a store that was just emptied, and
+    // nothing would ever release it.
+    expect(mocks.unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("drops a sweep that answers after the last reader is gone", async () => {
+    const repos = ref([repo([checkout("checkout:a")])]);
+    const sweep = gate();
+    mocks.getGitCheckoutDiffStats.mockImplementation(() =>
+      sweep.promise.then(() => ({ "checkout:a": { additions: 9, deletions: 9 } })),
+    );
+    mocks.getGitDiffStats.mockImplementation(() => sweep.promise.then(() => [countedFile("src/file.ts", 9, 9)]));
+    const held: { stats?: DiffStats } = {};
+    const wrapper = mount(host(repos, ref("checkout:a"), held));
+    await flushPromises();
+    expect(held.stats?.checkoutTotals).toEqual({});
+
+    wrapper.unmount();
+    sweep.release();
+    await flushPromises();
+
+    // Leaving empties the store on purpose, and those numbers are about nobody. Painting them
+    // here would put them on the rows of whichever reader mounts next.
+    expect(held.stats?.checkoutTotals).toEqual({});
+    expect(held.stats?.fileCounts).toEqual({});
+  });
+
+  it("registers and asks again for a reader that arrives after the last one left", async () => {
+    const repos = ref([repo([checkout("checkout:a")])]);
+    const first = mount(host(repos, ref("checkout:a")));
+    await flushPromises();
+    first.unmount();
+    await flushPromises();
+
+    mocks.getGitCheckoutDiffStats.mockClear();
+    mocks.getGitDiffStats.mockClear();
+    const second = mount(host(repos, ref("checkout:a")));
+    await flushPromises();
+
+    // The position the dropped answers left behind is not inherited: this reader asks Git for
+    // itself and listens for itself.
+    expect(vi.mocked(listen)).toHaveBeenCalledTimes(2);
+    expect(mocks.getGitCheckoutDiffStats).toHaveBeenCalledTimes(1);
+    expect(mocks.getGitDiffStats).toHaveBeenCalledWith("checkout:a");
+    expect(second.text()).toBe("a:5|b:0|f:5");
+
+    second.unmount();
+    await flushPromises();
+    // And the subscription this reader registered is the one that gets released.
+    expect(mocks.unlisten).toHaveBeenCalledTimes(2);
   });
 });

@@ -2,17 +2,20 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
-    io::{self, BufRead, BufReader, Read},
-    os::unix::fs::OpenOptionsExt,
+    io::{self, BufRead, BufReader, Read, Write},
+    os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, process::CommandExt},
     path::{Component, Path, PathBuf},
-    process::{Command, Output, Stdio},
+    process::{Child, Command, Output, Stdio},
     sync::{
         atomic::{AtomicBool, Ordering},
-        mpsc, Arc, Mutex,
+        mpsc, Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, Instant},
 };
+
+#[cfg(test)]
+use std::cell::{Cell, RefCell};
 
 use notify::{RecommendedWatcher, RecursiveMode, Watcher};
 use serde::Serialize;
@@ -55,6 +58,63 @@ const MAX_SYNTAX_CONTEXT_BYTES: usize = SMALL_DIFF_BYTES;
 /// them into the machine in the same moment. The point is to overlap the work, not to let the
 /// work starve itself.
 const PARALLEL_READS: usize = 8;
+/// How long a read-only Git process may take before it is stopped.
+///
+/// A read that never finishes is not a slow checkout: it is a process nobody is going to answer. An
+/// `index.lock` another process is holding, a credential helper waiting on a question nobody can
+/// see, `gpg` waiting for a PIN, an LFS filter waiting on a network that is not there. The IPC call
+/// that started it sits on a `spawn_blocking` slot that would not come back, so the deadline is what
+/// keeps the app answering at all. It is longer than any of these commands takes in a repository of
+/// any ordinary size -- a status, a list of changed names, a ref lookup, a merge base -- because the
+/// cost of being wrong in that direction is one slower refresh and the cost of being wrong in the
+/// other is a checkout that never shows its changes again.
+pub(crate) const GIT_READ_TIMEOUT: Duration = Duration::from_secs(30);
+/// How often a running read is asked whether it is done. Short first so a fast read pays almost
+/// nothing for having a deadline, long later so a hung one does not spend the wait asking.
+const GIT_READ_POLL_MIN: Duration = Duration::from_millis(1);
+const GIT_READ_POLL_MAX: Duration = Duration::from_millis(25);
+/// How long Git's own output is collected for after the process has been stopped.
+const GIT_PIPE_DRAIN: Duration = Duration::from_secs(2);
+/// How much of what a stopped Git said travels in the error it leaves behind.
+const GIT_DIAGNOSTIC_LINES: usize = 3;
+const GIT_DIAGNOSTIC_WIDTH: usize = 120;
+/// How much of what a read's Git printed on its standard output is kept.
+///
+/// The largest thing this runner carries is one checkout's change list: `status --porcelain=v2 -z`,
+/// `diff --name-status -z` and `diff --numstat -z` each print on the order of a hundred bytes per
+/// changed file, path included. 16 MiB is therefore about a hundred thousand changed files in one
+/// checkout -- a working tree nobody reads in a sidebar, and half of what `MAX_DIFF_BYTES` already
+/// accepts for the patch of a single file.
+///
+/// The deadline bounds how long a read may take and this bounds how much of it is kept, because
+/// they are different limits: a Git that prints for thirty seconds and a Git that prints thirty
+/// gigabytes both satisfy the first one. What arrives past this is an error rather than what came
+/// first. Every caller here reads what came back as the state of a whole checkout, and the first
+/// sixteen megabytes of a `status` is not a status.
+const GIT_OUTPUT_CAP: usize = 16 * 1024 * 1024;
+/// How much of what Git said about a failure is kept.
+///
+/// A diagnostic travels under `GIT_DIAGNOSTIC_LINES` lines of `GIT_DIAGNOSTIC_WIDTH` characters, so
+/// a mebibyte of one is orders of magnitude more than any error message is long. It is a ceiling
+/// rather than a summary for the reason the summary is not enough on its own: callers read an
+/// empty pipe as an answer of its own -- a ref that is not there says so by printing nothing -- and
+/// half a diagnostic is not an answer.
+const GIT_DIAGNOSTIC_CAP: usize = 1024 * 1024;
+/// How many paths a burst may carry before the batch stops being filtered by path.
+///
+/// The paths are what `check-ignore` is asked about, one call for the whole batch, and a batch that
+/// stays inside this is answered by asking Git rather than by re-reading every checkout. `pnpm
+/// install` and a build write tens of thousands of files and stay inside it; a generator writing
+/// hundreds of thousands does not, and pays a refresh instead -- which is the safe direction,
+/// because a refresh is a few `git` processes and a burst that was never asked about Git's rules is
+/// a checkout whose row describes a change set nobody looked at.
+const WATCH_PATH_BUDGET: usize = 50_000;
+/// How many bytes of those paths, path plus the NUL `check-ignore --stdin` is fed one per path.
+///
+/// Counted in bytes as well as in paths because the copy that is made of the whole batch to hand it
+/// to Git is what the burst costs, and a build writing deep paths costs more per file than one
+/// writing shallow ones.
+const WATCH_PATH_BYTE_BUDGET: usize = 4 * 1024 * 1024;
 pub const MAX_DIFF_PAGE_LINES: usize = 32;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -172,7 +232,7 @@ pub struct GitWatcherManager {
 
 struct RepoWatcher {
     _watcher: RecommendedWatcher,
-    sender: mpsc::Sender<WatchMessage>,
+    queue: WatchQueue,
     failed: Arc<AtomicBool>,
     token: Arc<()>,
     /// The renderer's request generation, echoed by runtime failure events.
@@ -214,13 +274,328 @@ struct WatchUpdate {
     /// any checkout can speak for, so the repository is named and its registration is read again
     /// rather than refreshed.
     worktrees: Vec<String>,
+    /// The checkout files a batch moved, relative to the checkout they landed in, so Git can be
+    /// asked once for the whole batch whether its own rules ignore them.
+    ///
+    /// A set rather than a list because a build writes the same file more than once and the query
+    /// is one that answers per path: the same path twice is one answer, and the batch is merged
+    /// here so a burst that writes a tree a thousand times does not grow a thousand copies of it.
+    paths: BTreeMap<String, BTreeSet<PathBuf>>,
+    /// The checkouts this batch names for something a checkout file cannot explain: their own Git
+    /// directory, or the one every worktree shares. A write there moves an index or a merge base
+    /// whatever the files beside it are, so no path can argue them out of being re-read.
+    pinned: BTreeSet<String>,
 }
 
+/// One checkout's file activity, with the paths the batch moved inside it.
+///
+/// The paths are what let a reader tell whether the write is one it depends on. Activity on its own
+/// says that something landed in this checkout, and a document whose own bytes came back unchanged
+/// cannot answer from that whether one of the figures it draws is the file that moved.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct FileActivity {
+    pub checkout_id: String,
+    /// Relative to the checkout and `/`-joined, because that is the form a relative reference in a
+    /// document resolves to.
+    ///
+    /// Empty says the batch was too large to carry what it moved (`PathBudget` lets the paths go
+    /// rather than hold an unbounded payload), so it reads as "something moved here and this cannot
+    /// say what", never as "nothing moved".
+    pub paths: Vec<String>,
+}
+
+/// The activity signal with the paths each checkout's batch named, in the order the batch did.
+fn file_activity(update: &WatchUpdate) -> Vec<FileActivity> {
+    update
+        .activity
+        .iter()
+        .map(|checkout_id| FileActivity {
+            checkout_id: checkout_id.clone(),
+            paths: update
+                .paths
+                .get(checkout_id)
+                .map(|moved| {
+                    moved
+                        .iter()
+                        .filter_map(|path| checkout_relative(path))
+                        .collect()
+                })
+                .unwrap_or_default(),
+        })
+        .collect()
+}
+
+/// A watched path as a relative reference in a document spells it.
+///
+/// `components()` rather than `to_str`: a path that is not UTF-8 is one a Markdown reference
+/// cannot name either, and the lossy form simply fails to match the reference that would.
+fn checkout_relative(path: &Path) -> Option<String> {
+    let relative = path
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy())
+        .collect::<Vec<_>>()
+        .join("/");
+    (!relative.is_empty()).then_some(relative)
+}
+
+/// What a burst has been told and what it is still carrying toward the answer.
+///
+/// The budget is state of its own rather than two numbers written into `WatchUpdate` because it
+/// spans the merges between two wakeups: it counts what the slot is carrying, so it is asked after
+/// every path that arrives instead of walking the whole map every time. No `Default` on purpose:
+/// a slot with no budget in it spends it on the first path, and the one place a slot is made is
+/// `holding`, which brings the budget a watcher runs on.
 #[derive(Debug, PartialEq, Eq)]
-enum WatchMessage {
-    Changed(WatchUpdate),
+struct WatchSlot {
+    update: WatchUpdate,
+    budget: PathBudget,
+}
+
+impl WatchSlot {
+    fn holding(update: WatchUpdate) -> Self {
+        Self {
+            update,
+            budget: PathBudget::watching(),
+        }
+    }
+
+    fn merge_update(&mut self, update: WatchUpdate) {
+        let WatchUpdate {
+            status,
+            activity,
+            worktrees,
+            paths,
+            pinned,
+        } = update;
+        for checkout_id in status {
+            if !self.update.status.contains(&checkout_id) {
+                self.update.status.push(checkout_id);
+            }
+        }
+        for checkout_id in activity {
+            if !self.update.activity.contains(&checkout_id) {
+                self.update.activity.push(checkout_id);
+            }
+        }
+        for repo_id in worktrees {
+            if !self.update.worktrees.contains(&repo_id) {
+                self.update.worktrees.push(repo_id);
+            }
+        }
+        self.update.pinned.extend(pinned);
+        self.budget.merge_paths(&mut self.update, paths);
+    }
+
+    /// The batch answered so far, and a whole budget behind it.
+    ///
+    /// Both halves at once, because taking the answer while leaving a spent budget spent is how a
+    /// watcher ends up refreshing every checkout forever after one enormous build: the burst that
+    /// spent it is over, and the next one starts from nothing.
+    fn take(&mut self) -> WatchUpdate {
+        std::mem::replace(self, Self::holding(WatchUpdate::default())).update
+    }
+}
+
+/// How much of a burst's payload is carried before the batch stops being filtered by path.
+///
+/// A path count and a byte budget rather than one of them, because a burst of shallow paths and a
+/// burst of deep ones cost very different amounts to hold and to hand to Git, and either one can be
+/// the one that grows without bound. Counted as the paths arrive rather than by walking what is
+/// already carried, because the budget is asked after every path of every event, and a walk would
+/// make a large burst quadratic in itself.
+///
+/// `Default` is a budget of nothing, which is what a test asks for when it sets the two numbers it
+/// cares about; a watcher runs on `watching`.
+#[derive(Debug, Default, PartialEq, Eq)]
+struct PathBudget {
+    /// How many paths this burst may carry, and how many bytes of them.
+    max_paths: usize,
+    max_bytes: usize,
+    /// How many it is carrying now, and how many bytes of those.
+    paths: usize,
+    bytes: usize,
+    /// Set once the burst has spent the budget. Sticky until the batch is taken, because the batch
+    /// has already decided to refresh every checkout it names: a later path is not carried, but it
+    /// is still a change to a checkout that is about to be re-read.
+    spent: bool,
+}
+
+impl PathBudget {
+    /// The budget a watcher runs on, in the units `WATCH_PATH_BUDGET` is derived in.
+    fn watching() -> Self {
+        Self {
+            max_paths: WATCH_PATH_BUDGET,
+            max_bytes: WATCH_PATH_BYTE_BUDGET,
+            ..Self::default()
+        }
+    }
+
+    /// Carries one event's paths into the batch, or stops carrying them.
+    fn merge_paths(
+        &mut self,
+        merged: &mut WatchUpdate,
+        paths: BTreeMap<String, BTreeSet<PathBuf>>,
+    ) {
+        // Named before they are consumed: every checkout this event speaks for is one the answer has
+        // to mention, whether or not one of its paths is carried.
+        let named: Vec<String> = paths.keys().cloned().collect();
+        // Merged into ordered sets rather than pushed onto a list: a burst writes the same file more
+        // than once, and the answer this feeds is per path, so a list would hold a thousand copies of
+        // one path and ask Git about it a thousand times.
+        for (checkout_id, moved) in paths {
+            if self.spent {
+                break;
+            }
+            let carried = merged.paths.entry(checkout_id).or_default();
+            for path in moved {
+                // The NUL goes into the answer too: it is what `check-ignore --stdin` is fed after
+                // every path, so a path costs that much whether or not this is where it is counted.
+                let cost = path.as_os_str().as_bytes().len() + 1;
+                if self.paths >= self.max_paths || self.bytes + cost > self.max_bytes {
+                    self.spent = true;
+                    break;
+                }
+                if carried.insert(path) {
+                    self.paths += 1;
+                    self.bytes += cost;
+                }
+            }
+        }
+        if self.spent {
+            self.spend(merged, &named);
+        }
+    }
+
+    /// What spending the budget costs: the paths are let go and every checkout the batch names is
+    /// pinned for a refresh, and its activity still stands.
+    ///
+    /// A full refresh rather than a guess. `check-ignore` is what turns a burst into "nothing in
+    /// here matters", and past this the batch is too big to ask about: dropping the paths instead
+    /// would leave a build that wrote a hundred thousand files looking like a checkout nobody
+    /// touched, which is a stale row rather than a slow one. `pinned` is the existing way of saying
+    /// a checkout is re-read whatever its own files look like, and it is what keeps an emptied
+    /// `paths` from being read as "every one of these was ignored".
+    fn spend(&mut self, merged: &mut WatchUpdate, named: &[String]) {
+        let affected: BTreeSet<String> = merged.paths.keys().chain(named).cloned().collect();
+        merged.paths.clear();
+        self.paths = 0;
+        self.bytes = 0;
+        for checkout_id in affected {
+            if !merged.status.contains(&checkout_id) {
+                merged.status.push(checkout_id.clone());
+            }
+            merged.pinned.insert(checkout_id);
+        }
+    }
+}
+
+/// What travels the queue: a wakeup, a failure, or the end.
+///
+/// A change is not one of these. It is merged into the slot behind the wakeup, so the worker never
+/// has to read a queue of thousands to learn what a burst moved.
+#[derive(Debug, PartialEq, Eq)]
+enum WatchSignal {
+    Wake,
     Failed(String),
     Stop,
+}
+
+/// What the callback side of a watcher sends: one wakeup of capacity, and the changes that came
+/// with it.
+///
+/// The queue carries the wakeup rather than the change. A build writes thousands of files and a
+/// checkout writes an index and a ref, and the debounce answers the whole burst as one refresh, so
+/// one message per event is one message per file held in memory and merged afterwards for an answer
+/// nobody reads in between. Merging into the slot first costs one message for a burst of any size,
+/// and the slot is emptied as soon as the worker looks at it. `merge_update` does the merging, so a
+/// burst still names every checkout it moved -- a checkout named twice is still one row, and a
+/// worktree that joined is still named -- which is the same answer each event used to give on its
+/// own.
+///
+/// `Stop` and `Failed` are not changes and do not queue behind one: they are sent, which waits for
+/// the worker to take them, because a watcher that cannot end holds its thread and its watch
+/// descriptors for as long as the app runs, and a watcher whose own death went unreported keeps
+/// looking alive to whoever asks after it. A wakeup that will not fit is not sent at all: the one
+/// already in the queue is the promise that the slot will be read, and the change that failed to
+/// send is in that slot.
+#[derive(Clone)]
+struct WatchQueue {
+    merged: Arc<Mutex<WatchSlot>>,
+    wake: mpsc::SyncSender<WatchSignal>,
+}
+
+impl WatchQueue {
+    fn new() -> (Self, WatchInbox) {
+        let (wake, receiver) = mpsc::sync_channel(1);
+        let merged = Arc::new(Mutex::new(WatchSlot::holding(WatchUpdate::default())));
+        (
+            Self {
+                merged: merged.clone(),
+                wake,
+            },
+            WatchInbox { receiver, merged },
+        )
+    }
+
+    fn changed(&self, update: WatchUpdate) {
+        if let Ok(mut merged) = self.merged.lock() {
+            merged.merge_update(update);
+        }
+        // Merged before the wakeup is offered, so a wakeup in the queue always has this change
+        // waiting behind it. Full says a wakeup is already there to read the slot, which is why
+        // dropping this one loses nothing -- and why the callback is never left waiting on the
+        // worker it is feeding.
+        let _ = self.wake.try_send(WatchSignal::Wake);
+    }
+
+    /// Offered, never queued: a watcher whose watch stream died has to be heard about even when the
+    /// queue is full, and a worker that is already gone is the one case where nobody is left to
+    /// hear it. `false` says the failure is being logged instead of answered.
+    fn failed(&self, message: String) -> bool {
+        self.wake.send(WatchSignal::Failed(message)).is_ok()
+    }
+
+    fn stop(&self) {
+        let _ = self.wake.send(WatchSignal::Stop);
+    }
+}
+
+/// The worker thread's end of the queue, and the only place the merged slot is read.
+struct WatchInbox {
+    receiver: mpsc::Receiver<WatchSignal>,
+    merged: Arc<Mutex<WatchSlot>>,
+}
+
+impl WatchInbox {
+    fn recv(&self) -> Result<WatchWakeup, mpsc::RecvError> {
+        self.woken(self.receiver.recv())
+    }
+
+    fn recv_timeout(&self, timeout: Duration) -> Result<WatchWakeup, mpsc::RecvTimeoutError> {
+        self.woken(self.receiver.recv_timeout(timeout))
+    }
+
+    #[cfg(test)]
+    fn try_recv(&self) -> Result<WatchWakeup, mpsc::TryRecvError> {
+        self.woken(self.receiver.try_recv())
+    }
+
+    /// A wakeup is answered as what woke it: the changes that merged while it was on its way.
+    fn woken<T>(&self, signal: Result<WatchSignal, T>) -> Result<WatchWakeup, T> {
+        match signal {
+            Ok(WatchSignal::Wake) => Ok(WatchWakeup::Changed(self.take_merged())),
+            Ok(WatchSignal::Failed(error)) => Ok(WatchWakeup::Failed(error)),
+            Ok(WatchSignal::Stop) => Ok(WatchWakeup::Stop),
+            Err(error) => Err(error),
+        }
+    }
+
+    fn take_merged(&self) -> WatchUpdate {
+        match self.merged.lock() {
+            Ok(mut merged) => merged.take(),
+            Err(_) => WatchUpdate::default(),
+        }
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -286,7 +661,179 @@ struct CachedGitSnapshot {
 struct GitSnapshotCache {
     entries: Mutex<BTreeMap<String, CachedGitSnapshot>>,
     revisions: Mutex<BTreeMap<String, u64>>,
+    /// The file lists being read right now. A caller that arrives while one is running waits for
+    /// its answer instead of walking the same working tree a second time.
+    reading_snapshots: Mutex<Readings<Snapshot>>,
+    /// The line counts being read right now, for the same reason.
+    reading_counts: Mutex<Readings<GitCounts>>,
 }
+
+/// What a read depends on: the checkout, the base ref it is counted against, and the revision it
+/// started at.
+///
+/// All three are in the key because a running read cannot answer for a different one of them. A
+/// change that lands mid-read moves the revision, and a caller arriving after it must read the tree
+/// again rather than be handed the answer the running read is about to publish -- that answer
+/// describes a working tree that has already moved. The base ref is the same argument one step back:
+/// a read against one merge base is not the answer for another. Two reads instead of one is the
+/// safe direction, and it costs processes rather than correctness.
+type ReadKey = (String, Option<String>, Option<u64>);
+
+/// The reads running right now, by what they are reading and what they depend on.
+type Readings<T> = BTreeMap<ReadKey, Arc<ReadingInFlight<T>>>;
+
+/// One read in flight, and the answer every caller that arrived while it ran is waiting for.
+///
+/// The file list and its line counts are read separately because they are read for different
+/// reasons, and they are shared the same way: the first caller publishes itself, lets the lock go
+/// and does the work, and the rest find that read and wait for its answer instead of starting the
+/// same `git` processes again. Nothing happens under the lock but the two lookups, and the
+/// processes never happen under it at all, so a read that takes its whole deadline does not keep
+/// another reader of the cache waiting.
+struct ReadingInFlight<T> {
+    outcome: Mutex<Option<Result<T, IpcError>>>,
+    published: Condvar,
+}
+
+impl<T> ReadingInFlight<T> {
+    fn new() -> Arc<Self> {
+        Arc::new(Self {
+            outcome: Mutex::new(None),
+            published: Condvar::new(),
+        })
+    }
+
+    /// Hands the answer to the waiters. Only the first publication is the answer: this read is over
+    /// once, and whoever is still waiting is waiting for what it decided.
+    fn publish(&self, outcome: Result<T, IpcError>) {
+        if let Ok(mut published) = self.outcome.lock() {
+            if published.is_none() {
+                *published = Some(outcome);
+            }
+        }
+        self.published.notify_all();
+    }
+}
+
+impl<T: Clone> ReadingInFlight<T> {
+    /// The answer of the read that is already running, shared rather than repeated.
+    ///
+    /// `None` says the read has not answered inside the wait and this caller stopped waiting for
+    /// it, which is not an error: it reads the tree for itself, which costs processes and is never
+    /// wrong. A wait with no bound at all is a caller that never returns, and an error here would
+    /// put a Git failure on a row that only had to wait.
+    fn wait(&self) -> Option<Result<T, IpcError>> {
+        let deadline = Instant::now() + GIT_READ_WAIT;
+        let mut published = self.outcome.lock().ok()?;
+        loop {
+            if let Some(outcome) = published.as_ref() {
+                return Some(outcome.clone());
+            }
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if remaining.is_zero() {
+                return None;
+            }
+            let (next, _) = self.published.wait_timeout(published, remaining).ok()?;
+            published = next;
+        }
+    }
+}
+
+/// Who does a read: the caller that got there first, or one that waits for the read already
+/// answering for it.
+enum ReadTurn<T> {
+    Reading(Arc<ReadingInFlight<T>>),
+    Waiting(Arc<ReadingInFlight<T>>),
+}
+
+/// Reads one thing for one checkout once, shared with whoever asked for it while it was running.
+///
+/// `None` from `begin_read` says the lock could not be taken, and the caller then reads on its own:
+/// a lock this poisoned cannot be shared, but the read itself still has an answer to give.
+fn begin_read<T>(readings: &Mutex<Readings<T>>, key: &ReadKey) -> Option<ReadTurn<T>> {
+    let mut running = readings.lock().ok()?;
+    if let Some(reading) = running.get(key) {
+        return Some(ReadTurn::Waiting(Arc::clone(reading)));
+    }
+    let reading = ReadingInFlight::new();
+    running.insert(key.clone(), Arc::clone(&reading));
+    Some(ReadTurn::Reading(reading))
+}
+
+/// Takes a read out of the map, if it is still the one running there.
+///
+/// By pointer, because a read that a checkout being forgotten outlived is not the read the next
+/// caller is waiting for: removing the newer one would leave it waiting for an answer nobody holds.
+/// The answer is published before this, so a caller arriving in between waits for a read that has
+/// already finished rather than starting a second one.
+fn finish_read<T>(
+    readings: &Mutex<Readings<T>>,
+    key: &ReadKey,
+    reading: &Arc<ReadingInFlight<T>>,
+    outcome: Result<T, IpcError>,
+) {
+    reading.publish(outcome);
+    if let Ok(mut running) = readings.lock() {
+        if running
+            .get(key)
+            .is_some_and(|current| Arc::ptr_eq(current, reading))
+        {
+            running.remove(key);
+        }
+    }
+}
+
+/// Runs one read for one checkout and revision, or waits for the one already running for it.
+fn shared_read<T: Clone>(
+    readings: &Mutex<Readings<T>>,
+    key: &ReadKey,
+    read: impl FnOnce() -> Result<T, IpcError>,
+) -> Result<T, IpcError> {
+    if key.2.is_none() {
+        return read();
+    }
+    match begin_read(readings, key) {
+        Some(ReadTurn::Waiting(reading)) => reading.wait().unwrap_or_else(read),
+        Some(ReadTurn::Reading(reading)) => {
+            let outcome = read();
+            finish_read(readings, key, &reading, outcome.clone());
+            outcome
+        }
+        None => read(),
+    }
+}
+
+/// Counts the Git processes the reads below start, per checkout root, so a test can tell one read
+/// from N reads of the same working tree rather than inferring it from timing.
+///
+/// Test-only because it is the only thing here that exists to be observed: the reads themselves
+/// fork `git` into the machine, and a duplicate read is invisible in the answer -- it is the same
+/// answer, computed twice -- so the process count is the only honest witness.
+#[cfg(test)]
+static GIT_READS: Mutex<BTreeMap<PathBuf, usize>> = Mutex::new(BTreeMap::new());
+
+#[cfg(test)]
+fn count_git_read(root: &Path) {
+    if let Ok(mut reads) = GIT_READS.lock() {
+        *reads.entry(root.to_path_buf()).or_default() += 1;
+    }
+}
+
+#[cfg(test)]
+fn git_reads(root: &Path) -> usize {
+    GIT_READS
+        .lock()
+        .map(|reads| reads.get(root).copied().unwrap_or(0))
+        .unwrap_or(0)
+}
+
+/// How long a caller waits for a read of one checkout that is already running.
+///
+/// A read is a handful of `git` processes, each under `GIT_READ_TIMEOUT`, so this is that read's own
+/// worst case rather than a budget invented for the waiter. Past it the waiter reads the tree for
+/// itself: that costs processes and is never wrong, while an unanswered IPC call is a row that
+/// stops updating.
+const GIT_READ_WAIT: Duration = Duration::from_secs(180);
 
 impl GitWatcherManager {
     pub fn watch<R: tauri::Runtime>(
@@ -313,14 +860,14 @@ impl GitWatcherManager {
             return Ok(());
         }
 
-        let (sender, receiver) = mpsc::channel();
-        let event_sender = sender.clone();
+        let (queue, inbox) = WatchQueue::new();
+        let event_queue = queue.clone();
         let callback_plan = plan.clone();
         let failed = Arc::new(AtomicBool::new(false));
         let callback_failed = failed.clone();
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
-                forward_watch_result(result, &callback_plan, &event_sender, &callback_failed);
+                forward_watch_result(result, &callback_plan, &event_queue, &callback_failed);
             })
             .map_err(|error| {
                 IpcError::new(
@@ -355,8 +902,14 @@ impl GitWatcherManager {
             .name("marvis-git-watch".into())
             .spawn(move || {
                 loop {
-                    match receive_debounced_change(&receiver, WATCH_DEBOUNCE, WATCH_MAX_BATCH) {
+                    match receive_debounced_change(&inbox, WATCH_DEBOUNCE, WATCH_MAX_BATCH) {
                         WatchWakeup::Changed(update) => {
+                            // Git is asked what the batch ignored before anything is invalidated,
+                            // so one query answers for the whole burst rather than one per file,
+                            // and the checkouts whose every moved path is ignored keep the
+                            // snapshot they have. The activity still goes out either way: the file
+                            // explorer has to show what was written.
+                            let update = without_ignored_only(&worker_plan, update);
                             // Before the event, so a refresh it triggers never reads what the same
                             // change just invalidated.
                             worker_snapshots.mark_stale(&update.status);
@@ -364,7 +917,7 @@ impl GitWatcherManager {
                                 let _ = app.emit(STATUS_CHANGED_EVENT, &update.status);
                             }
                             if !update.activity.is_empty() {
-                                let _ = app.emit(FILE_ACTIVITY_EVENT, &update.activity);
+                                let _ = app.emit(FILE_ACTIVITY_EVENT, &file_activity(&update));
                             }
                             if !update.worktrees.is_empty() {
                                 // The rows themselves are not a status refresh, so the repository is named
@@ -414,7 +967,7 @@ impl GitWatcherManager {
             repo_id,
             RepoWatcher {
                 _watcher: watcher,
-                sender,
+                queue,
                 failed: worker_failed,
                 token: worker_token,
                 registration_id,
@@ -426,11 +979,23 @@ impl GitWatcherManager {
 
     pub fn unwatch(&self, repo_id: &str, checkout_ids: &[String]) {
         let mut checkout_ids: BTreeSet<_> = checkout_ids.iter().cloned().collect();
-        if let Ok(mut watchers) = self.watchers.lock() {
-            if let Some(RepoWatcher { sender, plan, .. }) = watchers.remove(repo_id) {
-                let _ = sender.send(WatchMessage::Stop);
-                checkout_ids.extend(plan.requested);
+        let retired = if let Ok(mut watchers) = self.watchers.lock() {
+            match watchers.remove(repo_id) {
+                Some(RepoWatcher { queue, plan, .. }) => {
+                    checkout_ids.extend(plan.requested);
+                    Some(queue)
+                }
+                None => None,
             }
+        } else {
+            None
+        };
+        // Sent with the map already unlocked, because `Stop` now waits for the worker to take it and
+        // that worker locks this same map to take itself out when it fails. A send from inside the
+        // lock would let those two wait for each other: the worker behind a `Failed` it already
+        // answered, the retired watcher behind a `Stop` nobody could read.
+        if let Some(queue) = retired {
+            queue.stop();
         }
         self.snapshots
             .forget_many(&checkout_ids.into_iter().collect::<Vec<_>>());
@@ -477,6 +1042,8 @@ fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<Wat
     let mut status: BTreeSet<String> = BTreeSet::new();
     let mut activity: BTreeSet<String> = BTreeSet::new();
     let mut worktrees: BTreeSet<String> = BTreeSet::new();
+    let mut paths: BTreeMap<String, BTreeSet<PathBuf>> = BTreeMap::new();
+    let mut pinned: BTreeSet<String> = BTreeSet::new();
     let mut repo_wide = false;
     for path in &event.paths {
         // Git writes a ref, the index and the configuration by creating `<name>.lock`, filling it
@@ -500,6 +1067,7 @@ fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<Wat
         }
         if let Some(checkout_id) = longest_match(&plan.git_dirs, path) {
             status.insert(checkout_id.clone());
+            pinned.insert(checkout_id);
             continue;
         }
         if let Some(common) = plan.common_dir.as_deref() {
@@ -526,18 +1094,130 @@ fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<Wat
             status.insert(checkout_id.clone());
             if is_checkout_file_activity(path, root) {
                 activity.insert(checkout_id.clone());
+                // Relative to the checkout, because that is the form `check-ignore` takes and the
+                // form every rule in it is written against.
+                if let Ok(relative) = path.strip_prefix(root) {
+                    paths
+                        .entry(checkout_id.clone())
+                        .or_default()
+                        .insert(relative.to_path_buf());
+                }
             }
         }
     }
     if repo_wide {
         status.extend(plan.all.iter().cloned());
+        pinned.extend(plan.all.iter().cloned());
     }
     let nothing_moved = status.is_empty() && activity.is_empty() && worktrees.is_empty();
     (!nothing_moved).then(|| WatchUpdate {
         status: status.into_iter().collect(),
         activity: activity.into_iter().collect(),
         worktrees: worktrees.into_iter().collect(),
+        paths,
+        pinned,
     })
+}
+
+/// Whether a checkout's snapshot is still current after a batch of changes, as far as this batch
+/// can tell.
+///
+/// Everything the batch ignored is only worth asking about once: a `pnpm install` and a build write
+/// thousands of files, and re-reading the Git state to discover that none of them are part of the
+/// change set is several `git` processes per checkout for an answer that is always the same. So the
+/// paths of the batch are handed to Git, which is the authority on what it ignores -- the user's own
+/// `.gitignore`, `.git/info/exclude` and `core.excludesFile`, plus a nested repository or a file a
+/// negative rule brings back inside an ignored directory, none of which a list of directory names
+/// here could account for.
+///
+/// A checkout is held back only when *every* path the batch moved inside it is one Git ignores and
+/// nothing else in the batch spoke for it: one path that is tracked, or any write in a Git
+/// directory, and the checkout is re-read. The activity signal is not held back with it, because
+/// the file explorer has to show what was just written whether Git tracks it or not.
+///
+/// `None` from Git is read as "not ignored", so a question it could not answer invalidates. That
+/// is the only safe direction: a stale row is a row describing a change set that no longer exists,
+/// while a re-read that was not needed costs a few processes.
+fn without_ignored_only(plan: &RepoWatchPlan, update: WatchUpdate) -> WatchUpdate {
+    let WatchUpdate {
+        mut status,
+        activity,
+        worktrees,
+        paths,
+        pinned,
+    } = update;
+    if paths.is_empty() {
+        return WatchUpdate {
+            status,
+            activity,
+            worktrees,
+            paths,
+            pinned,
+        };
+    }
+    let mut ignored_only: BTreeSet<String> = BTreeSet::new();
+    for (checkout_id, moved) in &paths {
+        // A checkout the batch speaks for through its own Git directory, or through the one every
+        // worktree shares, is re-read whatever its files are: an index or a merge base moved.
+        if pinned.contains(checkout_id) || !status.contains(checkout_id) {
+            continue;
+        }
+        let Some(root) = checkout_root(plan, checkout_id) else {
+            continue;
+        };
+        let paths: Vec<_> = moved.iter().cloned().collect();
+        if ignored_paths(root, &paths) == Some(paths.len()) {
+            ignored_only.insert(checkout_id.clone());
+        }
+    }
+    if ignored_only.is_empty() {
+        return WatchUpdate {
+            status,
+            activity,
+            worktrees,
+            paths,
+            pinned,
+        };
+    }
+    status.retain(|checkout_id| !ignored_only.contains(checkout_id));
+    WatchUpdate {
+        status,
+        activity,
+        worktrees,
+        paths,
+        pinned,
+    }
+}
+
+/// The directory a checkout is watched in, which is the directory its paths are relative to.
+fn checkout_root<'a>(plan: &'a RepoWatchPlan, checkout_id: &str) -> Option<&'a Path> {
+    plan.roots
+        .iter()
+        .find(|(_, id)| id.as_str() == checkout_id)
+        .map(|(root, _)| root.as_path())
+}
+
+/// How many of a checkout's paths Git says it ignores, or `None` when it could not be asked.
+///
+/// The count rather than the set because the paths were handed to Git relative to the checkout and
+/// come back the way they went in; a path Git does not name, or does not name in the form it went
+/// in, is a path this cannot claim is ignored.
+///
+/// Exit 1 is Git's own answer for "none of these are ignored", not a failure, so it counts as zero
+/// rather than as the question having gone unanswered. Anything else -- a Git that is not there, a
+/// deadline, a fatal error over a path -- is `None`, which invalidates.
+fn ignored_paths(root: &Path, paths: &[PathBuf]) -> Option<usize> {
+    let output = run_git_on_paths(root, ["check-ignore", "--stdin", "-z"], paths).ok()?;
+    if !matches!(output.status.code(), Some(0) | Some(1)) {
+        return None;
+    }
+    Some(
+        output
+            .stdout
+            .split(|byte| *byte == 0)
+            .filter(|record| !record.is_empty())
+            .count(),
+    )
 }
 
 /// Whether a change in the shared Git directory is the list of worktrees moving.
@@ -732,6 +1412,15 @@ impl GitSnapshotCache {
                 entries.remove(checkout_id);
             }
         }
+        // A read of a checkout nobody watches any more is not the read the next caller of that id
+        // is asking about, and leaving it in the map would make them wait for it. The read itself is
+        // left alone: it is another thread's work, and it still answers the callers waiting for it.
+        if let Ok(mut reading_snapshots) = self.reading_snapshots.lock() {
+            reading_snapshots.retain(|(checkout_id, _, _), _| !checkout_ids.contains(checkout_id));
+        }
+        if let Ok(mut reading_counts) = self.reading_counts.lock() {
+            reading_counts.retain(|(checkout_id, _, _), _| !checkout_ids.contains(checkout_id));
+        }
     }
 }
 
@@ -756,16 +1445,19 @@ fn invalidate_replaced_plan(
 ///
 /// A burst is one answer, so the checkouts are merged as they arrive: a save that rewrites a
 /// file and its lock, or a commit that moves a ref and an index, are two filesystem events
-/// describing one change, and answering them apart would refresh the same rows twice.
+/// describing one change, and answering them apart would refresh the same rows twice. The events
+/// that made the burst were merged into one slot before they were announced (`WatchQueue`), so
+/// what arrives per burst here is the answer and what arrives after it is only the tail of a burst
+/// that began while this answer was already being built.
 fn receive_debounced_change(
-    receiver: &mpsc::Receiver<WatchMessage>,
+    inbox: &WatchInbox,
     debounce: Duration,
     max_batch: Duration,
 ) -> WatchWakeup {
-    let merged = match receiver.recv() {
-        Ok(WatchMessage::Changed(update)) => update,
-        Ok(WatchMessage::Failed(error)) => return WatchWakeup::Failed(error),
-        Ok(WatchMessage::Stop) | Err(_) => return WatchWakeup::Stop,
+    let merged = match inbox.recv() {
+        Ok(WatchWakeup::Changed(update)) => WatchSlot::holding(update),
+        Ok(WatchWakeup::Failed(error)) => return WatchWakeup::Failed(error),
+        Ok(WatchWakeup::Stop) | Err(_) => return WatchWakeup::Stop,
     };
     let started = Instant::now();
     receive_debounced_updates(
@@ -773,47 +1465,29 @@ fn receive_debounced_change(
         debounce,
         max_batch,
         || started.elapsed(),
-        |timeout| receiver.recv_timeout(timeout),
+        |timeout| inbox.recv_timeout(timeout),
     )
 }
 
 fn receive_debounced_updates(
-    mut merged: WatchUpdate,
+    mut merged: WatchSlot,
     debounce: Duration,
     max_batch: Duration,
     mut elapsed: impl FnMut() -> Duration,
-    mut receive: impl FnMut(Duration) -> Result<WatchMessage, mpsc::RecvTimeoutError>,
+    mut receive: impl FnMut(Duration) -> Result<WatchWakeup, mpsc::RecvTimeoutError>,
 ) -> WatchWakeup {
     loop {
         let remaining = max_batch.saturating_sub(elapsed());
         if remaining.is_zero() {
-            return WatchWakeup::Changed(merged);
+            return WatchWakeup::Changed(merged.take());
         }
         match receive(debounce.min(remaining)) {
-            Ok(WatchMessage::Changed(update)) => merge_update(&mut merged, update),
-            Ok(WatchMessage::Failed(error)) => return WatchWakeup::Failed(error),
-            Ok(WatchMessage::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
+            Ok(WatchWakeup::Changed(update)) => merged.merge_update(update),
+            Ok(WatchWakeup::Failed(error)) => return WatchWakeup::Failed(error),
+            Ok(WatchWakeup::Stop) | Err(mpsc::RecvTimeoutError::Disconnected) => {
                 return WatchWakeup::Stop;
             }
-            Err(mpsc::RecvTimeoutError::Timeout) => return WatchWakeup::Changed(merged),
-        }
-    }
-}
-
-fn merge_update(merged: &mut WatchUpdate, update: WatchUpdate) {
-    for checkout_id in update.status {
-        if !merged.status.contains(&checkout_id) {
-            merged.status.push(checkout_id);
-        }
-    }
-    for checkout_id in update.activity {
-        if !merged.activity.contains(&checkout_id) {
-            merged.activity.push(checkout_id);
-        }
-    }
-    for repo_id in update.worktrees {
-        if !merged.worktrees.contains(&repo_id) {
-            merged.worktrees.push(repo_id);
+            Err(mpsc::RecvTimeoutError::Timeout) => return WatchWakeup::Changed(merged.take()),
         }
     }
 }
@@ -848,20 +1522,21 @@ fn invalidate_failed_watch(snapshots: &GitSnapshotCache, plan: &RepoWatchPlan) -
 fn forward_watch_result(
     result: notify::Result<notify::Event>,
     plan: &RepoWatchPlan,
-    sender: &mpsc::Sender<WatchMessage>,
+    queue: &WatchQueue,
     failed: &AtomicBool,
 ) {
     match result {
         Ok(event) if !failed.load(Ordering::Acquire) => {
             if let Some(update) = affected_checkouts(plan, &event) {
-                // The channel only has to wake the worker; which checkouts moved rides along with
-                // it, and the worker merges a burst into one answer.
-                let _ = sender.send(WatchMessage::Changed(update));
+                // The queue only has to wake the worker; which checkouts moved is merged into the
+                // one slot behind that wakeup, and the worker merges the rest of a burst into one
+                // answer.
+                queue.changed(update);
             }
         }
         Err(error) if !failed.swap(true, Ordering::AcqRel) => {
             let message = error.to_string();
-            if sender.send(WatchMessage::Failed(message.clone())).is_err() {
+            if !queue.failed(message.clone()) {
                 log::error!(
                     "Git watcher for repository {} failed: {message}",
                     plan.repo_id
@@ -998,25 +1673,38 @@ fn held_state(context: &GitContext, watchers: &GitWatcherManager) -> Option<Cach
 
 /// Reads the checkout and remembers it, so the next question about it is a lookup rather than
 /// another walk of the same working tree.
+///
+/// The sidebar and the Changes tab ask about the same checkout at the same time, and each read is a
+/// burst of `git` processes over the same working tree, so a caller that arrives while the read is
+/// running waits for that answer rather than asking Git the same questions twice. The revision is
+/// taken before the read starts, which is what keeps a refresh that a change overtook from writing
+/// its answer back over the newer one.
 fn snapshot_of(context: &GitContext, watchers: &GitWatcherManager) -> Result<Snapshot, IpcError> {
     let revision = watchers.snapshots.revision(&context.checkout.id);
     let default_branch = context.repo.default_branch.clone();
     if let Some(held) = held_state(context, watchers) {
         return Ok(held.snapshot);
     }
-    let read = snapshot(context)?;
-    watchers.store_state(
+    let read_key = (
         context.checkout.id.clone(),
-        CachedGitSnapshot {
-            default_branch,
-            revision: 0,
-            stale: false,
-            snapshot: read.clone(),
-            counts: None,
-        },
+        default_branch.clone(),
         revision,
     );
-    Ok(read)
+    shared_read(&watchers.snapshots.reading_snapshots, &read_key, || {
+        let read = snapshot(context)?;
+        watchers.store_state(
+            context.checkout.id.clone(),
+            CachedGitSnapshot {
+                default_branch,
+                revision: 0,
+                stale: false,
+                snapshot: read.clone(),
+                counts: None,
+            },
+            revision,
+        );
+        Ok(read)
+    })
 }
 
 /// The line counts, from the same snapshot the file list is served from, so a number and the
@@ -1024,28 +1712,36 @@ fn snapshot_of(context: &GitContext, watchers: &GitWatcherManager) -> Result<Sna
 fn counts_of(context: &GitContext, watchers: &GitWatcherManager) -> Result<GitCounts, IpcError> {
     let revision = watchers.snapshots.revision(&context.checkout.id);
     let default_branch = context.repo.default_branch.clone();
-    let held = held_state(context, watchers);
-    if let Some(counts) = held.as_ref().and_then(|held| held.counts.clone()) {
+    if let Some(counts) = held_state(context, watchers).and_then(|held| held.counts) {
         return Ok(counts);
     }
-    // The file list is the expensive part and it is already held; only the lines are missing.
-    let read = match &held {
-        Some(held) => held.snapshot.clone(),
-        None => snapshot(context)?,
-    };
-    let counts = counted_files(context, &read)?;
-    watchers.store_state(
+    let read_key = (
         context.checkout.id.clone(),
-        CachedGitSnapshot {
-            default_branch,
-            revision: 0,
-            stale: false,
-            snapshot: read,
-            counts: Some(counts.clone()),
-        },
+        default_branch.clone(),
         revision,
     );
-    Ok(counts)
+    shared_read(&watchers.snapshots.reading_counts, &read_key, || {
+        // The file list is the expensive part and it is held; only the lines are missing. When
+        // it is not held either, this is the same read `snapshot_of` shares, so two callers
+        // counting one checkout are counting one change set rather than one each.
+        let read = match held_state(context, watchers) {
+            Some(held) => held.snapshot,
+            None => snapshot_of(context, watchers)?,
+        };
+        let counts = counted_files(context, &read)?;
+        watchers.store_state(
+            context.checkout.id.clone(),
+            CachedGitSnapshot {
+                default_branch,
+                revision: 0,
+                stale: false,
+                snapshot: read,
+                counts: Some(counts.clone()),
+            },
+            revision,
+        );
+        Ok(counts)
+    })
 }
 
 fn workspace_repos(database: &Database) -> Result<Vec<Repo>, IpcError> {
@@ -1340,29 +2036,187 @@ fn worktree_content(path: &Path) -> Option<String> {
 /// prints: a blob is the size of a file, and this one is read to color a diff rather than to show
 /// it. A merge base with no such path (an added file, an untracked one) fails here, which is the
 /// same answer as an old side with no lines to draw; the exit status is what says so, because a
-/// failure prints nothing on the pipe it would have been read from.
+/// failure prints nothing on the pipe it would have been read from. A Git that never finishes is
+/// that same answer once more: there is no text to draw from a read that never came back, and the
+/// deadline is what makes it come back.
 fn merge_base_content(root: &Path, merge_base: &str, path: &str) -> Option<String> {
-    let mut child = Command::new("git")
-        .args(["cat-file", "blob", &format!("{merge_base}:{path}")])
+    let blob = format!("{merge_base}:{path}");
+    let bytes = run_capped_git(
+        "git",
+        root,
+        ["cat-file", "blob", &blob],
+        MAX_SYNTAX_CONTEXT_BYTES,
+        GIT_READ_TIMEOUT,
+    )?;
+    String::from_utf8(bytes).ok()
+}
+
+/// Whether a Git process has finished, asked in a way that leaves it where it is.
+///
+/// `Child::try_wait` answers by reaping, and a reaped pid is a number the kernel is free to hand to
+/// the next process that asks for one: from that moment `kill(-pid, ...)` is aimed at whichever
+/// group answers to that number, not at Git's. `waitid` with `WNOWAIT` reports the same exit and
+/// leaves the child waitable, so the number stays reserved -- and with it the identity of the group
+/// `stop_git_read` has to end -- for as long as the read has not decided what to do with that group.
+/// `waitpid` has no `WNOWAIT` on macOS.
+fn exited_unreaped(child: &Child) -> io::Result<bool> {
+    // A test can break the one status read this has to survive, and only the one that would report
+    // an exit: the reads before it are ordinary polls, and breaking those would test nothing.
+    #[cfg(test)]
+    if BROKEN_STATUS_READ.with(Cell::get) == 1 && exited_unreaped_unbroken(child)? {
+        BROKEN_STATUS_READ.with(|broken| broken.set(2));
+        return Err(io::Error::other("the process status could not be read"));
+    }
+    exited_unreaped_unbroken(child)
+}
+
+fn exited_unreaped_unbroken(child: &Child) -> io::Result<bool> {
+    // Zeroed rather than uninitialized, because a kernel that has nothing to report leaves the
+    // structure as it found it and this reads it either way: what is in there before a report would
+    // be whatever was on the stack, and a watch that read it as an exit would end a healthy read.
+    let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+    let found = unsafe {
+        libc::waitid(
+            libc::P_PID,
+            child.id() as libc::id_t,
+            info.as_mut_ptr(),
+            libc::WEXITED | libc::WNOWAIT | libc::WNOHANG,
+        )
+    };
+    if found != 0 {
+        return Err(io::Error::last_os_error());
+    }
+    // A report names the child it is about, and no report is a success that carries no process:
+    // `WNOHANG` asking too early says the child is still running, and saying that as an exit would
+    // end a read that was only just getting started.
+    Ok(unsafe { (*info.as_ptr()).si_pid == child.id() as libc::pid_t })
+}
+
+/// Runs one Git under a deadline and reads what it printed through a pipe under a cap.
+///
+/// `run_command_with_timeout`'s twin and not `run_command_with_timeout` itself, because that one
+/// keeps `GIT_OUTPUT_CAP` and refuses what came past it, and this reading exists precisely not to
+/// refuse: a blob is the size of a file and is read to color a diff, so the cap is the whole
+/// difference between a ceiling of `cap` bytes and an allocation the size of the file, and a blob
+/// that happens to be larger than a checkout's whole change list is an ordinary thing to be asking
+/// for. Everything else is shared on purpose -- the process group of its own, `stop_git_read` to end
+/// what hung, the same poll and the same deadline -- so a blob that will not finish is ended by the
+/// same machinery and for the same reasons as every other read, and a `spawn_blocking` slot does not
+/// stay taken by it.
+///
+/// Past the cap the answer is nothing rather than a prefix, and the Git is ended as soon as the
+/// reading knows that: the reading keeps draining rather than stopping, so a blob larger than the cap
+/// does not block its writer on a pipe nobody is finishing, and what ends it is the cap being passed
+/// instead of the deadline being reached.
+fn run_capped_git<const N: usize>(
+    program: &str,
+    root: &Path,
+    args: [&str; N],
+    cap: usize,
+    timeout: Duration,
+) -> Option<Vec<u8>> {
+    let mut child = Command::new(program)
+        .args(args)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
         // Nothing is read of Git's own account of a failure, so its pipe is never the reason a read
         // stops: a blob past the cap ends the read and Git's complaint has nowhere to go.
         .stderr(Stdio::null())
         .stdout(Stdio::piped())
+        // Its own group, so what hung is ended whole rather than only the process `spawn`
+        // returned: what hangs is usually not Git but something it started, and killing that alone
+        // would leave it holding the write end the reading collects from.
+        .process_group(0)
         .spawn()
         .ok()?;
-    let mut bytes = Vec::new();
-    BufReader::new(child.stdout.take()?)
-        .take(MAX_SYNTAX_CONTEXT_BYTES as u64 + 1)
-        .read_to_end(&mut bytes)
-        .ok()?;
-    // A blob past the cap ends the read early and Git never finishes writing, which is one of the
-    // two ways this is nothing rather than the text of a file.
-    if !child.wait().ok()?.success() || bytes.len() > MAX_SYNTAX_CONTEXT_BYTES {
-        return None;
+    // `cap + 1` bytes and not `cap`, because the byte past the cap is what says the blob is past
+    // it, and a reading that stopped at exactly the cap could not tell a blob of exactly the cap
+    // from a bigger one. On a thread of its own, as everywhere else here: a read on a pipe is the
+    // one wait with no deadline left to time it out with. A reader that cannot be started leaves a
+    // Git writing into a pipe nobody will ever read, so the child is ended before giving up.
+    let over_cap = Arc::new(AtomicBool::new(false));
+    let pipe = match drain_pipe(
+        child.stdout.take().expect("piped stdout"),
+        "marvis-git-stdout",
+        cap + 1,
+        over_cap.clone(),
+    ) {
+        Ok(pipe) => pipe,
+        Err(_) => {
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            return None;
+        }
+    };
+    let deadline = Instant::now() + timeout;
+    let mut poll = GIT_READ_POLL_MIN;
+    // The answer is held rather than taken straight off the channel: a Git that has closed its pipe
+    // and is a moment from exiting would otherwise have its blob dropped on the floor for asking
+    // about the status too early, and the one channel left to ask about it again says there is
+    // nothing coming.
+    let mut read: Option<Option<PipeOutput>> = None;
+    // Watched and not collected, for the reason `exited_unreaped` gives: the status is taken when
+    // the read has decided what to do with the group, not while it is still deciding.
+    let mut exited = false;
+    loop {
+        // A blob past the cap is past it: nothing about the rest of what Git prints puts it back
+        // under, so the reading stops caring about it here. What the reading does not do is stop --
+        // it carries on draining so that Git is not left blocked on a pipe nobody finishes -- and
+        // this is what ends it instead, which the deadline used to have to do.
+        if over_cap.load(Ordering::Acquire) {
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            return None;
+        }
+        if read.is_none() {
+            match pipe.try_recv() {
+                Ok(answer) => read = Some(answer.ok()),
+                // The reader is gone without an answer, so there is nothing left to wait for.
+                Err(mpsc::TryRecvError::Disconnected) => read = Some(None),
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        if !exited {
+            match exited_unreaped(&child) {
+                Ok(answer) => exited = answer,
+                // It cannot be asked again, so it is ended rather than waited for.
+                Err(_) => {
+                    stop_git_read(&mut child, GroupIdentity::Reserved);
+                    return None;
+                }
+            }
+        }
+        // Both halves are waited for, because neither answers alone: the pipe says the reading is
+        // over, and the status says whether what came of it is text. A Git that has closed its pipe
+        // and is a moment from exiting is the ordinary case here, and the blob is not taken on the
+        // pipe's word alone.
+        if exited && matches!(read, Some(Some(_))) {
+            // What came of it is not text to draw in two ways: the exit status says the Git failed,
+            // and the reading above already refused a blob past the cap.
+            let blob = read.take().flatten().expect("the blob is in hand");
+            let Ok(status) = child.wait() else {
+                // Nothing else reaps a child, so a collection that could not answer is ended the
+                // same way every other exit is rather than left as a zombie.
+                let group = reserved_group(&child);
+                stop_git_read(&mut child, group);
+                return None;
+            };
+            return (status.success() && !blob.over_cap && blob.bytes.len() <= cap)
+                .then_some(blob.bytes);
+        }
+        // A pipe that broke mid-blob leaves what arrived short of the whole thing, and a reader that
+        // died leaves nothing at all: either way there is no blob here, and the writer is in the way
+        // of nothing.
+        if let Some(None) = read {
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            return None;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            return None;
+        }
+        thread::sleep(poll.min(remaining));
+        poll = (poll * 2).min(GIT_READ_POLL_MAX);
     }
-    String::from_utf8(bytes).ok()
 }
 
 pub fn diff_page(
@@ -1708,7 +2562,10 @@ fn ensure_diff_succeeded(
     too_large: bool,
 ) -> Result<(), IpcError> {
     if !too_large && !output.status.success() && !(untracked && output.status.code() == Some(1)) {
-        return Err(git_error("could not diff changed file", output));
+        return Err(git_error_without_stdout(
+            "could not diff changed file",
+            output,
+        ));
     }
     Ok(())
 }
@@ -2273,28 +3130,815 @@ fn checked_git<const N: usize>(
 /// the announcement would ask for the refresh that wrote it, and the repository would spend the
 /// rest of its life re-reading itself. Git answers the same question without the lock, and the
 /// index stays exactly where the last command that meant to change it left it.
+///
+/// The read also runs under a deadline. Everything that reaches here is a read -- a status, a list
+/// of changed names, a ref lookup, a merge base -- so ending a Git that will not finish cannot
+/// leave a commit half written, a lock behind it or an index caught mid-refresh; there is nothing
+/// of its own to be in the middle of. What does write goes through `git::run_git`, which has no
+/// deadline for exactly the opposite reason: a commit stopped at one would be a commit that half
+/// happened.
 fn run_git(root: &Path, args: Vec<OsString>) -> Result<Output, IpcError> {
-    Command::new("git")
+    run_command_with_timeout("git", root, args, GIT_READ_TIMEOUT)
+}
+
+/// A Git read run by a module outside this one, under a deadline of the caller's.
+///
+/// The reads elsewhere in the app need this machinery rather than a copy of it. The deadline is
+/// only the half of what keeps a read from being a wait that never ends; the other half is the
+/// process group of its own, the pipes drained on threads of their own and the diagnosis that
+/// travels with the failure, and a module that grew its own `Command::output` would be the one
+/// place a read stopped being bounded. The deadline is passed in rather than taken from here so
+/// `GIT_READ_TIMEOUT` stays the one answer to how long a Git read may take, and so a test can
+/// watch a read end a Git that will not finish without waiting that long to find out that it does.
+pub(crate) fn run_git_read(
+    root: &Path,
+    args: &[&str],
+    within: Duration,
+) -> Result<Output, IpcError> {
+    run_command_with_timeout(
+        "git",
+        root,
+        args.iter().map(OsString::from).collect(),
+        within,
+    )
+}
+
+/// One Git process under the read deadline, told what to read on its standard input.
+///
+/// `check-ignore --stdin` takes a whole burst of paths that way, which is what keeps the query one
+/// call per checkout rather than one per file. Everything else about it is `run_command_with_timeout`
+/// -- the optional locks off, the process group of its own, the same deadline -- so a check-ignore
+/// that will not finish is ended by the same machinery and for the same reasons as every other read.
+fn run_git_on_paths(root: &Path, args: [&str; 3], paths: &[PathBuf]) -> Result<Output, IpcError> {
+    let mut input = Vec::new();
+    for path in paths {
+        input.extend_from_slice(path.as_os_str().as_bytes());
+        input.push(0);
+    }
+    run_command_with_input("git", root, args, GIT_READ_TIMEOUT, &input)
+}
+
+/// Runs one Git process under a deadline and hands back what it printed either way.
+fn run_command_with_input(
+    program: &str,
+    root: &Path,
+    args: [&str; 3],
+    timeout: Duration,
+    input: &[u8],
+) -> Result<Output, IpcError> {
+    spawn_and_collect(
+        program,
+        root,
+        args.iter().map(OsString::from).collect(),
+        timeout,
+        Some(input.to_vec()),
+    )
+}
+
+/// Runs one Git process under a deadline and hands back what it printed either way.
+fn run_command_with_timeout(
+    program: &str,
+    root: &Path,
+    args: Vec<OsString>,
+    timeout: Duration,
+) -> Result<Output, IpcError> {
+    spawn_and_collect(program, root, args, timeout, None)
+}
+
+/// Runs one Git process under a deadline and hands back what it printed either way.
+///
+/// The deadline is on the process and not on the reading, so both pipes are drained on threads of
+/// their own: a Git that never exits holds a pipe open, and a read on that pipe is the one wait
+/// here with nothing left to time it out with. Its process group is its own, so what hung can be
+/// ended whole rather than only the process `spawn` returned, and the pipes are collected under a
+/// deadline of their own, because a helper that left the group can still hold the write end and a
+/// collection that waited for it forever would be the failure this whole path exists to remove.
+///
+/// That deadline also bounds what a read can come back with, so what a pipe failed to give is
+/// reported rather than handed on: a Git that finished inside its deadline and printed something
+/// this never read is not a Git that printed nothing, and only one of those is a checkout with no
+/// changes in it.
+///
+/// A bound on the volume as well is a different kind of answer, and it is here because a deadline
+/// says nothing about how much a Git prints while it has it: a `status` of a repository with a very
+/// large change set was accumulated whole before anything summarized or parsed it. Each pipe keeps
+/// `GIT_OUTPUT_CAP` or `GIT_DIAGNOSTIC_CAP` bytes and says so when there was more, which is an error
+/// rather than what arrived first -- every caller reads this as the state of a whole checkout, and
+/// the first sixteen megabytes of a `status` is not a status. The reader carries on past the cap and
+/// discards, because a Git that prints more than the cap and then keeps talking is a Git that blocks
+/// on a pipe nobody is reading, and ending it for printing is not the same ending it for hanging.
+///
+/// Every way out of here after the `spawn` ends the child, which is why each thread it needs is
+/// started through `start_read_thread`: a read that could not start one is a machine with no threads
+/// left, not a reason to leave a Git running and unreaped behind a panic.
+///
+/// `input` is what the process is told to read, fed on a thread of its own for the same reason the
+/// output pipes are drained on threads of their own: a pipe read or written on this one is a wait
+/// here with no deadline left to time it out with.
+fn spawn_and_collect(
+    program: &str,
+    root: &Path,
+    args: Vec<OsString>,
+    timeout: Duration,
+    input: Option<Vec<u8>>,
+) -> Result<Output, IpcError> {
+    #[cfg(test)]
+    count_git_read(root);
+    let mut child = Command::new(program)
         .args(args)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
-        .output()
+        // Every diagnostic this file reads back as a fact about the repository is Git's own wording,
+        // and one of them is what tells a plain folder from a repository whose config cannot be read
+        // (`is_plain_directory`). A translated Git answers in the user's locale, and that sentence
+        // is then not the one being compared, so a plain folder is reported as a broken repository
+        // instead. The locale is pinned on the child rather than in this process so a user's own
+        // locale still governs everything they see themselves; `LANGUAGE` is dropped because gettext
+        // consults it ahead of `LC_ALL` and it would override the pin. Nothing else is compared to
+        // Git's words, and nothing here is shown to a user untranslated.
+        .env("LC_ALL", "C")
+        .env_remove("LANGUAGE")
+        // Nothing a read asks of Git can be answered by a person: a prompt with no terminal behind
+        // it is the wait this deadline exists for, so the reading end is closed the way the
+        // non-interactive `Command::output` this replaced closed it -- unless the read asked for a
+        // list on it, which `check-ignore --stdin` is.
+        .stdin(match &input {
+            Some(_) => Stdio::piped(),
+            None => Stdio::null(),
+        })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .process_group(0)
+        .spawn()
         .map_err(|error| {
             IpcError::new(
                 IpcErrorCode::GitFailed,
                 format!("could not start Git: {error}"),
             )
-        })
+        })?;
+    if let (Some(bytes), Some(pipe)) = (input, child.stdin.take()) {
+        // The write end is dropped when the bytes are all there, which is what tells a read that is
+        // waiting for its list that the list is complete: a `--stdin` read that never sees the end
+        // waits forever, and the deadline would end it having answered nothing.
+        if let Err(error) = start_read_thread("marvis-git-input", move || {
+            let mut pipe = pipe;
+            let _ = pipe.write_all(&bytes);
+        }) {
+            // Git is running with a list half fed and no thread to feed the rest of it, so it is
+            // ended and collected here: returning the failure on its own would leave it waiting on a
+            // write end that nobody is left to close.
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            return Err(IpcError::new(
+                IpcErrorCode::GitFailed,
+                format!("could not feed Git: {error}"),
+            ));
+        }
+    }
+    // From here on there is a Git to end on every way out of this function, which is why a reader
+    // that cannot be started is a failure to report rather than a panic to unwind: the panic would
+    // leave the child behind, running, and holding the pipes nobody drained.
+    let pipes = match GitPipes::take(&mut child) {
+        Ok(pipes) => pipes,
+        Err(error) => {
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            return Err(IpcError::new(
+                IpcErrorCode::GitFailed,
+                format!("could not read Git's output: {error}"),
+            ));
+        }
+    };
+    let deadline = Instant::now() + timeout;
+    let mut poll = GIT_READ_POLL_MIN;
+    // Watched and not collected, and collected only once the pipes have said what they are going
+    // to say: the exit is read the way `exited_unreaped` reads it because the group this read may
+    // still have to end is named after this pid, and a pid the kernel has handed back is a number
+    // that can belong to somebody else by the time a signal goes to it.
+    loop {
+        match exited_unreaped(&child) {
+            Ok(true) => break,
+            Ok(false) => {}
+            Err(error) => {
+                // It cannot be asked again, so it is ended rather than waited for, and the words it
+                // got out first are still the diagnosis.
+                stop_git_read(&mut child, GroupIdentity::Reserved);
+                let (stdout, stderr) = pipes.collect();
+                return Err(IpcError::new(
+                    IpcErrorCode::GitFailed,
+                    format!(
+                        "could not read from Git: {error}: {}",
+                        summarize_git_output(&stdout, &stderr)
+                    ),
+                ));
+            }
+        }
+        // Asked while Git is still running, because a Git printing past what this read keeps is a
+        // Git that will not exit inside the deadline: reported as a read that ran out of time, it
+        // would be answered with the reason it did not.
+        if let Some((stream, cap)) = pipes.overflowed() {
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            let (stdout, stderr) = pipes.collect();
+            return Err(git_output_over_cap(stream, cap, &stdout, &stderr));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            let (stdout, stderr) = pipes.collect();
+            return Err(git_read_timeout(timeout, &stdout, &stderr));
+        }
+        thread::sleep(poll.min(remaining));
+        poll = (poll * 2).min(GIT_READ_POLL_MAX);
+    }
+    let (stdout, stderr) = match pipes.read() {
+        Ok(printed) => printed,
+        Err(failure) => {
+            // The leader above is a zombie and not a pid the kernel has reused, so the group it
+            // leads is still the group this read started and still answers to a number nothing
+            // else can be handed. That is what makes the signal below Git's own rather than a
+            // stranger's, and it holds exactly as long as the leader is left uncollected: it is
+            // collected in `stop_git_read` and nowhere before. What a pipe still held can be is a
+            // member of that group -- a helper of Git's holding the write end long after Git
+            // itself was gone -- and it has to be ended for the reason `stop_git_read` gives, not
+            // a moment later. Only a pipe that is still held is signalled, because that is the one
+            // failure with a member left in the group. A pipe that failed, or whose reader is gone,
+            // proves no such thing, and a writer that left the group cannot be told apart from one
+            // that is still in it -- so the leader is collected and the group is left to it.
+            if failure.writer_left() {
+                stop_git_read(&mut child, GroupIdentity::Reserved);
+            } else {
+                let _ = child.wait();
+            }
+            return Err(git_pipe_failure(&failure));
+        }
+    };
+    // Past a cap is refused here rather than handed on as what arrived first, for the reason
+    // `git_output_over_cap` gives. Read after the exit and not during the loop above because the
+    // bytes are the whole answer only once the writer is gone; the loop asked early only to end a
+    // Git that was printing without end.
+    if let Some((stream, cap, _)) = [
+        ("stdout", GIT_OUTPUT_CAP, &stdout),
+        ("stderr", GIT_DIAGNOSTIC_CAP, &stderr),
+    ]
+    .into_iter()
+    .find(|(_, _, printed)| printed.over_cap)
+    {
+        let _ = child.wait();
+        return Err(git_output_over_cap(
+            stream,
+            cap,
+            &stdout.bytes,
+            &stderr.bytes,
+        ));
+    }
+    // Collected here, where everything the group could still be asked about is settled.
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            let group = reserved_group(&child);
+            stop_git_read(&mut child, group);
+            return Err(IpcError::new(
+                IpcErrorCode::GitFailed,
+                format!("could not read from Git: {error}"),
+            ));
+        }
+    };
+    Ok(Output {
+        status,
+        stdout: stdout.bytes,
+        stderr: stderr.bytes,
+    })
 }
 
-fn git_error(action: &str, output: &Output) -> IpcError {
+/// The error a read leaves behind when Git printed more than the read keeps.
+///
+/// Refused rather than trimmed, because every caller reads what came back as the state of a whole
+/// checkout: the first `GIT_OUTPUT_CAP` bytes of a `status` is not a status, and handing it on is
+/// a wrong answer wearing the clothes of a right one. What Git said on its way out still travels as
+/// the diagnosis, under the same summary limit as every other failure.
+fn git_output_over_cap(stream: &str, cap: usize, stdout: &[u8], stderr: &[u8]) -> IpcError {
+    let over = format!(
+        "Git printed more than {} on its {stream}, which this read does not keep: the answer is \
+         refused rather than trimmed into a shorter one",
+        say_bytes(cap)
+    );
+    let said = summarize_git_output(stdout, stderr);
     IpcError::new(
         IpcErrorCode::GitFailed,
-        format!(
-            "{action}: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ),
+        if said.is_empty() {
+            over
+        } else {
+            format!("{over}: {said}")
+        },
     )
+}
+
+/// How a cap is said out loud, in the unit it was chosen in.
+fn say_bytes(cap: usize) -> String {
+    format!("{} MiB", cap / (1024 * 1024))
+}
+
+/// Ends what a read left running, and collects the process `spawn` returned.
+///
+/// The whole process group is signalled rather than only the process `spawn` returned, because what
+/// hangs is usually not Git but something it started and is waiting for: an LFS filter on a network
+/// that is not answering, a credential helper waiting on a prompt with no terminal, `gpg` waiting
+/// for a PIN. Killing Git alone would leave those holding the pipes the output is collected from, so
+/// the collection would go on waiting for processes nothing is going to end. `process_group(0)` put
+/// Git and everything it spawned into a group of its own, so the signal reaches that whole tree and
+/// nothing else of ours, and `SIGKILL` because a process that ignored one deadline does not answer a
+/// polite request. The `wait` afterwards is what collects it: a read that stopped Git and left it
+/// unreached would leave a zombie behind for every hung read in the session.
+///
+/// Both callers reach here with the leader uncollected, and that is the whole of what keeps the aim
+/// honest: an unreaped pid is a number the kernel has not handed to anyone else, so `-pid` is the
+/// group this read started rather than whichever group answers to a number that was free a moment
+/// ago. One caller arrives while the leader is still running and ends the whole tree at once; the
+/// other arrives after the leader exited and its pipes did not, and ends the group it left behind.
+/// A helper that left that group is out of reach either way -- a held pipe proves a writer and never
+/// which group it writes from -- and that is the price of not answering the same question with a
+/// signal nobody can point at anything.
+///
+/// `group` is that claim made at the call site rather than assumed here, because there are two ways
+/// out of a read and only one of them still holds it: a collection that has already happened, or
+/// failed in a way this cannot interpret, leaves a number the kernel is free to hand to somebody
+/// else, and a signal to `-pid` then aims at whatever answers to a number that was free a moment
+/// ago. `Spent` ends the process `spawn` returned and nothing else, which is the direction that
+/// leaves a helper behind rather than the one that signals a stranger.
+fn stop_git_read(child: &mut Child, group: GroupIdentity) {
+    if group == GroupIdentity::Reserved {
+        let group = libc::pid_t::try_from(child.id())
+            .ok()
+            .filter(|pid| *pid > 0)
+            .map(|pid| -pid);
+        if let Some(group) = group {
+            // A group that is already gone says nothing worth reporting: the read is over either way,
+            // and the direct kill below covers the process itself. One that is not is this read's own,
+            // because the leader is still here to hold its number.
+            unsafe { libc::kill(group, libc::SIGKILL) };
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+/// Whether the number a group is named after is still this read's own.
+///
+/// `Reserved` is the claim `stop_git_read` is allowed to act on, and it holds exactly while this
+/// read holds an uncollected child: the kernel cannot hand out the number of a process that is
+/// still its own, so `-pid` is the group this read started. `Spent` is the admission that a
+/// collection has happened or has failed in a way that leaves the state unknown.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GroupIdentity {
+    Reserved,
+    Spent,
+}
+
+/// What the identity of the group is, asked of the only thing that can answer it.
+///
+/// Used where a collection has already been attempted and failed: the process may be a zombie
+/// still, and asking is what tells it apart from a number the kernel has already given away. A
+/// `waitid` that fails answers nothing, so the claim is given up and only the process `spawn`
+/// returned is ended -- which is the direction that can leave a helper behind rather than the one
+/// that signals whatever group has the number by now.
+fn reserved_group(child: &Child) -> GroupIdentity {
+    match exited_unreaped(child) {
+        Ok(_) => GroupIdentity::Reserved,
+        Err(_) => GroupIdentity::Spent,
+    }
+}
+
+/// The error a read that ran out of time leaves behind.
+///
+/// What Git said on its way out is the diagnosis -- a ref it could not lock, a helper it could not
+/// reach, a signature it could not make -- so it travels with the error under the existing summary
+/// limit. The summary truncates; it does not redact paths.
+fn git_read_timeout(timeout: Duration, stdout: &[u8], stderr: &[u8]) -> IpcError {
+    let stopped = format!("Git stopped reading after {}s", timeout.as_secs_f32());
+    let said = summarize_git_output(stdout, stderr);
+    IpcError::new(
+        IpcErrorCode::GitFailed,
+        if said.is_empty() {
+            stopped
+        } else {
+            format!("{stopped}: {said}")
+        },
+    )
+}
+
+pub(crate) fn summarize_git_output(stdout: &[u8], stderr: &[u8]) -> String {
+    let text = String::from_utf8_lossy(if stderr.is_empty() { stdout } else { stderr });
+    let mut summary: Vec<String> = text
+        .lines()
+        .rev()
+        .filter_map(|line| {
+            let line = line.trim();
+            (!line.is_empty()).then(|| {
+                let kept: String = line.chars().take(GIT_DIAGNOSTIC_WIDTH).collect();
+                if kept.len() == line.len() {
+                    kept
+                } else {
+                    format!("{kept}…")
+                }
+            })
+        })
+        .take(GIT_DIAGNOSTIC_LINES)
+        .collect();
+    summary.reverse();
+    summary.join(" / ")
+}
+
+/// What a Git process printed, drained on threads of its own.
+///
+/// The threads are what make the deadline above a wait on the process rather than a read on a pipe.
+/// They hand their bytes over through a channel rather than a join because a join cannot be waited
+/// on for a deadline either, and the only wait left with room to give is the read itself.
+struct GitPipes {
+    stdout: PipeReader,
+    stderr: PipeReader,
+}
+
+impl GitPipes {
+    /// Takes both pipes of a Git that was started with them piped, under their own caps.
+    ///
+    /// Fails when a reader cannot be started, which is said rather than panicked: the Git is already
+    /// running, and `spawn_and_collect` ends and collects it rather than unwinding a worker with a
+    /// live child behind it.
+    fn take(child: &mut Child) -> io::Result<Self> {
+        Ok(Self {
+            stdout: PipeReader::take(
+                child.stdout.take().expect("piped stdout"),
+                "stdout",
+                "marvis-git-stdout",
+                GIT_OUTPUT_CAP,
+            )?,
+            stderr: PipeReader::take(
+                child.stderr.take().expect("piped stderr"),
+                "stderr",
+                "marvis-git-stderr",
+                GIT_DIAGNOSTIC_CAP,
+            )?,
+        })
+    }
+
+    /// Which pipe is already carrying more than this read keeps, if either is.
+    ///
+    /// Asked with the same non-blocking question the read loop asks about the process, and read off
+    /// a flag rather than off the answer, because the answer of a pipe whose writer has not closed
+    /// it yet is not there to ask for: a Git printing without end holds its own pipes open until it
+    /// is ended. A loop that waited for the answer would report a read that ran out of time, which
+    /// is not the reason it ran out.
+    fn overflowed(&self) -> Option<(&'static str, usize)> {
+        if self.stdout.overflowed() {
+            Some((self.stdout.stream, self.stdout.cap))
+        } else if self.stderr.overflowed() {
+            Some((self.stderr.stream, self.stderr.cap))
+        } else {
+            None
+        }
+    }
+
+    /// What Git printed, or as much of it as arrived inside the drain deadline.
+    ///
+    /// Best effort on purpose, because this is what a read that has *already* failed leaves behind
+    /// as its diagnosis: a pipe that failed or was still held is the smaller of the two failures,
+    /// and the one that came first is the one the caller is being told about. Only `read` reports a
+    /// pipe's own failure, and only `read` is on a path that has not failed yet.
+    fn collect(self) -> (Vec<u8>, Vec<u8>) {
+        (self.stdout.collect(), self.stderr.collect())
+    }
+
+    /// What Git printed, or why the answer is not known.
+    ///
+    /// The same wait as `collect`, but a pipe that could not be read and a pipe nobody finished
+    /// writing are answers rather than silences. Handed on as empty they are a read that failed
+    /// wearing the clothes of a read that answered, and the caller cannot tell the two apart --
+    /// which for the reads this whole path serves is the difference between "this checkout has no
+    /// changes" and "this checkout was never read".
+    fn read(self) -> Result<(PipeOutput, PipeOutput), PipeFailure> {
+        let stdout = self.stdout.read();
+        let stderr = self.stderr.read();
+        // Both pipes are waited for even once one of them has failed, because the other is where
+        // Git's own words would have been and because a pipe nobody drained is a reader thread
+        // nobody let go. The first failure is the one named: the pipe that failed says the reading
+        // itself went wrong, and it does not matter which pipe was asked first.
+        match (stdout, stderr) {
+            (Ok(stdout), Ok(stderr)) => Ok((stdout, stderr)),
+            (Err(failure), _) | (_, Err(failure)) => Err(failure),
+        }
+    }
+}
+
+/// What one of Git's pipes carried: the bytes up to a cap, and whether more of them arrived.
+///
+/// The cap bounds what is kept and never what is read. A Git still writing into a pipe nobody is
+/// reading blocks on it, so the reading carries on to the end and drops the rest: the answer
+/// becomes "there was more than this", which a caller can refuse, instead of a process parked on a
+/// pipe until a deadline ends it.
+#[derive(Debug, Default)]
+struct PipeOutput {
+    bytes: Vec<u8>,
+    over_cap: bool,
+}
+
+/// One of Git's pipes, read on a thread of its own and answered through a channel.
+struct PipeReader {
+    stream: &'static str,
+    cap: usize,
+    /// Set by the reader the moment it drops a byte past the cap, so a read that is still waiting
+    /// for the process can already tell that the answer is not coming whole. The answer it sends
+    /// when the pipe closes says the same thing; this is what says it before then.
+    over_cap: Arc<AtomicBool>,
+    pipe: mpsc::Receiver<io::Result<PipeOutput>>,
+}
+
+impl PipeReader {
+    fn take<T: Read + Send + 'static>(
+        pipe: T,
+        stream: &'static str,
+        thread: &'static str,
+        cap: usize,
+    ) -> io::Result<Self> {
+        let over_cap = Arc::new(AtomicBool::new(false));
+        Ok(Self {
+            stream,
+            cap,
+            pipe: drain_pipe(pipe, thread, cap, over_cap.clone())?,
+            over_cap,
+        })
+    }
+
+    /// Whether Git has printed more than this read keeps, asked without waiting for the pipe.
+    fn overflowed(&self) -> bool {
+        self.over_cap.load(Ordering::Acquire)
+    }
+
+    /// What Git printed, or as much of it as arrived inside the drain deadline.
+    ///
+    /// Best effort on purpose, because this is what a read that has *already* failed leaves behind
+    /// as its diagnosis: a pipe that failed or was still held is the smaller of the two failures,
+    /// and the one that came first is the one the caller is being told about. Only `read` reports a
+    /// pipe's own failure, and only `read` is on a path that has not failed yet.
+    fn collect(self) -> Vec<u8> {
+        self.read().unwrap_or_default().bytes
+    }
+
+    /// What Git printed, or why the answer is not known.
+    ///
+    /// A pipe that could not be read and a pipe nobody finished writing are answers rather than
+    /// silences. Handed on as empty they are a read that failed wearing the clothes of a read that
+    /// answered, and the caller cannot tell the two apart -- which for the reads this whole path
+    /// serves is the difference between "this checkout has no changes" and "this checkout was
+    /// never read".
+    fn read(self) -> Result<PipeOutput, PipeFailure> {
+        pipe_read(self.pipe, self.stream)
+    }
+}
+
+/// Why one of Git's pipes did not give up everything Git printed, and which of the two it was.
+///
+/// An empty pipe and an unreadable one are the same bytes and not the same answer: only the first
+/// is a Git that had nothing to say, and the second is a Git whose words went somewhere this cannot
+/// reach. They are kept apart for that reason, and so that a failure is described by what it was
+/// rather than by a single "could not read it".
+#[derive(Debug)]
+enum PipeFailure {
+    /// The read failed on the way, so what is on that pipe is not all of what Git said.
+    Read {
+        stream: &'static str,
+        error: io::Error,
+    },
+    /// The read was still going when the drain deadline was, which means a writer nobody ended is
+    /// still on the other end: Git is gone and something it started kept its pipe.
+    StillHeld { stream: &'static str },
+    /// The reader is gone without having sent anything, so there is nothing left to wait for and
+    /// nothing left to say what Git printed.
+    ReaderGone { stream: &'static str },
+}
+
+impl PipeFailure {
+    /// Whether something of Git's is still on the other end of the pipe, writing into it.
+    ///
+    /// The only failure of the three that leaves a process running, and so the only one a group can
+    /// be signalled for: the other two say the reading itself went wrong and say nothing at all
+    /// about what is still alive.
+    fn writer_left(&self) -> bool {
+        matches!(self, Self::StillHeld { .. })
+    }
+}
+
+/// Reads one of Git's pipes to its end on a thread of its own, keeping up to `cap` bytes of it.
+///
+/// Reading to the end is what the cap does not stop: a pipe whose reader stops is a pipe its writer
+/// blocks on, so a Git that printed more than the cap and then kept talking would be parked on it
+/// until the deadline ended it. So the rest is read and dropped, and `over_cap` is what says there
+/// was more -- a refusal the caller can make, rather than a process stopped for want of a reader.
+///
+/// This thread is not ended when the answer is given up on, and that is deliberate rather than an
+/// oversight: a read on a pipe blocks with no deadline of its own, so the only ways out of one are
+/// interrupting the thread (unsafe, and unsafe around the buffers this closure owns) or closing the
+/// reading end. Closing it is what a cancellation flag plus a non-blocking `poll` loop would do, and
+/// it is not done here for the reason `stop_git_read` gives: the only thing that proves there is a
+/// writer out there is that the pipe is still held, which says nothing about which process it is or
+/// which group it writes from. Ending the read therefore ends the writer -- by `EPIPE`, then by the
+/// `SIGPIPE` that follows -- for a process this code cannot point at, which is the same signal
+/// through the same unverified aim that `stop_git_read` refuses to send.
+///
+/// What is left is this: a helper that left the group and kept its write end open holds one thread
+/// and one file descriptor until that writer is gone, and no deadline here can end it. It is the
+/// cost of not guessing, it is paid once per read whose writer escapes, and the read itself is still
+/// bounded by `GIT_PIPE_DRAIN` -- which is what keeps it from becoming the failure this path exists
+/// to remove. Draining past the cap leaks the same way when the writer escaped: the overflow path
+/// stops the group and then collects best effort, so the same thread stays on the same pipe and its
+/// answer is swallowed rather than reported, which `collect` is already best effort for. A fix has to
+/// make the writer identifiable before it may make the reader stoppable, and nothing this runner
+/// knows is enough to do that.
+fn drain_pipe<T: Read + Send + 'static>(
+    pipe: T,
+    thread: &'static str,
+    cap: usize,
+    over_cap: Arc<AtomicBool>,
+) -> io::Result<mpsc::Receiver<io::Result<PipeOutput>>> {
+    let (sender, receiver) = mpsc::sync_channel(1);
+    start_read_thread(thread, move || {
+        let mut pipe = pipe;
+        let mut bytes = Vec::new();
+        let mut chunk = [0u8; GIT_DRAIN_CHUNK];
+        let read = loop {
+            match pipe.read(&mut chunk) {
+                Ok(0) => {
+                    break Ok(PipeOutput {
+                        bytes,
+                        over_cap: over_cap.load(Ordering::Acquire),
+                    })
+                }
+                Ok(read) => {
+                    // Never past the cap, and never re-read to find out how much of it was kept.
+                    let kept = cap.saturating_sub(bytes.len()).min(read);
+                    bytes.extend_from_slice(&chunk[..kept]);
+                    if kept < read {
+                        over_cap.store(true, Ordering::Release);
+                    }
+                }
+                Err(error) => break Err(error),
+            }
+        };
+        // The reading end is gone only once this process has been answered, and a reader that
+        // outlives its answer has nobody left to report to.
+        let _ = sender.send(read);
+    })?;
+    Ok(receiver)
+}
+
+/// How much of a pipe is read at a time, which is a stack block on the reader's thread and
+/// nothing else: it bounds neither the answer nor the reading.
+const GIT_DRAIN_CHUNK: usize = 32 * 1024;
+
+/// Starts one of the threads a read needs, or says why it could not.
+///
+/// The writer that feeds a Git its list and the readers that drain what it prints are waits with
+/// no deadline left to time them out with, which is why they are threads -- and either of them can
+/// fail to be one, on a machine that has no threads left. That is said here instead of unwrapped
+/// with `expect` because the Git they were started for is already running: a panic leaves it
+/// running and unreaped, and the panic is the smaller of the two failures.
+fn start_read_thread(name: &'static str, task: impl FnOnce() + Send + 'static) -> io::Result<()> {
+    #[cfg(test)]
+    if let Some(error) = impossible_read_thread(name) {
+        return Err(error);
+    }
+    thread::Builder::new()
+        .name(name.into())
+        .spawn(task)
+        .map(|_| ())
+}
+
+/// The failure a test has arranged for this thread, having first waited out its instant.
+#[cfg(test)]
+fn impossible_read_thread(name: &'static str) -> Option<io::Error> {
+    IMPOSSIBLE_READ_THREAD.with(|impossible| {
+        let impossible = impossible.borrow();
+        let (unwanted, from) = (*impossible)?;
+        if unwanted != name {
+            return None;
+        }
+        // Waited out rather than refused outright: the Git this read started is a moment old, and a
+        // test asserting that it is gone has to be able to ask what its process was first. A test
+        // that does not care says zero and gets the failure at once.
+        thread::sleep(from.saturating_duration_since(Instant::now()));
+        Some(io::Error::other("no thread could be started"))
+    })
+}
+
+#[cfg(test)]
+thread_local! {
+    /// A thread this test has made impossible to start, and the instant it is to be refused from.
+    ///
+    /// Per thread on purpose: the reads these tests break are on this thread, and a hook any other
+    /// test's read could trip over would be a source of failures that look like nothing else.
+    static IMPOSSIBLE_READ_THREAD: RefCell<Option<(&'static str, Instant)>> =
+        const { RefCell::new(None) };
+}
+
+/// Holds a thread unstartable for as long as it is alive, and lets it go on drop.
+#[cfg(test)]
+struct ImpossibleReadThread;
+
+#[cfg(test)]
+impl ImpossibleReadThread {
+    fn new(name: &'static str, after: Duration) -> Self {
+        IMPOSSIBLE_READ_THREAD.with(|impossible| {
+            *impossible.borrow_mut() = Some((name, Instant::now() + after));
+        });
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for ImpossibleReadThread {
+    fn drop(&mut self) {
+        IMPOSSIBLE_READ_THREAD.with(|impossible| *impossible.borrow_mut() = None);
+    }
+}
+
+#[cfg(test)]
+thread_local! {
+    /// Set by a test to make the first status read that would report this Git's exit fail instead,
+    /// which is the status read a kernel has no reason to refuse and this code has to survive.
+    static BROKEN_STATUS_READ: Cell<u8> = const { Cell::new(0) };
+}
+
+/// Holds the next exit-reporting status read broken, and lets it go on drop.
+#[cfg(test)]
+struct BrokenStatusRead;
+
+#[cfg(test)]
+impl BrokenStatusRead {
+    fn armed() -> Self {
+        BROKEN_STATUS_READ.with(|broken| broken.set(1));
+        Self
+    }
+}
+
+#[cfg(test)]
+impl Drop for BrokenStatusRead {
+    fn drop(&mut self) {
+        BROKEN_STATUS_READ.with(|broken| broken.set(0));
+    }
+}
+
+fn pipe_read(
+    pipe: mpsc::Receiver<io::Result<PipeOutput>>,
+    stream: &'static str,
+) -> Result<PipeOutput, PipeFailure> {
+    match pipe.recv_timeout(GIT_PIPE_DRAIN) {
+        // A pipe that closed with nothing on it is Git that had nothing to say, which is an answer
+        // and an ordinary one: a `rev-parse` that printed no ref, a status with no changes in it.
+        Ok(Ok(output)) => Ok(output),
+        Ok(Err(error)) => Err(PipeFailure::Read { stream, error }),
+        Err(mpsc::RecvTimeoutError::Timeout) => Err(PipeFailure::StillHeld { stream }),
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(PipeFailure::ReaderGone { stream }),
+    }
+}
+
+/// The error a pipe that did not give up its answer leaves behind.
+///
+/// What the pipe failed to carry does not travel with it: the reading failed, so there is no saying
+/// what Git printed. The message names which pipe and why; it does not quote output that was not
+/// successfully read.
+fn git_pipe_failure(failure: &PipeFailure) -> IpcError {
+    let (stream, because) = match failure {
+        PipeFailure::Read { stream, error } => (*stream, error.to_string()),
+        PipeFailure::StillHeld { stream } => {
+            (*stream, "still held open after Git finished".to_owned())
+        }
+        PipeFailure::ReaderGone { stream } => {
+            (*stream, "the reader stopped without an answer".to_owned())
+        }
+    };
+    IpcError::new(
+        IpcErrorCode::GitFailed,
+        format!("could not read Git's {stream}: {because}"),
+    )
+}
+
+pub(crate) fn git_error(action: &str, output: &Output) -> IpcError {
+    git_error_with_output(action, output, &output.stdout)
+}
+
+fn git_error_without_stdout(action: &str, output: &Output) -> IpcError {
+    git_error_with_output(action, output, &[])
+}
+
+fn git_error_with_output(action: &str, output: &Output, stdout: &[u8]) -> IpcError {
+    let said = summarize_git_output(stdout, &output.stderr);
+    let exit = output.status.code().map_or_else(
+        || "terminated without an exit code".to_owned(),
+        |code| format!("exit code {code}"),
+    );
+    let message = if said.is_empty() {
+        format!("{action} ({exit}; Git returned no diagnostic output)")
+    } else {
+        format!("{action} ({exit}): {said}")
+    };
+    IpcError::new(IpcErrorCode::GitFailed, message)
 }
 
 fn output_text(output: &Output) -> String {
@@ -2307,14 +3951,16 @@ fn output_text(output: &Output) -> String {
 mod tests {
     use std::{
         cell::Cell,
-        collections::{BTreeMap, VecDeque},
-        fs,
+        collections::{BTreeMap, BTreeSet, VecDeque},
+        fs, io,
+        os::unix::process::ExitStatusExt,
         path::Path,
-        process::Command,
+        process::{Command, ExitStatus, Output},
         sync::{
             atomic::{AtomicBool, Ordering},
-            mpsc,
+            mpsc, Arc, Barrier, Mutex,
         },
+        thread,
         time::{Duration, Instant},
     };
 
@@ -2328,14 +3974,81 @@ mod tests {
     };
 
     use super::{
-        affected_checkouts, checked_git, diff, diff_page, failed_watch_update,
-        forward_watch_result, invalidate_failed_watch, parse_diff_display_line, parse_name_status,
-        parse_numstat, parse_porcelain_v2, receive_debounced_change, receive_debounced_updates,
-        requested_watch_ids, resolve_default_ref, should_refresh_path, status,
-        untracked_line_count, watch_failure, watch_plan_matches_request, CachedGitSnapshot,
-        GitCounts, GitDiffStats, GitSnapshotCache, GitStatus, GitWatcherManager, PathBuf,
-        RepoWatchPlan, WatchMessage, WatchUpdate, WatchWakeup, MAX_SYNTAX_CONTEXT_BYTES,
+        affected_checkouts, checked_git, diff, diff_page, drain_pipe, exited_unreaped,
+        failed_watch_update, file_activity, forward_watch_result, git_error,
+        git_error_without_stdout, git_pipe_failure, git_reads, ignored_paths,
+        invalidate_failed_watch, merge_base_content, parse_diff_display_line, parse_name_status,
+        parse_numstat, parse_porcelain_v2, pipe_read, receive_debounced_change,
+        receive_debounced_updates, requested_watch_ids, reserved_group, resolve_default_ref,
+        run_capped_git, run_command_with_input, run_command_with_timeout, shared_read,
+        should_refresh_path, status, untracked_line_count, watch_failure,
+        watch_plan_matches_request, without_ignored_only, CachedGitSnapshot, FileActivity,
+        GitCounts, GitDiffStats, GitSnapshotCache, GitStatus, GitWatcherManager, GroupIdentity,
+        IpcError, PathBudget, PathBuf, ReadingInFlight, RepoWatchPlan, WatchInbox, WatchQueue,
+        WatchSlot, WatchUpdate, WatchWakeup, GIT_OUTPUT_CAP, MAX_SYNTAX_CONTEXT_BYTES,
+        WATCH_PATH_BUDGET, WATCH_PATH_BYTE_BUDGET,
     };
+    use super::{BrokenStatusRead, ImpossibleReadThread};
+
+    fn failed_output(stdout: &[u8], stderr: &[u8]) -> Output {
+        Output {
+            status: ExitStatus::from_raw(1 << 8),
+            stdout: stdout.to_vec(),
+            stderr: stderr.to_vec(),
+        }
+    }
+
+    #[test]
+    fn git_errors_prefer_stderr_and_fall_back_to_stdout() {
+        let from_stderr = failed_output(b"", b"fatal: stderr reason");
+        assert_eq!(
+            git_error("Git query failed", &from_stderr).message,
+            "Git query failed (exit code 1): fatal: stderr reason"
+        );
+        let from_stdout = failed_output(b"stdout fallback", b"");
+        assert_eq!(
+            git_error("Git query failed", &from_stdout).message,
+            "Git query failed (exit code 1): stdout fallback"
+        );
+    }
+
+    #[test]
+    fn git_error_summary_bounds_long_unicode_diagnostics_without_redacting_paths() {
+        let path = "/Users/matias/Projects/秘密/🪶.rs";
+        let stderr = (0..8)
+            .map(|line| format!("fatal: {path} line-{line} {}", "界".repeat(500)))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let error = git_error("Git query failed", &failed_output(b"", stderr.as_bytes()));
+        let summary = error.message.split_once(": ").unwrap().1;
+
+        assert_eq!(summary.split(" / ").count(), 3);
+        assert!(summary.contains(path));
+        assert!(summary.contains('界'));
+        assert!(summary.split(" / ").all(|line| line.chars().count() <= 121));
+    }
+
+    #[test]
+    fn empty_git_error_keeps_action_and_exit_code() {
+        let error = git_error("could not list Git worktrees", &failed_output(b"", b""));
+
+        assert_eq!(
+            error.message,
+            "could not list Git worktrees (exit code 1; Git returned no diagnostic output)"
+        );
+    }
+
+    #[test]
+    fn diff_error_does_not_include_stdout_source() {
+        let output = failed_output(b"diff --git a/source.rs\n+private source", b"");
+
+        let error = git_error_without_stdout("could not diff changed file", &output);
+
+        assert!(error
+            .message
+            .contains("could not diff changed file (exit code 1"));
+        assert!(!error.message.contains("private source"));
+    }
 
     fn git(cwd: &Path, args: &[&str]) {
         let output = Command::new("git")
@@ -2722,24 +4435,1383 @@ line.txt";
             status: status.iter().map(|id| (*id).to_owned()).collect(),
             activity: activity.iter().map(|id| (*id).to_owned()).collect(),
             worktrees: worktrees.iter().map(|id| (*id).to_owned()).collect(),
+            ..WatchUpdate::default()
         }
     }
 
     #[test]
     fn watcher_debounces_a_burst_into_one_signal_naming_every_checkout_it_touched() {
-        let (sender, receiver) = mpsc::channel();
-        sender.send(WatchMessage::Changed(touched(&["a"]))).unwrap();
-        sender.send(WatchMessage::Changed(touched(&["b"]))).unwrap();
-        sender.send(WatchMessage::Changed(touched(&["a"]))).unwrap();
+        let (queue, inbox) = WatchQueue::new();
+        queue.changed(touched(&["a"]));
+        queue.changed(touched(&["b"]));
+        queue.changed(touched(&["a"]));
 
         // One save rewrites a file and its lock, and a commit moves a ref and an index. Those
         // are separate filesystem events describing one change, and answering them apart would
         // refresh the same rows twice. A checkout named twice is still one row.
         assert_eq!(
-            receive_debounced_change(&receiver, Duration::from_millis(1), Duration::from_secs(1),),
+            receive_debounced_change(&inbox, Duration::from_millis(1), Duration::from_secs(1),),
             WatchWakeup::Changed(touched(&["a", "b"]))
         );
-        assert!(receiver.try_recv().is_err());
+        assert!(inbox.try_recv().is_err());
+    }
+
+    /// The ordering the whole slot rests on, which a burst cannot show: a wakeup offered before the
+    /// change it answers is merged is a worker told to look at a slot that does not have that change
+    /// yet, and the change waits there for the next event to announce it.
+    ///
+    /// Holding the slot is what a worker reading it looks like from the callback's side, and it is
+    /// enough to tell the two orders apart: with the change merged first, the callback cannot reach
+    /// the wakeup at all while this thread holds the slot.
+    #[test]
+    fn a_wakeup_is_offered_only_after_the_change_it_answers_is_in_the_slot() {
+        let (queue, inbox) = WatchQueue::new();
+        let slot = queue.merged.clone();
+        // A slot held by a thread of its own: held by this one, the callback below and the reading
+        // below would be the same thread, and the reading would wait on what this one is holding.
+        let holding = slot.clone();
+        let (held_tx, held_rx) = mpsc::channel();
+        let holder = thread::spawn(move || {
+            let guard = holding.lock().expect("the slot");
+            let _ = held_tx.send(());
+            thread::sleep(Duration::from_millis(300));
+            drop(guard);
+        });
+        held_rx.recv().expect("the slot to be held");
+        let offered = thread::spawn(move || queue.changed(touched(&["late"])));
+
+        thread::sleep(Duration::from_millis(100));
+        assert!(
+            matches!(inbox.try_recv(), Err(mpsc::TryRecvError::Empty)),
+            "a wakeup was offered before the change it answers was merged"
+        );
+        holder.join().expect("the slot to be released");
+        offered.join().expect("the callback finished");
+
+        assert_eq!(
+            inbox.try_recv().expect("the change answered"),
+            WatchWakeup::Changed(touched(&["late"]))
+        );
+    }
+
+    /// The plan a burst is read against: two worktrees over one shared Git directory, so the events
+    /// below move one row, both rows and the list of worktrees between them.
+    fn two_worktree_plan() -> RepoWatchPlan {
+        RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [
+                (PathBuf::from("/repo"), "main".to_owned()),
+                (PathBuf::from("/repo-task"), "task".to_owned()),
+            ]
+            .into_iter()
+            .collect(),
+            git_dirs: BTreeMap::from([(
+                PathBuf::from("/repo/.git/worktrees/task"),
+                "task".to_owned(),
+            )]),
+            common_dir: Some(PathBuf::from("/repo/.git")),
+            all: vec!["main".to_owned(), "task".to_owned()],
+            requested: vec!["main".to_owned(), "task".to_owned()],
+        }
+    }
+
+    fn event(path: &str) -> notify::Event {
+        notify::Event {
+            kind: notify::EventKind::Modify(notify::event::ModifyKind::Any),
+            paths: vec![PathBuf::from(path)],
+            attrs: Default::default(),
+        }
+    }
+
+    /// A build and a checkout: a long burst that touches a file in each worktree, moves a ref every
+    /// worktree counts against and registers a worktree, and repeats all of it.
+    fn burst_events(times: usize) -> Vec<notify::Event> {
+        (0..times)
+            .flat_map(|_| {
+                [
+                    event("/repo/built-a.txt"),
+                    event("/repo-task/built-b.txt"),
+                    event("/repo/.git/refs/heads/trunk"),
+                    event("/repo-task/.git/worktrees/task/index"),
+                    event("/repo/.git/worktrees/joined/gitdir"),
+                ]
+            })
+            .collect()
+    }
+
+    #[test]
+    fn a_burst_of_thousands_of_events_merges_into_the_checkouts_it_merged_before() {
+        let plan = two_worktree_plan();
+        let events = burst_events(1_000);
+
+        // What one message per event used to produce: the same `merge_update` the worker used to run
+        // over the queue it read, run here over the events themselves. The answer must be this one.
+        let mut merged_before = WatchSlot::holding(WatchUpdate::default());
+        for event in &events {
+            merged_before.merge_update(
+                affected_checkouts(&plan, event).expect("the plan describes these paths"),
+            );
+        }
+        let (queue, inbox) = WatchQueue::new();
+        for event in &events {
+            queue
+                .changed(affected_checkouts(&plan, event).expect("the plan describes these paths"));
+        }
+
+        // One answer, and the queue behind it never held more than that one wakeup: the burst of
+        // five thousand events is still the answer the queue of five thousand messages gave.
+        let delivered =
+            receive_debounced_change(&inbox, Duration::from_millis(1), Duration::from_secs(1));
+        assert_eq!(delivered, WatchWakeup::Changed(merged_before.take()));
+        let WatchWakeup::Changed(answer) = delivered else {
+            panic!("the burst was not answered as a change: {delivered:?}");
+        };
+        assert_eq!(
+            answer.status,
+            vec!["main".to_owned(), "task".to_owned()],
+            "the burst must still name both rows a shared ref moves"
+        );
+        assert_eq!(answer.worktrees, vec!["repo".to_owned()]);
+        assert!(inbox.try_recv().is_err());
+    }
+
+    /// The worker thread of a watcher, read the way it is written in production: on until the signal
+    /// that ends it. `None` is the deadline passing with no terminal signal in sight, which is what a
+    /// retirement that was never delivered looks like from here.
+    fn read_worker_thread(inbox: &WatchInbox, deadline: Instant) -> Option<WatchWakeup> {
+        loop {
+            if Instant::now() >= deadline {
+                return None;
+            }
+            if let terminal @ (WatchWakeup::Stop | WatchWakeup::Failed(_)) =
+                receive_debounced_change(inbox, Duration::from_millis(1), Duration::from_millis(50))
+            {
+                return Some(terminal);
+            }
+        }
+    }
+
+    #[test]
+    fn a_stop_sent_while_the_queue_is_saturated_still_ends_the_watcher_thread() {
+        let (queue, inbox) = WatchQueue::new();
+        let retired = queue.clone();
+        let producer = thread::spawn(move || {
+            for burst in 0..2_000 {
+                let id = format!("checkout:{}", burst % 40);
+                retired.changed(touched(&[&id]));
+            }
+            retired.stop();
+        });
+
+        // Nothing is reading yet, so the queue is still holding its one wakeup with two thousand
+        // events merged behind it. The stop cannot be there until it is read, which is what makes it
+        // a signal that was kept rather than one that was dropped.
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            !producer.is_finished(),
+            "a stop behind a full queue was dropped instead of waiting for the worker"
+        );
+
+        // A retired watcher has to end its thread whatever the queue is doing: the burst behind the
+        // stop is dropped with it, which is what retiring means, but the stop itself must arrive or
+        // the thread and its watch descriptors stay alive for the rest of the session.
+        let terminal = read_worker_thread(&inbox, Instant::now() + Duration::from_secs(10));
+        assert_eq!(
+            terminal,
+            Some(WatchWakeup::Stop),
+            "a stop behind a full queue never reached the worker"
+        );
+        producer
+            .join()
+            .expect("the retired watcher finished sending");
+        // The queue is still held here, so what the worker read was the signal and not the sender
+        // going away.
+        assert!(
+            inbox.try_recv().is_err(),
+            "the worker ended on the queue rather than on the stop"
+        );
+    }
+
+    #[test]
+    fn a_failure_sent_while_the_queue_is_saturated_is_still_answered() {
+        let (queue, inbox) = WatchQueue::new();
+        for burst in 0..2_000 {
+            let id = format!("checkout:{}", burst % 40);
+            queue.changed(touched(&[&id]));
+        }
+        let failed = queue.clone();
+        let reporter = thread::spawn(move || failed.failed("watch stream failed".to_owned()));
+
+        // The queue is full and nobody is reading, so the failure cannot be reported yet. It has to
+        // be waiting rather than gone: a watch stream that died has to be heard about even while a
+        // build is filling the queue, because the watcher that reported it is gone and one that
+        // stayed silent about its own death keeps looking alive, holding a snapshot nothing can
+        // refresh.
+        thread::sleep(Duration::from_millis(200));
+        assert!(
+            !reporter.is_finished(),
+            "a failure behind a full queue was dropped instead of waiting for the worker"
+        );
+
+        let terminal = read_worker_thread(&inbox, Instant::now() + Duration::from_secs(10));
+        assert_eq!(
+            terminal,
+            Some(WatchWakeup::Failed("watch stream failed".to_owned())),
+            "a failure behind a full queue never reached the worker"
+        );
+        assert!(
+            reporter.join().expect("the failed watcher reported"),
+            "there was no worker left to report to"
+        );
+    }
+
+    #[test]
+    fn a_git_read_that_never_finishes_fails_after_the_deadline_and_is_collected() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let helper_pid = temp.path().join("helper-pid");
+        // A Git that hangs the way a real one does: it says why on its way out, then waits on a
+        // helper nothing is going to answer, which is the pair of processes one deadline has to end.
+        let script = format!(
+            "echo $$ > \"{git}\"; echo \"fatal: {}\" >&2; sleep 30 & echo $! > \"{helper}\"; wait",
+            "cannot lock ref 'refs/heads/trunk'".repeat(8),
+            git = git_pid.display(),
+            helper = helper_pid.display()
+        );
+
+        let started = Instant::now();
+        let error = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            Duration::from_millis(300),
+        )
+        .expect_err("a Git that never finishes cannot answer");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the deadline did not end the read"
+        );
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        // What Git said is the diagnosis, under the summary limit. This limit bounds the message; it
+        // does not redact paths.
+        assert!(
+            error.message.starts_with("Git stopped reading after 0.3s"),
+            "{error:?}"
+        );
+        assert!(error.message.contains("cannot lock ref"), "{error:?}");
+        assert!(
+            error.message.chars().count() < 200,
+            "Git's own words were not cut down: {}",
+            error.message
+        );
+
+        // Neither process is left behind. The Git itself because a stopped read that skipped the
+        // wait would leave a zombie per hung read, and the helper because a deadline that ended only
+        // the process it started would leave the pipes the output is collected from held open.
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let pids = [read_pid(&git_pid), read_pid(&helper_pid)];
+        while pids.iter().any(|pid| process_exists(*pid)) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        for pid in pids {
+            assert!(
+                !process_exists(pid),
+                "the stopped Git left process {pid} behind"
+            );
+        }
+    }
+
+    /// What the deadline replaced was a runner that already told Git not to take the optional
+    /// locks, and that answer has to survive the rewrite: the index of a linked worktree lives
+    /// inside the directory the watcher is watching, so a `git status` that refreshed it would
+    /// announce itself and ask for the refresh that wrote it, for as long as the app runs.
+    #[test]
+    fn a_read_still_tells_git_to_leave_the_optional_locks_alone() {
+        let temp = tempdir().unwrap();
+        let output = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), "printf %s \"$GIT_OPTIONAL_LOCKS\"".into()],
+            Duration::from_secs(5),
+        )
+        .expect("the read ran");
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"0");
+    }
+
+    /// The read that decides whether a folder is a plain one compares Git's own wording, and a
+    /// translated Git does not say the words being compared.
+    ///
+    /// The environment a read runs Git under is pinned rather than inherited, so this holds whatever
+    /// locale the machine (or the person using it) is set to: what the child is told is `C`, and
+    /// `LANGUAGE` is dropped because gettext reads it ahead of `LC_ALL` and it would win otherwise.
+    /// Nothing global is set to achieve it -- a user's own locale still governs everything they read.
+    #[test]
+    fn a_read_pins_the_language_git_answers_in_without_touching_the_process() {
+        let temp = tempdir().unwrap();
+        // What this process had, so the assertion below is about the child and not about a machine
+        // that happens to run in English.
+        let ambient = std::env::var("LANGUAGE").ok();
+        let output = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec![
+                "-c".into(),
+                "printf '%s|%s' \"$LC_ALL\" \"${LANGUAGE-unset}\"".into(),
+            ],
+            Duration::from_secs(5),
+        )
+        .expect("the read ran");
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout, b"C|unset");
+        assert_eq!(std::env::var("LANGUAGE").ok(), ambient);
+    }
+
+    fn read_pid(path: &Path) -> libc::pid_t {
+        fs::read_to_string(path)
+            .unwrap_or_else(|error| panic!("the hanging Git recorded its process: {error}"))
+            .trim()
+            .parse()
+            .expect("a process id")
+    }
+
+    fn process_exists(pid: libc::pid_t) -> bool {
+        // A process that has been waited for is gone; one that was only killed is still in the
+        // process table as a zombie and still answers this.
+        unsafe { libc::kill(pid, 0) == 0 }
+    }
+
+    /// An empty pipe is Git saying nothing, which is an answer and an ordinary one. It is the answer
+    /// the drain must not stop giving, because it is the same bytes a pipe that could not be read
+    /// would have handed on.
+    #[test]
+    fn a_git_that_prints_nothing_is_a_read_that_answered() {
+        let temp = tempdir().unwrap();
+
+        let output = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), "exit 0".into()],
+            Duration::from_secs(10),
+        )
+        .expect("a Git that printed nothing still answered");
+
+        assert!(output.status.success(), "{output:?}");
+        assert!(output.stdout.is_empty(), "{output:?}");
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+
+    #[test]
+    fn a_git_that_finished_with_its_pipe_still_held_is_a_failed_read_and_leaves_nothing() {
+        // What the drain deadline had no answer for: Git finished inside its own deadline and says
+        // it worked, while a helper it started is still holding the write end. What came back from
+        // here was an exit status with nothing in either pipe, which every caller above reads as a
+        // Git that had nothing to say -- in the changes panel, a checkout with no changes in it,
+        // reported with the failure nowhere in sight.
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let helper_pid = temp.path().join("helper-pid");
+        let script = format!(
+            "echo $$ > \"{git}\"; sleep 30 & echo $! > \"{helper}\"; \
+             echo \"fatal: cannot read /private/nowhere/secret.txt\" >&2; exit 0",
+            git = git_pid.display(),
+            helper = helper_pid.display()
+        );
+
+        let started = Instant::now();
+        let error = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            Duration::from_secs(10),
+        )
+        .expect_err("a read that could not finish is not an empty read");
+
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        assert!(
+            error
+                .message
+                .starts_with("could not read Git's stdout: still held open"),
+            "{error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the drain deadline did not end the read"
+        );
+        // What Git said on its way out does not travel with this one either: the reading failed, so
+        // there is no vouching for what was in it, and a path has no business in a message the app
+        // logs and shows.
+        assert!(!error.message.contains("nowhere"), "{error:?}");
+        assert!(!error.message.contains("secret.txt"), "{error:?}");
+        assert!(
+            !error.message.contains(&temp.path().display().to_string()),
+            "{error:?}"
+        );
+        // Both, for the reason `stop_git_read` gives: the helper because it is the one holding the
+        // pipe that could not be read and it was still in the group Git led, and the Git because
+        // ending that group and collecting the leader is the same operation here.
+        assert_processes_gone(&[read_pid(&git_pid), read_pid(&helper_pid)]);
+    }
+
+    /// The exit is watched and not taken away, which is what keeps the number a signal is aimed at
+    /// still reserved.
+    ///
+    /// `try_wait` answers the same question by reaping, and a reaped pid is a number the kernel
+    /// hands to the next process that asks for one. A watched Git can be asked again; a collected
+    /// one cannot be asked about, and neither can the group it led be named afterwards.
+    #[test]
+    fn a_finished_git_is_watched_and_not_collected() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("a shell to watch");
+        assert!(
+            !exited_unreaped(&child).expect("a running Git can be watched"),
+            "a Git that has not finished is not an exit"
+        );
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !exited_unreaped(&child).expect("a running Git can be watched") {
+            assert!(Instant::now() < deadline, "the shell never exited");
+            thread::sleep(Duration::from_millis(10));
+        }
+        // Watched, not collected: the question has the same answer the second time, which is what
+        // a child that was reaped the first time could not say.
+        assert!(
+            exited_unreaped(&child).expect("an exited Git can still be watched"),
+            "an exit reported once was collected on the way out"
+        );
+        assert_eq!(
+            child.wait().expect("a collected Git").code(),
+            Some(0),
+            "collecting a watched exit still hands back the exit"
+        );
+    }
+
+    /// A pipe held open proves a writer and not which group the writer is in.
+    ///
+    /// Job control gives the helper a group of its own, which is the part of `setsid` that matters
+    /// to a signal: the writer is holding the pipe and is not in the group the read would aim at.
+    /// What must not follow from that is a wider aim -- the leader's number belongs to the kernel
+    /// once the leader is collected, so the group is ended while the leader is still there to hold
+    /// it, and the writer that left is left.
+    ///
+    /// This is also where the reader thread left behind by that writer is asserted not to have
+    /// turned into a signal aimed at it: the read gives up on the pipe after its drain deadline, and
+    /// what it must not do to end with the writer holding it is close the reading end, which would
+    /// hand the same unverified writer an `EPIPE` and then a `SIGPIPE`. What it leaves instead is
+    /// described in `drain_pipe`: the thread stays on the pipe until that writer is gone, which is
+    /// the price of not guessing, and it is paid without the read itself hanging on it.
+    #[test]
+    fn a_helper_that_left_the_group_is_left_rather_than_signalled() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let helper_pid = temp.path().join("helper-pid");
+        let script = format!(
+            "set -m; echo $$ > \"{git}\"; sleep 30 & echo $! > \"{helper}\"; exit 0",
+            git = git_pid.display(),
+            helper = helper_pid.display()
+        );
+
+        let started = Instant::now();
+        let error = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            Duration::from_secs(10),
+        )
+        .expect_err("a read that could not finish is not an empty read");
+
+        // The same failed read as a helper that stayed in the group: a writer on the other end of
+        // a pipe nobody could finish reading, reported rather than handed on as an empty answer.
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        assert!(
+            error
+                .message
+                .starts_with("could not read Git's stdout: still held open"),
+            "{error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the drain deadline did not end the read"
+        );
+
+        let (git, helper) = (read_pid(&git_pid), read_pid(&helper_pid));
+        // The leader was collected rather than left as a zombie, which is the whole reason the exit
+        // above was watched instead of taken.
+        assert_processes_gone(&[git]);
+        assert!(
+            process_exists(helper),
+            "a writer that was never in the group was signalled through a number that \
+             proves nothing about it"
+        );
+        unsafe { libc::kill(helper, libc::SIGKILL) };
+    }
+
+    /// A read that failed on the way cannot be forced on a live pipe from here -- it would take a
+    /// broken descriptor under a running Git -- so what is under test is the seam it arrives
+    /// through: what the drain thread sends, and the error that becomes.
+    #[test]
+    fn a_pipe_that_failed_to_read_is_an_error_and_not_an_empty_read() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        sender
+            .send(Err(io::Error::other("the pipe went away")))
+            .expect("a channel with room for the reader's answer");
+
+        let failure = pipe_read(receiver, "stdout")
+            .expect_err("a pipe that could not be read did not come back as no output");
+
+        assert!(!failure.writer_left(), "{failure:?}");
+        let error = git_pipe_failure(&failure);
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        assert!(
+            error.message.contains("the pipe went away"),
+            "the reason the read failed is the diagnosis: {error:?}"
+        );
+    }
+
+    #[test]
+    fn a_drain_thread_that_stopped_without_an_answer_is_not_an_empty_read() {
+        let (sender, receiver) = mpsc::sync_channel(1);
+        drop(sender);
+
+        let failure = pipe_read(receiver, "stderr")
+            .expect_err("a reader that died with nothing to say did not come back as no output");
+
+        let error = git_pipe_failure(&failure);
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        assert!(
+            error
+                .message
+                .starts_with("could not read Git's stderr: the reader stopped"),
+            "{error:?}"
+        );
+        assert!(!failure.writer_left(), "{failure:?}");
+    }
+
+    /// The exit status is still the failure when the output was read whole: the new errors are about
+    /// an answer that never arrived, and a Git that answered and failed has failed the way it
+    /// always did.
+    #[test]
+    fn a_git_that_really_failed_still_fails_with_its_own_words() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+
+        let error = checked_git(
+            &root,
+            ["rev-parse", "--verify", "refs/heads/nothing"],
+            "read the ref",
+        )
+        .expect_err("a ref that is not there is not a ref");
+
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        assert!(
+            error.message.starts_with("read the ref (exit code "),
+            "{error:?}"
+        );
+        assert!(
+            error.message.contains("fatal: Needed a single revision"),
+            "{error:?}"
+        );
+        assert!(
+            !error.message.contains("could not read Git's"),
+            "a Git that answered did not fail to read: {error:?}"
+        );
+    }
+
+    /// The threads a read needs can fail to start, and the Git they were started for is running
+    /// already. The failure is reported and the child is ended here; before, the writer's was `?`
+    /// and the readers' was a panic, so a read that could not start one of them returned or
+    /// unwound with the child behind it.
+    #[test]
+    fn a_git_whose_list_could_not_be_fed_is_stopped_and_collected() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        // Reads the list and then stays up, so the only thing that can end it is this read: the
+        // write end is dropped with the thread that never started, so `cat` sees the end of a list
+        // that never came.
+        let script = format!(
+            "echo $$ > \"{}\"; cat > /dev/null; sleep 30",
+            git_pid.display()
+        );
+        let _writer = ImpossibleReadThread::new("marvis-git-input", Duration::from_millis(300));
+
+        let started = Instant::now();
+        let error = run_command_with_input(
+            "sh",
+            temp.path(),
+            ["-c", &script, ""],
+            Duration::from_secs(10),
+            b"build/a.js\0",
+        )
+        .expect_err("a Git that was never fed a list did not read one");
+
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        assert!(
+            error.message.starts_with("could not feed Git:"),
+            "the reason it could not be fed is the diagnosis: {error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the unwritable Git was not ended: {:?}",
+            started.elapsed()
+        );
+        assert_processes_gone(&[read_pid(&git_pid)]);
+    }
+
+    /// The same for a reader, and both of them: `GitPipes::take` asks for the two in order, so a
+    /// refusal has to be able to arrive on either. A panic on the second one would unwind with the
+    /// first still running and both pipes half drained.
+    #[test]
+    fn a_git_whose_output_could_not_be_drained_is_stopped_and_collected() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let script = format!("echo $$ > \"{}\"; sleep 30", git_pid.display());
+
+        for reader in ["marvis-git-stdout", "marvis-git-stderr"] {
+            let _reader = ImpossibleReadThread::new(reader, Duration::from_millis(300));
+            let started = Instant::now();
+            let error = run_command_with_timeout(
+                "sh",
+                temp.path(),
+                vec!["-c".into(), script.clone().into()],
+                Duration::from_secs(10),
+            )
+            .expect_err("a Git nobody was reading was not answered");
+
+            assert_eq!(error.code, IpcErrorCode::GitFailed);
+            assert!(
+                error.message.starts_with("could not read Git's output:"),
+                "{reader}: {error:?}"
+            );
+            assert!(
+                started.elapsed() < Duration::from_secs(5),
+                "{reader}: the unreadable Git was not ended: {:?}",
+                started.elapsed()
+            );
+            assert_processes_gone_named(&[read_pid(&git_pid)], reader);
+        }
+    }
+
+    /// `run_capped_git` drains on the same thread and for the same reason, so the same refusal ends
+    /// its Git rather than leaving it writing into a pipe that will never be read again.
+    #[test]
+    fn a_blob_whose_reader_could_not_be_started_is_nothing_and_leaves_nothing_running() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let script = format!("echo $$ > \"{}\"; sleep 30", git_pid.display());
+        let _reader = ImpossibleReadThread::new("marvis-git-stdout", Duration::from_millis(300));
+
+        let read = run_capped_git(
+            "sh",
+            temp.path(),
+            ["-c", &script],
+            MAX_SYNTAX_CONTEXT_BYTES,
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(read, None, "a blob nobody could read is not text to draw");
+        assert_processes_gone(&[read_pid(&git_pid)]);
+    }
+
+    /// The status read that fails is the one this code cannot ask again, so the read has to end the
+    /// Git and collect it rather than keep waiting for an answer it will never have. And because the
+    /// leader is still uncollected at that point, the group behind its number is still this read's
+    /// own: the helper holding the pipe is ended with it, and nothing that is not in that group is
+    /// signalled at all.
+    #[test]
+    fn a_status_read_that_fails_ends_the_whole_group_it_started_and_nothing_else() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let helper_pid = temp.path().join("helper-pid");
+        let script = format!(
+            "echo $$ > \"{git}\"; sleep 30 & echo $! > \"{helper}\"; exit 0",
+            git = git_pid.display(),
+            helper = helper_pid.display()
+        );
+        // A process of its own, outside every group of this read, as the one thing a signal aimed at
+        // the wrong number would show up on.
+        let mut bystander = Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .expect("a bystander to watch");
+        let _broken = BrokenStatusRead::armed();
+
+        let started = Instant::now();
+        let error = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            Duration::from_secs(10),
+        )
+        .expect_err("a read whose status could not be read is not a read that answered");
+
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        assert!(
+            error
+                .message
+                .starts_with("could not read from Git: the process status could not be read"),
+            "{error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the unreadable status did not end the read: {:?}",
+            started.elapsed()
+        );
+        // Both, for the reason `stop_git_read` gives: the helper because it is what still holds the
+        // pipe, and the leader because ending that group and collecting the leader are one operation.
+        assert_processes_gone(&[read_pid(&git_pid), read_pid(&helper_pid)]);
+        assert!(
+            process_exists(bystander.id() as libc::pid_t),
+            "a signal aimed at a number the kernel had given away would land here"
+        );
+        let _ = bystander.kill();
+        let _ = bystander.wait();
+    }
+
+    /// A collection that already happened leaves a number the kernel is free to hand to somebody
+    /// else, so the group behind it is not this read's to signal. Only the process `spawn`
+    /// returned is ended there, and this is the pair of answers that decides it: a leader the
+    /// kernel still holds is a reserved number, and a status read that fails leaves nothing to
+    /// prove one way or the other.
+    #[test]
+    fn a_group_is_only_signalled_while_the_number_behind_it_is_still_this_reads() {
+        let mut child = Command::new("sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .expect("a shell to watch");
+        assert_eq!(
+            reserved_group(&child),
+            GroupIdentity::Reserved,
+            "a child this read has not collected is still a number the kernel holds"
+        );
+
+        child.wait().expect("a collected shell");
+        assert_eq!(
+            reserved_group(&child),
+            GroupIdentity::Spent,
+            "a collected child is a number the kernel may have handed to somebody else"
+        );
+    }
+
+    /// The deadline bounds how long a read may take; it never bounded how much of one is kept, and a
+    /// `status` of a repository with a very large change set printed all of it into a `Vec` before
+    /// anything summarized or parsed it. Past the cap the answer is refused: what arrived first is
+    /// not the state of the checkout, and every caller here reads it as one.
+    #[test]
+    fn output_past_the_cap_is_refused_rather_than_trimmed() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let script = format!(
+            "echo $$ > \"{}\"; head -c {} /dev/zero; exit 0",
+            git_pid.display(),
+            GIT_OUTPUT_CAP + 1
+        );
+
+        let error = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            Duration::from_secs(30),
+        )
+        .expect_err("an answer past the cap is not a whole answer");
+
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        assert!(
+            error
+                .message
+                .contains("Git printed more than 16 MiB on its stdout"),
+            "{error:?}"
+        );
+        assert!(
+            error.message.contains("refused rather than trimmed"),
+            "the failure has to say the answer was refused, not shortened: {error:?}"
+        );
+        assert_processes_gone(&[read_pid(&git_pid)]);
+    }
+
+    /// The byte on the other side of the cap is the whole difference: at the cap the read is a
+    /// `status` of a large checkout, one byte more is not a `status` at all.
+    #[test]
+    fn output_exactly_at_the_cap_is_still_a_whole_answer() {
+        let temp = tempdir().unwrap();
+        let script = format!("head -c {GIT_OUTPUT_CAP} /dev/zero; exit 0");
+
+        let output = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            Duration::from_secs(30),
+        )
+        .expect("an answer of exactly the cap is an answer");
+
+        assert!(output.status.success(), "{output:?}");
+        assert_eq!(output.stdout.len(), GIT_OUTPUT_CAP);
+        assert!(output.stderr.is_empty(), "{output:?}");
+    }
+
+    /// Two caps and two streams: the diagnostic is measured on its own, so a Git that says more
+    /// about a failure than the summary keeps is refused over the stream that said it rather than
+    /// over the answer every caller parses.
+    #[test]
+    fn each_stream_is_refused_over_its_own_cap() {
+        let temp = tempdir().unwrap();
+        let script = "printf 'answer\\n'; yes x >&2 | head -c 1100000; exit 0";
+
+        let error = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            Duration::from_secs(30),
+        )
+        .expect_err("a diagnosis past its own cap is not a diagnosis");
+
+        assert!(
+            error
+                .message
+                .contains("Git printed more than 1 MiB on its stderr"),
+            "{error:?}"
+        );
+        assert!(
+            !error.message.contains("stdout"),
+            "the answer that did arrive whole is not what was refused: {error:?}"
+        );
+    }
+
+    /// What Git said about the failure still travels with a refused answer, because the refusal is
+    /// about the volume and the diagnosis is about why the volume happened.
+    #[test]
+    fn a_refused_answer_keeps_what_git_said_about_itself() {
+        let temp = tempdir().unwrap();
+        let script = format!(
+            "echo 'fatal: could not lock config file .git/config' >&2; \
+             head -c {} /dev/zero",
+            GIT_OUTPUT_CAP + 1
+        );
+
+        let error = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            Duration::from_secs(30),
+        )
+        .expect_err("an answer past the cap is not a whole answer");
+
+        assert!(
+            error.message.contains("could not lock config file"),
+            "{error:?}"
+        );
+    }
+
+    /// A Git printing without end is the case a deadline does not answer: it is not slow, it is
+    /// past what the read keeps, and saying so is what makes the difference between a bounded read
+    /// and a wait that ends only when the deadline is.
+    ///
+    /// It is also the case that proves the reader does not stop at the cap: a reader that did would
+    /// block the writer on a full pipe, and the read would end at the deadline instead, thirty
+    /// seconds later and saying something else.
+    #[test]
+    fn a_git_that_prints_without_ending_is_refused_for_printing_and_not_for_running_out_of_time() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let script = format!("echo $$ > \"{}\"; yes x", git_pid.display());
+
+        let started = Instant::now();
+        let error = run_command_with_timeout(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            Duration::from_secs(30),
+        )
+        .expect_err("a Git that prints without end has no whole answer");
+
+        assert!(
+            error
+                .message
+                .contains("Git printed more than 16 MiB on its stdout"),
+            "{error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(20),
+            "the flood was only ended by the deadline: {:?}",
+            started.elapsed()
+        );
+        assert_processes_gone(&[read_pid(&git_pid)]);
+    }
+
+    #[test]
+    fn a_blob_is_read_whole_through_the_cap() {
+        // What the deadline was added to has to answer exactly as it did before it: a blob under
+        // the cap is the text of the file, byte for byte, and nothing about having a deadline on it
+        // may show in the diff that draws it.
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join("view.ts"), "const n = 1;\n").unwrap();
+        git(&root, &["add", "view.ts"]);
+        git(&root, &["commit", "-m", "view"]);
+
+        let blob = merge_base_content(&root, "HEAD", "view.ts");
+
+        assert_eq!(blob.as_deref(), Some("const n = 1;\n"));
+    }
+
+    #[test]
+    fn a_blob_that_is_not_text_and_one_past_the_cap_are_both_nothing() {
+        // The two ways a reading of a blob ends without text: bytes that are not text at all, which
+        // no grammar could be handed, and more of it than a diff is worth carrying in order to color.
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join("bytes.dat"), [0x80, 0xff, 0xfe]).unwrap();
+        let big = "line\n".repeat(MAX_SYNTAX_CONTEXT_BYTES / 5 + 1);
+        fs::write(root.join("big.txt"), &big).unwrap();
+        git(&root, &["add", "bytes.dat", "big.txt"]);
+        git(&root, &["commit", "-m", "sides"]);
+
+        assert_eq!(merge_base_content(&root, "HEAD", "bytes.dat"), None);
+        assert_eq!(merge_base_content(&root, "HEAD", "big.txt"), None);
+        // A blob the merge base does not have is the same nothing, and it is Git's exit status that
+        // says so: a failure prints nothing on the pipe it would have been read from.
+        assert_eq!(
+            merge_base_content(&root, "HEAD", "base.txt"),
+            Some("base\n".to_owned())
+        );
+        assert_eq!(merge_base_content(&root, "HEAD", "added.txt"), None);
+    }
+
+    #[test]
+    fn a_writer_that_closes_its_pipe_before_it_exits_is_still_its_text() {
+        // The reading arrives before the process does, which is ordinary rather than broken: a Git
+        // that has printed the whole blob and closed its pipe is a moment from exiting. Its bytes
+        // are held until the status that vouches for them is in, because a reading that asked about
+        // the status too early and took the answer anyway would lose the blob to the one question
+        // left to ask about it.
+        let temp = tempdir().unwrap();
+        let script = "printf 'const n = 1;\\n'; exec 1>&-; sleep 1";
+
+        let read = run_capped_git(
+            "sh",
+            temp.path(),
+            ["-c", script],
+            MAX_SYNTAX_CONTEXT_BYTES,
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(read.as_deref(), Some(&b"const n = 1;\n"[..]));
+    }
+
+    /// The cap cuts what is kept and not what is read, and this is what says so at the level where it
+    /// is decided. A reader that stopped at the cap would hand over its answer without ever asking
+    /// for the end of the pipe, which is a Git writing into a pipe nobody is reading: a blob is the
+    /// size of a file, so that is the whole file blocking, not one buffer.
+    #[test]
+    fn a_pipe_past_the_cap_is_drained_to_its_end_and_says_so() {
+        struct UntilTheEnd {
+            left: usize,
+            at_the_end: Arc<AtomicBool>,
+        }
+        impl io::Read for UntilTheEnd {
+            fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+                if self.left == 0 {
+                    self.at_the_end.store(true, Ordering::Release);
+                    return Ok(0);
+                }
+                let read = buffer.len().min(self.left);
+                buffer[..read].fill(b'x');
+                self.left -= read;
+                Ok(read)
+            }
+        }
+        let drain = |printed: usize, cap: usize| {
+            let at_the_end = Arc::new(AtomicBool::new(false));
+            let pipe = drain_pipe(
+                UntilTheEnd {
+                    left: printed,
+                    at_the_end: at_the_end.clone(),
+                },
+                "marvis-git-stdout",
+                cap,
+                Arc::new(AtomicBool::new(false)),
+            )
+            .expect("a thread to drain");
+            let answer = pipe
+                .recv_timeout(Duration::from_secs(5))
+                .expect("the drain to finish")
+                .expect("a pipe that could be read");
+            (answer, at_the_end.load(Ordering::Acquire))
+        };
+
+        let (at_the_cap, drained) = drain(1024, 1024);
+        assert_eq!(at_the_cap.bytes.len(), 1024);
+        assert!(
+            !at_the_cap.over_cap,
+            "a reading of exactly the cap is a reading of all of it"
+        );
+        assert!(drained);
+
+        let (past_the_cap, drained) = drain(4096, 1024);
+        assert_eq!(past_the_cap.bytes.len(), 1024, "what is kept is the cap");
+        assert!(past_the_cap.over_cap, "there was more than the cap");
+        assert!(
+            drained,
+            "the rest was read and dropped, not left in a pipe the writer blocks on"
+        );
+    }
+
+    /// A blob past the cap is ended as soon as the reading knows it, which is what a reading that
+    /// stopped at the cap used to get from the broken pipe it left behind: the blob is not coming
+    /// back under the cap, so there is nothing to wait for, and the deadline is no longer what ends
+    /// it.
+    #[test]
+    fn a_blob_past_the_cap_ends_its_git_as_soon_as_it_is_past_it() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        // More than a pipe holds, then a Git that would not finish inside the deadline at all.
+        let script = format!(
+            "echo $$ > \"{}\"; head -c 1048576 /dev/zero; sleep 30",
+            git_pid.display()
+        );
+
+        let started = Instant::now();
+        let read = run_capped_git(
+            "sh",
+            temp.path(),
+            ["-c", &script],
+            1024,
+            Duration::from_secs(10),
+        );
+
+        assert_eq!(read, None, "a blob past the cap is not text to draw");
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the reading only ended when the deadline was: {:?}",
+            started.elapsed()
+        );
+        assert_processes_gone(&[read_pid(&git_pid)]);
+    }
+
+    #[test]
+    fn a_cat_file_that_never_finishes_is_nothing_and_is_collected() {
+        // What the deadline replaced here was a `wait` with no deadline on it at all, over a read
+        // that was itself the wait: a `cat-file` blocked on a filter nobody can reach held the
+        // `spawn_blocking` slot that draws the diff for as long as it chose to hang. Nothing to
+        // draw is the right answer for it, so it is stopped and it leaves nothing behind.
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let helper_pid = temp.path().join("helper-pid");
+        let script = format!(
+            "echo $$ > \"{git}\"; sleep 30 & echo $! > \"{helper}\"; wait",
+            git = git_pid.display(),
+            helper = helper_pid.display()
+        );
+
+        let started = Instant::now();
+        let read = run_capped_git(
+            "sh",
+            temp.path(),
+            ["-c", &script],
+            MAX_SYNTAX_CONTEXT_BYTES,
+            Duration::from_millis(300),
+        );
+
+        assert_eq!(read, None, "a Git that never finishes has no blob to read");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the deadline did not end the read"
+        );
+        // Both processes, for the reason `stop_git_read` gives: the Git itself because a read that
+        // stopped it and skipped the wait would leave a zombie, and the helper because a deadline
+        // that ended only the process it started would leave it holding the pipe being read.
+        assert_processes_gone(&[read_pid(&git_pid), read_pid(&helper_pid)]);
+    }
+
+    #[test]
+    fn a_writer_past_the_cap_that_never_finishes_is_nothing_and_is_collected() {
+        // The second way a blob ends a reading early: the blob is already past the cap while the Git
+        // that is writing it keeps running, so the reading has nothing left to wait for and ends it
+        // itself rather than leaving it writing on a thread that already holds its answer. The
+        // answer is `None` either way -- the blob is past the cap -- and the process is collected.
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let helper_pid = temp.path().join("helper-pid");
+        // Both processes record themselves before anything is printed, which is what makes them
+        // findable afterwards: the reading ends as soon as the cap is passed, which can be before a
+        // shell that prints first would have got as far as writing anything down.
+        let script = format!(
+            "echo $$ > \"{git}\"; sleep 30 & echo $! > \"{helper}\"; \
+             head -c 4096 /dev/zero | tr '\\0' 'a'; wait",
+            git = git_pid.display(),
+            helper = helper_pid.display()
+        );
+
+        let started = Instant::now();
+        let read = run_capped_git(
+            "sh",
+            temp.path(),
+            ["-c", &script],
+            1024,
+            Duration::from_millis(300),
+        );
+
+        assert_eq!(read, None, "a blob past the cap is not text to draw");
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the deadline did not end the writer"
+        );
+        assert_processes_gone(&[read_pid(&git_pid), read_pid(&helper_pid)]);
+    }
+
+    fn assert_processes_gone(pids: &[libc::pid_t]) {
+        assert_processes_gone_named(pids, "the stopped read");
+    }
+
+    fn assert_processes_gone_named(pids: &[libc::pid_t], what: &str) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while pids.iter().any(|pid| process_exists(*pid)) && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(10));
+        }
+        for pid in pids {
+            assert!(!process_exists(*pid), "{what} left process {pid} behind");
+        }
+    }
+
+    /// The budget is the answer to "a burst that will not stop, while the worker waits on Git":
+    /// the wakeups were capped, the payload behind them was not, and paths accumulated in sets for
+    /// as long as the merge went on. Two budgets rather than one -- a count and a byte budget --
+    /// because either one alone leaves a burst that grows in the other direction.
+    #[test]
+    fn a_burst_past_the_path_budget_refreshes_what_it_named_and_keeps_its_activity() {
+        let mut slot = slot_with_budget(2, 4096);
+        slot.merge_update(moved_paths("main", &["build/a.js", "build/b.js"]));
+
+        // At the budget is not past it: the paths are still carried, still what `check-ignore`
+        // would be asked about, and the checkout is not pinned by spending.
+        assert_eq!(slot.update.paths[&"main".to_owned()].len(), 2);
+        assert!(slot.budget.paths == 2 && !slot.budget.spent);
+
+        slot.merge_update(moved_paths("main", &["build/c.js"]));
+        let batch = slot.take();
+
+        assert!(
+            batch.paths.is_empty(),
+            "the payload is what the budget is for"
+        );
+        assert_eq!(
+            batch.status,
+            ["main"],
+            "a burst that big is not a clean checkout"
+        );
+        assert_eq!(
+            batch.activity,
+            ["main"],
+            "the file explorer shows what was written, budget or not"
+        );
+        assert_eq!(
+            batch.pinned,
+            BTreeSet::from(["main".to_owned()]),
+            "pinned is what keeps an emptied `paths` from reading as all ignored"
+        );
+    }
+
+    /// The bytes are counted with the NUL `check-ignore --stdin` is fed after each path, and they are
+    /// counted at all because a burst of deep paths costs more per file than one of shallow ones:
+    /// the same number of files is a different burst, and the one that spends the budget must be the
+    /// one that was expensive.
+    #[test]
+    fn a_burst_of_deep_paths_spends_the_byte_budget_before_the_path_one() {
+        let inside = "a".repeat(23);
+        let mut within = slot_with_budget(1_000, 24);
+        within.merge_update(moved_paths("main", &[&inside]));
+        assert_eq!(
+            within.update.paths[&"main".to_owned()].len(),
+            1,
+            "23 bytes of path and the NUL behind it is exactly the budget"
+        );
+
+        let past = "a".repeat(24);
+        let mut over = slot_with_budget(1_000, 24);
+        over.merge_update(moved_paths("main", &[&past]));
+        let batch = over.take();
+        assert!(batch.paths.is_empty());
+        assert_eq!(batch.status, ["main"]);
+        assert_eq!(batch.pinned, BTreeSet::from(["main".to_owned()]));
+    }
+
+    /// Nothing is dropped silently. A checkout named after the budget is spent is still a checkout
+    /// something was written in, and the batch that says otherwise is what leaves a row describing a
+    /// change set that no longer exists.
+    #[test]
+    fn a_change_after_the_budget_is_refreshed_rather_than_dropped() {
+        let mut slot = slot_with_budget(1, 4096);
+        slot.merge_update(moved_paths("main", &["build/a.js", "build/b.js"]));
+        slot.merge_update(moved_paths("task", &["build/c.js"]));
+        slot.merge_update(moved_paths("task", &["build/d.js"]));
+
+        let batch = slot.take();
+
+        assert!(batch.paths.is_empty());
+        assert_eq!(batch.status, ["main", "task"]);
+        assert_eq!(batch.activity, ["main", "task"]);
+        assert_eq!(
+            batch.pinned,
+            BTreeSet::from(["main".to_owned(), "task".to_owned()])
+        );
+    }
+
+    /// The budget belongs to the burst and not to the watcher: taking the batch hands the next one a
+    /// whole one, or a single enormous build would leave every checkout after it being refreshed for
+    /// the rest of the session.
+    #[test]
+    fn the_batch_after_an_overspent_one_carries_its_paths_again() {
+        let mut slot = slot_with_budget(1, 4096);
+        slot.merge_update(moved_paths("main", &["build/a.js", "build/b.js"]));
+        assert!(slot.budget.spent);
+        slot.take();
+
+        slot.merge_update(moved_paths("main", &["build/c.js"]));
+        assert_eq!(slot.update.paths[&"main".to_owned()].len(), 1);
+        assert!(!slot.budget.spent);
+    }
+
+    /// The same funnel the worker reads: the queue, the merge behind the wakeup and the terminal
+    /// signals that end the worker. A budget that ran out is a payload decision and cannot leave the
+    /// watcher unable to stop or unable to report that its watch stream died.
+    #[test]
+    fn a_watcher_whose_burst_ran_out_of_budget_still_answers_refreshes_and_still_stops() {
+        let (queue, inbox) = WatchQueue::new();
+        if let Ok(mut slot) = queue.merged.lock() {
+            slot.budget = PathBudget {
+                max_paths: 1,
+                max_bytes: 4096,
+                ..PathBudget::default()
+            };
+        }
+        queue.changed(moved_paths("main", &["build/a.js"]));
+        queue.changed(moved_paths("main", &["build/b.js"]));
+        queue.changed(moved_paths("task", &["build/c.js"]));
+
+        assert_eq!(
+            receive_debounced_change(&inbox, Duration::from_millis(1), Duration::from_secs(1)),
+            WatchWakeup::Changed(WatchUpdate {
+                status: vec!["main".to_owned(), "task".to_owned()],
+                activity: vec!["main".to_owned(), "task".to_owned()],
+                paths: BTreeMap::new(),
+                pinned: BTreeSet::from(["main".to_owned(), "task".to_owned()]),
+                ..WatchUpdate::default()
+            })
+        );
+
+        assert!(queue.failed("the watch stream died".to_owned()));
+        assert_eq!(
+            receive_debounced_change(&inbox, Duration::from_millis(1), Duration::from_secs(1)),
+            WatchWakeup::Failed("the watch stream died".to_owned())
+        );
+        queue.stop();
+        assert_eq!(
+            receive_debounced_change(&inbox, Duration::from_millis(1), Duration::from_secs(1)),
+            WatchWakeup::Stop
+        );
+    }
+
+    /// The cap `check-ignore` is given is what turns a burst into "nothing in here matters", and an
+    /// emptied `paths` on a batch Git never answered about is the one reading of it that is not a
+    /// refresh. So Git is not asked at all: there are no paths left to ask about, and the checkout
+    /// is re-read rather than held back.
+    #[test]
+    fn a_batch_that_ran_out_of_budget_is_not_read_as_every_path_being_ignored() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "x\n").unwrap();
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
+        let plan = super::watch_plan(&database, &repo_id).unwrap();
+
+        let mut slot = slot_with_budget(1, 4096);
+        slot.merge_update(moved_paths(
+            &checkout_id,
+            &["node_modules/pkg/index.js", "node_modules/pkg/other.js"],
+        ));
+        let before = git_reads(&root);
+
+        let answered = without_ignored_only(&plan, slot.take());
+
+        assert_eq!(
+            answered.status[..],
+            [checkout_id.as_str()],
+            "every path Git was never asked about cannot be a path Git said it ignores"
+        );
+        assert_eq!(answered.activity, [checkout_id]);
+        assert_eq!(
+            git_reads(&root) - before,
+            0,
+            "there were no paths left to ask about"
+        );
+    }
+
+    /// The budget the watcher runs on, at the numbers it runs on: `WATCH_PATH_BUDGET` paths of an
+    /// ordinary depth fit, and the one past the count is what spends it. The byte budget is not what
+    /// binds here, which is the point of having both -- a burst of shallow paths is stopped by the
+    /// count and a burst of deep ones by the bytes, and neither is a smaller cap wearing the other's
+    /// name.
+    #[test]
+    fn the_production_budget_carries_its_own_paths_and_spends_on_the_next_one() {
+        let path = |index: usize| format!("build/{index:05}.js");
+        let mut slot = WatchSlot::holding(WatchUpdate::default());
+        assert_eq!(slot.budget.max_paths, WATCH_PATH_BUDGET);
+        assert_eq!(slot.budget.max_bytes, WATCH_PATH_BYTE_BUDGET);
+
+        slot.merge_update(WatchUpdate {
+            status: vec!["main".to_owned()],
+            paths: BTreeMap::from([(
+                "main".to_owned(),
+                (0..WATCH_PATH_BUDGET)
+                    .map(|index| PathBuf::from(path(index)))
+                    .collect(),
+            )]),
+            ..WatchUpdate::default()
+        });
+        assert!(
+            !slot.budget.spent && slot.budget.paths == WATCH_PATH_BUDGET,
+            "{WATCH_PATH_BUDGET} ordinary paths are inside the budget: {:?}",
+            slot.budget
+        );
+        assert!(slot.budget.bytes < WATCH_PATH_BYTE_BUDGET);
+
+        slot.merge_update(moved_paths("main", &[&path(WATCH_PATH_BUDGET)]));
+        let batch = slot.take();
+        assert!(batch.paths.is_empty());
+        assert_eq!(batch.status, ["main"]);
+        assert_eq!(batch.pinned, BTreeSet::from(["main".to_owned()]));
+    }
+
+    fn slot_with_budget(max_paths: usize, max_bytes: usize) -> WatchSlot {
+        let mut slot = WatchSlot::holding(WatchUpdate::default());
+        slot.budget = PathBudget {
+            max_paths,
+            max_bytes,
+            ..PathBudget::default()
+        };
+        slot
+    }
+
+    fn moved_paths(checkout_id: &str, paths: &[&str]) -> WatchUpdate {
+        WatchUpdate {
+            status: vec![checkout_id.to_owned()],
+            activity: vec![checkout_id.to_owned()],
+            paths: BTreeMap::from([(
+                checkout_id.to_owned(),
+                paths.iter().map(PathBuf::from).collect(),
+            )]),
+            ..WatchUpdate::default()
+        }
     }
 
     #[test]
@@ -2748,7 +5820,7 @@ line.txt";
         let mut pending = VecDeque::from([
             (
                 Duration::from_millis(50),
-                WatchMessage::Changed(watch_update(
+                WatchWakeup::Changed(watch_update(
                     &["early"],
                     &["activity-early"],
                     &["repo-early"],
@@ -2756,7 +5828,7 @@ line.txt";
             ),
             (
                 Duration::from_millis(120),
-                WatchMessage::Changed(watch_update(
+                WatchWakeup::Changed(watch_update(
                     &["middle"],
                     &["activity-middle"],
                     &["repo-middle"],
@@ -2764,7 +5836,7 @@ line.txt";
             ),
             (
                 Duration::from_millis(190),
-                WatchMessage::Changed(watch_update(
+                WatchWakeup::Changed(watch_update(
                     &["initial"],
                     &["activity-early"],
                     &["repo-early"],
@@ -2772,7 +5844,7 @@ line.txt";
             ),
             (
                 Duration::from_millis(240),
-                WatchMessage::Changed(watch_update(
+                WatchWakeup::Changed(watch_update(
                     &["near-limit"],
                     &["activity-near-limit"],
                     &["repo-near-limit"],
@@ -2780,14 +5852,18 @@ line.txt";
             ),
             (
                 Duration::from_millis(260),
-                WatchMessage::Changed(touched(&["next-batch"])),
+                WatchWakeup::Changed(touched(&["next-batch"])),
             ),
         ]);
         let mut waits = Vec::new();
         let mut receives = 0;
 
         let wakeup = receive_debounced_updates(
-            watch_update(&["initial"], &["activity-initial"], &["repo-initial"]),
+            WatchSlot::holding(watch_update(
+                &["initial"],
+                &["activity-initial"],
+                &["repo-initial"],
+            )),
             Duration::from_millis(100),
             Duration::from_millis(250),
             || elapsed.get(),
@@ -2837,18 +5913,18 @@ line.txt";
         assert_eq!(elapsed.get(), Duration::from_millis(250));
         assert_eq!(receives, 5);
         assert!(
-            matches!(pending.front(), Some((at, WatchMessage::Changed(_))) if *at == Duration::from_millis(260))
+            matches!(pending.front(), Some((at, WatchWakeup::Changed(_))) if *at == Duration::from_millis(260))
         );
     }
 
     #[test]
     fn watcher_stops_if_the_channel_disconnects_during_a_batch() {
-        let (sender, receiver) = mpsc::channel();
-        sender.send(WatchMessage::Changed(touched(&["a"]))).unwrap();
-        drop(sender);
+        let (queue, inbox) = WatchQueue::new();
+        queue.changed(touched(&["a"]));
+        drop(queue);
 
         assert_eq!(
-            receive_debounced_change(&receiver, Duration::from_millis(1), Duration::from_secs(1),),
+            receive_debounced_change(&inbox, Duration::from_millis(1), Duration::from_secs(1),),
             WatchWakeup::Stop
         );
     }
@@ -2875,8 +5951,8 @@ line.txt";
             all: vec!["main".to_owned(), "task".to_owned()],
             requested: vec!["main".to_owned(), "task".to_owned()],
         };
-        let (sender, receiver) = mpsc::channel();
-        let event_sender = sender.clone();
+        let (queue, inbox) = WatchQueue::new();
+        let event_queue = queue.clone();
         let event_plan = plan.clone();
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
@@ -2884,7 +5960,7 @@ line.txt";
                     .ok()
                     .and_then(|event| affected_checkouts(&event_plan, &event))
                 {
-                    let _ = event_sender.send(WatchMessage::Changed(update));
+                    event_queue.changed(update);
                 }
             })
             .unwrap();
@@ -2908,13 +5984,13 @@ line.txt";
         let deadline = Instant::now() + Duration::from_secs(5);
         let update = loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            match receiver.recv_timeout(remaining) {
-                Ok(WatchMessage::Changed(update)) if update.status.contains(&"task".to_owned()) => {
+            match inbox.recv_timeout(remaining) {
+                Ok(WatchWakeup::Changed(update)) if update.status.contains(&"task".to_owned()) => {
                     break update;
                 }
-                Ok(WatchMessage::Changed(_)) => continue,
-                Ok(WatchMessage::Failed(error)) => panic!("watch failed: {error}"),
-                Ok(WatchMessage::Stop) => panic!("watcher stopped"),
+                Ok(WatchWakeup::Changed(_)) => continue,
+                Ok(WatchWakeup::Failed(error)) => panic!("watch failed: {error}"),
+                Ok(WatchWakeup::Stop) => panic!("watcher stopped"),
                 Err(_) => panic!("the write into the worktree was never reported"),
             }
         };
@@ -3030,6 +6106,7 @@ line.txt";
                     status: Vec::new(),
                     activity: Vec::new(),
                     worktrees: vec!["repo".to_owned()],
+                    ..WatchUpdate::default()
                 }),
                 "{path}"
             );
@@ -3047,8 +6124,8 @@ line.txt";
         let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
         let plan = super::watch_plan(&database, &repo_id).unwrap();
         let common_dir = plan.common_dir.clone().unwrap();
-        let (sender, receiver) = mpsc::channel();
-        let event_sender = sender.clone();
+        let (queue, inbox) = WatchQueue::new();
+        let event_queue = queue.clone();
         let event_plan = plan.clone();
         let mut watcher =
             notify::recommended_watcher(move |result: notify::Result<notify::Event>| {
@@ -3056,7 +6133,7 @@ line.txt";
                     .ok()
                     .and_then(|event| affected_checkouts(&event_plan, &event))
                 {
-                    let _ = event_sender.send(update);
+                    event_queue.changed(update);
                 }
             })
             .unwrap();
@@ -3074,19 +6151,22 @@ line.txt";
             &root,
             &["worktree", "add", added.to_str().unwrap(), "external"],
         );
-        assert_membership_signal(&receiver, &repo_id);
+        assert_membership_signal(&inbox, &repo_id);
 
         git(&root, &["worktree", "remove", added.to_str().unwrap()]);
-        assert_membership_signal(&receiver, &repo_id);
+        assert_membership_signal(&inbox, &repo_id);
     }
 
-    fn assert_membership_signal(receiver: &mpsc::Receiver<WatchUpdate>, repo_id: &str) {
+    fn assert_membership_signal(inbox: &WatchInbox, repo_id: &str) {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let remaining = deadline.saturating_duration_since(Instant::now());
-            let update = receiver
-                .recv_timeout(remaining)
-                .expect("Git worktree add/remove should notify the shared Git directory");
+            let update = match inbox.recv_timeout(remaining) {
+                Ok(WatchWakeup::Changed(update)) => update,
+                Ok(WatchWakeup::Failed(error)) => panic!("watch failed: {error}"),
+                Ok(WatchWakeup::Stop) => panic!("watcher stopped"),
+                Err(_) => panic!("Git worktree add/remove should notify the shared Git directory"),
+            };
             if update.worktrees.iter().any(|id| id == repo_id) {
                 return;
             }
@@ -3167,6 +6247,11 @@ line.txt";
                 status: vec!["main".to_owned()],
                 activity: vec!["main".to_owned()],
                 worktrees: Vec::new(),
+                paths: BTreeMap::from([(
+                    "main".to_owned(),
+                    BTreeSet::from([PathBuf::from("base.txt")]),
+                )]),
+                pinned: BTreeSet::new(),
             })
         );
     }
@@ -3663,6 +6748,37 @@ line.txt";
     }
 
     #[test]
+    fn activity_carries_the_paths_it_moved_and_leaves_a_spent_batch_unnamed() {
+        let update = WatchUpdate {
+            status: Vec::new(),
+            activity: vec!["checkout:one".to_owned(), "checkout:two".to_owned()],
+            worktrees: Vec::new(),
+            paths: BTreeMap::from([(
+                "checkout:one".to_owned(),
+                BTreeSet::from([PathBuf::from("docs/pic.png"), PathBuf::from("src/app.ts")]),
+            )]),
+            pinned: BTreeSet::new(),
+        };
+
+        assert_eq!(
+            file_activity(&update),
+            vec![
+                FileActivity {
+                    checkout_id: "checkout:one".to_owned(),
+                    paths: vec!["docs/pic.png".to_owned(), "src/app.ts".to_owned()],
+                },
+                // The burst spent its budget, so it kept the checkout in its activity and let the
+                // paths go. An empty list is the batch declining to say what it moved, which the
+                // renderer reads as "ask again", and not as a checkout nothing touched.
+                FileActivity {
+                    checkout_id: "checkout:two".to_owned(),
+                    paths: Vec::new(),
+                },
+            ]
+        );
+    }
+
+    #[test]
     fn numstat_records_are_keyed_by_the_new_path_of_a_rename_and_skip_uncounted_files() {
         // The two literals are concatenated so no `\0` sits next to a digit, which would
         // read as an octal escape rather than a NUL.
@@ -3950,16 +7066,16 @@ line.txt";
             assert!(cache.fresh(checkout_id, Some("trunk")).is_some());
         }
 
-        let (sender, receiver) = mpsc::channel();
+        let (queue, inbox) = WatchQueue::new();
         let failed = AtomicBool::new(false);
         forward_watch_result(
             Err(notify::Error::generic("watch stream failed")),
             &plan,
-            &sender,
+            &queue,
             &failed,
         );
         assert_eq!(
-            receive_debounced_change(&receiver, Duration::ZERO, Duration::ZERO),
+            receive_debounced_change(&inbox, Duration::ZERO, Duration::ZERO),
             WatchWakeup::Failed("watch stream failed".to_owned())
         );
 
@@ -3972,10 +7088,10 @@ line.txt";
         forward_watch_result(
             Err(notify::Error::generic("second error")),
             &plan,
-            &sender,
+            &queue,
             &failed,
         );
-        assert!(receiver.try_recv().is_err());
+        assert!(inbox.try_recv().is_err());
         assert!(failed.load(Ordering::Acquire));
     }
 
@@ -4180,5 +7296,404 @@ line.txt";
                 deletions: 0
             }
         );
+    }
+
+    /// The sidebar and the Changes tab ask about one checkout at the same time, and each read is a
+    /// burst of `git` processes over the same working tree. N callers arriving together must cost
+    /// one read, and the process count is the only witness: the answers would be identical either
+    /// way, because they are the same answer computed once or several times.
+    #[test]
+    fn readers_that_arrive_while_one_checkout_is_being_read_share_that_read() {
+        let readers = 8;
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join("added.txt"), "one\ntwo\n").unwrap();
+        let (database, checkout_id) = git_database(temp.path(), &root);
+
+        let alone = GitWatcherManager::default();
+        super::diff_stats(&database, &alone, &checkout_id).unwrap();
+        let one_read = git_reads(&root);
+
+        // Every reader is released at once, so the ones that did not do the read all arrive while it
+        // is still running rather than after it has cached its answer.
+        let together = &GitWatcherManager::default();
+        let database = &database;
+        let released = Arc::new(Barrier::new(readers));
+        let watched = checkout_id.clone();
+        let answers: Vec<_> = thread::scope(|scope| {
+            let reads: Vec<_> = (0..readers)
+                .map(|_| {
+                    let released = Arc::clone(&released);
+                    let watched = watched.clone();
+                    scope.spawn(move || {
+                        released.wait();
+                        super::diff_stats(database, together, &watched)
+                            .unwrap()
+                            .iter()
+                            .map(|file| file.additions)
+                            .collect::<Vec<_>>()
+                    })
+                })
+                .collect();
+            reads.into_iter().map(|read| read.join().unwrap()).collect()
+        });
+
+        assert!(
+            answers.iter().all(|additions| *additions == answers[0]),
+            "the readers did not all get the same reading: {answers:?}"
+        );
+        assert_eq!(answers[0], [Some(2)]);
+        assert_eq!(
+            git_reads(&root) - one_read,
+            one_read,
+            "{readers} readers of one checkout must cost one read, not {readers}"
+        );
+    }
+
+    /// The rule the sharing rests on: a read in the map is the read a caller that arrives joins, and
+    /// a read that has already published is still in the map for the moment between publishing and
+    /// leaving it. A caller arriving there must get that answer rather than start a second read.
+    #[test]
+    fn a_read_that_published_is_still_shared_until_it_leaves_the_map() {
+        let readings: Mutex<super::Readings<GitCounts>> = Mutex::new(BTreeMap::new());
+        let checkout_a = ("checkout:a".to_owned(), Some("trunk".to_owned()), Some(0));
+        let checkout_b = ("checkout:b".to_owned(), Some("trunk".to_owned()), Some(0));
+        let answered = GitCounts {
+            files: Vec::new(),
+            totals: GitDiffStats {
+                additions: 4,
+                deletions: 1,
+            },
+        };
+        let first = shared_read(&readings, &checkout_a, || Ok(answered.clone())).unwrap();
+
+        // The map is empty again, which is what lets the next change be read rather than shared.
+        assert!(readings.lock().unwrap().is_empty());
+        assert_eq!(first.totals, answered.totals);
+
+        // A caller that arrives while a read is running gets its answer, and does not read.
+        let reading = ReadingInFlight::new();
+        reading.publish(Ok(answered.clone()));
+        readings
+            .lock()
+            .unwrap()
+            .insert(checkout_a.clone(), Arc::clone(&reading));
+        let late = shared_read(&readings, &checkout_a, || {
+            panic!("a caller joined a published read and read the tree again")
+        })
+        .unwrap();
+
+        assert_eq!(late, answered);
+        // A read of another checkout is its own read, and a read that failed publishes the failure
+        // rather than letting the next caller ask again.
+        let failed = shared_read(&readings, &checkout_b, || {
+            Err(IpcError::new(
+                IpcErrorCode::GitFailed,
+                "Git could not answer",
+            ))
+        });
+        assert!(matches!(failed, Err(error) if error.code == IpcErrorCode::GitFailed));
+    }
+
+    #[test]
+    fn a_reader_after_invalidation_does_not_join_the_previous_revision() {
+        let cache = GitSnapshotCache::default();
+        let checkout_id = "checkout:a".to_owned();
+        let branch = Some("trunk".to_owned());
+        let old_revision = cache.revision(&checkout_id);
+        let old_key = (checkout_id.clone(), branch.clone(), old_revision);
+        let started = Arc::new(Barrier::new(2));
+        let release = Arc::new(Barrier::new(2));
+        let mut old_state = cached_state(None);
+        old_state.snapshot.merge_base = "old".to_owned();
+        let mut new_state = cached_state(None);
+        new_state.snapshot.merge_base = "new".to_owned();
+
+        thread::scope(|scope| {
+            let cache_ref = &cache;
+            let counts = &cache_ref.reading_counts;
+            let old_started = Arc::clone(&started);
+            let old_release = Arc::clone(&release);
+            let old_checkout_id = checkout_id.clone();
+            let old = scope.spawn(move || {
+                shared_read(counts, &old_key, || {
+                    old_started.wait();
+                    old_release.wait();
+                    cache_ref.insert_at(old_checkout_id, old_state, old_revision);
+                    Ok(GitCounts {
+                        files: Vec::new(),
+                        totals: GitDiffStats {
+                            additions: 1,
+                            deletions: 0,
+                        },
+                    })
+                })
+            });
+
+            started.wait();
+            cache.mark_stale(std::slice::from_ref(&checkout_id));
+            let new_revision = cache.revision(&checkout_id);
+            let new_key = (checkout_id.clone(), branch, new_revision);
+            assert_eq!(
+                shared_read(&cache.reading_counts, &new_key, || {
+                    cache.insert_at(checkout_id.clone(), new_state, new_revision);
+                    Ok(GitCounts {
+                        files: Vec::new(),
+                        totals: GitDiffStats {
+                            additions: 2,
+                            deletions: 0,
+                        },
+                    })
+                })
+                .unwrap()
+                .totals
+                .additions,
+                2
+            );
+            release.wait();
+            assert_eq!(old.join().unwrap().unwrap().totals.additions, 1);
+        });
+
+        assert_eq!(
+            cache
+                .fresh(&checkout_id, Some("trunk"))
+                .unwrap()
+                .snapshot
+                .merge_base,
+            "new"
+        );
+    }
+
+    /// A build writes thousands of files under directories Git ignores, and none of them is part of
+    /// the change set, so the snapshot does not move and there is nothing to re-read. The activity
+    /// still goes out: the file explorer has to show what was just written.
+    #[test]
+    fn a_file_under_an_ignored_directory_is_activity_but_not_a_reason_to_re_read() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "x\n").unwrap();
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
+        let plan = super::watch_plan(&database, &repo_id).unwrap();
+        // Resolved, because the plan watches the resolved path it registered and the filesystem
+        // reports resolved paths: an event under the symlinked temp path would match no checkout.
+        let root = root.canonicalize().unwrap();
+
+        let update = affected_checkouts(
+            &plan,
+            &event(root.join("node_modules/pkg/index.js").to_str().unwrap()),
+        )
+        .expect("the write is inside the checkout");
+        assert_eq!(update.status, std::slice::from_ref(&checkout_id));
+        let answered = without_ignored_only(&plan, update);
+
+        assert!(
+            answered.status.is_empty(),
+            "an ignored file is not part of the change set and must not invalidate: {:?}",
+            answered.status
+        );
+        assert_eq!(answered.activity, [checkout_id]);
+    }
+
+    /// The same write next to a tracked one: the tracked file is part of the change set, so the
+    /// checkout is re-read even though the ignored one is beside it. A batch is one answer, so one
+    /// path Git cannot ignore is enough to keep the whole thing.
+    #[test]
+    fn one_tracked_file_in_a_batch_keeps_the_batch_from_being_ignored() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        fs::write(root.join("node_modules/pkg/index.js"), "x\n").unwrap();
+        fs::write(root.join("tracked.txt"), "changed\n").unwrap();
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
+        let plan = super::watch_plan(&database, &repo_id).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        let mut update = WatchSlot::holding(WatchUpdate::default());
+        for moved in ["node_modules/pkg/index.js", "tracked.txt"] {
+            update.merge_update(
+                affected_checkouts(&plan, &event(root.join(moved).to_str().unwrap()))
+                    .expect("the write is inside the checkout"),
+            );
+        }
+        assert_eq!(update.update.paths[&checkout_id].len(), 2);
+
+        let answered = without_ignored_only(&plan, update.take());
+
+        assert_eq!(answered.status, [checkout_id]);
+    }
+
+    /// Git, not a list of directory names. A file tracked inside a directory the rules ignore is
+    /// part of the change set whatever `.gitignore` says about the directory, and only Git knows
+    /// which files are tracked. This is the case a hardcoded `node_modules`-style list gets wrong,
+    /// because a user can ignore a directory and then force-add a file inside it.
+    #[test]
+    fn a_tracked_file_inside_an_ignored_directory_still_invalidates() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join(".gitignore"), "vendored/\n").unwrap();
+        fs::create_dir_all(root.join("vendored")).unwrap();
+        fs::write(root.join("vendored/kept.js"), "kept\n").unwrap();
+        // Forced into the index under the directory the rules ignore, which is what `git add -f`
+        // is for and what a vendored dependency in an ignored folder looks like.
+        git(&root, &["add", "-f", "vendored/kept.js"]);
+        git(&root, &["commit", "-m", "vendored"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
+        let plan = super::watch_plan(&database, &repo_id).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        // Git itself is the witness that the case is real: the file is in the index under a
+        // directory the rules ignore, so editing it is a change the change set has to describe.
+        git(&root, &["ls-files", "--error-unmatch", "vendored/kept.js"]);
+        fs::write(root.join("vendored/kept.js"), "kept and edited\n").unwrap();
+        assert!(
+            status(&database, &GitWatcherManager::default(), &checkout_id)
+                .unwrap()
+                .files
+                .iter()
+                .any(|file| file.path == "vendored/kept.js")
+        );
+
+        let update = affected_checkouts(
+            &plan,
+            &event(root.join("vendored/kept.js").to_str().unwrap()),
+        )
+        .unwrap();
+        let answered = without_ignored_only(&plan, update);
+
+        assert_eq!(
+            answered.status,
+            [checkout_id],
+            "a tracked file is part of the change set however its directory is ignored"
+        );
+    }
+
+    /// The dominant rule: a stale row is worse than a slow one. Anything this cannot answer -- Git
+    /// not being there, a deadline, a fatal error over a path -- is read as "not ignored", so the
+    /// checkout is re-read rather than trusted.
+    #[test]
+    fn a_check_ignore_that_cannot_answer_invalidates_rather_than_trusting() {
+        let temp = tempdir().unwrap();
+        // Not a repository, so `check-ignore` has nothing to answer with.
+        let root = temp.path().join("not-a-repo");
+        fs::create_dir_all(&root).unwrap();
+        let plan = RepoWatchPlan {
+            repo_id: "repo".to_owned(),
+            roots: [(root.clone(), "main".to_owned())].into_iter().collect(),
+            all: vec!["main".to_owned()],
+            ..RepoWatchPlan::default()
+        };
+        let update = WatchUpdate {
+            status: vec!["main".to_owned()],
+            activity: vec!["main".to_owned()],
+            paths: BTreeMap::from([(
+                "main".to_owned(),
+                BTreeSet::from([PathBuf::from("build/out.js")]),
+            )]),
+            ..WatchUpdate::default()
+        };
+
+        assert_eq!(
+            ignored_paths(&root, &[PathBuf::from("build/out.js")]),
+            None,
+            "Git answered a question about a directory that is not a repository"
+        );
+        assert_eq!(without_ignored_only(&plan, update).status, ["main"]);
+    }
+
+    /// The query has to be one call per checkout for the whole burst, not one per file: a build
+    /// writes thousands of files and the cost this path exists to remove is a burst of `git`
+    /// processes per file. One path per process would make it worse than the re-read it saves.
+    #[test]
+    fn a_burst_asks_git_once_for_the_whole_batch_and_not_once_per_file() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        let files = 200;
+        fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+        for file in 0..files {
+            fs::write(
+                root.join(format!("node_modules/pkg/{file}.js")),
+                format!("{file}\n"),
+            )
+            .unwrap();
+        }
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
+        let plan = super::watch_plan(&database, &repo_id).unwrap();
+        let root = root.canonicalize().unwrap();
+
+        let mut update = WatchSlot::holding(WatchUpdate::default());
+        for file in 0..files {
+            let path = root
+                .join(format!("node_modules/pkg/{file}.js"))
+                .to_str()
+                .unwrap()
+                .to_owned();
+            update.merge_update(
+                affected_checkouts(&plan, &event(&path)).expect("the write is inside the checkout"),
+            );
+        }
+        // The merged burst is the whole batch, deduped: one answer per path rather than one per
+        // event, which is what keeps the set from growing with the burst.
+        assert_eq!(update.update.paths[&checkout_id].len(), files);
+
+        let before = git_reads(&root);
+        let answered = without_ignored_only(&plan, update.take());
+
+        assert!(answered.status.is_empty());
+        assert_eq!(answered.activity, [checkout_id]);
+        assert_eq!(
+            git_reads(&root) - before,
+            1,
+            "{files} files of one burst must be one question to Git"
+        );
+    }
+
+    /// A write in a checkout's own Git directory moves its index, and a write in the directory every
+    /// worktree shares moves the merge base they all count against. Neither is a file, so neither can
+    /// be argued out of the re-read by a file that Git ignores.
+    #[test]
+    fn a_write_in_git_metadata_is_re_read_whatever_the_files_beside_it_are() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        fs::write(root.join(".gitignore"), "node_modules/\n").unwrap();
+        let (database, _) = git_database(temp.path(), &root);
+        let repo_id = database.load_workspace().unwrap().repos[0].id.clone();
+        let plan = super::watch_plan(&database, &repo_id).unwrap();
+        let primary = plan.all[0].clone();
+        let root = root.canonicalize().unwrap();
+
+        for path in [
+            root.join(".git/index").to_str().unwrap(),
+            root.join(".git/refs/heads/trunk").to_str().unwrap(),
+        ] {
+            let mut update =
+                affected_checkouts(&plan, &event(path)).expect("the write is metadata");
+            update
+                .paths
+                .entry(primary.clone())
+                .or_default()
+                .insert(PathBuf::from("node_modules/pkg/index.js"));
+            assert!(
+                update.pinned.contains(&primary),
+                "{path} is not marked as something a file cannot argue away"
+            );
+            assert_eq!(
+                without_ignored_only(&plan, update).status,
+                std::slice::from_ref(&primary)
+            );
+        }
     }
 }

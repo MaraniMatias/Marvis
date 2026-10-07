@@ -268,6 +268,7 @@ describe("Review note IPC client", () => {
       sessionId: "ses_one",
       ids: ["note:1"],
       markdown: "# Code Review",
+      queue: false,
     });
     await requeueReviewRounds("checkout:one");
     await reconcileReviewRound("checkout:one", "round:1");
@@ -281,6 +282,7 @@ describe("Review note IPC client", () => {
         sessionId: "ses_one",
         ids: ["note:1"],
         markdown: "# Code Review",
+        queue: false,
       },
     });
     expect(invoke).toHaveBeenNthCalledWith(3, "review_rounds_requeue", { checkoutId: "checkout:one" });

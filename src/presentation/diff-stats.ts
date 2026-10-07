@@ -52,6 +52,13 @@ const REFRESH_DEBOUNCE_MS = 120;
 /** The checkout whose files the Changes tab lists. Every caller names the same one. */
 let activeCheckoutId: string | null = null;
 let consumers = 0;
+/** Bumped when the last reader leaves. Anything still on its way belongs to the readers that
+ *  asked for it, whether that is a subscription Tauri has not handed back yet or a sweep still
+ *  waiting on Git, so its late answer is dropped instead of landing on whoever is reading now.
+ *  It moves when the count reaches zero and not on the way back up: a reader that arrives while
+ *  the previous cycle is still in flight is exactly the case where the old answer must not
+ *  paint. */
+let lifecycle = 0;
 let unlisten: (() => void) | undefined;
 let refreshTimer: ReturnType<typeof setTimeout> | undefined;
 let refreshing = false;
@@ -91,6 +98,7 @@ export function useDiffStats(repos: MaybeRefOrGetter<Repo[]>, checkoutId: MaybeR
 
   onScopeDispose(() => {
     if (--consumers > 0) return;
+    lifecycle += 1;
     unlisten?.();
     unlisten = undefined;
     clearTimeout(refreshTimer);
@@ -105,8 +113,14 @@ export function useDiffStats(repos: MaybeRefOrGetter<Repo[]>, checkoutId: MaybeR
 }
 
 async function startListening() {
+  const startedIn = lifecycle;
   try {
-    unlisten = await listen<string[]>("git-status-changed", () => scheduleRefresh());
+    const dispose = await listen<string[]>("git-status-changed", () => scheduleRefresh());
+    // The last reader can be gone before the subscription exists, and a new one may have
+    // registered another in the meantime. A listener from a finished lifecycle would go on
+    // refreshing a store that was just emptied, and outlive the readers it was registered for.
+    if (lifecycle !== startedIn) dispose();
+    else unlisten = dispose;
   } catch {
     // Without the event the counts refresh on selection and on workspace changes only, which
     // is stale but never wrong.
@@ -138,6 +152,7 @@ function refreshNow() {
 }
 
 async function refresh() {
+  const startedIn = lifecycle;
   const checkoutId = activeCheckoutId;
   // One failure must not take the other half down: a checkout with no readable counts leaves
   // the sidebar totals it already had, and the Changes tab loses only its numbers.
@@ -145,6 +160,9 @@ async function refresh() {
     getGitCheckoutDiffStats().catch(() => null),
     checkoutId ? getGitDiffStats(checkoutId).catch(() => null) : Promise.resolve(null),
   ]);
+  // The last reader left while Git was answering, and leaving empties the store. These numbers
+  // are about nobody now, so they are dropped rather than read by whoever mounts next.
+  if (lifecycle !== startedIn) return;
   if (totals) {
     for (const id of Object.keys(state.checkoutTotals)) delete state.checkoutTotals[id];
     Object.assign(state.checkoutTotals, totals);

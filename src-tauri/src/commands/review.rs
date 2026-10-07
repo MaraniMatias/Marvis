@@ -190,7 +190,9 @@ pub struct ReviewRoundDispatchRequest {
     /// The exported review. Built by the caller, which owns the Markdown format.
     pub markdown: String,
     /// Wait for the agent instead of interrupting what it is doing now.
-    #[serde(default)]
+    ///
+    /// Required, not defaulted: this request and the caller that writes it ship in the same build,
+    /// so a request without the field is a caller that cannot be talking to this backend.
     pub queue: bool,
 }
 
@@ -334,4 +336,35 @@ pub async fn review_round_ack(
     })
     .await
     .map_err(operation_error)?
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ReviewRoundDispatchRequest;
+
+    /// The bridge contract is one build on both ends, so `queue` is required rather than defaulted:
+    /// a request missing it is refused instead of being read as "send it now".
+    #[test]
+    fn a_dispatch_without_queue_is_refused() {
+        let missing = serde_json::json!({
+            "checkoutId": "checkout:one",
+            "sessionId": "ses_one",
+            "ids": ["note:1"],
+            "markdown": "# Code Review",
+        });
+        assert!(serde_json::from_value::<ReviewRoundDispatchRequest>(missing).is_err());
+
+        let present = serde_json::json!({
+            "checkoutId": "checkout:one",
+            "sessionId": "ses_one",
+            "ids": ["note:1"],
+            "markdown": "# Code Review",
+            "queue": false,
+        });
+        assert!(
+            !serde_json::from_value::<ReviewRoundDispatchRequest>(present)
+                .unwrap()
+                .queue
+        );
+    }
 }

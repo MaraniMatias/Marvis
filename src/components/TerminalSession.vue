@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { Channel } from "@tauri-apps/api/core";
+import { emit as emitAppEvent } from "@tauri-apps/api/event";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { FitAddon } from "@xterm/addon-fit";
 import "@xterm/xterm/css/xterm.css";
@@ -18,9 +19,11 @@ import {
   enableTerminalSelectionCopy,
   preloadTerminalFonts,
   terminalFontSize,
+  watchTerminalRendererRecovery,
 } from "../lib/marvis-terminal";
 import { registerFilePathLinks } from "../lib/terminal-file-links";
-import { renderPtyOutput } from "../lib/terminal-renderer";
+import { createPtyOutputWriter } from "../lib/terminal-renderer";
+import type { PtyOutputWriter } from "../lib/terminal-renderer";
 import { scrollbarOffsetForTop, terminalScrollbarGeometry } from "../lib/terminal-scrollbar";
 import type { TerminalScrollbarGeometry } from "../lib/terminal-scrollbar";
 import { theme } from "../presentation/theme";
@@ -70,6 +73,7 @@ const scrollbarPosition = ref(0);
 const scrollbarMaximum = ref(0);
 const state = ref<TerminalSessionStatus>({ state: "running", foregroundProcess: false });
 const error = ref<string | null>(null);
+const sessionUnavailable = ref(false);
 const closing = ref(false);
 const terminal = createMarvisTerminal(props.fontSize, props.cursorBlink, props.cursorStyle, props.zoom);
 const fit = new FitAddon();
@@ -86,6 +90,8 @@ let terminalTitle: string | null = null;
 let channel: Channel<ArrayBuffer> | undefined;
 let resizeObserver: ResizeObserver | undefined;
 let statusTimer: number | undefined;
+let statusPollInFlight = false;
+let statusPollError: string | null = null;
 let inputQueue: Promise<void> = Promise.resolve();
 let resizeQueue: Promise<void> = Promise.resolve();
 let resizeScheduled = false;
@@ -94,6 +100,8 @@ let started = false;
 let terminalReady = false;
 let selectionCopy: { dispose(): void } | undefined;
 let fileLinks: { dispose(): void } | undefined;
+let outputWriter: PtyOutputWriter | undefined;
+let rendererRecovery: { dispose(): void } | undefined;
 let latestSize = { cols: 0, rows: 0 };
 /** What the queue is working on: the last size handed to the PTY, or the one it refused. */
 let attemptedSize = { cols: 0, rows: 0 };
@@ -111,8 +119,67 @@ let wheelRemainderPx = 0;
  */
 const SCROLLBAR_FADE_MS = 900;
 
+/**
+ * How often a session is asked how it is doing.
+ *
+ * A terminal on screen is watched closely, because that is where an exit and the name of the process
+ * in front of the shell are read: an exit closes the session, and the rest is what the pane and its
+ * row in the sidebar say. A terminal nobody is looking at still has to keep that row honest, so it
+ * asks rarely rather than not at all. Every pane stays mounted with `v-show`, so at the fast pace
+ * ten hidden terminals are ~800 backend calls a minute, each one validating ownership in SQLite and
+ * inspecting a process, none of it for a terminal that is `display: none`.
+ */
+const STATUS_POLL_MS = 750;
+const BACKGROUND_STATUS_POLL_MS = 5000;
+const UNAVAILABLE_STATUS_RETRY_MS = 5000;
+
+/**
+ * Where the reader behind the PTY is told how much of its output this window has parsed.
+ *
+ * This is the only message in a terminal that runs backwards. Everything else about a session is
+ * an answer, and the reader cannot be asked for more output while it has no way to be told where
+ * the output it already sent has got to — which is why nothing here waits for one: a report that
+ * never arrives costs throughput for five seconds and then the reader carries on on its own.
+ */
+const OUTPUT_FLOW_EVENT = "terminal-output-flow";
+
+/** What the window has parsed in total, and the last figure it was reported as. */
+let processedOutput = 0;
+let reportedOutput = -1;
+
+/**
+ * Tells the reader how much of the output it sent has been parsed here.
+ *
+ * A total and not a pending count, because the reader counts its own output from the moment it
+ * hands it over: what it needs from here is the same number counted from this side, and only the
+ * difference between the two covers the chunks still in the channel. A session with no id yet
+ * cannot be named, so the answer waits for one rather than being sent to nobody — the writer keeps
+ * counting either way, and `startSession` flushes what it has the moment the session exists.
+ */
+function reportOutputFlow() {
+  if (disposed || !sessionId || reportedOutput === processedOutput) return;
+  reportedOutput = processedOutput;
+  void emitAppEvent(OUTPUT_FLOW_EVENT, { sessionId, parsed: processedOutput }).catch(() => {});
+}
+
+function errorMessage(cause: unknown) {
+  return isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+}
+
 function showError(cause: unknown) {
-  error.value = isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
+  statusPollError = null;
+  error.value = errorMessage(cause);
+}
+
+function showStatusPollError(cause: unknown) {
+  const message = errorMessage(cause);
+  if (error.value !== message) error.value = message;
+  statusPollError = message;
+}
+
+function clearStatusPollError() {
+  if (statusPollError !== null && error.value === statusPollError) error.value = null;
+  statusPollError = null;
 }
 
 /**
@@ -275,14 +342,35 @@ function onScrollbarKeydown(event: KeyboardEvent) {
   wakeScrollbar();
 }
 
-function updateStatus(status: TerminalSessionStatus) {
-  state.value = { ...status, ...(terminalTitle !== null && { terminalTitle }) };
-  emit("statusChanged", state.value);
-  if (status.state !== "exited") return;
+/**
+ * Puts the status poll on the clock the pane's own visibility asks for, and takes it away when the
+ * session has nothing left to report.
+ *
+ * One function owns the timer, so every change of pace and every end of it goes through the same
+ * place. The interval is rebuilt rather than re-timed, so a terminal that has just come back to the
+ * foreground starts asking at its own pace from now instead of waiting out the slow one first.
+ */
+function syncStatusPolling() {
   if (statusTimer !== undefined) {
     window.clearInterval(statusTimer);
     statusTimer = undefined;
   }
+  if (disposed || !sessionId || state.value.state !== "running") return;
+  const pace = sessionUnavailable.value
+    ? UNAVAILABLE_STATUS_RETRY_MS
+    : props.active && props.visible
+      ? STATUS_POLL_MS
+      : BACKGROUND_STATUS_POLL_MS;
+  statusTimer = window.setInterval(() => void pollStatus(), pace);
+}
+
+function updateStatus(status: TerminalSessionStatus) {
+  state.value = { ...status, ...(terminalTitle !== null && { terminalTitle }) };
+  emit("statusChanged", state.value);
+  if (status.state !== "exited") return;
+  // Nothing left to poll for, and asking anyway would only produce errors for a session the backend
+  // no longer has.
+  syncStatusPolling();
   // A shell that has exited has nothing left to say, and holding its last screen open is worse
   // than losing it: the panel shows a frozen frame that looks like a hung app, the session stays
   // in the sidebar with a live-looking entry, and the only way out is the close button on a pane
@@ -297,11 +385,47 @@ function updateStatus(status: TerminalSessionStatus) {
 }
 
 async function pollStatus() {
-  if (!sessionId) return;
+  if (disposed || !sessionId || statusPollInFlight) return;
+  // A read that comes back after the pane is gone, or after the session it asked about is no longer
+  // this component's, has nobody left to report to: publishing it writes state on an unmounted
+  // component and can ask a session that is on its way out to close itself. The checkout and session
+  // ids are captured before the ask and compared after it, so a reply is only ever applied to the
+  // session that asked for it.
+  const id = sessionId;
+  const checkoutId = props.checkoutId;
+  statusPollInFlight = true;
   try {
-    updateStatus(await getTerminalStatus(props.checkoutId, sessionId));
+    const status = await getTerminalStatus(checkoutId, id);
+    if (disposed || sessionId !== id || props.checkoutId !== checkoutId) return;
+    if (sessionUnavailable.value) {
+      sessionUnavailable.value = false;
+      syncStatusPolling();
+    }
+    clearStatusPollError();
+    updateStatus(status);
   } catch (cause) {
-    showError(cause);
+    if (disposed || sessionId !== id || props.checkoutId !== checkoutId) return;
+    showStatusPollError(cause);
+    if (
+      isIpcError(cause) &&
+      (cause.code === "terminal_session_missing" || cause.code === "terminal_ownership_mismatch")
+    ) {
+      sessionUnavailable.value = true;
+      syncStatusPolling();
+    }
+  } finally {
+    statusPollInFlight = false;
+    // If ownership changed while the old request was pending, ask for the current session now
+    // rather than waiting for the next interval. The one-in-flight guard still bounds IPC calls.
+    if (
+      !disposed &&
+      !closing.value &&
+      state.value.state === "running" &&
+      sessionId &&
+      (sessionId !== id || props.checkoutId !== checkoutId)
+    ) {
+      void pollStatus();
+    }
   }
 }
 
@@ -504,6 +628,7 @@ watch(
   () => props.checkoutId,
   () => {
     if (terminalReady) registerFileLinks();
+    if (!closing.value && state.value.state === "running") void pollStatus();
   },
 );
 
@@ -513,8 +638,17 @@ async function startSession() {
   if (started || disposed || !terminalReady || !props.active || !terminalElement.value) return;
   started = true;
   fitActiveView();
+  // One writer for the whole session, before the first byte can arrive: chunks are joined and
+  // handed to xterm a write at a time, and how much of its output xterm has parsed is how far the
+  // reader behind it is to let it come. Losing bytes is not an option here — a TUI drawn from a
+  // dropped chunk is a TUI that is wrong on screen — so the writer queues rather than ever
+  // discarding.
+  outputWriter ??= createPtyOutputWriter(terminal, (parsed) => {
+    processedOutput = parsed;
+    reportOutputFlow();
+  });
   channel = new Channel<ArrayBuffer>();
-  channel.onmessage = (buffer) => renderPtyOutput(terminal, buffer);
+  channel.onmessage = (buffer) => outputWriter?.push(buffer);
   const initialSize = { cols: terminal.cols || 80, rows: terminal.rows || 24 };
   try {
     const created = await createTerminal(props.checkoutId, initialSize.cols, initialSize.rows, channel);
@@ -523,6 +657,10 @@ async function startSession() {
       return;
     }
     sessionId = created.session.id;
+    // The writer may already have counted output the backend sent before the session had a name
+    // to be answered under, and the first report is what lets the reader's gate be opened by an
+    // answer rather than by its own timeout.
+    reportOutputFlow();
     emit("created", created);
     if (
       latestSize.cols &&
@@ -533,9 +671,7 @@ async function startSession() {
     }
     if (props.visible && props.active && props.focused) terminal.focus();
     await pollStatus();
-    if (state.value.state === "running") {
-      statusTimer = window.setInterval(() => void pollStatus(), 750);
-    }
+    syncStatusPolling();
   } catch (cause) {
     showError(cause);
     emit("failed", error.value ?? "Could not start terminal");
@@ -623,7 +759,11 @@ watch(
 
 watch(
   () => [props.active, props.visible, props.focused] as const,
-  async ([active, visible, focused]) => {
+  async ([active, visible, focused], [wasActive, wasVisible]) => {
+    // Whether this pane is the one on screen is what the poll pace is read from, so it is re-read
+    // here rather than left at the pace the session started at.
+    syncStatusPolling();
+    if (active && visible && sessionUnavailable.value && (!wasActive || !wasVisible)) void pollStatus();
     if (!active) return;
     await nextTick();
     fitActiveView();
@@ -646,7 +786,9 @@ onMounted(async () => {
   // Both of these need the terminal on the page, and the fit that follows has to measure the
   // renderer that will actually draw.
   setTerminalLigatures(terminal, props.ligatures);
-  attachTerminalRenderer(terminal);
+  // The renderer that just went on, watched so a context lost to sleep or memory pressure can be
+  // put back. Without it a terminal that lost one stays on the fallback for the rest of its life.
+  rendererRecovery = watchTerminalRendererRecovery(terminal, attachTerminalRenderer(terminal));
   selectionCopy = enableTerminalSelectionCopy(terminal, (text) => {
     void writeText(text).catch((cause) => {
       pushCause(cause);
@@ -670,6 +812,14 @@ onUnmounted(() => {
   resizeObserver?.disconnect();
   selectionCopy?.dispose();
   fileLinks?.dispose();
+  rendererRecovery?.dispose();
+  outputWriter?.dispose();
+  if (sessionId) {
+    // Nothing is going to parse this session's output any more, so the reader behind it is told
+    // so: it lets go of the gate rather than holding the PTY until its own timeout, and it stops
+    // waiting for answers that are never coming.
+    void emitAppEvent(OUTPUT_FLOW_EVENT, { sessionId }).catch(() => {});
+  }
   if (channel) channel.onmessage = () => {};
   terminal.dispose();
 });
@@ -714,11 +864,12 @@ onUnmounted(() => {
       </div>
     </div>
     <p
-      v-if="error"
+      v-if="error || sessionUnavailable"
       role="alert"
       class="m-0 border-t border-(--marvis-border) px-3 py-2 text-xs text-(--marvis-danger-fg)"
     >
-      {{ error }}
+      <span v-if="sessionUnavailable">Terminal session is unavailable. </span>{{ error }}
+      <button v-if="sessionUnavailable" type="button" class="ml-2 underline" @click="pollStatus">Retry</button>
     </p>
 
     <!-- Teleported, because a terminal that is not the one on screen is still mounted and still

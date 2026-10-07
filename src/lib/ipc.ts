@@ -168,7 +168,11 @@ export function dispatchReviewRound(request: {
   sessionId: string;
   ids: string[];
   markdown: string;
-  queue?: boolean;
+  /**
+   * Required, not optional: the backend refuses a round without it, because both ends of this
+   * command ship in the same build and a caller that omits it is not talking to this one.
+   */
+  queue: boolean;
 }): Promise<ReviewRound> {
   return invoke<ReviewRound>("review_round_dispatch", { request });
 }

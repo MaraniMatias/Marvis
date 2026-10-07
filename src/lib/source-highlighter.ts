@@ -214,12 +214,8 @@ const languageByName = new Map<string, LanguageDefinition>(
 );
 
 const highlighters = new Map<string, ReturnType<typeof createHighlighterCore>>();
-const highlightedSourceCache = new Map<string, Promise<readonly string[]>>();
 const highlightedBlockCache = new Map<string, Promise<string | null>>();
 const MAX_CACHED_BLOCKS = 256;
-/** A source entry is a whole file rendered, and the toolbar makes re-reading one under another
-    grammar a normal thing to do, so this cache is where the eviction actually matters. */
-const MAX_CACHED_SOURCES = 32;
 
 const sanitizerOptions = {
   ALLOWED_TAGS: ["span"],
@@ -422,10 +418,6 @@ const fenceLanguageByAlias = new Map<string, LanguageDefinition>(
   Object.entries(fenceLanguageAliases).map(([alias, key]) => [alias, languageDefinitions[key]]),
 );
 
-function cacheKey(language: string, source: string): string {
-  return JSON.stringify([language, source]);
-}
-
 function languageForPath(path: string) {
   const name = detectedLanguageName(path);
   return name ? languageByName.get(name) : undefined;
@@ -471,6 +463,12 @@ function highlighterFor(language: LanguageDefinition) {
     }),
   );
   highlighters.set(language.name, request);
+  // A grammar whose load failed goes back out of the map, so the next reader of that language asks
+  // for it again instead of reading the same rejection for the rest of the session: a chunk that
+  // failed to arrive is worth one more try. Requests already in flight share one load, so a grammar
+  // that cannot be loaded is retried once per reader rather than once per render, and re-importing a
+  // module the platform has already failed re-throws that error instead of fetching it again.
+  void request.catch(() => highlighters.delete(language.name));
   return request;
 }
 
@@ -526,8 +524,110 @@ export function highlightCodeBlock(language: LanguageDefinition, code: string): 
     .then((html) => sanitizeShikiFragment(html)?.innerHTML || null)
     .catch(() => null);
   highlightedBlockCache.set(key, request);
+  // A block whose grammar could not be loaded answers `null` here, which is also what plain text is.
+  // Cached, that failure would outlive the cause: the entry goes, so the retry the highlighter map
+  // now allows is actually reached.
+  void request.then((html) => {
+    if (html === null) highlightedBlockCache.delete(key);
+  });
   return request;
 }
+
+/** One cached render of one whole file, and what holding it costs. */
+type CachedSource = {
+  language: string;
+  source: string;
+  /** The order it was cached in, which is the order the budget gives entries up in. */
+  sequence: number;
+  /** The source and rendered markup, counted as UTF-16 code units via string length. */
+  codeUnits: number;
+  lines: Promise<readonly string[]>;
+};
+
+/**
+ * Rendered sources, held within a budget of UTF-16 code units instead of a number of entries.
+ *
+ * Source and rendered markup are counted with string length; these units do not estimate heap use.
+ * Files are keyed by language and then by the caller's own source string, held by reference, because a
+ * composed key keeps a second copy of every file cached and escapes on top. A file too big for the
+ * budget is rendered, handed over, and not remembered: the price of that is one more render.
+ */
+export function createSourceCache(limitCodeUnits: number) {
+  const entries = new Map<string, Map<string, CachedSource>>();
+  let retainedCodeUnits = 0;
+  let lastSequence = 0;
+
+  function oldest(): CachedSource | undefined {
+    let first: CachedSource | undefined;
+    for (const bySource of entries.values()) {
+      for (const entry of bySource.values()) {
+        if (!first || entry.sequence < first.sequence) first = entry;
+      }
+    }
+    return first;
+  }
+
+  /** Drops an entry unless the key has been cached again since, which is what eviction leaves behind. */
+  function drop(entry: CachedSource) {
+    const bySource = entries.get(entry.language);
+    if (bySource?.get(entry.source) !== entry) return;
+    bySource.delete(entry.source);
+    if (bySource.size === 0) entries.delete(entry.language);
+    retainedCodeUnits -= entry.codeUnits;
+  }
+
+  function trim() {
+    while (retainedCodeUnits > limitCodeUnits) {
+      const first = oldest();
+      if (!first) return;
+      drop(first);
+    }
+  }
+
+  /** Adds what a render turned out to cost, unless the budget gave that entry up in the meantime. */
+  function charge(entry: CachedSource, codeUnits: number) {
+    if (entries.get(entry.language)?.get(entry.source) !== entry) return;
+    entry.codeUnits += codeUnits;
+    retainedCodeUnits += codeUnits;
+  }
+
+  return {
+    get: (language: string, source: string) => entries.get(language)?.get(source)?.lines,
+    set(language: string, source: string, lines: Promise<readonly string[]>) {
+      const bySource = entries.get(language) ?? new Map<string, CachedSource>();
+      const entry: CachedSource = {
+        language,
+        source,
+        sequence: ++lastSequence,
+        codeUnits: source.length,
+        lines,
+      };
+      bySource.set(source, entry);
+      entries.set(language, bySource);
+      retainedCodeUnits += entry.codeUnits;
+      trim();
+      void lines.then(
+        (rendered) => {
+          charge(
+            entry,
+            rendered.reduce((total, line) => total + line.length, 0),
+          );
+          trim();
+        },
+        // A render that failed is not worth remembering: it would answer the next reader of that
+        // file with the failure, and the retry the highlighter map allows would never be reached.
+        () => drop(entry),
+      );
+      return lines;
+    },
+    /** The retained source and markup in UTF-16 code units. */
+    retainedCodeUnits: () => retainedCodeUnits,
+  };
+}
+
+/** Maximum retained UTF-16 code units of source plus rendered markup, across every language. */
+const MAX_CACHED_SOURCE_CODE_UNITS = 4 * 1024 * 1024;
+const highlightedSourceCache = createSourceCache(MAX_CACHED_SOURCE_CODE_UNITS);
 
 /**
  * The highlighted lines of `source` read as `languageName` says to read it, or null when the name
@@ -538,26 +638,22 @@ export function highlightSourceAs(languageName: string, source: string): Promise
   const language = languageForName(languageName);
   if (!language) return Promise.resolve(null);
 
-  const key = cacheKey(language.name, source);
-  const cached = highlightedSourceCache.get(key);
+  const cached = highlightedSourceCache.get(language.name, source);
   if (cached) return cached;
-  if (highlightedSourceCache.size >= MAX_CACHED_SOURCES) {
-    const oldest = highlightedSourceCache.keys().next().value;
-    if (oldest !== undefined) highlightedSourceCache.delete(oldest);
-  }
 
-  const request = highlighterFor(language)
-    .then((instance) =>
-      instance.codeToHtml(source, { lang: language.shikiName ?? language.name, theme: MARVIS_SYNTAX_NAME }),
-    )
-    .then(sanitizeHighlightedHtml)
-    .then((lines) => {
-      if (lines.length === 0) throw new Error("Shiki returned no source lines");
-      return lines;
-    });
-  highlightedSourceCache.set(key, request);
-  void request.catch(() => highlightedSourceCache.delete(key));
-  return request;
+  return highlightedSourceCache.set(
+    language.name,
+    source,
+    highlighterFor(language)
+      .then((instance) =>
+        instance.codeToHtml(source, { lang: language.shikiName ?? language.name, theme: MARVIS_SYNTAX_NAME }),
+      )
+      .then(sanitizeHighlightedHtml)
+      .then((lines) => {
+        if (lines.length === 0) throw new Error("Shiki returned no source lines");
+        return lines;
+      }),
+  );
 }
 
 export function highlightSource(path: string, source: string): Promise<readonly string[] | null> {

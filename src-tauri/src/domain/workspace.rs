@@ -1,3 +1,14 @@
+//! The shapes the workspace travels in, as the bridge hands them to the window.
+//!
+//! Nothing here is read back. Every type in this file is built in Rust from a database row or from
+//! what Git said, and only the `Serialize` half runs: no command takes one of these as an argument
+//! and no column holds one as JSON. That is why the `Option`s below carry
+//! `skip_serializing_if` and no `default` — `None` leaves the wire entirely rather than coming back
+//! as a field nobody wrote, and a shape this build never produces cannot arrive here to be read.
+//! The blob rows that *are* read back (`AppLayoutState`, `CheckoutUiState` in
+//! `persistence`, `CheckoutTerminalLayout` in `terminal_layout`) are the ones with no `default`
+//! and a refusal in their load path.
+
 use std::{fs, path::Path};
 
 use serde::{Deserialize, Serialize};
@@ -23,7 +34,7 @@ pub struct Repo {
     pub kind: RepoKind,
     pub name: String,
     pub root: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub default_branch: Option<String>,
     pub checkouts: Vec<Checkout>,
     pub created_at: String,
@@ -38,11 +49,11 @@ pub struct Checkout {
     pub path: String,
     pub canonical_path: String,
     pub is_primary: bool,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub head: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub ahead_of_default: Option<u32>,
     pub changed_files: u32,
     pub is_missing: bool,
@@ -79,7 +90,7 @@ pub struct TerminalSessionStatus {
     ///
     /// Absent when the shell itself is in front, which is the resting state and needs no
     /// naming, and when the foreground group is gone or belongs to another user.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub foreground_app: Option<String>,
 }
 
@@ -101,7 +112,7 @@ pub struct ArchivedCheckout {
     pub id: String,
     pub repo_id: String,
     pub path: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
 }
 
@@ -113,7 +124,7 @@ pub struct WorkspaceState {
     /// The worktrees that are registered but off the panel, so the repo root can offer
     /// them back. Empty on every workspace with nothing archived, which is why it is not
     /// always on the wire.
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub archived_worktrees: Vec<ArchivedCheckout>,
     pub active_checkout_id: Option<String>,
     pub active_session_id: Option<String>,

@@ -31,6 +31,9 @@ const props = withDefaults(
     shellRequest?: { checkoutId: string; token: number } | null;
     registeredSessionIds?: string[];
     refreshRevision?: number;
+    /** The checkout-relative paths the last file activity named, for a document that resolves
+     *  references of its own and can say whether one of them is the file that moved. */
+    refreshPaths?: string[];
     readingPosition?: { top: number; left: number };
     diffScrollTop?: number;
     split?: boolean;
@@ -41,6 +44,7 @@ const props = withDefaults(
   }>(),
   {
     refreshRevision: 0,
+    refreshPaths: () => [],
     readingPosition: () => ({ top: 0, left: 0 }),
     checkouts: () => [],
     diffScrollTop: 0,
@@ -168,6 +172,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
             :mode="documentView?.mode ?? 'code'"
             :git-snapshot="gitSnapshot"
             :refresh-revision="refreshRevision"
+            :refresh-paths="refreshPaths"
             :reading-position="readingPosition"
             :editor-settings="editorSettings"
             @update-mode="$emit('updateDocumentMode', $event)"

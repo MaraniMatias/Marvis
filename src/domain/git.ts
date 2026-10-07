@@ -21,6 +21,14 @@ export type GitCheckoutDiffStats = Record<string, GitDiffStats>;
 /** The changed files of one checkout, each with the lines it adds and removes. */
 export type GitFileDiffStats = GitChangedFile[];
 
+/** One checkout's file activity, with the paths a batch moved inside it. */
+export interface CheckoutFileActivity {
+  checkoutId: string;
+  /** Relative to the checkout, which is the form a document's relative references resolve to.
+   *  Empty means the batch was too large to carry what it moved, not that nothing moved. */
+  paths: string[];
+}
+
 export interface GitStatus {
   branch?: string;
   head?: string;

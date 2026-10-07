@@ -12,6 +12,95 @@ mod persistence;
 pub mod services;
 mod terminal;
 
+/// The level every log statement is kept at, in every build.
+///
+/// This is the only place the level is chosen, because neither `fern` nor `tauri-plugin-log` reads
+/// `RUST_LOG` (checked in fern 0.7.1 and tauri-plugin-log 2.10.0). So a level that changed with the
+/// build profile would mean a failure reported from a shipped build is logged under a filter nobody
+/// debugged it under, with no way to raise it afterwards. Release is therefore exactly as verbose as
+/// development, not quieter: this is the trade-off, and it buys a shipped failure being reproducible
+/// without a rebuild.
+///
+/// It is `Debug` and not `Trace` because `Trace` is where the volume of this dependency tree is:
+/// `notify` writes one line per filesystem event, and this app watches whole repositories with it,
+/// and `tao` writes one every time it locks and unlocks a window's shared state. None of that
+/// belongs in a file somebody attaches to a bug report. What is left at `Debug` is a handful of
+/// call sites in the whole tree, and the ones Tauri has are the ones worth keeping: "web content
+/// process terminated", a webview reload, an asset falling back to its index.
+fn log_level() -> log::LevelFilter {
+    log::LevelFilter::Debug
+}
+
+/// Bytes one rotated log file holds before the writer starts the next one.
+///
+/// The plugin's default is 40_000 bytes, which is about four hundred lines, and with the default
+/// `KeepOne` the file those lines live in is deleted the moment the next one is written. A session
+/// with a terminal in it crosses that in seconds, so the log a bug report needs is routinely gone
+/// before anybody opens it. A megabyte is roughly ten thousand lines of what this app writes, and
+/// still nothing next to the repository the app is pointed at.
+fn log_max_file_size() -> u128 {
+    1024 * 1024
+}
+
+/// Rotated log files kept beside the live one, so a failure that reproduced yesterday is still
+/// there today.
+///
+/// `KeepOne` is the other default worth replacing: it deletes rather than renames, so the evidence
+/// is gone the first time the file fills. `KeepAll` would keep it and grow without bound inside a
+/// log directory a shipped app owns, which is its own bug. Three archives beside the live file, at
+/// `log_max_file_size()` each, is about four megabytes and holds this session and the three before
+/// it — which is what "reproducible" needs.
+fn log_rotated_files_kept() -> usize {
+    3
+}
+
+/// Where the log is written: the log directory always, stdout while developing.
+///
+/// A packaged app has no console on its stdout — a release binary launched from Finder on macOS has
+/// no terminal at all — so the `Stdout` target's lines go where nobody can read them, on every
+/// launch, while still costing a write on every record. In development it is the other way round:
+/// the app runs attached to a terminal, and that terminal is faster than opening the log directory.
+/// This is the one part of the policy that depends on the build profile, and it only ever adds a
+/// destination where somebody is already looking.
+fn log_targets() -> Vec<tauri_plugin_log::Target> {
+    let log_dir =
+        tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::LogDir { file_name: None });
+    #[cfg(debug_assertions)]
+    {
+        vec![
+            tauri_plugin_log::Target::new(tauri_plugin_log::TargetKind::Stdout),
+            log_dir,
+        ]
+    }
+    #[cfg(not(debug_assertions))]
+    {
+        vec![log_dir]
+    }
+}
+
+/// The two setup steps that can stop the app before a window is usable, named the way the log and
+/// the message read: a name of what was being done, not of what went wrong, so the cause carries
+/// the reason and this carries the step.
+const OPENING_THE_WORKSPACE_DATABASE: &str = "opening the workspace database";
+const RECORDING_THE_HOME_CHECKOUT: &str = "recording the Home checkout";
+
+/// One line for a startup failure, and the error the failure leaves through.
+///
+/// The plugin that writes the log is registered before `setup` runs, so this lands in the file a
+/// bug report attaches rather than only on a stdout a packaged app does not have. It is written
+/// here, at the step that failed, and the error is handed on unchanged afterwards: the refusal is
+/// not the app's to swallow, and turning it into a warning is what made a refusal that ends the
+/// launch invisible in the one file support asks for.
+///
+/// `cause` is what the failing step said, verbatim, and nothing is added to it: it already names
+/// the schema versions the two builds speak, and repeating the database path or the user's
+/// directories here would only put the same local layout in the log a second time.
+fn startup_failure(step: &str, cause: &str) -> std::io::Error {
+    let message = format!("Marvis did not start: {step} failed: {cause}");
+    log::error!("{message}");
+    std::io::Error::other(message)
+}
+
 /// Registers the local MCP automation bridge. It only exists in debug builds
 /// compiled with `--features dev-bridge`, so release builds never include it.
 fn with_dev_plugins(builder: tauri::Builder<tauri::Wry>) -> tauri::Builder<tauri::Wry> {
@@ -54,7 +143,31 @@ fn main() {
             }
         }));
     let app = with_menus(with_dev_plugins(builder))
-        .plugin(tauri_plugin_log::Builder::new().build())
+        // The policy is written out rather than left to `tauri_plugin_log`'s defaults, because
+        // every one of those defaults is a third party's decision about a shipped app: a level of
+        // whatever `fern` defaults to, a 40 KB file deleted on rotation, and stdout on a release
+        // build that has no console attached to it. What the level and the two rotation numbers
+        // are, and why, is on the constants above.
+        .plugin(
+            tauri_plugin_log::Builder::new()
+                .level(log_level())
+                // `ureq` is the one dependency in this tree that writes a line per unit of work
+                // at `log_level()`: one per HTTP call to the OpenCode service, carrying the method,
+                // the URL and the response's status and headers. That is the app's own traffic
+                // written out one line at a time into the file people attach to bug reports. It
+                // does not log bodies, and it redacts the headers it prints, but the URLs are not
+                // wanted either way. `ureq_proto` is a second target and needs its own entry:
+                // `fern` matches `level_for` on `::` boundaries and that crate is `ureq_proto`, not
+                // `ureq::proto`, so without this line half of them come through anyway.
+                .level_for("ureq", log::LevelFilter::Info)
+                .level_for("ureq_proto", log::LevelFilter::Info)
+                .max_file_size(log_max_file_size())
+                .rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(
+                    log_rotated_files_kept(),
+                ))
+                .targets(log_targets())
+                .build(),
+        )
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_clipboard_manager::init())
         .setup(|app| {
@@ -66,13 +179,16 @@ fn main() {
             let review_root = services::files::review_root(&home);
             let config_file = config::config_file(&home);
             std::fs::create_dir_all(&data_dir)?;
+            // Both steps are logged on the way out rather than left to the panic the propagation
+            // ends in: a database this build refuses to open, by name, is a question a person can
+            // act on, and it has to reach the file support reads to be answered.
             let database = persistence::Database::open(data_dir.join("marvis.sqlite3"))
-                .map_err(std::io::Error::other)?;
+                .map_err(|cause| startup_failure(OPENING_THE_WORKSPACE_DATABASE, &cause))?;
             database
                 .set_home_checkout_id(crate::domain::workspace::checkout_id_for_path(
                     &home_directory.0.display().to_string(),
                 ))
-                .map_err(std::io::Error::other)?;
+                .map_err(|cause| startup_failure(RECORDING_THE_HOME_CHECKOUT, &cause))?;
             if let Some(window) = app.get_webview_window("main") {
                 if let Ok(Some(geometry)) = database.window_geometry() {
                     let geometry_is_visible = window.available_monitors().is_ok_and(|monitors| {
@@ -159,6 +275,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app::app_prepare_exit,
+            commands::app::frontend_diagnostic,
             commands::agent::agent_sessions,
             commands::agent::agent_candidate_sessions,
             commands::agent::agent_agents,
@@ -540,6 +657,141 @@ mod startup_tests {
                  reaches it before anything can turn it away"
             );
         }
+    }
+
+    /// The logging policy is written out in this file, not inherited from `tauri-plugin-log`.
+    ///
+    /// Every default in `Builder::new()` is a third party's decision about a shipped app, and none
+    /// of them is visible in the source: the level is whatever `fern` defaults to, the log file is
+    /// 40 KB and is deleted the moment the next one starts, and stdout is a target on a release
+    /// build that has no console attached to it. So nothing in the app, and nothing in a review of
+    /// it, says what the file a user attaches to a bug report actually holds. This says the three
+    /// numbers are what they are and that the builder is the one given them, rather than functions
+    /// standing on their own while the plugin keeps its defaults.
+    ///
+    /// None of the three can be read back out of a built logger: they are private on the plugin's
+    /// builder, and the only function that hands a logger over (`split`) needs a real app handle
+    /// and opens the log file to do it, which is not something a test should do in the log
+    /// directory of whoever runs it. So this reads them where they are declared, and reads the
+    /// registration itself from the source.
+    #[test]
+    fn the_logging_policy_is_written_out_and_not_inherited() {
+        use crate::{log_level, log_max_file_size, log_rotated_files_kept};
+
+        assert_eq!(
+            log_level(),
+            log::LevelFilter::Debug,
+            "the level moved, and a failure reported from a shipped build is now logged under a \
+             filter nobody debugged it under"
+        );
+        assert!(
+            log_max_file_size() >= 1024 * 1024,
+            "the log file is back under a megabyte, which is under four thousand lines of what \
+             this app writes"
+        );
+        assert!(
+            log_rotated_files_kept() >= 2,
+            "rotation is deleting the previous session's log again, so a failure that reproduced \
+             yesterday is gone before anybody reads it"
+        );
+
+        let main = include_str!("main.rs");
+        let registered = main.split("#[cfg(test)]").next().unwrap();
+        for given in [
+            ".level(log_level())",
+            ".max_file_size(log_max_file_size())",
+            ".rotation_strategy(tauri_plugin_log::RotationStrategy::KeepSome(",
+            ".level_for(\"ureq\", log::LevelFilter::Info)",
+            ".level_for(\"ureq_proto\", log::LevelFilter::Info)",
+            ".targets(log_targets())",
+        ] {
+            assert!(
+                registered.contains(given),
+                "the log plugin stopped being given `{given}`, so that part of the policy is the \
+                 library's default again"
+            );
+        }
+
+        // And `stdout` is the one destination that may depend on the build, only in the direction
+        // that adds a place where somebody is looking.
+        let targets = registered
+            .split("fn log_targets()")
+            .nth(1)
+            .and_then(|body| body.split("\n}").next())
+            .expect("`log_targets` is not a function any more");
+        assert!(
+            targets.contains("TargetKind::LogDir"),
+            "the log file is not a destination any more, so a release build has nowhere to write"
+        );
+        let (development, release) = targets
+            .split_once("#[cfg(not(debug_assertions))]")
+            .expect("a target list with no release branch");
+        assert!(
+            development.contains("#[cfg(debug_assertions)]"),
+            "the target list does not depend on the build profile at all"
+        );
+        assert!(
+            development.contains("TargetKind::Stdout"),
+            "stdout is not a development destination any more, and the terminal the app runs under \
+             is the fastest way to read it"
+        );
+        assert!(
+            !release.contains("TargetKind::Stdout"),
+            "a release build writes to stdout, which is nowhere a person running the app can read"
+        );
+    }
+
+    /// A startup failure says what was being done and why, and leaves through an error that
+    /// carries both.
+    ///
+    /// The refusal to open a database stamped with another schema is the one startup failure with
+    /// a known answer, and it used to reach nobody: `setup` propagated it and the process ended in
+    /// the abort that follows, so the log file support asks for never held the reason. The reason
+    /// is written where the app can be read, once, on the way out.
+    ///
+    /// The error is returned rather than logged and dropped, and it carries the same text: a
+    /// startup that is swallowed is a startup nobody is told about either.
+    #[test]
+    fn a_startup_failure_is_named_before_it_is_propagated() {
+        use crate::{startup_failure, OPENING_THE_WORKSPACE_DATABASE};
+
+        let refusal = "the workspace database is schema version 13 and this build speaks version \
+                       14: update by deleting the workspace database and opening the app again";
+        let error = startup_failure(OPENING_THE_WORKSPACE_DATABASE, refusal);
+
+        assert_eq!(error.kind(), std::io::ErrorKind::Other);
+        let reported = error.to_string();
+        assert!(
+            reported.contains(OPENING_THE_WORKSPACE_DATABASE),
+            "the failure does not name the step that failed: {reported}"
+        );
+        assert!(
+            reported.contains(refusal),
+            "the failure does not carry the cause it was given: {reported}"
+        );
+
+        // Both steps go through it. `Database::open` refusing the file is the case this exists for,
+        // and a second step added to `setup` afterwards has to say why it failed the same way
+        // instead of handing a bare `io::Error::other` to the abort.
+        let main = include_str!("main.rs");
+        let registered = main.split("#[cfg(test)]").next().unwrap();
+        let setup = registered
+            .split(".setup(|app| {")
+            .nth(1)
+            .and_then(|body| body.split("\n        .invoke_handler").next())
+            .expect("`setup` is not a block any more");
+        assert!(
+            setup.contains("startup_failure(OPENING_THE_WORKSPACE_DATABASE, &cause)"),
+            "the database is opened without logging why it could not be opened"
+        );
+        assert!(
+            setup.contains("startup_failure(RECORDING_THE_HOME_CHECKOUT, &cause)"),
+            "the initialization step after it fails without saying so in the log"
+        );
+        assert!(
+            !setup.contains("std::io::Error::other"),
+            "a startup failure is propagated without being written to the log first"
+        );
     }
 
     /// Every terminal is stopped from the event loop, and this app's own event readers are detached,

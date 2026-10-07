@@ -1,10 +1,17 @@
 // @vitest-environment happy-dom
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { forceParsing, syntaxTree } from "@codemirror/language";
 import { redo, undo } from "@codemirror/commands";
+import { Text } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import type { IndentationSettings } from "../domain/settings";
-import { createCodeEditor, setEditorChangedLines, setEditorIndentation, CHANGED_LINE_CLASS } from "./code-editor";
+import {
+  createCodeEditor,
+  setEditorChangedLines,
+  setEditorIndentation,
+  CHANGED_LINE_CLASS,
+  FRONT_MATTER_SCAN_LINES,
+} from "./code-editor";
 
 const views = new Set<EditorView>();
 const hosts = new Set<HTMLElement>();
@@ -126,6 +133,31 @@ describe("code editor", () => {
     expect(nodeNames(view)).toContain("ATXHeading1");
   });
 
+  it("keeps CRLF front matter and following Markdown aligned", () => {
+    const view = mount("markdown", ["---", "name: tamis", "...", "# Tamis"].join("\r\n"));
+
+    expect(colorPaintedOn(view, "name")).toBe("var(--marvis-syntax-token-constant)");
+    expect(nodeNames(view)).toContain("ATXHeading1");
+  });
+
+  it("avoids splitting a huge Markdown document when it has no front matter", () => {
+    const source = ["# Title", ...Array.from({ length: 12_000 }, (_, index) => "Body " + index)].join("\n");
+    const view = mount("markdown", source);
+    const documentLength = view.state.doc.length;
+    const split = vi.spyOn(String.prototype, "split");
+
+    try {
+      view.dispatch({ changes: { from: documentLength, insert: "!" } });
+
+      expect(documentLength).toBeGreaterThan(100_000);
+      expect(
+        split.mock.contexts.some((context) => typeof context === "string" && context.length >= documentLength),
+      ).toBe(false);
+    } finally {
+      split.mockRestore();
+    }
+  });
+
   it("leaves a document that only opens with a rule alone", () => {
     // A rule with nothing to close it is not metadata, so nothing in it is read as YAML: the words
     // stay the flat text the Markdown grammar leaves them, and the rule is a rule.
@@ -135,6 +167,52 @@ describe("code editor", () => {
     expect(colorPaintedOn(view, "name")).toBeUndefined();
     expect(nodeNames(view)).toContain("HorizontalRule");
     expect(nodeNames(view)).toContain("ATXHeading1");
+  });
+
+  it("stops looking for a closing fence at a bound instead of at the end of the file", () => {
+    // A document that opens with a fence and never closes it is prose, and looking for the fence
+    // that would say so used to cost a walk to the end of the file on every keystroke. This counts
+    // the lines that walk asked about: it stops at the bound whatever the file's length, so a
+    // 20,000-line document costs what a 2,000-line one does.
+    const source = ["---", ...Array.from({ length: 20_000 }, (_, index) => `body ${index}`)].join("\n");
+    const view = mount("markdown", source);
+    const original = Text.prototype.line;
+    const asked = new Set<string>();
+    const line = vi.spyOn(Text.prototype, "line");
+
+    try {
+      line.mockImplementation(function (this: Text, at: number) {
+        asked.add(String(at));
+        return original.call(this, at);
+      });
+      view.dispatch({ changes: { from: view.state.doc.length, insert: "!" } });
+
+      expect(view.state.doc.lines).toBeGreaterThan(20_000);
+      // The furthest line the fence search may reach, and the one after it.
+      expect(Math.max(...[...asked].map(Number))).toBe(FRONT_MATTER_SCAN_LINES);
+      expect(asked.has(String(FRONT_MATTER_SCAN_LINES + 1))).toBe(false);
+      // And nothing in the unclosed block is decoration: it is the flat text Markdown leaves it.
+      expect(colorPaintedOn(view, "body 0")).toBeUndefined();
+    } finally {
+      line.mockRestore();
+    }
+  });
+
+  it("reads a block whose closing fence is at the bound, and leaves one past it plain", () => {
+    // The bound is where the search gives up, not where a block stops being metadata: a closing
+    // fence on the last line it may look at is YAML like any other, and one a line further is not
+    // found at all. Both blocks are the same length apart by a single line, and both are read by
+    // their first line, which is the one a test can see.
+    const block = (closingAt: number) =>
+      ["---", ...Array.from({ length: closingAt - 2 }, (_, index) => `key${index}: value`), "..."].join("\n");
+
+    const atBound = mount("markdown", block(FRONT_MATTER_SCAN_LINES));
+    expect(forceParsing(atBound, atBound.state.doc.length)).toBe(true);
+    expect(colorPaintedOn(atBound, "key0")).toBe("var(--marvis-syntax-token-constant)");
+
+    const pastBound = mount("markdown", block(FRONT_MATTER_SCAN_LINES + 1));
+    expect(forceParsing(pastBound, pastBound.state.doc.length)).toBe(true);
+    expect(colorPaintedOn(pastBound, "key0")).toBeUndefined();
   });
 
   it("paints tokens in the palette the read-only preview already uses", () => {

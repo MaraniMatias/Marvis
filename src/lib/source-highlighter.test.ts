@@ -1,10 +1,12 @@
 // @vitest-environment happy-dom
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import {
+  createSourceCache,
   highlightCodeBlock,
   highlightSource,
   highlightSourceAs,
   languageForFenceInfo,
+  loadSourceHighlighter,
   sanitizeHighlightedHtml,
 } from "./source-highlighter";
 import { PLAIN_TEXT } from "./source-languages";
@@ -150,5 +152,115 @@ describe("source highlighter", () => {
     }
     // The body survived as the exact text it was, which is what "escaped, not parsed" means.
     expect(root?.textContent).toBe(body);
+  });
+
+  it("spends the rendered sources within a budget of UTF-16 code units, oldest file first", async () => {
+    // Every entry here is a whole file, which is what makes a count of entries the wrong bound: a
+    // code-unit budget is what says the same thing about thirty small files and one large one.
+    const cache = createSourceCache(6000);
+    const render = (source: string) => Promise.resolve([`<span class="line">${source}</span>`]);
+    const source = (id: number) => `${id}`.padEnd(1000, ".");
+
+    const first = cache.set("ini", source(1), render(source(1)));
+    const second = cache.set("python", source(2), render(source(2)));
+    expect(cache.retainedCodeUnits()).toBeLessThanOrEqual(6000);
+
+    const third = cache.set("ini", source(3), render(source(3)));
+    const fourth = cache.set("python", source(4), render(source(4)));
+    await Promise.all([first, second, third, fourth]);
+
+    // Each entry costs its own text plus the markup it rendered into, so four of them do not fit in a
+    // budget of two and the two oldest go, whichever language they belong to.
+    expect(cache.retainedCodeUnits()).toBeLessThanOrEqual(6000);
+    expect(cache.get("ini", source(1))).toBeUndefined();
+    expect(cache.get("python", source(2))).toBeUndefined();
+    expect(cache.get("ini", source(3))).toBe(third);
+    expect(cache.get("python", source(4))).toBe(fourth);
+
+    // A file too big for the whole budget is still handed over; it is the remembering that is given up.
+    const huge = "x".repeat(9000);
+    expect(cache.get("ini", huge)).toBeUndefined();
+    expect(await cache.set("ini", huge, render(huge))).toHaveLength(1);
+    expect(cache.get("ini", huge)).toBeUndefined();
+    expect(cache.retainedCodeUnits()).toBeLessThanOrEqual(6000);
+  });
+
+  it("counts ASCII, Latin, CJK and emoji as UTF-16 code units", async () => {
+    const sources = ["A", "é", "漢", "🙂"];
+    expect(sources.map((source) => source.length)).toEqual([1, 1, 1, 2]);
+
+    for (const source of sources) {
+      const rendered = "<span>" + source + "</span>";
+      const codeUnits = source.length + rendered.length;
+      const cache = createSourceCache(codeUnits);
+
+      await cache.set("text", source, Promise.resolve([rendered]));
+
+      expect(cache.retainedCodeUnits()).toBe(codeUnits);
+      expect(cache.get("text", source)).toBeDefined();
+    }
+  });
+
+  it("counts the file it holds once, not a second copy of it inside a key", async () => {
+    const cache = createSourceCache(1024 * 1024);
+    // Newlines and quotes are what a composed key escapes, doubling the units it holds of a file.
+    const source = Array.from({ length: 40 }, (_, index) => `let x${index} = "${index}";`).join("\n");
+    const markup = `<span class="line">${source}</span>`;
+
+    await cache.set("typescript", source, Promise.resolve([markup]));
+
+    expect(cache.retainedCodeUnits()).toBe(source.length + markup.length);
+  });
+
+  it("asks for a grammar again after its load failed, and forgets the failed render", async () => {
+    // `rust` is not read anywhere else in this file, so this is the first load of it. A chunk that
+    // failed to arrive is worth one more try: the language stays unusable for the whole session if
+    // the rejection is what the highlighter map keeps.
+    let attempts = 0;
+    vi.doMock("shiki/langs/rust.mjs", async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("chunk load failed");
+      return await vi.importActual<typeof import("shiki/langs/rust.mjs")>("shiki/langs/rust.mjs");
+    });
+
+    const source = 'fn main() {\n    println!("hi");\n}';
+    // Vitest wraps whatever a mock factory throws, so the message is its own. What is being asserted
+    // is that the load failed at all, and that the second ask does not fail the same way.
+    await expect(highlightSourceAs("rust", source)).rejects.toThrow();
+
+    // The second ask loads the grammar: the first one's rejection is not what the map answers with.
+    await expect(loadSourceHighlighter("rust")).resolves.toBeDefined();
+    expect(attempts).toBe(2);
+
+    // And the failed render was not cached either, so this file gets the retry instead of the error.
+    const lines = await highlightSourceAs("rust", source);
+    expect(lines).toHaveLength(3);
+    expect(lines?.[0]).toContain('class="line"');
+    expect(lines?.[0]).toContain("var(--marvis-syntax-token-keyword)");
+  });
+
+  it("keeps the sanitizer a barrier against script, handlers and url(javascript:)", () => {
+    const lines = sanitizeHighlightedHtml(
+      [
+        '<pre><code class="language-html">',
+        '<span class="line" onclick="alert(1)" onmouseover="alert(2)">',
+        "<script>alert(3)</script>",
+        '<span style="color:#FF7B72;background:url(javascript:alert(4))">const</span>',
+        '<span style="width:expression(alert(5))">x</span>',
+        '<a href="javascript:alert(6)">link</a>',
+        "<img src=x onerror=alert(7)>",
+        '<iframe srcdoc="&lt;script&gt;alert(8)&lt;/script&gt;"></iframe>',
+        "</span></code></pre>",
+      ].join(""),
+    );
+
+    expect(lines).toHaveLength(1);
+    expect(lines[0]).toContain("const");
+    // Nothing that can run, and nothing that says it could: the whole of the payload is gone.
+    expect(lines[0]).not.toMatch(/<\/?(?:script|img|a|iframe|code|pre)\b/i);
+    expect(lines[0]).not.toMatch(/\son[a-z]+\s*=/i);
+    expect(lines[0]).not.toMatch(/(?:url|expression|javascript)\s*[(:]/i);
+    expect(lines[0]).not.toContain("alert");
+    expect(lines[0]).not.toContain("#FF7B72");
   });
 });

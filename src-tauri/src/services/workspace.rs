@@ -1,6 +1,5 @@
 use std::{
     collections::BTreeSet,
-    ffi::OsString,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -13,7 +12,7 @@ use crate::{
     },
     git,
     persistence::{timestamp, Database},
-    services::{folder, worktree},
+    services::{folder, git as git_service, worktree},
 };
 
 #[derive(Clone)]
@@ -209,6 +208,37 @@ pub fn locate_missing_checkout(
     })
 }
 
+/// Tells Git about a worktree that moved, so the path it records is the one on disk.
+///
+/// A mutation, and so the one Git in this file that runs with no deadline, for the reason
+/// `git::run_git` gives: a repair ended part way through is administrative state nobody asked to be
+/// left in. What it does take from the shared runner is the locale, so the diagnostic below is the
+/// same sentence on every machine, and the error it fails with is bounded like every other one --
+/// `git_error` summarizes what Git said instead of handing a helper's whole stderr to a message a
+/// user reads.
+fn repair_located_worktree(management_root: &Path, selected_path: &Path) -> Result<(), IpcError> {
+    let repair = Command::new("git")
+        .args(["worktree", "repair"])
+        .arg(selected_path)
+        .current_dir(management_root)
+        .env("LC_ALL", "C")
+        .env_remove("LANGUAGE")
+        .output()
+        .map_err(|error| {
+            IpcError::new(
+                IpcErrorCode::GitFailed,
+                format!("could not repair the located worktree: {error}"),
+            )
+        })?;
+    if !repair.status.success() {
+        return Err(git_service::git_error(
+            "could not repair the located worktree",
+            &repair,
+        ));
+    }
+    Ok(())
+}
+
 fn locate_missing_checkout_locked(
     database: &Database,
     agents: &crate::services::agent::AgentService,
@@ -322,26 +352,7 @@ fn locate_missing_checkout_locked(
             "located directory belongs to a different Git repository",
         ));
     }
-    let repair = Command::new("git")
-        .args(["worktree", "repair"])
-        .arg(selected_path)
-        .current_dir(&management_root)
-        .output()
-        .map_err(|error| {
-            IpcError::new(
-                IpcErrorCode::GitFailed,
-                format!("could not repair the located worktree: {error}"),
-            )
-        })?;
-    if !repair.status.success() {
-        return Err(IpcError::new(
-            IpcErrorCode::GitFailed,
-            format!(
-                "Git could not repair the located worktree: {}",
-                String::from_utf8_lossy(&repair.stderr).trim()
-            ),
-        ));
-    }
+    repair_located_worktree(&management_root, selected_path)?;
     let (resolved, focus_id) =
         git::resolve_repository(selected_path, &timestamp())?.ok_or_else(|| {
             IpcError::new(
@@ -428,16 +439,11 @@ fn reserve_idle_agent_checkout(
 }
 
 fn git_common_dir(path: &Path) -> Result<std::path::PathBuf, IpcError> {
-    let output = Command::new("git")
-        .args(["rev-parse", "--git-common-dir"])
-        .current_dir(path)
-        .output()
-        .map_err(|error| {
-            IpcError::new(
-                IpcErrorCode::GitFailed,
-                format!("could not verify Git worktree ownership: {error}"),
-            )
-        })?;
+    let output = crate::services::git::run_git_read(
+        path,
+        &["rev-parse", "--git-common-dir"],
+        crate::services::git::GIT_READ_TIMEOUT,
+    )?;
     if !output.status.success() {
         return Err(IpcError::new(
             IpcErrorCode::InvalidCheckout,
@@ -1091,26 +1097,44 @@ pub fn set_default_branch(
             )
         })?;
     let ref_name = format!("refs/heads/{branch}");
-    let valid = Command::new("git")
-        .args([OsString::from("check-ref-format"), ref_name.clone().into()])
-        .current_dir(&root)
-        .status()
-        .map_err(|error| {
-            IpcError::new(
-                IpcErrorCode::GitFailed,
-                format!("could not validate Git branch: {error}"),
-            )
-        })?
-        .success();
-    let exists = [ref_name, format!("refs/remotes/origin/{branch}")]
-        .iter()
-        .any(|reference| {
-            Command::new("git")
-                .args(["show-ref", "--verify", "--quiet", reference])
-                .current_dir(&root)
-                .status()
-                .is_ok_and(|status| status.success())
-        });
+    let valid_output = crate::services::git::run_git_read(
+        &root,
+        &["check-ref-format", &ref_name],
+        crate::services::git::GIT_READ_TIMEOUT,
+    )?;
+    let valid = if valid_output.status.success() {
+        true
+    } else if valid_output.status.code() == Some(1)
+        && valid_output.stdout.is_empty()
+        && valid_output.stderr.is_empty()
+    {
+        false
+    } else {
+        return Err(crate::services::git::git_error(
+            "could not validate Git branch",
+            &valid_output,
+        ));
+    };
+    let remote_ref = format!("refs/remotes/origin/{branch}");
+    let mut exists = false;
+    for reference in [&ref_name, &remote_ref] {
+        let output = crate::services::git::run_git_read(
+            &root,
+            &["show-ref", "--verify", "--quiet", reference],
+            crate::services::git::GIT_READ_TIMEOUT,
+        )?;
+        if output.status.success() {
+            exists = true;
+            break;
+        }
+        if output.status.code() != Some(1) || !output.stdout.is_empty() || !output.stderr.is_empty()
+        {
+            return Err(crate::services::git::git_error(
+                "could not check Git branch",
+                &output,
+            ));
+        }
+    }
     if !valid || !exists {
         return Err(IpcError::new(
             IpcErrorCode::DefaultBranchUnknown,
@@ -1130,16 +1154,19 @@ mod tests {
 
     use crate::{
         domain::{
+            ipc::IpcErrorCode,
             review::{ReviewNote, ReviewRound},
             terminal_layout::{CheckoutTerminalLayout, TerminalLayoutNode, TerminalLayoutTab},
             workspace::{RepoKind, Session, SessionStatus, SessionType},
         },
         persistence::Database,
+        services::git::{run_git_read, GIT_READ_TIMEOUT},
     };
 
     use super::{
         archive_checkout, close_checkout, close_missing_checkout, locate_missing_checkout,
-        register_folder, restore, set_default_branch, sync_repo, HomeDirectory,
+        register_folder, repair_located_worktree, restore, set_default_branch, sync_repo,
+        HomeDirectory,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -1155,6 +1182,16 @@ mod tests {
         );
     }
 
+    fn git_read(cwd: &Path, args: &[&str]) -> String {
+        let output = run_git_read(cwd, args, GIT_READ_TIMEOUT).expect("Git read completes");
+        assert!(
+            output.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8_lossy(&output.stdout).trim().to_owned()
+    }
+
     fn init_repo(path: &Path) {
         fs::create_dir_all(path).unwrap();
         git(path, &["init", "-b", "trunk"]);
@@ -1167,6 +1204,58 @@ mod tests {
 
     fn database(path: &Path) -> Database {
         Database::open(path.join("workspace.sqlite3")).expect("database")
+    }
+
+    /// A repair that fails has to say so in bounded words.
+    ///
+    /// What Git prints on this path is whatever a helper it started printed, and a message a user
+    /// reads is not the place for all of it: before this went through `git_error`, the raw stderr
+    /// went into the error whole, so a helper that printed a wall of text put a wall of text into
+    /// the app's error. Git prints this diagnostic on stderr with nothing on stdout, which is the
+    /// case that has to be covered -- so the fixture makes Git print a lot of it, and the assertion
+    /// is that what came back is summarized, prefixed with the action and the exit code.
+    #[test]
+    fn a_failed_worktree_repair_reports_a_bounded_diagnostic() {
+        let temp = tempdir().unwrap();
+        let primary = temp.path().join("repo");
+        init_repo(&primary);
+        // A path Git names in full and does not accept: its own words are long, and every one of
+        // them used to travel to the user.
+        let wall = "w".repeat(64);
+        let not_a_worktree = temp
+            .path()
+            .join(&wall)
+            .join(&wall)
+            .join(&wall)
+            .join(&wall)
+            .join(&wall)
+            .join(&wall);
+
+        let error = repair_located_worktree(&primary, &not_a_worktree)
+            .expect_err("repairing a path that is not a worktree cannot succeed");
+
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        assert!(
+            error
+                .message
+                .starts_with("could not repair the located worktree (exit code "),
+            "{error:?}"
+        );
+        // The diagnostic is on stderr and stdout is empty, so this is Git's own words summarized rather
+        // than an empty answer dressed up as one: at most three lines of at most 120 characters, with
+        // the rest of the path dropped and marked as dropped -- the same bound every other Git
+        // diagnostic in this app is held to.
+        let said = error.message.split_once(": ").unwrap().1;
+        assert!(said.contains("fatal: Invalid path"), "{error:?}");
+        assert!(
+            said.chars().count() <= 121 * 3 + " / ".len() * 2,
+            "{error:?}"
+        );
+        assert!(
+            said.chars().count() < not_a_worktree.to_string_lossy().chars().count(),
+            "the whole path travelled to the user: {error:?}"
+        );
+        assert!(said.ends_with('…'), "{error:?}");
     }
 
     fn home_directory(parent: &Path) -> HomeDirectory {
@@ -2038,6 +2127,20 @@ mod tests {
     }
 
     #[test]
+    fn a_corrupt_git_checkout_is_not_registered_as_a_plain_folder() {
+        let temp = tempdir().unwrap();
+        let path = temp.path().join("repo");
+        init_repo(&path);
+        fs::write(path.join(".git/config"), "[core\n").unwrap();
+        let db = database(temp.path());
+
+        let error = register_folder(&db, &path).expect_err("a corrupt Git checkout must fail");
+
+        assert_eq!(error.code, crate::domain::ipc::IpcErrorCode::GitFailed);
+        assert!(db.load_workspace().unwrap().repos.is_empty());
+    }
+
+    #[test]
     fn explicitly_opened_submodule_is_standalone_and_bare_repository_is_rejected() {
         let temp = tempdir().unwrap();
         let child = temp.path().join("child");
@@ -2482,13 +2585,9 @@ mod tests {
         assert!(linked.join("work-in-progress.txt").exists());
         // Git still knows the worktree, because Marvis only forgot it: `git worktree list` goes
         // on naming the directory, and so does the branch.
-        let listed = Command::new("git")
-            .args(["worktree", "list", "--porcelain"])
-            .current_dir(&primary)
-            .output()
-            .expect("Git is installed");
-        assert!(String::from_utf8_lossy(&listed.stdout).contains(linked.to_str().unwrap()));
-        git(
+        let listed = git_read(&primary, &["worktree", "list", "--porcelain"]);
+        assert!(listed.contains(linked.to_str().unwrap()));
+        git_read(
             &primary,
             &["show-ref", "--verify", "--quiet", "refs/heads/temporary"],
         );
@@ -2578,12 +2677,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(closed.repos[0].checkouts.len(), 1);
-        let listed = Command::new("git")
-            .args(["worktree", "list", "--porcelain"])
-            .current_dir(&primary)
-            .output()
-            .expect("Git is installed");
-        let listed = String::from_utf8_lossy(&listed.stdout);
+        let listed = git_read(&primary, &["worktree", "list", "--porcelain"]);
         assert!(!listed.contains(linked.to_str().unwrap()));
     }
 

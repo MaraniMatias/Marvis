@@ -14,6 +14,7 @@ import {
   X as XIcon,
 } from "@lucide/vue";
 import type { Checkout, Repo } from "./domain/workspace";
+import type { CheckoutFileActivity } from "./domain/git";
 import type { ReviewTarget } from "./domain/review";
 import { sessionTitle, terminalHasProcess } from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
@@ -58,6 +59,7 @@ import { defaultAgentSession } from "./domain/agent";
 import { DEFAULT_ZOOM, zoomKeyFor, zoomLabel, zoomStep } from "./domain/zoom";
 import type { Zoom, ZoomModifier } from "./domain/zoom";
 import { buildReviewMarkdown, localReviewTimestamp } from "./domain/review";
+import { useLayoutPersistence } from "./presentation/layout-persistence";
 import { isMarkdownPath } from "./presentation/markdown-preview";
 import {
   DEFAULT_APP_LAYOUT,
@@ -72,15 +74,9 @@ import {
 import type { AppLayoutState, CheckoutUiState } from "./domain/ui-state";
 import { DEFAULT_SETTINGS, cloneSettings, normalizeSettings, uiFontScale } from "./domain/settings";
 import type { AppSettings } from "./domain/settings";
-import {
-  loadAppLayout,
-  loadCheckoutUiState,
-  loadSettings,
-  prepareAppExit,
-  saveAppLayout,
-  saveCheckoutUiState,
-  saveSettings,
-} from "./lib/ipc";
+import { loadAppLayout, loadCheckoutUiState, loadSettings, prepareAppExit, saveSettings } from "./lib/ipc";
+import { reportFrontendDiagnostic } from "./lib/diagnostics";
+import type { DiagnosticCategory } from "./lib/diagnostics";
 
 const {
   workspace,
@@ -103,6 +99,16 @@ const appLayoutReady = ref(false);
 const appShell = ref<HTMLElement | null>(null);
 const checkoutUiStates = ref<Record<string, CheckoutUiState>>({});
 const checkoutUiReady = ref(false);
+/**
+ * What the window looked like when it was last closed: written on its own schedule, in one
+ * order, and flushed in full before the window is allowed to go.
+ */
+const { scheduleCheckoutUiSave, flushUiStateWrites } = useLayoutPersistence({
+  appLayout,
+  appLayoutReady,
+  checkoutUiStates,
+  reportCause,
+});
 const mainPane = ref<InstanceType<typeof MainPane> | null>(null);
 /** ⌘B's state: the navigation and the files and changes panel are one thing to the eye, so they go
  *  together. A window with the main view alone in it is the point of the shortcut. */
@@ -225,7 +231,17 @@ const sessionRuntimeStatuses = ref<Record<string, TerminalSessionStatus>>({});
  * because the order it computed is not the one that was saved.
  */
 const sessionOrder = ref<Record<string, string[]>>({});
-const documentRefreshRevisions = ref<Record<string, number>>({});
+/**
+ * What the last file activity said about each checkout: how many times, and which paths.
+ *
+ * The two travel together because the paths are what make the count actionable. A count alone
+ * says that something was written in the checkout, and a document whose own bytes come back
+ * unchanged cannot answer from that whether one of the figures it draws is the file that moved.
+ */
+const documentRefreshActivity = ref<Record<string, { revision: number; paths: string[] }>>({});
+/** Hoisted so the pane is handed the same array when nothing has moved, rather than a new one on
+ *  every repaint of the shell. */
+const NO_REFRESH_PATHS: string[] = [];
 let shellRequestToken = 0;
 let unlistenFileActivity: (() => void) | undefined;
 let activityListenerDisposed = false;
@@ -236,10 +252,7 @@ const windowDecorated = ref(true);
 const windowMaximized = ref(false);
 let allowWindowClose = false;
 let windowClosePromise: Promise<void> | null = null;
-let uiLayoutSaveTimer: number | undefined;
 let inspectorCloseTimer: number | undefined;
-const checkoutUiSaveTimers = new Map<string, number>();
-let uiStateWriteQueue: Promise<void> = Promise.resolve();
 const loadedCheckoutUiIds = new Set<string>();
 const pendingCheckoutUiPatches = new Map<string, Partial<CheckoutUiState>>();
 let checkoutUiLoadGeneration = 0;
@@ -832,9 +845,31 @@ watch(appZoom, applyZoom, { immediate: true });
 const toScreen = (px: number) => px * appZoom.value;
 const toLayout = (px: number) => px / appZoom.value;
 
+type CheckoutUiScrollField =
+  "filesScrollTop" | "changesScrollTop" | "documentScrollTop" | "documentScrollLeft" | "diffScrollTop";
+const CHECKOUT_UI_SCROLL_FIELDS = new Set<CheckoutUiScrollField>([
+  "filesScrollTop",
+  "changesScrollTop",
+  "documentScrollTop",
+  "documentScrollLeft",
+  "diffScrollTop",
+]);
+
 function updateCheckoutUiState(checkoutId: string, patch: Partial<CheckoutUiState>) {
   const previous = checkoutUiStates.value[checkoutId] ?? { ...DEFAULT_CHECKOUT_UI_STATE };
-  const state = normalizeCheckoutUiState({ ...previous, ...patch, version: 1 });
+  const patchKeys = Object.keys(patch);
+  const scrollOnly =
+    patchKeys.length > 0 && patchKeys.every((key) => CHECKOUT_UI_SCROLL_FIELDS.has(key as CheckoutUiScrollField));
+  let state: CheckoutUiState;
+  if (scrollOnly) {
+    // The map only holds the default, normalized IPC state, or a normalized result from this function.
+    // Validate new scroll values with the same rules without rebuilding its accepted directory paths.
+    const validated = normalizeCheckoutUiState(patch);
+    state = { ...previous };
+    for (const key of patchKeys as CheckoutUiScrollField[]) state[key] = validated[key];
+  } else {
+    state = normalizeCheckoutUiState({ ...previous, ...patch });
+  }
   checkoutUiStates.value = { ...checkoutUiStates.value, [checkoutId]: state };
   if (!loadedCheckoutUiIds.has(checkoutId)) {
     pendingCheckoutUiPatches.set(checkoutId, { ...pendingCheckoutUiPatches.get(checkoutId), ...patch });
@@ -868,55 +903,13 @@ function updateInspectorUiState(
   updateCheckoutUiState(checkoutId, patch);
 }
 
-function scheduleUiWrite(write: () => Promise<void>) {
-  const pending = uiStateWriteQueue
-    .catch(() => {})
-    .then(write)
-    .catch((cause: unknown) => {
-      reportCause(cause);
-    });
-  uiStateWriteQueue = pending;
-}
-
-function scheduleAppLayoutSave() {
-  if (!appLayoutReady.value) return;
-  if (uiLayoutSaveTimer !== undefined) window.clearTimeout(uiLayoutSaveTimer);
-  uiLayoutSaveTimer = window.setTimeout(() => {
-    uiLayoutSaveTimer = undefined;
-    const state = normalizeAppLayout(JSON.parse(JSON.stringify(appLayout.value)));
-    scheduleUiWrite(() => saveAppLayout(state));
-  }, 250);
-}
-
-function scheduleCheckoutUiSave(checkoutId: string) {
-  const previousTimer = checkoutUiSaveTimers.get(checkoutId);
-  if (previousTimer !== undefined) window.clearTimeout(previousTimer);
-  checkoutUiSaveTimers.set(
-    checkoutId,
-    window.setTimeout(() => {
-      checkoutUiSaveTimers.delete(checkoutId);
-      const state = normalizeCheckoutUiState(JSON.parse(JSON.stringify(checkoutUiStates.value[checkoutId])));
-      scheduleUiWrite(() => saveCheckoutUiState(checkoutId, state));
-    }, 250),
-  );
-}
-
-async function flushUiStateWrites() {
-  if (uiLayoutSaveTimer !== undefined) {
-    window.clearTimeout(uiLayoutSaveTimer);
-    uiLayoutSaveTimer = undefined;
-    const state = normalizeAppLayout(JSON.parse(JSON.stringify(appLayout.value)));
-    scheduleUiWrite(() => saveAppLayout(state));
-  }
-  for (const [checkoutId, timer] of checkoutUiSaveTimers) {
-    window.clearTimeout(timer);
-    const state = normalizeCheckoutUiState(JSON.parse(JSON.stringify(checkoutUiStates.value[checkoutId])));
-    scheduleUiWrite(() => saveCheckoutUiState(checkoutId, state));
-  }
-  checkoutUiSaveTimers.clear();
-  await uiStateWriteQueue;
-  // A close request leaves the webview alive until the flush finishes. If another settings action
-  // arrived during that wait, include its newer queue entry before allowing the window to close.
+/**
+ * Waits for the settings writes already asked for, and for any that arrived while waiting.
+ *
+ * The window stays alive for this, so a settings action made during the wait belongs to this close
+ * rather than to a window that is about to be gone.
+ */
+async function settleSettingsWrites() {
   let revision: number;
   do {
     revision = settingsRevision;
@@ -943,8 +936,6 @@ function resetPanelWidth(panel: "sidebar" | "inspector") {
 function resizeAppPreview(width: number) {
   appLayout.value = resizeLayoutPanel(appLayout.value, "preview", width);
 }
-
-watch(appLayout, () => scheduleAppLayoutSave(), { deep: true });
 
 // A narrow window cannot hold the main panel and the inspector side by side, so the inspector
 // floats over it as a drawer. Its width is left alone, to be restored when space returns. A panel
@@ -1048,13 +1039,14 @@ onMounted(async () => {
     appLayoutReady.value = true;
   }
   try {
-    const dispose = await listen<string[]>("checkout-file-activity", (event) => {
+    const dispose = await listen<CheckoutFileActivity[]>("checkout-file-activity", (event) => {
       // One watcher covers a whole repository, so a write in one worktree arrives naming the
       // worktree it landed in rather than the one that happened to be on screen.
-      for (const checkoutId of event.payload) {
-        documentRefreshRevisions.value = {
-          ...documentRefreshRevisions.value,
-          [checkoutId]: (documentRefreshRevisions.value[checkoutId] ?? 0) + 1,
+      for (const activity of event.payload) {
+        const current = documentRefreshActivity.value[activity.checkoutId]?.revision ?? 0;
+        documentRefreshActivity.value = {
+          ...documentRefreshActivity.value,
+          [activity.checkoutId]: { revision: current + 1, paths: activity.paths },
         };
       }
     });
@@ -1077,9 +1069,6 @@ onUnmounted(() => {
   systemPrefersDark.removeEventListener("change", applyTheme);
   unlistenFileActivity?.();
   if (inspectorCloseTimer !== undefined) window.clearTimeout(inspectorCloseTimer);
-  if (uiLayoutSaveTimer !== undefined) window.clearTimeout(uiLayoutSaveTimer);
-  for (const timer of checkoutUiSaveTimers.values()) window.clearTimeout(timer);
-  checkoutUiSaveTimers.clear();
 });
 
 function onViewportResize() {
@@ -1102,10 +1091,13 @@ function requestWindowClose(currentWindow: ReturnType<typeof getCurrentWindow>):
       // The window waits for the queued writes, but only for as long as that can reasonably
       // take. A window that cannot be closed is worse than a layout that is one launch stale, and
       // the write is on the other side of the bridge: it goes on after this stops waiting for it.
+      // A close request leaves the webview alive until this finishes, so a settings action made
+      // during the wait is included before the window is allowed to close.
       await withinDeadline(
-        flushUiStateWrites(),
+        flushUiStateWrites().then(settleSettingsWrites),
         CLOSE_BUDGET,
         `The window closed before its queued writes finished (${CLOSE_BUDGET}ms).`,
+        "ui_writes_deadline",
       );
       // The sweep runs while the window is still here to ask for it: an exit event the app could
       // clean up from is never delivered on this path, and a server left running holds its port.
@@ -1248,10 +1240,26 @@ async function sweepBeforeExit(): Promise<void> {
       prepareAppExit(),
       CLOSE_BUDGET,
       `The window closed before the app's own processes were ended (${CLOSE_BUDGET}ms).`,
+      "exit_sweep_deadline",
     );
   } catch (cause) {
     reportCause(cause);
   }
+}
+
+const CLOSE_DIAGNOSTIC_BUDGET = 250;
+
+/** Waits briefly for the categorized Rust log command, without holding close on a stalled bridge. */
+function reportDiagnosticBeforeClose(category: DiagnosticCategory): Promise<void> {
+  return new Promise((resolve) => {
+    let deadline: number;
+    const finish = () => {
+      window.clearTimeout(deadline);
+      resolve();
+    };
+    deadline = window.setTimeout(finish, CLOSE_DIAGNOSTIC_BUDGET);
+    void reportFrontendDiagnostic(category).then(finish, finish);
+  });
 }
 
 /**
@@ -1260,18 +1268,27 @@ async function sweepBeforeExit(): Promise<void> {
  * The deadline resolves rather than rejects: the caller asked to close the window, and a write
  * that arrives late still arrives, so all that is left to say is that it was late.
  */
-function withinDeadline(work: Promise<void>, milliseconds: number, late: string): Promise<void> {
+function withinDeadline(
+  work: Promise<void>,
+  milliseconds: number,
+  late: string,
+  category: DiagnosticCategory,
+): Promise<void> {
   return new Promise((resolve, reject) => {
+    let timedOut = false;
     const deadline = window.setTimeout(() => {
+      timedOut = true;
       reportCause(new Error(late));
-      resolve();
+      void reportDiagnosticBeforeClose(category).then(resolve);
     }, milliseconds);
     work.then(
       () => {
+        if (timedOut) return;
         window.clearTimeout(deadline);
         resolve();
       },
       (cause: unknown) => {
+        if (timedOut) return;
         window.clearTimeout(deadline);
         reject(cause);
       },
@@ -1803,7 +1820,8 @@ function reportWarning(message: string) {
           :is-opening="isOpening"
           :shell-request="shellRequest"
           :registered-session-ids="registeredSessionIds"
-          :refresh-revision="documentRefreshRevisions[activeCheckout?.id ?? ''] ?? 0"
+          :refresh-revision="documentRefreshActivity[activeCheckout?.id ?? '']?.revision ?? 0"
+          :refresh-paths="documentRefreshActivity[activeCheckout?.id ?? '']?.paths ?? NO_REFRESH_PATHS"
           :reading-position="{
             top: activeCheckoutUiState?.documentScrollTop ?? 0,
             left: activeCheckoutUiState?.documentScrollLeft ?? 0,

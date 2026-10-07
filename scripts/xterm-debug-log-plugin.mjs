@@ -16,10 +16,18 @@ function isDebugLog(node, label) {
   );
 }
 
-function suppressConsoleCall(call, sourceFile, source) {
-  const args = call.arguments.map((argument) => source.slice(argument.getStart(sourceFile), argument.end));
-  const evaluation = call.arguments.some(ts.isSpreadElement) ? `[${args.join(", ")}]` : args.join(", ");
-  return `(${evaluation}, void 0)`;
+function debugContextCall(logs, sourceFile, source) {
+  // One console.error per anomalous throw, carrying the same context dev prints: the labels plus the emitter
+  // state (`_disposed`, `_size`, `JSON.stringify(_listeners)`). Arguments are still evaluated in order, with
+  // their side effects and failures, and the emitted throw is unchanged. `_listeners` only holds emitter
+  // records `{ value: function, id: number, stack?: string }`, so no terminal payload is serialized here.
+  const args = logs.flatMap((call) =>
+    call.arguments.map((argument) => source.slice(argument.getStart(sourceFile), argument.end)),
+  );
+  const evaluation = logs.some((call) => call.arguments.some(ts.isSpreadElement))
+    ? `[${args.join(", ")}]`
+    : args.join(", ");
+  return `console.error(${evaluation})`;
 }
 
 function commaExpressions(node) {
@@ -56,13 +64,11 @@ export function suppressXtermDebugLogs(source) {
   function visit(node) {
     const logs = listenerErrorLogs(node);
     if (logs) {
-      for (const call of logs) {
-        replacements.push({
-          start: call.getStart(sourceFile),
-          end: call.end,
-          text: suppressConsoleCall(call, sourceFile, source),
-        });
-      }
+      replacements.push({
+        start: logs[0].getStart(sourceFile),
+        end: logs.at(-1).end,
+        text: debugContextCall(logs, sourceFile, source),
+      });
       return;
     }
     ts.forEachChild(node, visit);

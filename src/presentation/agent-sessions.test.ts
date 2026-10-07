@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import { computed, ref } from "vue";
+import { computed, effectScope, ref, watch } from "vue";
 import type { AgentEvent, AgentSession } from "../domain/agent";
 import type { Checkout, Repo } from "../domain/workspace";
 
@@ -105,6 +105,8 @@ describe("useAgentSessions", () => {
     mocks.listAgentSessions.mockResolvedValue([]);
     // An empty catalog is the common case: a row with no color of its own falls back.
     mocks.listAgentAgents.mockResolvedValue([]);
+    // The bridge answers a registration with the release for it, which the hook keeps and uses.
+    mocks.listen.mockImplementation(async () => vi.fn());
   });
 
   it("defaults the target to the most recently updated session", async () => {
@@ -383,6 +385,163 @@ describe("useAgentSessions", () => {
     expect(state.state).toBe("ready");
     expect(state.headline).toEqual({ label: "plan", color: null, attention: "none" });
   });
+
+  it("releases the event subscription with the scope that asked for it", async () => {
+    const unlisten = vi.fn();
+    mocks.listen.mockImplementation(async () => unlisten);
+    const scope = effectScope();
+    scope.run(() =>
+      useAgentSessions(
+        computed(() => checkout),
+        computed(() => gitRepo),
+      ),
+    );
+    await settle();
+
+    expect(mocks.listen).toHaveBeenCalledTimes(1);
+    expect(unlisten).not.toHaveBeenCalled();
+
+    // A remount leaves the scope behind, so the subscription has to go with it: one that is not
+    // released is still answering events into a row that no longer exists, and every mount stacks
+    // another one behind it.
+    scope.stop();
+    expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("releases a subscription the bridge only hands over after the scope is gone", async () => {
+    const unlisten = vi.fn();
+    let answerListen!: (dispose: () => void) => void;
+    mocks.listen.mockImplementation(() => new Promise<() => void>((resolve) => (answerListen = resolve)));
+    const scope = effectScope();
+    scope.run(() =>
+      useAgentSessions(
+        computed(() => checkout),
+        computed(() => gitRepo),
+      ),
+    );
+    await settle();
+
+    scope.stop();
+    expect(unlisten).not.toHaveBeenCalled();
+
+    // The registration answers only now, with nobody left to receive what it would deliver.
+    answerListen(unlisten);
+    await settle();
+    expect(unlisten).toHaveBeenCalledTimes(1);
+  });
+
+  it("still reads a row when the subscription cannot be registered at all", async () => {
+    mocks.listen.mockRejectedValue(new Error("event bridge is not up"));
+    mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_one" })]);
+    let state: ReturnType<typeof useAgentSessions> | undefined;
+    const scope = effectScope();
+    scope.run(() => {
+      state = useAgentSessions(
+        computed(() => checkout),
+        computed(() => gitRepo),
+      );
+    });
+    await settle();
+
+    // The polls are what keeps the row correct anyway, so a registration that fails costs live
+    // events and nothing else. Left unhandled it would take the whole scope down with it.
+    expect(state?.state).toBe("ready");
+    expect(state?.sessions.map((entry) => entry.id)).toEqual(["ses_one"]);
+    scope.stop();
+  });
+
+  it("does not start a second read while one is still on its way", async () => {
+    vi.useFakeTimers();
+    mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_one", running: true })]);
+    const state = useAgentSessions(
+      computed(() => checkout),
+      computed(() => gitRepo),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.listAgentSessions).toHaveBeenCalledTimes(1);
+
+    // A service slower than the interval: the read is still in flight and the poll asks twice more.
+    let answerRead!: (sessions: AgentSession[]) => void;
+    mocks.listAgentSessions.mockImplementation(() => new Promise<AgentSession[]>((resolve) => (answerRead = resolve)));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentSessions).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(2000);
+    // The generation drops the answer of a read that was overtaken, not the work behind it: two
+    // more intervals went by and no third read was spent.
+    expect(mocks.listAgentSessions).toHaveBeenCalledTimes(2);
+
+    // The ask is held rather than lost, and it runs as soon as the read in flight answers.
+    answerRead([session({ id: "ses_one", idleAt: 99 })]);
+    await settle();
+    expect(mocks.listAgentSessions).toHaveBeenCalledTimes(3);
+    expect(state.turnsCompleted).toBe(1);
+    vi.useRealTimers();
+  });
+
+  it("does not let a stale failed read write its error over a newer one", async () => {
+    mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_one" })]);
+    const state = useAgentSessions(
+      computed(() => checkout),
+      computed(() => gitRepo),
+    );
+    await settle();
+    expect(state.state).toBe("ready");
+
+    // Two reads overlap: the older one is slow, the newer one answers first.
+    let failStale!: (cause: unknown) => void;
+    mocks.listAgentSessions.mockImplementationOnce(
+      () => new Promise<AgentSession[]>((_resolve, reject) => (failStale = reject)),
+    );
+    const stale = state.reload();
+    expect(await state.reload()).toBe(true);
+    expect(state.state).toBe("ready");
+
+    // The older read failing afterwards has nothing left to correct: it was superseded while it
+    // was still in flight, so its failure says nothing about the state the newer read published.
+    failStale({ code: "agent_unavailable", message: "stale failure" });
+    expect(await stale).toBe(false);
+    expect(state.state).toBe("ready");
+    expect(state.error).toBe("");
+  });
+
+  it("does not chain a queued read past the scope that asked for it", async () => {
+    vi.useFakeTimers();
+    mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_one", running: true })]);
+    const scope = effectScope();
+    scope.run(() =>
+      useAgentSessions(
+        computed(() => checkout),
+        computed(() => gitRepo),
+      ),
+    );
+    await settle();
+
+    // A service slower than the fast cadence: the read is on its way and the next poll owes one
+    // behind it.
+    let answerRead!: (sessions: AgentSession[]) => void;
+    mocks.listAgentSessions.mockImplementation(() => new Promise<AgentSession[]>((resolve) => (answerRead = resolve)));
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentSessions).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentSessions).toHaveBeenCalledTimes(2);
+
+    scope.stop();
+    const whenReleased = mocks.listAgentSessions.mock.calls.length;
+    mocks.listAgentSessions.mockResolvedValue([session({ id: "ses_one", running: true, updatedAt: 9 })]);
+
+    // The read held behind the one on its way is dropped rather than chained: the timers that ask
+    // are released with the scope, so a chain that still ran would be the last thing reading a
+    // checkout nobody is drawing.
+    answerRead([session({ id: "ses_one", running: true })]);
+    await settle();
+    expect(mocks.listAgentSessions).toHaveBeenCalledTimes(whenReleased);
+
+    // No interval survived either.
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(mocks.listAgentSessions).toHaveBeenCalledTimes(whenReleased);
+    vi.useRealTimers();
+  });
 });
 
 describe("useTerminalAgentRows", () => {
@@ -512,6 +671,277 @@ describe("useTerminalAgentRows", () => {
     perCheckout({ "checkout:first": [{ id: "ses_one", agent: "coder", running: true }] });
     await vi.advanceTimersByTimeAsync(5000);
     expect(state.byCheckout["checkout:first"].sessions[0]?.running).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("asks only about the busy checkouts when the fast poll fires", async () => {
+    vi.useFakeTimers();
+    perCheckout({
+      "checkout:first": [{ id: "ses_one", agent: "coder", running: true }],
+      "checkout:second": [{ id: "ses_two", agent: "plan" }],
+    });
+
+    const state = useTerminalAgentRows(computed(() => ["checkout:first", "checkout:second"]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.byCheckout["checkout:second"].sessions[0]?.running).toBe(false);
+    mocks.listAgentCandidateSessions.mockClear();
+
+    await vi.advanceTimersByTimeAsync(2000);
+    // One agent is working and the other row is idle, so the idle worktree is not asked about at
+    // all: the fast poll exists to notice a turn ending, and nothing about an idle one has changed.
+    expect(mocks.listAgentCandidateSessions.mock.calls.map(([id]) => id)).toEqual(["checkout:first"]);
+    vi.useRealTimers();
+  });
+
+  it("asks about every checkout when the slow poll fires", async () => {
+    vi.useFakeTimers();
+    perCheckout({
+      "checkout:first": [{ id: "ses_one", agent: "coder" }],
+      "checkout:second": [{ id: "ses_two", agent: "plan" }],
+    });
+
+    useTerminalAgentRows(computed(() => ["checkout:first", "checkout:second"]));
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.listAgentCandidateSessions.mockClear();
+
+    // Nothing is running, so this is the slow poll's question, and it is the only one that can find
+    // a turn somebody started in their own TUI: both worktrees are asked, the idle one included.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(mocks.listAgentCandidateSessions.mock.calls.map(([id]) => id).sort()).toEqual([
+      "checkout:first",
+      "checkout:second",
+    ]);
+    vi.useRealTimers();
+  });
+
+  it("does not start a second pass while one is still on its way", async () => {
+    vi.useFakeTimers();
+    perCheckout({ "checkout:first": [{ id: "ses_one", agent: "coder", running: true }] });
+    mocks.listAgentCandidateSessions.mockClear();
+
+    useTerminalAgentRows(computed(() => ["checkout:first"]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(1);
+
+    // A service slower than the interval: the pass is still reading and the poll asks twice more.
+    let answerRead!: (sessions: AgentSession[]) => void;
+    mocks.listAgentCandidateSessions.mockImplementation(
+      () => new Promise<AgentSession[]>((resolve) => (answerRead = resolve)),
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(2000);
+    // Without the in-flight guard each of those intervals starts a pass of its own, and every
+    // answer but the last one is dropped on arrival for having been overtaken.
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(2);
+
+    answerRead([session({ id: "ses_one", agent: "coder", running: true })]);
+    await settle();
+    // The ask was held rather than lost: the pass behind the one on its way runs it.
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(3);
+    vi.useRealTimers();
+  });
+
+  it("leaves the store alone when an answer draws the row that is already there", async () => {
+    vi.useFakeTimers();
+    perCheckout({ "checkout:first": [{ id: "ses_one", agent: "coder" }] });
+
+    const state = useTerminalAgentRows(computed(() => ["checkout:first"]));
+    await vi.advanceTimersByTimeAsync(0);
+    const drawn = state.byCheckout["checkout:first"];
+
+    // `byCheckout` is reactive and every terminal row reads out of it, so a poll that found nothing
+    // must not hand the sidebar a new object to redraw itself from.
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(state.byCheckout["checkout:first"]).toBe(drawn);
+
+    // A row that would draw something else is published, so the shortcut is not a store that
+    // stops updating.
+    perCheckout({
+      "checkout:first": [{ id: "ses_one", agent: "coder", running: true, updatedAt: 9 }],
+    });
+    await vi.advanceTimersByTimeAsync(5000);
+    expect(state.byCheckout["checkout:first"]).not.toBe(drawn);
+    expect(state.byCheckout["checkout:first"].sessions[0]?.running).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("still asks about an idle checkout while another one stays busy", async () => {
+    vi.useFakeTimers();
+    // The regression this covers. One long turn in the first worktree used to gate the full pass off
+    // entirely, and the fast poll cannot hear a turn somebody started in their own TUI: that worktree
+    // is not in the busy set, so nothing would ever ask it and its row sat on "idle" for as long as
+    // the first worktree kept working.
+    perCheckout({
+      "checkout:first": [{ id: "ses_long", agent: "coder", running: true }],
+      "checkout:second": [{ id: "ses_quiet", agent: "plan" }],
+    });
+
+    const state = useTerminalAgentRows(computed(() => ["checkout:first", "checkout:second"]));
+    await vi.advanceTimersByTimeAsync(0);
+    expect(state.byCheckout["checkout:second"].sessions[0]?.running).toBe(false);
+
+    // Somebody starts a turn in the quiet worktree's own TUI. Nothing on this stream announces it,
+    // and the first worktree goes on working through every slow window below.
+    perCheckout({
+      "checkout:first": [{ id: "ses_long", agent: "coder", running: true }],
+      "checkout:second": [{ id: "ses_quiet", agent: "plan", running: true }],
+    });
+
+    await vi.advanceTimersByTimeAsync(20000);
+    expect(state.byCheckout["checkout:first"].sessions[0]?.running).toBe(true);
+    expect(state.byCheckout["checkout:second"].sessions[0]?.running).toBe(true);
+    vi.useRealTimers();
+  });
+
+  it("keeps the fast pass narrow to the busy checkouts and leaves the width to the slow one", async () => {
+    vi.useFakeTimers();
+    perCheckout({
+      "checkout:first": [{ id: "ses_one", agent: "coder", running: true }],
+      "checkout:second": [{ id: "ses_two", agent: "plan" }],
+      "checkout:third": [{ id: "ses_three", agent: "plan" }],
+    });
+
+    useTerminalAgentRows(computed(() => ["checkout:first", "checkout:second", "checkout:third"]));
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.listAgentCandidateSessions.mockClear();
+
+    // A fast window asks about the one working checkout alone: that scoping is the load the poll
+    // removes, and it must survive the slow pass being widened back to everything.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentCandidateSessions.mock.calls.map(([id]) => id)).toEqual(["checkout:first"]);
+
+    // The next fast window is just as narrow, and then the slow one asks about everybody: that is
+    // the pass that can find a turn somebody started outside the app.
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(mocks.listAgentCandidateSessions.mock.calls.map(([id]) => id)).toEqual([
+      "checkout:first",
+      "checkout:first",
+      "checkout:first",
+      "checkout:second",
+      "checkout:third",
+    ]);
+    vi.useRealTimers();
+  });
+
+  it("widens the queued pass instead of losing a full ask that lands during a busy one", async () => {
+    vi.useFakeTimers();
+    perCheckout({
+      "checkout:first": [{ id: "ses_one", agent: "coder", running: true }],
+      "checkout:second": [{ id: "ses_two", agent: "plan" }],
+    });
+
+    useTerminalAgentRows(computed(() => ["checkout:first", "checkout:second"]));
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.listAgentCandidateSessions.mockClear();
+
+    // A service slower than the fast cadence: the busy pass is still reading when the next fast one
+    // and the slow one both ask behind it.
+    let answerRead!: (sessions: AgentSession[]) => void;
+    mocks.listAgentCandidateSessions.mockImplementation(
+      () => new Promise<AgentSession[]>((resolve) => (answerRead = resolve)),
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(3000);
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(1);
+
+    // The pass that runs behind the one on its way is the full one. The queued "all" widened the
+    // queued "busy" rather than being replaced by it, which is the only thing that ever gets the
+    // idle worktree asked here.
+    mocks.listAgentCandidateSessions.mockClear();
+    answerRead([session({ id: "ses_one", checkoutId: "checkout:first", agent: "coder", running: true })]);
+    await settle();
+    expect(mocks.listAgentCandidateSessions.mock.calls.map(([id]) => id).sort()).toEqual([
+      "checkout:first",
+      "checkout:second",
+    ]);
+    vi.useRealTimers();
+  });
+
+  it("does not put back a checkout whose terminal closed while the read was on its way", async () => {
+    vi.useFakeTimers();
+    perCheckout({
+      "checkout:first": [{ id: "ses_one", agent: "coder" }],
+      "checkout:second": [{ id: "ses_two", agent: "plan" }],
+    });
+    const ids = ref(["checkout:first", "checkout:second"]);
+
+    const state = useTerminalAgentRows(computed(() => ids.value));
+    await settle();
+    expect(Object.keys(state.byCheckout).sort()).toEqual(["checkout:first", "checkout:second"]);
+
+    // Every write to the store is recorded whole, because a row that comes back and is dropped again in
+    // the same tick is not something the end state can show: what matters is that it was never drawn.
+    const drawn: string[] = [];
+    watch(
+      () => JSON.stringify(state.byCheckout),
+      (store) => drawn.push(store),
+      { flush: "sync" },
+    );
+
+    // The full pass is still reading when the worktree goes away.
+    const answers = new Map<string, (sessions: AgentSession[]) => void>();
+    mocks.listAgentCandidateSessions.mockImplementation(
+      (checkoutId: string) => new Promise<AgentSession[]>((resolve) => answers.set(checkoutId, resolve)),
+    );
+    await vi.advanceTimersByTimeAsync(5000);
+    expect([...answers.keys()].sort()).toEqual(["checkout:first", "checkout:second"]);
+
+    // The answer about the closed worktree arrives after the terminal is gone, and it is not the answer
+    // that was there before: writing it would give the closed worktree a row back that says it is
+    // working, and the pass behind this one would only have to take it away again.
+    ids.value = ["checkout:first"];
+    const before = drawn.length;
+    answers.get("checkout:second")?.([
+      session({ id: "ses_two", checkoutId: "checkout:second", agent: "plan", running: true }),
+    ]);
+    answers.get("checkout:first")?.([session({ id: "ses_one", checkoutId: "checkout:first", agent: "coder" })]);
+    await settle();
+
+    expect(drawn.slice(before).some((store) => store.includes("checkout:second"))).toBe(false);
+    expect(Object.keys(state.byCheckout)).toEqual(["checkout:first"]);
+    expect(state.row("checkout:second")).toEqual({ sessions: [] });
+    vi.useRealTimers();
+  });
+
+  it("leaves no timer and no queued pass behind when the scope is released mid-pass", async () => {
+    vi.useFakeTimers();
+    perCheckout({ "checkout:first": [{ id: "ses_one", agent: "coder", running: true }] });
+    mocks.listAgentCandidateSessions.mockClear();
+
+    const scope = effectScope();
+    const state = scope.run(() => useTerminalAgentRows(computed(() => ["checkout:first"])))!;
+    await settle();
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(1);
+
+    // A service slower than the fast cadence: the pass is on its way and the next interval owes one.
+    let answerRead!: (sessions: AgentSession[]) => void;
+    mocks.listAgentCandidateSessions.mockImplementation(
+      () => new Promise<AgentSession[]>((resolve) => (answerRead = resolve)),
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(2);
+
+    scope.stop();
+    const whenReleased = mocks.listAgentCandidateSessions.mock.calls.length;
+    perCheckout({
+      "checkout:first": [{ id: "ses_one", agent: "coder", running: true, updatedAt: 9 }],
+    });
+
+    // The answer lands after the row is gone. The pass owed behind it must not run: its timers are
+    // released, so a chain that still ran would be the only thing left polling this checkout.
+    answerRead([session({ id: "ses_one", checkoutId: "checkout:first", agent: "coder", running: true })]);
+    await settle();
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(whenReleased);
+    expect(state.byCheckout["checkout:first"].sessions[0]?.updatedAt).toBe(1);
+
+    // And no interval survived the scope: advancing well past both cadences asks for nothing.
+    await vi.advanceTimersByTimeAsync(30000);
+    expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(whenReleased);
     vi.useRealTimers();
   });
 });

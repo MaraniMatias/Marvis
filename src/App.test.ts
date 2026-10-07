@@ -2,10 +2,12 @@
 // Test doubles intentionally colocate small component shells and omit production prop defaults.
 /* eslint-disable vue/one-component-per-file, vue/require-default-prop */
 import { flushPromises, mount } from "@vue/test-utils";
+import { listen } from "@tauri-apps/api/event";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { defineComponent, h, inject, onMounted } from "vue";
 import type { InjectionKey, Ref } from "vue";
 import { DEFAULT_APP_LAYOUT, DEFAULT_CHECKOUT_UI_STATE } from "./domain/ui-state";
+import * as uiStateDomain from "./domain/ui-state";
 import type { AppLayoutState } from "./domain/ui-state";
 import { ACKNOWLEDGEMENT, CREDITS, REPOSITORY } from "./domain/credits";
 import { DEFAULT_SETTINGS, SETTINGS_SECTIONS, cloneSettings } from "./domain/settings";
@@ -30,6 +32,7 @@ const mocks = vi.hoisted(() => ({
   loadCheckoutUiState: vi.fn(),
   saveCheckoutUiState: vi.fn(),
   prepareAppExit: vi.fn(),
+  reportFrontendDiagnostic: vi.fn(),
   getTerminalStatus: vi.fn(),
   loadReviewTarget: vi.fn(),
   saveReviewTarget: vi.fn(),
@@ -249,6 +252,7 @@ vi.mock("@tauri-apps/api/window", () => ({
 }));
 vi.mock("@tauri-apps/api/event", () => ({ listen: vi.fn().mockResolvedValue(vi.fn()) }));
 vi.mock("@tauri-apps/plugin-dialog", () => ({ open: vi.fn() }));
+vi.mock("./lib/diagnostics", () => ({ reportFrontendDiagnostic: mocks.reportFrontendDiagnostic }));
 vi.mock("./lib/ipc", () => ({
   archiveCheckout: mocks.archiveCheckout,
   closeCheckout: mocks.closeCheckout,
@@ -643,6 +647,7 @@ describe("App UI integration", () => {
     mocks.saveSettings.mockResolvedValue(undefined);
     mocks.saveCheckoutUiState.mockResolvedValue(undefined);
     mocks.prepareAppExit.mockResolvedValue(undefined);
+    mocks.reportFrontendDiagnostic.mockResolvedValue(undefined);
     mocks.getTerminalStatus.mockResolvedValue({ state: "running", foregroundProcess: false });
     mocks.loadReviewTarget.mockResolvedValue("markdown");
     mocks.saveReviewTarget.mockResolvedValue(undefined);
@@ -1441,6 +1446,51 @@ describe("App UI integration", () => {
     });
   });
 
+  describe("file activity", () => {
+    it("hands the document the paths the batch moved, alongside the revision", async () => {
+      const handlers = new Map<string, (event: { payload: unknown }) => void>();
+      vi.mocked(listen).mockImplementation((async (name: string, handler: (event: { payload: unknown }) => void) => {
+        handlers.set(name, handler);
+        return () => {};
+      }) as unknown as typeof listen);
+
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      const pane = wrapper.findComponent({ name: "MainPane" });
+      expect(pane.props("refreshRevision")).toBe(0);
+
+      // The watcher names the paths as well as the checkout, which is what lets a document whose
+      // own bytes came back unchanged tell whether one of the files it draws is the one that moved.
+      handlers.get("checkout-file-activity")?.({
+        payload: [{ checkoutId: "checkout:one", paths: ["docs/pic.png"] }],
+      });
+      await flushPromises();
+
+      expect(pane.props("refreshRevision")).toBe(1);
+      expect(pane.props("refreshPaths")).toEqual(["docs/pic.png"]);
+      wrapper.unmount();
+    });
+
+    it("counts a batch that could not name its paths without inventing any", async () => {
+      const handlers = new Map<string, (event: { payload: unknown }) => void>();
+      vi.mocked(listen).mockImplementation((async (name: string, handler: (event: { payload: unknown }) => void) => {
+        handlers.set(name, handler);
+        return () => {};
+      }) as unknown as typeof listen);
+
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      const pane = wrapper.findComponent({ name: "MainPane" });
+
+      handlers.get("checkout-file-activity")?.({ payload: [{ checkoutId: "checkout:one", paths: [] }] });
+      await flushPromises();
+
+      // An empty list is the watcher declining to say what it moved, which is not a checkout
+      // nothing touched: the revision still moves, and no path is claimed on the way.
+      expect(pane.props("refreshRevision")).toBe(1);
+      expect(pane.props("refreshPaths")).toEqual([]);
+      wrapper.unmount();
+    });
+  });
+
   describe("layout", () => {
     it("starts the panels at the marvis default widths within their clamps", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
@@ -1464,7 +1514,6 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 5,
         mode: "focus",
         sidebarWidth: 310,
         inspectorWidth: 340,
@@ -1481,7 +1530,6 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 5,
         mode: "focus",
         sidebarWidth: 500,
         inspectorWidth: 200,
@@ -1495,7 +1543,6 @@ describe("App UI integration", () => {
       // this one is stored as `always`: a preference read back as the default would be invisible
       // everywhere else, because the default is what a layout with no preference in it gives.
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 5,
         mode: "focus",
         sidebarWidth: 345,
         inspectorWidth: 450,
@@ -1514,7 +1561,6 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 5,
         mode: "focus",
         sidebarWidth: 400,
         inspectorWidth: 450,
@@ -1525,7 +1571,6 @@ describe("App UI integration", () => {
 
     it("lets double-click on a handle reset just that panel", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 5,
         mode: "focus",
         sidebarWidth: 345,
         inspectorWidth: 450,
@@ -1545,7 +1590,6 @@ describe("App UI integration", () => {
       await vi.advanceTimersByTimeAsync(300);
       await flushPromises();
       expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({
-        version: 5,
         mode: "focus",
         sidebarWidth: DEFAULT_APP_LAYOUT.sidebarWidth,
         inspectorWidth: 450,
@@ -1569,7 +1613,6 @@ describe("App UI integration", () => {
 
     it("gives the inspector its full width back when space returns", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
-        version: 5,
         mode: "focus",
         sidebarWidth: 300,
         inspectorWidth: 300,
@@ -2144,6 +2187,35 @@ describe("App UI integration", () => {
     wrapper.unmount();
   });
 
+  it("preserves validated checkout paths while applying validated scroll-only updates", async () => {
+    const normalizeState = vi.spyOn(uiStateDomain, "normalizeCheckoutUiState");
+    mocks.loadCheckoutUiState.mockResolvedValue({
+      ...DEFAULT_CHECKOUT_UI_STATE,
+      document: { checkoutId: "checkout:one", path: "README.md", origin: "checkout", source: "file", mode: "view" },
+      mainView: "document",
+      selectedFilePath: "../outside",
+      expandedDirectories: ["src", "src/../outside"],
+      filesScrollTop: 1e20,
+    });
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+
+    wrapper.getComponent({ name: "DocumentPane" }).vm.$emit("readingPositionChanged", { top: Infinity, left: -10 });
+    expect(normalizeState).toHaveBeenLastCalledWith({ documentScrollTop: Infinity, documentScrollLeft: -10 });
+    normalizeState.mockRestore();
+    await vi.advanceTimersByTimeAsync(300);
+    await flushPromises();
+    const firstCalls = mocks.saveCheckoutUiState.mock.calls;
+    const firstSavedState = firstCalls[firstCalls.length - 1][1];
+    expect(firstSavedState).toMatchObject({
+      selectedFilePath: null,
+      expandedDirectories: ["src"],
+      filesScrollTop: 10_000_000,
+      documentScrollTop: 0,
+      documentScrollLeft: 0,
+    });
+    wrapper.unmount();
+  });
+
   it("switches the main view from the inspector and back from a crumb, without unmounting the terminal", async () => {
     const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
 
@@ -2349,6 +2421,66 @@ describe("App UI integration", () => {
     expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
     wrapper.unmount();
   });
+  it("logs an incomplete UI-write deadline before allowing close", async () => {
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+    let resolveWrite!: () => void;
+    let rejectWrite!: (cause: unknown) => void;
+    let resolveDiagnostic!: () => void;
+    mocks.saveAppLayout.mockImplementation(
+      () =>
+        new Promise<void>((resolve, reject) => {
+          resolveWrite = resolve;
+          rejectWrite = reject;
+        }),
+    );
+    wrapper.getComponent(SplitterGroup).vm.$emit("layout", [320, 700, 300]);
+    await vi.advanceTimersByTimeAsync(300);
+    mocks.reportFrontendDiagnostic.mockImplementation(
+      () => new Promise<void>((resolve) => (resolveDiagnostic = resolve)),
+    );
+
+    const closing = mocks.onCloseRequested!({ preventDefault: vi.fn() });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(5000);
+    await flushPromises();
+    expect(mocks.reportFrontendDiagnostic).toHaveBeenCalledExactlyOnceWith("ui_writes_deadline");
+    expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
+
+    rejectWrite(new Error("late write failure remains inconclusive after deadline"));
+    await flushPromises();
+    expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
+
+    resolveDiagnostic();
+    await closing;
+    expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
+    resolveWrite();
+    wrapper.unmount();
+  });
+
+  it("logs an incomplete exit-sweep deadline before allowing close", async () => {
+    const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+    let resolveSweep!: () => void;
+    let resolveDiagnostic!: () => void;
+    mocks.prepareAppExit.mockImplementation(() => new Promise<void>((resolve) => (resolveSweep = resolve)));
+    mocks.reportFrontendDiagnostic.mockImplementation(
+      () => new Promise<void>((resolve) => (resolveDiagnostic = resolve)),
+    );
+
+    const closing = mocks.onCloseRequested!({ preventDefault: vi.fn() });
+    await flushPromises();
+    await vi.advanceTimersByTimeAsync(5000);
+    await flushPromises();
+    expect(mocks.reportFrontendDiagnostic).toHaveBeenCalledExactlyOnceWith("exit_sweep_deadline");
+    expect(mocks.currentWindow!.close).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(250);
+    await closing;
+    expect(mocks.currentWindow!.close).toHaveBeenCalledOnce();
+    resolveDiagnostic();
+    resolveSweep();
+    wrapper.unmount();
+  });
+
   describe("the sidebar shortcut", () => {
     const pressInSidebar = (init: KeyboardEventInit, target = wrapper.get("#navigation-panel").element) => {
       const event = new KeyboardEvent("keydown", { cancelable: true, bubbles: true, ...init });

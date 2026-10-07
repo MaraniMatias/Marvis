@@ -15,7 +15,7 @@ use crate::domain::workspace::{
     WorkspaceState,
 };
 
-const SCHEMA_VERSION: i64 = 13;
+const SCHEMA_VERSION: i64 = 14;
 const REVIEW_NOTE_COLUMNS: &str = "id, checkout_id, path, side, line_start, line_end, content, code, status, code_hash, outdated, round_id, created_at, updated_at";
 const ACTIVE_CHECKOUT: &str = "active_checkout_id";
 const ACTIVE_SESSION: &str = "active_session_id";
@@ -29,15 +29,18 @@ const INSPECTOR_WIDTH_MIN: u32 = 200;
 const INSPECTOR_WIDTH_MAX: u32 = 480;
 const PREVIEW_WIDTH_MIN: u32 = 260;
 const PREVIEW_WIDTH_MAX: u32 = 900;
-/// The layout row is the window's own shape and nothing else. The preferences a person sets once
-/// (sizes, ligatures, the scale) live in `~/.marvis/config.yml`, which this shape was widened
-/// and narrowed once to make room for, before that file existed.
-const APP_LAYOUT_VERSION: u8 = 5;
 
+/// The layout row is the window's own shape and nothing else: which mode it is in and how wide
+/// the panes are. The preferences a person sets once (sizes, ligatures, the scale) live in
+/// `~/.marvis/config.yml`.
+///
+/// There is no version in the row. `SCHEMA_VERSION` is the only ladder in this database, and a
+/// per-blob ladder inside it only ever bought a second way to keep reading shapes this build
+/// cannot write. A row that does not parse into this struct is the default window and a deleted
+/// row, which is the whole of what the ladder was buying.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct AppLayoutState {
-    pub version: u8,
     pub mode: String,
     pub sidebar_width: u32,
     pub inspector_width: u32,
@@ -47,7 +50,6 @@ pub struct AppLayoutState {
 impl Default for AppLayoutState {
     fn default() -> Self {
         Self {
-            version: APP_LAYOUT_VERSION,
             mode: "focus".into(),
             sidebar_width: 240,
             inspector_width: 280,
@@ -57,7 +59,10 @@ impl Default for AppLayoutState {
 }
 
 impl AppLayoutState {
-    /// Clamp persisted dimensions and discard unknown layout modes.
+    /// Clamp a reported dimension and discard a mode this build does not name.
+    ///
+    /// This is validation of what arrives, not a reading of an older row: a row this build cannot
+    /// read never reaches here, it is refused whole by [`Database::load_app_layout`].
     fn normalized(mut self) -> Self {
         if self.mode != "focus" && self.mode != "split" {
             self.mode = "focus".into();
@@ -86,13 +91,11 @@ pub struct PersistedDocument {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
-#[serde(default, rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
 pub struct CheckoutUiState {
-    pub version: u8,
     pub document: Option<PersistedDocument>,
     pub main_view: String,
-    /// The whole-change-set diff has no path, so it cannot be a `document`. Added after
-    /// version 1 shipped: absent in state saved before it, which means `false`.
+    /// The whole-change-set diff has no path, so it cannot be a `document`.
     pub diff_all_files: bool,
     pub inspector_tab: String,
     pub selected_file_path: Option<String>,
@@ -108,7 +111,6 @@ pub struct CheckoutUiState {
 impl Default for CheckoutUiState {
     fn default() -> Self {
         Self {
-            version: 1,
             document: None,
             main_view: "terminal".into(),
             diff_all_files: false,
@@ -927,6 +929,11 @@ impl Database {
         Ok(())
     }
 
+    /// Reads the layout row, and drops it when it does not parse into this build's shape.
+    ///
+    /// There is no version to compare, so the whole refusal is the parse: what this build cannot
+    /// read is the default window, and deleting the row says so out loud instead of leaving one to
+    /// be read again on the next launch.
     pub fn load_app_layout(&self) -> Result<AppLayoutState, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let Some(serialized) = get_preference(&connection, UI_LAYOUT)? else {
@@ -935,7 +942,6 @@ impl Database {
         let layout = serde_json::from_str::<AppLayoutState>(&serialized)
             .ok()
             .map(AppLayoutState::normalized)
-            .filter(|layout| layout.version == APP_LAYOUT_VERSION)
             .unwrap_or_default();
         if serde_json::to_string(&layout).map_err(|error| error.to_string())? != serialized {
             connection
@@ -947,9 +953,6 @@ impl Database {
 
     pub fn save_app_layout(&self, layout: &AppLayoutState) -> Result<(), String> {
         let layout = layout.clone().normalized();
-        if layout.version != APP_LAYOUT_VERSION {
-            return Err("saved UI layout has an unsupported version".into());
-        }
         let serialized = serde_json::to_string(&layout).map_err(|error| error.to_string())?;
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         connection
@@ -2276,9 +2279,13 @@ fn safe_review_relative_path(path: &str) -> bool {
             .all(|component| matches!(component, std::path::Component::Normal(_)))
 }
 
+/// What a saved state has to hold for this build to hand it back.
+///
+/// Every field is required, so a row written before one of them existed does not parse and is
+/// discarded whole rather than half honoured. There is no version here to compare: a field that
+/// arrives is a field this build knows what to mean.
 fn validate_checkout_ui_state(checkout_id: &str, state: &CheckoutUiState) -> bool {
-    state.version == 1
-        && matches!(state.main_view.as_str(), "terminal" | "document")
+    matches!(state.main_view.as_str(), "terminal" | "document")
         && matches!(state.inspector_tab.as_str(), "files" | "changes")
         && state.document.as_ref().is_none_or(|document| {
             document.checkout_id == checkout_id
@@ -2811,7 +2818,7 @@ mod tests {
 
     use super::{
         AppLayoutState, CheckoutUiState, Database, PersistedDocument, ReviewNote, ReviewRound,
-        APP_LAYOUT_VERSION, SCHEMA_VERSION,
+        SCHEMA_VERSION, UI_LAYOUT,
     };
 
     fn plain_repo(path: &Path, now: &str) -> Repo {
@@ -2966,10 +2973,11 @@ mod tests {
     /// A file with no stamp gets the whole schema, a file already stamped with this build's
     /// version is left alone, and a file from any other version is refused by name.
     #[test]
-    fn a_fresh_file_gets_the_whole_schema_and_a_foreign_one_is_refused() {
+    fn a_fresh_file_gets_schema_14_and_a_foreign_one_is_refused() {
         let temp = tempdir().unwrap();
         let path = temp.path().join("workspace.sqlite3");
         let database = Database::open(&path).expect("fresh database");
+        assert_eq!(SCHEMA_VERSION, 14);
         let checkout_path = temp.path().join("checkout");
         fs::create_dir(&checkout_path).unwrap();
         let repo = plain_repo(&checkout_path, "now");
@@ -3014,14 +3022,15 @@ mod tests {
         let foreign_path = temp.path().join("foreign.sqlite3");
         Connection::open(&foreign_path)
             .unwrap()
-            .pragma_update(None, "user_version", 12)
+            .pragma_update(None, "user_version", 13)
             .unwrap();
         let error = Database::open(&foreign_path)
             .err()
             .expect("a file from another schema version is refused");
-        assert!(error.contains("schema version 12"), "{error}");
-        assert!(error.contains("this build speaks version 13"), "{error}");
+        assert!(error.contains("schema version 13"), "{error}");
+        assert!(error.contains("this build speaks version 14"), "{error}");
         assert!(error.contains("deleting"), "{error}");
+        assert!(error.contains("empty workspace"), "{error}");
     }
 
     /// A session outlives nothing: its PTY died with the process, so reopening drops the rows
@@ -3165,7 +3174,6 @@ mod tests {
             sidebar_width: 340,
             inspector_width: 420,
             preview_width: 720,
-            ..AppLayoutState::default()
         };
         database.save_app_layout(&layout).unwrap();
         let state = CheckoutUiState {
@@ -3207,8 +3215,11 @@ mod tests {
                 .unwrap();
             connection
                 .execute(
-                    "UPDATE preferences SET value = ?1 WHERE key = 'ui_layout_v1'",
-                    [r#"{"version":2,"sidebarWidth":300,"inspectorWidth":320,"previewWidth":500}"#],
+                    "UPDATE preferences SET value = ?1 WHERE key = ?2",
+                    params![
+                        r#"{"sidebarWidth":300,"inspectorWidth":320,"previewWidth":500}"#,
+                        UI_LAYOUT
+                    ],
                 )
                 .unwrap();
         }
@@ -3355,7 +3366,6 @@ mod tests {
     #[test]
     fn app_layout_normalizes_dimensions_and_unknown_modes() {
         let layout = serde_json::from_value::<AppLayoutState>(serde_json::json!({
-            "version": 5,
             "mode": "unknown",
             "sidebarWidth": 260,
             "inspectorWidth": 320,
@@ -3370,12 +3380,11 @@ mod tests {
                 sidebar_width: 260,
                 inspector_width: 320,
                 preview_width: 900,
-                ..Default::default()
             }
         );
 
         let out_of_range = serde_json::from_value::<AppLayoutState>(serde_json::json!({
-            "version": 5,
+            "mode": "split",
             "sidebarWidth": 220,
             "inspectorWidth": 560,
             "previewWidth": 200
@@ -3385,38 +3394,90 @@ mod tests {
         assert_eq!(
             out_of_range,
             AppLayoutState {
+                mode: "split".into(),
                 sidebar_width: 240,
                 inspector_width: 480,
                 preview_width: 260,
-                ..Default::default()
             }
         );
     }
 
     #[test]
-    fn a_layout_row_from_before_the_settings_file_moved_out_is_refused_by_name() {
+    fn a_layout_row_this_build_cannot_read_falls_to_the_default_and_is_deleted() {
         // Widths are the only thing this row holds now, so a row written when it also held the
-        // preferences is a shape this build cannot read. It is discarded whole rather than half
-        // honoured: a pane width nobody asked for is a smaller cost than one that silently means
-        // something else than it did.
-        let layout = serde_json::from_value::<AppLayoutState>(serde_json::json!({
-            "version": 4,
-            "mode": "split",
-            "sidebarWidth": 340,
-            "inspectorWidth": 420,
-            "previewWidth": 720,
-            "terminalScrollbar": "auto",
-            "zoom": 1.2
-        }))
-        .unwrap()
-        .normalized();
-        assert_ne!(layout.version, APP_LAYOUT_VERSION);
+        // preferences is a shape this build cannot read. There is no version left to compare it
+        // against, so what refuses it is the shape itself: no parse, the default window, and the
+        // row deleted rather than left to be read again on the next launch.
+        let database = Database::open_in_memory().unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO preferences (key, value) VALUES (?1, ?2)",
+                params![UI_LAYOUT, r#"{"mode":"split","sidebarWidth":"wide"}"#],
+            )
+            .unwrap();
+
+        assert_eq!(
+            database.load_app_layout().unwrap(),
+            AppLayoutState::default()
+        );
+        let connection = database.connection.lock().unwrap();
+        let remains: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM preferences WHERE key = ?1)",
+                [UI_LAYOUT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!remains);
     }
 
     #[test]
-    fn checkout_ui_state_defaults_new_scroll_fields_for_existing_saved_state() {
+    fn a_layout_row_carrying_fields_this_build_dropped_is_read_and_rewritten() {
+        // The opposite case: the row still parses, so the widths in it are honoured, and the
+        // fields this build does not have are dropped on the way out, which is what deletes the
+        // row. Nothing is guessed and nothing is refused that this build can still read.
+        let database = Database::open_in_memory().unwrap();
+        database
+            .connection
+            .lock()
+            .unwrap()
+            .execute(
+                "INSERT INTO preferences (key, value) VALUES (?1, ?2)",
+                params![
+                    UI_LAYOUT,
+                    r#"{"version":4,"mode":"split","sidebarWidth":340,"inspectorWidth":420,"previewWidth":720,"terminalScrollbar":"auto","zoom":1.2}"#
+                ],
+            )
+            .unwrap();
+
+        assert_eq!(
+            database.load_app_layout().unwrap(),
+            AppLayoutState {
+                mode: "split".into(),
+                sidebar_width: 340,
+                inspector_width: 420,
+                preview_width: 720,
+            }
+        );
+        let connection = database.connection.lock().unwrap();
+        let remains: bool = connection
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM preferences WHERE key = ?1)",
+                [UI_LAYOUT],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(!remains);
+    }
+
+    #[test]
+    fn checkout_ui_state_rejects_old_saved_state_shape() {
+        // A row written before `diffAllFiles` and the scroll fields existed has no version left to
+        // be refused by, so the missing fields are what refuses it: no parse, the default state.
         let old_state = serde_json::json!({
-            "version": 1,
             "document": null,
             "mainView": "terminal",
             "inspectorTab": "files",
@@ -3427,12 +3488,35 @@ mod tests {
             "documentScrollTop": 32,
             "documentScrollLeft": 4
         });
-        let state: CheckoutUiState = serde_json::from_value(old_state).unwrap();
-        assert_eq!(state.files_scroll_top, 64);
-        assert_eq!(state.changes_scroll_top, 0);
-        assert_eq!(state.diff_scroll_top, 0);
-        // The whole-change-set diff postdates this saved shape, so it reads as not shown.
-        assert!(!state.diff_all_files);
+        assert!(serde_json::from_value::<CheckoutUiState>(old_state).is_err());
+
+        // A row carrying fields this build no longer has still reads: it is what this build can
+        // make sense of that is kept, and nothing about it is refused on a version it does not
+        // write.
+        let carried = serde_json::json!({
+            "version": 1,
+            "document": null,
+            "mainView": "terminal",
+            "diffAllFiles": false,
+            "inspectorTab": "files",
+            "selectedFilePath": null,
+            "selectedChangePath": null,
+            "expandedDirectories": [],
+            "filesScrollTop": 64,
+            "changesScrollTop": 0,
+            "documentScrollTop": 32,
+            "documentScrollLeft": 4,
+            "diffScrollTop": 0
+        });
+        assert_eq!(
+            serde_json::from_value::<CheckoutUiState>(carried).unwrap(),
+            CheckoutUiState {
+                files_scroll_top: 64,
+                document_scroll_top: 32,
+                document_scroll_left: 4,
+                ..CheckoutUiState::default()
+            }
+        );
 
         let invalid = CheckoutUiState {
             changes_scroll_top: 10_000_001,

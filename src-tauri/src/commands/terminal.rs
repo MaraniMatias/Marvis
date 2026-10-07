@@ -1,6 +1,8 @@
+use std::sync::{Arc, Mutex};
+
 use tauri::{
     ipc::{Channel, Response},
-    State,
+    AppHandle, EventId, Listener, State,
 };
 
 use crate::{
@@ -11,7 +13,7 @@ use crate::{
     },
     persistence::Database,
     services::terminal,
-    terminal::{OutputSink, TerminalBackend},
+    terminal::{OutputGate, OutputSink, TerminalBackend, OUTPUT_RESUME_TIMEOUT},
 };
 
 #[tauri::command]
@@ -61,10 +63,109 @@ pub struct TerminalCreateRequest {
     prompt: Option<String>,
 }
 
+/// Where the window says how far behind it is.
+///
+/// A Tauri event rather than a command, because this is the one message in the terminal that runs
+/// backwards: everything else about a session is an answer, and the reader cannot ask for more
+/// output without somewhere to put what it already has. The event is registered per session
+/// rather than once for the app, and each registration recognises its own answers and ignores the
+/// rest, so the session id is what tells them apart.
+const OUTPUT_FLOW_EVENT: &str = "terminal-output-flow";
+
+/// What one window reports about the output it has parsed so far.
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct OutputFlow {
+    session_id: String,
+    /// Bytes the window has parsed in total, or absent once it is gone for good.
+    ///
+    /// A total rather than a pending count because the reader's own count is taken before the
+    /// bytes leave this side: the difference between the two totals is what is still owed, and a
+    /// pending count would leave everything still in the channel out of it.
+    parsed: Option<usize>,
+}
+
+/// The registration through which one terminal's window answers its own reader and nobody else's.
+struct OutputFlowListener {
+    app: AppHandle,
+    session_id: Arc<Mutex<Option<String>>>,
+    listener: Arc<Mutex<Option<EventId>>>,
+}
+
+impl OutputFlowListener {
+    fn attach(app: &AppHandle, gate: Arc<OutputGate>) -> Self {
+        let session_id: Arc<Mutex<Option<String>>> = Arc::new(Mutex::new(None));
+        let listener: Arc<Mutex<Option<EventId>>> = Arc::new(Mutex::new(None));
+        let watched = Arc::clone(&session_id);
+        let registered = Arc::clone(&listener);
+        let answering = Arc::clone(&gate);
+        let listener_app = app.clone();
+        let id = app.listen(OUTPUT_FLOW_EVENT, move |event| {
+            let Ok(flow) = serde_json::from_str::<OutputFlow>(event.payload()) else {
+                return;
+            };
+            let Ok(session) = watched.lock() else {
+                return;
+            };
+            // An answer from any other terminal, and any answer at all before this session has a
+            // name, is not this reader's to answer.
+            if session.as_deref() != Some(flow.session_id.as_str()) {
+                return;
+            }
+            drop(session);
+            match flow.parsed {
+                Some(parsed) => answering.acknowledge(parsed),
+                None => {
+                    // The window is gone, so nothing will ever answer this gate again and the
+                    // reader goes back to draining on its own. The registration goes with it:
+                    // there is no session left for it to answer.
+                    answering.release();
+                    if let Some(id) = registered
+                        .lock()
+                        .ok()
+                        .and_then(|mut registered| registered.take())
+                    {
+                        listener_app.unlisten(id);
+                    }
+                }
+            }
+        });
+        *listener
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id);
+        Self {
+            app: app.clone(),
+            session_id,
+            listener,
+        }
+    }
+
+    /// The session this reader belongs to, which only exists once the terminal has been created.
+    fn name(&self, session_id: String) {
+        *self
+            .session_id
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(session_id);
+    }
+
+    /// Takes the registration away, for the case where there is no session to answer for.
+    fn stop(&self) {
+        if let Some(id) = self
+            .listener
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .take()
+        {
+            self.app.unlisten(id);
+        }
+    }
+}
+
 #[tauri::command]
 pub async fn terminal_create(
     request: TerminalCreateRequest,
     on_output: Channel<Response>,
+    app: AppHandle,
     database: State<'_, Database>,
     backend: State<'_, std::sync::Arc<TerminalBackend>>,
 ) -> Result<CreatedTerminal, IpcError> {
@@ -72,12 +173,34 @@ pub async fn terminal_create(
     let database = database.inner().clone();
     let backend = backend.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
+        // The reader's half of the flow control with the window that draws this session's output:
+        // one gate per session, and the only thing that can open it is that window saying how far
+        // behind it is.
+        let gate = Arc::new(OutputGate::new(OUTPUT_RESUME_TIMEOUT));
+        let flow = OutputFlowListener::attach(&app, Arc::clone(&gate));
         let output: OutputSink = Box::new(move |bytes| {
-            on_output
-                .send(Response::new(bytes.to_vec()))
-                .map_err(|error| error.to_string())
+            // Held before the hand-off rather than after it: a window that is already two
+            // megabytes behind must not be handed another chunk, and while this waits the PTY is
+            // not drained, so the process behind it blocks in `write` the way it would behind a
+            // full terminal. Nothing is dropped here, which is the whole of the bargain.
+            gate.hold();
+            // Counted before the hand-off rather than after it, which is the only order in which no
+            // byte can fall between the two counts: the window can be parsing this chunk and
+            // answering about it before the send carrying it has returned, and a total that
+            // arrives ahead of its own bytes would clamp itself to a count they were counted
+            // outside of. Nothing here discards or retries output to make room — the bytes are
+            // handed over whole, in order, or the session has no window left to hand them to.
+            gate.delivered(bytes.len());
+            if let Err(error) = on_output.send(Response::new(bytes.to_vec())) {
+                // Nobody is left to answer a gate whose window is gone, and the reader has to keep
+                // draining either way, so from here this is not a gate. That is also what retires
+                // the bytes counted above for a hand-off that did not happen.
+                gate.release();
+                return Err(error.to_string());
+            }
+            Ok(())
         });
-        terminal::create_with_options(
+        match terminal::create_with_options(
             &database,
             &backend,
             &request.checkout_id,
@@ -87,12 +210,23 @@ pub async fn terminal_create(
                 prompt: request.prompt,
             },
             output,
-        )
-        .map(|created| CreatedTerminal {
-            session: created.session,
-            workspace: created.workspace,
-        })
-        .map_err(operation_error)
+        ) {
+            Ok(created) => {
+                // The window answers for this session only, and cannot be named until the session
+                // exists. An answer that gets here first is not this session's and is ignored; the
+                // gate opens on its own timeout rather than holding anything in the meantime.
+                flow.name(created.session.id.clone());
+                Ok(CreatedTerminal {
+                    session: created.session,
+                    workspace: created.workspace,
+                })
+            }
+            Err(error) => {
+                // No session, so nothing will ever answer this gate.
+                flow.stop();
+                Err(operation_error(error))
+            }
+        }
     })
     .await
     .map_err(operation_error)?

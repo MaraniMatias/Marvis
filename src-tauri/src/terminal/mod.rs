@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
-        Arc, Mutex,
+        Arc, Condvar, Mutex,
     },
     thread,
     time::{Duration, Instant},
@@ -551,7 +551,7 @@ fn signal_foreground_group(
             std::io::Error::last_os_error()
         ));
     }
-    let sent = signal_group_with(
+    let outcome = signal_group_with(
         Some(group),
         u32::try_from(actual_session).ok(),
         signal,
@@ -563,9 +563,8 @@ fn signal_foreground_group(
                 Err(std::io::Error::last_os_error())
             }
         },
-    )
-    .map_err(|error| format!("could not signal terminal {id} foreground group: {error}"))?;
-    if !sent && process_group_exists(group) {
+    );
+    if outcome == GroupSignal::Unverified && process_group_exists(group) {
         return Err(format!(
             "terminal {id} foreground group is not verified in its original PTY session"
         ));
@@ -612,6 +611,34 @@ fn process_group_exists(group: u32) -> bool {
     std::io::Error::last_os_error().raw_os_error() != Some(libc::ESRCH)
 }
 
+/// Whether a refusal to signal a group is that platform's way of saying the group is over.
+///
+/// Darwin's `kill` reports the group it could signal nothing in, and a process that has already
+/// exited takes no more signals, so a group made of zombies answers EPERM there -- the same news
+/// ESRCH carries. Everywhere else it is the opposite: a signal aimed at a zombie is delivered and
+/// then dropped, so a group of zombies is a group the signal went through and an EPERM is a member
+/// the caller has no right to touch. Belonging to a session says nothing about the credentials of
+/// everything in it -- a privileged process that inherited this session's group is such a member,
+/// and it is very much alive -- so the refusal is only an answer about liveness where the kernel
+/// makes it one.
+#[cfg(all(unix, target_os = "macos"))]
+const REFUSAL_IS_AN_EMPTY_GROUP: bool = true;
+#[cfg(all(unix, not(target_os = "macos")))]
+const REFUSAL_IS_AN_EMPTY_GROUP: bool = false;
+
+/// What a signal aimed at a process group achieved.
+///
+/// `Gone` and `Unverified` both mean no signal was sent, and they are not the same news: the
+/// first is a group with nothing left in it, the second is a group nobody could show belongs to
+/// this session, or one that refused the signal in a way that is not an answer about liveness.
+#[cfg(unix)]
+#[derive(Debug, PartialEq, Eq)]
+enum GroupSignal {
+    Delivered,
+    Gone,
+    Unverified,
+}
+
 #[cfg(unix)]
 fn signal_group_with(
     group: Option<u32>,
@@ -619,18 +646,43 @@ fn signal_group_with(
     signal: libc::c_int,
     belongs_to_session: impl FnOnce(u32, u32) -> bool,
     send: impl FnOnce(libc::pid_t, libc::c_int) -> Result<(), std::io::Error>,
-) -> Result<bool, std::io::Error> {
+) -> GroupSignal {
     let (Some(group), Some(session_id)) = (group, session_id) else {
-        return Ok(false);
+        return if group.is_some() {
+            // A group whose session is unknown is a group nobody could check.
+            GroupSignal::Unverified
+        } else {
+            GroupSignal::Gone
+        };
     };
     if group == 0 || !belongs_to_session(group, session_id) {
-        return Ok(false);
+        return GroupSignal::Unverified;
     }
-    let group = libc::pid_t::try_from(group).map_err(std::io::Error::other)?;
+    let Ok(group) = libc::pid_t::try_from(group) else {
+        return GroupSignal::Gone;
+    };
     match send(-group, signal) {
-        Ok(()) => Ok(true),
-        Err(error) if error.raw_os_error() == Some(libc::ESRCH) => Ok(false),
-        Err(error) => Err(error),
+        Ok(()) => GroupSignal::Delivered,
+        // ESRCH is a group that is not there. An EPERM is that same news where the kernel makes it
+        // one -- Darwin, and only Darwin, and `REFUSAL_IS_AN_EMPTY_GROUP` is where that is kept.
+        // Anywhere else a refusal is not an answer about liveness: the group is there with a
+        // member that could not be signalled, which is a group somebody is alive in, so it stays
+        // loud and the caller keeps an error to retry with. Any other errno is not an answer about
+        // liveness either, and stays loud.
+        //
+        // The check and the signal are two syscalls apart, so a pid freed in between can have
+        // been reused and the group this lands on can be a stranger's. Nothing here closes that
+        // window and nothing below waits to widen it: the permission check the kernel does per
+        // member at the moment of the kill is what stops a signal reaching a stranger, and the
+        // guarantee this function owes its caller is the one that holds either way, which is that
+        // no signal goes to a group that did not verify as this session's a moment earlier.
+        Err(error)
+            if error.raw_os_error() == Some(libc::ESRCH)
+                || (REFUSAL_IS_AN_EMPTY_GROUP && error.raw_os_error() == Some(libc::EPERM)) =>
+        {
+            GroupSignal::Gone
+        }
+        Err(_) => GroupSignal::Unverified,
     }
 }
 
@@ -644,7 +696,7 @@ fn signal_process_group(
     let Some(group) = group else {
         return Ok(());
     };
-    let sent = signal_group_with(
+    let outcome = signal_group_with(
         Some(group),
         session_id,
         signal,
@@ -656,9 +708,8 @@ fn signal_process_group(
                 Err(std::io::Error::last_os_error())
             }
         },
-    )
-    .map_err(|error| format!("could not signal terminal {id} process group: {error}"))?;
-    if !sent && process_group_exists(group) {
+    );
+    if outcome == GroupSignal::Unverified && process_group_exists(group) {
         return Err(format!(
             "terminal {id} process group could not be verified in its original session"
         ));
@@ -729,6 +780,177 @@ fn read_output(mut reader: Box<dyn Read + Send>, output: &mut OutputSink) {
     }
 }
 
+/// What the window is allowed to owe the terminal before the reader stops taking more.
+///
+/// The window between the PTY and the renderer is a queue, and a real terminal bounds it in the
+/// kernel: a process that writes faster than the screen can draw blocks in `write` instead of
+/// filling the machine's memory. A reader here cannot make the renderer's parser slower, so
+/// without a bound the queue is the whole burst — a `cat` of a large file, a `yes`, a TUI
+/// redrawing — and the app pays for it in memory and in a keyboard that stops answering.
+pub const OUTPUT_HIGH_WATER_BYTES: usize = 2 * 1024 * 1024;
+
+/// Where the gate opens again, well under the mark that closed it.
+///
+/// Two marks and not one. A single mark is either too eager, in which case the reader and the
+/// window take turns for the rest of the session and the terminal is slower than no gate at all,
+/// or too late, in which case nothing is bounded.
+pub const OUTPUT_LOW_WATER_BYTES: usize = 512 * 1024;
+
+const _: () = assert!(OUTPUT_LOW_WATER_BYTES < OUTPUT_HIGH_WATER_BYTES);
+
+/// How long a hold waits for an answer that never arrives.
+///
+/// Failing open, on purpose. A window that stops answering must not be able to stop a terminal:
+/// the gate is an optimisation and a lost answer is not a reason to lose output, so the hold ends
+/// by itself, the debt it was counting is cleared, and the next answer starts counting again. A
+/// window that never answers costs the unbounded queue this gate was added for — the behaviour
+/// from before it, which is a floor and not a worse one.
+pub const OUTPUT_RESUME_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The reader's half of the flow control with the window that draws its output.
+///
+/// xterm parses asynchronously and does not say how far through its own write buffer it is, so
+/// the window reports how much of its output it has parsed and this holds the reader while the
+/// difference between that and what it has sent is over the high water mark. Nothing is dropped
+/// here: a held chunk is a chunk the PTY has not been drained for, so the process behind it
+/// blocks in `write` exactly as it would behind a full terminal.
+///
+/// Both halves are cumulative totals rather than a running debt, because the two sides are never
+/// looking at the same set of bytes: the reader counts a chunk the moment it hands it over, and
+/// the window only counts what has arrived. A difference of totals is the one figure that
+/// includes the bytes still travelling, and totals also make an answer that is late or repeated
+/// harmless instead of a rewind — it can only ever move the count forwards.
+///
+/// The gate is held inside the output sink rather than around the read, which costs at most one
+/// buffer of overrun past the mark. That is what keeps the reader loop above untouched, and with
+/// it the two things it guarantees: a disconnected renderer still drains the PTY to the end of
+/// the session, and it is still said once.
+pub struct OutputGate {
+    state: Mutex<GateState>,
+    resumed: Condvar,
+    resume_timeout: Duration,
+}
+
+#[derive(Default)]
+struct GateState {
+    /// Bytes on their way to the window, counted as they are handed over and never rewound.
+    delivered: usize,
+    /// How much of those the window has said it has parsed, counted the same way.
+    parsed: usize,
+    /// Whether this gate has already closed, because where it opens again is read against the low
+    /// mark rather than the high one and the debt alone cannot tell the two situations apart.
+    paused: bool,
+    /// Set when nothing is going to answer any more, so this is no longer a gate.
+    released: bool,
+}
+
+impl GateState {
+    /// What the window still owes, which is not what it has not received: the bytes on their way to
+    /// it are owed too, and leaving them out of the count is what would let the reader outrun the
+    /// window by whatever it had in flight every time the window answered.
+    fn debt(&self) -> usize {
+        self.delivered.saturating_sub(self.parsed)
+    }
+}
+
+impl OutputGate {
+    pub fn new(resume_timeout: Duration) -> Self {
+        Self {
+            state: Mutex::new(GateState::default()),
+            resumed: Condvar::new(),
+            resume_timeout,
+        }
+    }
+
+    fn state(&self) -> std::sync::MutexGuard<'_, GateState> {
+        self.state
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
+    /// Counts bytes on their way to the window, which is what the window's own total is measured
+    /// against.
+    ///
+    /// Called before the hand-off rather than after it, and that order is the whole point: a window
+    /// can be parsing a chunk and answering about it before the send carrying it has returned, and
+    /// a total that arrives ahead of its own bytes would clamp itself to a count those bytes are
+    /// then counted outside of. A send that fails counts bytes nobody will ever parse, which is why
+    /// the failure path releases the gate instead of unwinding this one.
+    pub fn delivered(&self, bytes: usize) {
+        let mut state = self.state();
+        if state.released {
+            return;
+        }
+        state.delivered = state.delivered.saturating_add(bytes);
+    }
+
+    /// Takes the window's total of what it has parsed as the truth.
+    ///
+    /// Never backwards and never past what has been delivered. A report that is late, or the same
+    /// report twice because two chunks crossed in the channel, leaves the reader counting the same
+    /// debt it was counting a moment ago instead of forgetting the bytes it is still waiting on.
+    pub fn acknowledge(&self, parsed: usize) {
+        let mut state = self.state();
+        if state.released {
+            return;
+        }
+        state.parsed = state.parsed.max(parsed).min(state.delivered);
+        drop(state);
+        self.resumed.notify_all();
+    }
+
+    /// Stops being a gate for good, because there is nothing left that could open it.
+    pub fn release(&self) {
+        let mut state = self.state();
+        state.released = true;
+        drop(state);
+        self.resumed.notify_all();
+    }
+
+    /// Waits while the window is too far behind to be handed another chunk.
+    ///
+    /// The two marks are read from opposite ends of the decision, and comparing against only one of
+    /// them is either no bound at all or a traffic jam: it takes the high mark to close, and once
+    /// closed it stays closed until the window is back under the low one. `paused` is what tells
+    /// the two apart, because the debt cannot — a window that comes back down into the middle of
+    /// the band has to be let through it.
+    pub fn hold(&self) {
+        let mut state = self.state();
+        loop {
+            if state.released {
+                return;
+            }
+            let debt = state.debt();
+            if state.paused {
+                if debt <= OUTPUT_LOW_WATER_BYTES {
+                    state.paused = false;
+                    return;
+                }
+            } else if debt < OUTPUT_HIGH_WATER_BYTES {
+                return;
+            } else {
+                state.paused = true;
+            }
+            let (after, timeout) = self
+                .resumed
+                .wait_timeout(state, self.resume_timeout)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            state = after;
+            // Nobody answered for the whole wait, so the last count is the one number here that
+            // nobody can vouch for. Reading is the safe direction: the debt goes, the gate reopens,
+            // and the queue starts over from a count that is known rather than from one that is
+            // inherited. The window's total moves up to what it was given rather than back to
+            // zero, so bytes counted after this wait are still measured from here and an answer
+            // that arrives for them counts where this one left off.
+            if timeout.timed_out() {
+                state.parsed = state.delivered;
+                state.paused = false;
+                return;
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -736,7 +958,7 @@ mod tests {
         path::PathBuf,
         sync::{
             atomic::{AtomicUsize, Ordering},
-            mpsc, Arc,
+            mpsc, Arc, Mutex,
         },
         thread,
         time::{Duration, Instant},
@@ -746,8 +968,14 @@ mod tests {
     use tempfile::tempdir;
 
     #[cfg(unix)]
-    use super::signal_group_with;
-    use super::{start_child_reaper, ChildState, OutputSink, SpawnOptions, TerminalBackend};
+    use std::os::unix::process::CommandExt;
+
+    #[cfg(unix)]
+    use super::{process_group_exists, signal_group_with, GroupSignal, REAP_POLL_INTERVAL};
+    use super::{
+        start_child_reaper, ChildState, OutputGate, OutputSink, SpawnOptions, TerminalBackend,
+        OUTPUT_HIGH_WATER_BYTES, OUTPUT_LOW_WATER_BYTES, OUTPUT_RESUME_TIMEOUT,
+    };
 
     fn spawn(
         backend: &TerminalBackend,
@@ -1100,8 +1328,7 @@ mod tests {
                 signaled.push(target);
                 Ok(())
             },
-        )
-        .unwrap();
+        );
         let escalation = signal_group_with(
             Some(456),
             Some(77),
@@ -1111,8 +1338,7 @@ mod tests {
                 signaled.push(target);
                 Ok(())
             },
-        )
-        .unwrap();
+        );
         let foreign_session = signal_group_with(
             Some(123),
             Some(78),
@@ -1122,22 +1348,149 @@ mod tests {
                 signaled.push(target);
                 Ok(())
             },
-        )
-        .unwrap();
+        );
         let gone = signal_group_with(
             Some(123),
             Some(77),
             libc::SIGKILL,
             |_, _| true,
-            |_, _| Err(std::io::Error::from_raw_os_error(libc::ESRCH)),
-        )
-        .unwrap();
+            |_, _| Err(io::Error::from_raw_os_error(libc::ESRCH)),
+        );
 
-        assert!(first);
-        assert!(!escalation);
-        assert!(!foreign_session);
-        assert!(!gone);
+        assert_eq!(first, GroupSignal::Delivered);
+        assert_eq!(escalation, GroupSignal::Unverified);
+        assert_eq!(foreign_session, GroupSignal::Unverified);
+        assert_eq!(gone, GroupSignal::Gone);
         assert_eq!(signaled, vec![-123]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_refusal_that_is_not_an_answer_about_liveness_stays_unverified() {
+        // A refusal is an answer about liveness on Darwin, where a group of processes that have
+        // already exited answers EPERM, and nowhere else.
+        let refused_group = signal_group_with(
+            Some(123),
+            Some(77),
+            libc::SIGKILL,
+            |_, _| true,
+            |_, _| Err(io::Error::from_raw_os_error(libc::EPERM)),
+        );
+        // Nothing else is. A refusal nobody can read as liveness keeps the caller's voice.
+        let refused = signal_group_with(
+            Some(123),
+            Some(77),
+            libc::SIGTERM,
+            |_, _| true,
+            |_, _| Err(io::Error::from_raw_os_error(libc::EINVAL)),
+        );
+        // A group with no session to check it against is a group nobody checked.
+        let unverifiable = signal_group_with(
+            Some(123),
+            None,
+            libc::SIGTERM,
+            |_, _| panic!("a group with no session must not be signalled"),
+            |_, _| Ok(()),
+        );
+        // A group with no id is nothing to report.
+        let nothing = signal_group_with(
+            None,
+            Some(77),
+            libc::SIGTERM,
+            |_, _| panic!("a group with no id must not be signalled"),
+            |_, _| Ok(()),
+        );
+
+        #[cfg(target_os = "macos")]
+        assert_eq!(refused_group, GroupSignal::Gone);
+        // A privileged member this process cannot signal is not a group that is over, and calling
+        // it one is what let a process that was never reached be reported as dead.
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(refused_group, GroupSignal::Unverified);
+        assert_eq!(refused, GroupSignal::Unverified);
+        assert_eq!(unverifiable, GroupSignal::Unverified);
+        assert_eq!(nothing, GroupSignal::Gone);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_group_of_exited_processes_is_a_group_that_is_over() {
+        let mut child = unsafe {
+            std::process::Command::new("/bin/sh")
+                .args(["-c", "exit 0"])
+                .pre_exec(|| {
+                    // setsid and nothing else: a session leader is already the leader of a group
+                    // of its own, so its group id is its own pid and nothing else joins that group
+                    // by accident.
+                    if libc::setsid() < 0 {
+                        return Err(io::Error::last_os_error());
+                    }
+                    Ok(())
+                })
+                .spawn()
+        }
+        .unwrap();
+        let group = child.id();
+        let send = |target, signal| {
+            if unsafe { libc::kill(target, signal) } == 0 {
+                Ok(())
+            } else {
+                Err(io::Error::last_os_error())
+            }
+        };
+        let outcome =
+            |signal| signal_group_with(Some(group), Some(group), signal, |_, _| true, send);
+
+        // Alive: the group takes the signal, and the cheap group probe says it is there.
+        assert_eq!(outcome(0), GroupSignal::Delivered);
+        assert!(process_group_exists(group));
+
+        // Exited and not reaped, which is what a shell killed a moment before the escalation is:
+        // its group is a zombie, and what the kernel answers for one is the platform's own --
+        // macOS answers EPERM to anything aimed at that group, Linux signals the zombie and drops
+        // it. Either way the group has nothing left in it to signal.
+        // waitid with WNOWAIT reports the exit without reaping, which is what leaves the child as
+        // a zombie for the assertions below. waitpid has no WNOWAIT on macOS. Zeroed rather than
+        // uninitialized because a kernel with nothing to report leaves the structure as it found
+        // it, and this reads it either way.
+        let mut info = std::mem::MaybeUninit::<libc::siginfo_t>::zeroed();
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while unsafe {
+            libc::waitid(
+                libc::P_PID,
+                group as libc::id_t,
+                info.as_mut_ptr(),
+                libc::WEXITED | libc::WNOWAIT,
+            )
+        } != 0
+            || unsafe { (*info.as_ptr()).si_pid } != group as libc::pid_t
+        {
+            assert!(Instant::now() < deadline, "the child never exited");
+            thread::sleep(REAP_POLL_INTERVAL);
+        }
+        #[cfg(target_os = "macos")]
+        assert_eq!(
+            unsafe { libc::kill(-(group as libc::pid_t), 0) },
+            -1,
+            "macOS stopped answering EPERM for a group of zombies"
+        );
+        // The other half of the same fact, and the premise the classification rests on: a zombie
+        // there takes the signal and drops it, so the group answers as a group that was signalled.
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(unsafe { libc::kill(-(group as libc::pid_t), 0) }, 0);
+        // Either way the caller is told the same thing: there is nothing left in the group to
+        // signal, which is what the refusal only means on one of the two.
+        #[cfg(target_os = "macos")]
+        assert_eq!(outcome(libc::SIGKILL), GroupSignal::Gone);
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(outcome(libc::SIGKILL), GroupSignal::Delivered);
+        assert!(process_group_exists(group));
+
+        // Reaped: the group is not there at all, which the probe can see and which is the same
+        // outcome for the caller.
+        drop(child.wait());
+        assert_eq!(outcome(libc::SIGKILL), GroupSignal::Gone);
+        assert!(!process_group_exists(group));
     }
 
     #[test]
@@ -1397,6 +1750,361 @@ mod tests {
         assert!(!resting.foreground_process);
         assert_eq!(resting.foreground_app, None);
         backend.close("foreground").unwrap();
+    }
+
+    /// A hold that is going to stay shut is given this long to prove it. Every one of these holds
+    /// is bounded by its own `resume_timeout`, so a gate that opens early sends on this channel
+    /// well inside it and a gate that stays shut sends nothing.
+    const HOLD_WINDOW: Duration = Duration::from_millis(200);
+
+    /// Starts a reader parked in `hold()` and hands back the channel it comes back on.
+    ///
+    /// The count is put in place before the thread starts, so what the reader finds on its first
+    /// pass is the count the test set rather than whatever the thread got to first. "Still waiting"
+    /// is then a wait on that channel and not a sleep.
+    fn parked_reader(gate: &Arc<OutputGate>) -> (thread::JoinHandle<()>, mpsc::Receiver<()>) {
+        let (done_tx, done_rx) = mpsc::channel();
+        let gate = Arc::clone(gate);
+        let reader = thread::spawn(move || {
+            gate.hold();
+            let _ = done_tx.send(());
+        });
+        (reader, done_rx)
+    }
+
+    /// The gate is two marks and not one, and this is what pins both: the reader is not stopped
+    /// before the high mark, is stopped at it, and once stopped stays stopped until the window is
+    /// back under the low one, so a window that keeps reporting the same crowded number cannot make
+    /// the two of them take turns forever.
+    #[test]
+    fn the_gate_closes_at_the_high_mark_and_opens_under_the_low_one() {
+        let gate = Arc::new(OutputGate::new(Duration::from_secs(30)));
+        // Not one byte under the allowance closes it: a queue the size this gate allows is the
+        // queue it was added for, and stopping the reader earlier than that only makes a burst
+        // arrive in pieces.
+        gate.delivered(OUTPUT_HIGH_WATER_BYTES);
+        let (reader, done) = parked_reader(&gate);
+        assert!(
+            done.recv_timeout(HOLD_WINDOW).is_err(),
+            "the gate opened at the high water mark"
+        );
+
+        // The window has parsed a quarter of the burst, which leaves most of the allowance owed.
+        // Reopening here is what a window that is merely draining would cause, over and over.
+        gate.acknowledge(OUTPUT_HIGH_WATER_BYTES / 4);
+        assert!(
+            done.recv_timeout(HOLD_WINDOW).is_err(),
+            "the gate opened between the two water marks"
+        );
+
+        // Down to the low mark and the reader goes.
+        gate.acknowledge(OUTPUT_HIGH_WATER_BYTES - OUTPUT_LOW_WATER_BYTES);
+        done.recv_timeout(Duration::from_secs(3))
+            .expect("the gate stayed shut under the low water mark");
+        reader.join().unwrap();
+    }
+
+    /// The other end of the same pair, and the half that is easy to get wrong in the other
+    /// direction: a window that is behind but not as behind as the whole allowance is a window
+    /// that is working, and holding the reader for it trades a bounded queue for a terminal that
+    /// crawls.
+    #[test]
+    fn a_gate_under_the_high_mark_never_waits_how_crowded_the_window_is() {
+        let gate = Arc::new(OutputGate::new(Duration::from_secs(30)));
+        let debt = OUTPUT_LOW_WATER_BYTES + OUTPUT_HIGH_WATER_BYTES / 2;
+        gate.delivered(debt);
+
+        let (reader, done) = parked_reader(&gate);
+        done.recv_timeout(Duration::from_secs(3))
+            .expect("the gate closed on a debt under the high water mark");
+        reader.join().unwrap();
+    }
+
+    /// What the reader waits for is what the window has not parsed, and that includes the bytes
+    /// still travelling to it. The window's own count can only see what has arrived, so the reader
+    /// has to keep counting from the moment it hands a chunk over: counted the other way round,
+    /// every answer describes a queue the window has already drained while a burst is still on its
+    /// way, and nothing is ever held.
+    #[test]
+    fn output_still_on_its_way_to_the_window_is_not_forgotten_when_an_answer_arrives() {
+        let gate = Arc::new(OutputGate::new(Duration::from_secs(30)));
+        // A whole mark's worth is on its way and the window has parsed none of it yet.
+        let chunk = 64 * 1024;
+        gate.delivered(OUTPUT_HIGH_WATER_BYTES);
+
+        let (reader, done) = parked_reader(&gate);
+        assert!(
+            done.recv_timeout(HOLD_WINDOW).is_err(),
+            "the gate opened at the high water mark"
+        );
+
+        // The window answers from inside the burst, having parsed its first chunk, while every
+        // other chunk is still in the channel. Counted the other way round — against what the
+        // window had received — this is the answer that says the queue is empty.
+        gate.acknowledge(chunk);
+        assert_eq!(
+            gate.state().debt(),
+            OUTPUT_HIGH_WATER_BYTES - chunk,
+            "a chunk still in transit fell out of the reader's count"
+        );
+        assert!(
+            done.recv_timeout(HOLD_WINDOW).is_err(),
+            "the gate opened while most of the queue was unparsed"
+        );
+
+        // The same answer again, which is what a repeated report and a second chunk crossing it in
+        // the channel look like from here. Neither moves the count back to where it was.
+        gate.acknowledge(chunk);
+        assert_eq!(
+            gate.state().debt(),
+            OUTPUT_HIGH_WATER_BYTES - chunk,
+            "a repeated answer moved the reader's count backwards"
+        );
+        assert!(
+            done.recv_timeout(HOLD_WINDOW).is_err(),
+            "a repeated answer opened the gate"
+        );
+
+        // An answer that claims more than was ever handed over is clamped to what was delivered,
+        // rather than taken at its word, so it cannot swallow the counting of the next chunk.
+        gate.acknowledge(OUTPUT_HIGH_WATER_BYTES - OUTPUT_LOW_WATER_BYTES);
+        done.recv_timeout(Duration::from_secs(3))
+            .expect("the gate stayed shut under the low water mark");
+        reader.join().unwrap();
+    }
+
+    /// A window that reports more than it was ever given is a window whose answer crossed the
+    /// reader's own count, which the reader cannot check for by waiting. It is clamped to what was
+    /// delivered rather than taken at its word, so it cannot swallow the counting of the chunk that
+    /// comes after it.
+    #[test]
+    fn an_answer_ahead_of_the_readers_own_count_is_clamped_to_it() {
+        let gate = OutputGate::new(Duration::from_secs(30));
+        let chunk = 64 * 1024;
+        gate.delivered(OUTPUT_HIGH_WATER_BYTES);
+
+        gate.acknowledge(OUTPUT_HIGH_WATER_BYTES * 2);
+        assert_eq!(
+            gate.state().debt(),
+            0,
+            "the gate kept a debt nobody was owed"
+        );
+        gate.delivered(chunk);
+        assert_eq!(
+            gate.state().debt(),
+            chunk,
+            "an answer ahead of the reader's own count swallowed the next chunk"
+        );
+    }
+
+    /// An answer that never comes has to cost throughput and nothing else. Failing open is what
+    /// stops a lost answer from turning into a terminal nobody can type into.
+    #[test]
+    fn a_window_that_never_answers_opens_the_gate_by_itself() {
+        let gate = OutputGate::new(Duration::from_millis(50));
+        gate.delivered(OUTPUT_HIGH_WATER_BYTES);
+
+        let started = Instant::now();
+        gate.hold();
+        assert!(
+            started.elapsed() >= Duration::from_millis(40),
+            "the gate gave up before it had waited"
+        );
+        // And the debt it was counting went with it: the reader is not left owing two megabytes on
+        // the strength of a count nobody confirmed, which is what would make every chunk after this
+        // wait out the timeout again, one chunk at a time. The window's total moved up to what it
+        // was sent rather than back to zero, so what arrives next is counted from here.
+        assert_eq!(gate.state().debt(), 0, "the timeout left the debt standing");
+        gate.delivered(OUTPUT_LOW_WATER_BYTES);
+        assert_eq!(
+            gate.state().debt(),
+            OUTPUT_LOW_WATER_BYTES,
+            "the timeout forgot the bytes that came after it"
+        );
+
+        // An answer that turns up after all of that is out of date rather than wrong: it describes
+        // a queue from before the timeout, and it cannot rewind the reader's count back to it.
+        gate.acknowledge(OUTPUT_HIGH_WATER_BYTES);
+        assert_eq!(
+            gate.state().debt(),
+            OUTPUT_LOW_WATER_BYTES,
+            "a late answer rewound the count the timeout had settled"
+        );
+        let started = Instant::now();
+        gate.hold();
+        assert!(
+            started.elapsed() < Duration::from_millis(40),
+            "the debt the timeout left behind is still holding the reader"
+        );
+    }
+
+    /// A window that is gone will never answer, so a gate that waited for one would hold the
+    /// reader until the timeout for the rest of the session.
+    #[test]
+    fn a_released_gate_never_holds_the_reader_again() {
+        let gate = OutputGate::new(Duration::from_secs(30));
+        gate.delivered(OUTPUT_HIGH_WATER_BYTES);
+        gate.release();
+
+        let started = Instant::now();
+        gate.hold();
+        assert!(started.elapsed() < Duration::from_millis(50));
+        // An answer that arrives late, from a window that was on its way out, changes nothing.
+        gate.delivered(OUTPUT_HIGH_WATER_BYTES);
+        gate.acknowledge(OUTPUT_HIGH_WATER_BYTES);
+        let started = Instant::now();
+        gate.hold();
+        assert!(started.elapsed() < Duration::from_millis(50));
+    }
+
+    /// The whole point of the gate, measured against a real PTY and a real process behind it.
+    ///
+    /// The window here is as slow as the worst one and the burst is one chunk larger than the
+    /// queue is allowed to be, so the reader has to stop mid-burst — which is what makes the child
+    /// block in `write` instead of the app growing. What is asserted afterwards is the thing that
+    /// makes the gate safe to have at all: every byte of the burst, in order, with none of it
+    /// duplicated, dropped or reordered across the pause.
+    #[test]
+    fn a_slow_window_stops_the_reader_without_losing_a_byte() {
+        let directory = tempdir().unwrap();
+        // Twice the allowance: the reader is meant to stop in the middle of this burst, and a burst
+        // that fits under the mark would arrive whole with the gate never once closing.
+        let payload: Vec<u8> = (0..2 * OUTPUT_HIGH_WATER_BYTES)
+            .map(|index| b'a' + (index % 26) as u8)
+            .collect();
+        let source = directory.path().join("burst.bin");
+        std::fs::write(&source, &payload).unwrap();
+
+        let backend = TerminalBackend::default();
+        let gate = Arc::new(OutputGate::new(OUTPUT_RESUME_TIMEOUT));
+        let delivered = Arc::new(Mutex::new(Vec::<u8>::new()));
+        let (chunk_tx, chunk_rx) = mpsc::channel();
+        let output: OutputSink = {
+            let gate = Arc::clone(&gate);
+            let delivered = Arc::clone(&delivered);
+            Box::new(move |bytes| {
+                gate.hold();
+                // Counted before the hand-off, as the real sink does: the reader's total is what
+                // the window's answers are measured against, so a chunk still in transit has to be
+                // in it or the burst is never waited for.
+                gate.delivered(bytes.len());
+                delivered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .extend_from_slice(bytes);
+                let _ = chunk_tx.send(());
+                Ok(())
+            })
+        };
+        spawn(
+            &backend,
+            "slow-window",
+            "/bin/cat",
+            &[source.to_str().unwrap()],
+            output,
+        );
+
+        // Let the burst run until the window is as far behind as the allowance allows, and keep
+        // answering as a window that has parsed nothing does. Everything already in the pipe lands
+        // first, so what follows is the reader actually waiting rather than a chunk it had not
+        // reached yet.
+        let settled = loop {
+            assert!(
+                delivered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .len()
+                    < payload.len(),
+                "the whole burst arrived without the reader ever being held"
+            );
+            gate.acknowledge(0);
+            let before = chunk_rx.recv_timeout(Duration::from_secs(3)).ok();
+            if before.is_none() {
+                break delivered
+                    .lock()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .len();
+            }
+        };
+
+        thread::sleep(Duration::from_millis(200));
+        assert_eq!(
+            delivered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .len(),
+            settled,
+            "the reader kept draining the PTY while the window was behind"
+        );
+
+        // The window catches up with everything it was given, and the rest of the burst arrives whole
+        // and in order. A total larger than the burst is the shape of a window that has parsed all
+        // of it: the gate clamps it to what was delivered, which is the same answer.
+        gate.acknowledge(usize::MAX);
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while delivered
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .len()
+            < payload.len()
+        {
+            assert!(Instant::now() < deadline, "the held output never arrived");
+            let _ = chunk_rx.recv_timeout(Duration::from_millis(100));
+        }
+        assert_eq!(
+            &*delivered
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+            &payload,
+            "output was lost or reordered across the hold"
+        );
+        backend.close("slow-window").unwrap();
+    }
+
+    /// The gate sits between the reader and everything else, so a close has to get past it.
+    ///
+    /// The window in this test never answers at all, which is the case where the reader is held
+    /// for the whole life of the session. `close` does not wait for the reader — it signals the
+    /// process group and reaps the child — so a terminal that is publishing faster than anybody
+    /// reads still closes on time instead of waiting out the safety timeout first.
+    #[test]
+    fn a_session_publishing_intensely_closes_without_waiting_for_the_reader() {
+        let backend = Arc::new(TerminalBackend::default());
+        let gate = Arc::new(OutputGate::new(OUTPUT_RESUME_TIMEOUT));
+        let (chunk_tx, chunk_rx) = mpsc::channel();
+        let output: OutputSink = {
+            let gate = Arc::clone(&gate);
+            Box::new(move |bytes| {
+                // A window that never answers, which in the cumulative protocol is a window that
+                // has parsed nothing: every answer leaves the whole queue owed.
+                gate.acknowledge(0);
+                gate.hold();
+                gate.delivered(bytes.len());
+                let _ = chunk_tx.send(());
+                Ok(())
+            })
+        };
+        spawn(
+            &backend,
+            "flood",
+            "/bin/sh",
+            &["-c", "while :; do printf 'flooding\\n'; done"],
+            output,
+        );
+        chunk_rx
+            .recv_timeout(Duration::from_secs(3))
+            .expect("the flood never produced output");
+
+        let (close_tx, close_rx) = mpsc::channel();
+        let closing = Arc::clone(&backend);
+        let close = thread::spawn(move || {
+            let _ = close_tx.send(closing.close("flood"));
+        });
+        let closed = close_rx
+            .recv_timeout(Duration::from_secs(5))
+            .expect("close waited on a reader held by a window that never answers");
+        assert!(closed.unwrap());
+        close.join().unwrap();
     }
 
     use crate::domain::workspace::TerminalProcessState;
