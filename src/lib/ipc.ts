@@ -372,6 +372,16 @@ export function prepareAppExit(): Promise<void> {
   return invoke<void>("app_prepare_exit");
 }
 
+/**
+ * Hands a web link to the browser the machine has.
+ *
+ * The other end refuses anything that is not `http` or `https`: this is a URL a document printed,
+ * not a command, and the process that opens it reads what it is given as its own argument.
+ */
+export function openExternalUrl(url: string): Promise<void> {
+  return invoke<void>("open_url", { url });
+}
+
 export function getWorktreeDefaults(checkoutId: string): Promise<WorktreeDefaults> {
   return invoke<WorktreeDefaults>("worktree_defaults", { checkoutId });
 }

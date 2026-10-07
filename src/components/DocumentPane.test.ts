@@ -366,6 +366,46 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("hands a web link to the browser and keeps the document's own links to itself", async () => {
+    // A web link names nothing in this checkout, and the preview is not a browser that could
+    // follow one: `open_url` on the other end is the only thing that can open it, and it refuses
+    // anything that is not a page. Which is why `mailto:` is not in here either.
+    const checkoutId = "checkout:web-links";
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "docs/start.md",
+      content: "[Site](https://example.com/guide) and [write](mailto:someone@example.com)",
+    });
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps("docs/start.md", "view", checkout(checkoutId)),
+    });
+    await vi.waitFor(() => expect(wrapper.find('[aria-label="File contents"] article').exists()).toBe(true));
+
+    await wrapper.get('[aria-label="File contents"] a[href="https://example.com/guide"]').trigger("click");
+
+    expect(wrapper.emitted("openExternalUrl")).toEqual([["https://example.com/guide"]]);
+    expect(wrapper.emitted("openMarkdownLink")).toBeUndefined();
+    wrapper.unmount();
+  });
+
+  it("leaves a link that names an app rather than a page to that app", async () => {
+    const checkoutId = "checkout:app-links";
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "docs/start.md",
+      content: "[write](mailto:someone@example.com)",
+    });
+    const wrapper = mount(DocumentPane, {
+      props: documentPaneProps("docs/start.md", "view", checkout(checkoutId)),
+    });
+    await vi.waitFor(() => expect(wrapper.find('[aria-label="File contents"] article').exists()).toBe(true));
+
+    await wrapper.get('[aria-label="File contents"] a[href="mailto:someone@example.com"]').trigger("click");
+
+    // Nothing here opens it, which is the honest answer: this key is not an email client's.
+    expect(wrapper.emitted("openExternalUrl")).toBeUndefined();
+    expect(wrapper.emitted("openMarkdownLink")).toBeUndefined();
+    wrapper.unmount();
+  });
+
   it("copies the absolute checkout path and reports success", async () => {
     mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const answer = 42;" });
     const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
@@ -535,21 +575,11 @@ describe("DocumentPane", () => {
     await search.setValue("yml");
     expect(languageRowLabels(wrapper)).toEqual(["Auto", "Plain text", "YAML"]);
     expect(search.attributes("aria-expanded")).toBe("false");
-    expect(search.attributes("aria-activedescendant")).toBeUndefined();
-    const activeRow = wrapper.get("#language-option-1");
-    const scrollIntoView = vi.fn();
-    Object.defineProperty(activeRow.element, "scrollIntoView", { value: scrollIntoView });
-    await search.trigger("keydown.down");
-    await flushPromises();
-    expect(search.attributes("aria-activedescendant")).toBe("language-option-1");
-    expect(activeRow.classes()).toContain("is-active");
-    expect(activeRow.attributes("tabindex")).toBe("-1");
-    expect(scrollIntoView).toHaveBeenCalledWith({ block: "nearest" });
+    // The rows are chosen with the pointer, so no row claims to be the one under the keyboard.
+    expect(wrapper.find(".is-active").exists()).toBe(false);
 
     await search.setValue("pyt");
-    await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.down");
-    await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.down");
-    await wrapper.get('input[aria-label="Search highlight languages"]').trigger("keydown.enter");
+    await pickLanguage(wrapper, "Python");
     await vi.waitFor(() =>
       expect(wrapper.get('[aria-label="Source code"]').attributes("data-language")).toBe("python"),
     );

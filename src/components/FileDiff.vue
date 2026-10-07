@@ -277,16 +277,6 @@ function chooseReviewTarget(target?: string) {
   if (target === "markdown" || target === "opencode") sender?.selectReviewTarget(target);
 }
 
-function moveTargetRow(step: number) {
-  const total = targetRows.value.length;
-  if (total > 0) targetIndex.value = (targetIndex.value + step + total) % total;
-}
-
-function chooseActiveTarget() {
-  const session = targetRows.value[activeTargetRow.value];
-  if (session) chooseTarget(session.id);
-}
-
 /**
  * Opens a draft on the line the `+` was on, which is the last line of its range.
  *
@@ -602,9 +592,6 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
                 align="end"
                 :side-offset="4"
                 class="surface-popover marvis-menu session-target-menu"
-                @keydown.down.prevent="moveTargetRow(1)"
-                @keydown.up.prevent="moveTargetRow(-1)"
-                @keydown.enter.prevent="chooseActiveTarget"
               >
                 <input
                   v-if="searchesTargets"

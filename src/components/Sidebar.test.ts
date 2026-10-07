@@ -2552,12 +2552,11 @@ describe("Sidebar workdir rows", () => {
     });
 
     const rows = wrapper.findAll('button[aria-label^="Terminal session:"]');
-    // Native browser dragging is off; a row with a destination advertises its keyboard menu.
+    // Native browser dragging is off; a row with a destination advertises the menu it opens.
     expect(rows.map((row) => row.attributes("draggable"))).toEqual([undefined, undefined]);
     expect(rows.map((row) => row.attributes("aria-haspopup"))).toEqual(["menu", undefined]);
 
-    // A drag is not a keyboard, so the same move is on the key the platform asks a row for.
-    await rows[0].trigger("keydown", { key: "F10", shiftKey: true });
+    await rows[0].trigger("contextmenu");
     const destinations = wrapper.findAll('[role="menu"] [role="menuitem"]');
     // The other repositories are not on the list, and a directory that is gone is nowhere to
     // put a shell that is running.

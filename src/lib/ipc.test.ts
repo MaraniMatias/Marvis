@@ -30,6 +30,7 @@ import {
   getGitDiffPage,
   getGitDiffStats,
   loadTerminalLayout,
+  openExternalUrl,
   openFolder,
   readCheckoutFile,
   saveReviewTarget,
@@ -56,6 +57,21 @@ describe("openFolder IPC client", () => {
     expect(isIpcError({ code: "folder_missing", message: "Folder not found" })).toBe(true);
     expect(isIpcError({ code: "terminal_ownership_mismatch", message: "Wrong checkout" })).toBe(true);
     expect(isIpcError({ code: "arbitrary", message: "No" })).toBe(false);
+  });
+});
+
+describe("web link IPC client", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("sends the link to the one command that opens it, and sends nothing else", async () => {
+    // The whole surface: a document's link travels back as a URL and leaves through the command
+    // that decides what may be opened. There is no shell and no filesystem behind it, so there is
+    // nothing else the webview could ask for.
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await openExternalUrl("https://example.com/guide");
+
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("open_url", { url: "https://example.com/guide" });
   });
 });
 

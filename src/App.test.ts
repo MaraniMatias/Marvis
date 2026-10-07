@@ -583,6 +583,25 @@ function workspaceWith(...checkouts: Checkout[]): WorkspaceState {
   return { repos: [repo], activeCheckoutId: checkouts[0]?.id ?? null, activeSessionId: null };
 }
 
+/**
+ * The platform this window reports, for the tests about the platform's own modifier key.
+ *
+ * ⌘ is the shortcut key on a Mac and Ctrl everywhere else, and it is one key or the other rather
+ * than both at once, so a test that presses Ctrl has to say which machine it is on. What it says
+ * is put back after the test whatever the test did, because a leaked platform answers every key
+ * that follows it as if it were a Mac.
+ */
+const reportedPlatform = Object.getOwnPropertyDescriptor(window.navigator, "platform");
+
+function reportsPlatform(value: string) {
+  Object.defineProperty(window.navigator, "platform", { configurable: true, value });
+}
+
+afterEach(() => {
+  if (reportedPlatform) Object.defineProperty(window.navigator, "platform", reportedPlatform);
+  else delete (window.navigator as unknown as Record<string, unknown>).platform;
+});
+
 async function mountApp(
   workspace: WorkspaceState,
   layout: AppLayoutState = { ...DEFAULT_APP_LAYOUT },
@@ -1652,7 +1671,6 @@ describe("App UI integration", () => {
       const resizeHandle = wrapper.get('[aria-label="Resize preview panel"]');
       await resizeHandle.trigger("pointermove", { pointerId: 1, clientX: 400 });
       expect(wrapper.getComponent({ name: "MainPane" }).emitted("resizePreview")).toBeUndefined();
-      await resizeHandle.trigger("keydown", { key: "ArrowLeft" });
       await wrapper.get('[data-testid="select-session-one"]').trigger("click");
       await flushPromises();
       expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
@@ -1664,7 +1682,7 @@ describe("App UI integration", () => {
 
       await vi.advanceTimersByTimeAsync(300);
       await flushPromises();
-      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({ ...DEFAULT_APP_LAYOUT, mode: "split", previewWidth: 380 });
+      expect(mocks.saveAppLayout).toHaveBeenLastCalledWith({ ...DEFAULT_APP_LAYOUT, mode: "split" });
       expect(mocks.saveCheckoutUiState).toHaveBeenLastCalledWith(
         "checkout:one",
         expect.objectContaining({ mainView: "document", document: expect.objectContaining({ path: "README.md" }) }),
@@ -1743,10 +1761,6 @@ describe("App UI integration", () => {
       await inspector.trigger("pointerleave");
       await vi.advanceTimersByTimeAsync(300);
       expect(inspector.classes()).toContain("split-inspector-closed");
-      await wrapper.get(".inspector-hover-strip").trigger("pointerenter");
-      window.dispatchEvent(new KeyboardEvent("keydown", { key: "Escape" }));
-      await flushPromises();
-      expect(inspector.classes()).toContain("split-inspector-closed");
 
       Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
       window.dispatchEvent(new Event("resize"));
@@ -1787,7 +1801,7 @@ describe("App UI integration", () => {
     });
 
     it("does not bring a drawer back open when the shortcut hides it", async () => {
-      // ⌘B is the only way to put the drawer away without a pointer over it, so it is also the
+      // Cmd+/ is the only way to put the drawer away without a pointer over it, so it is also the
       // only way to strand the flag that refuses every close: a hidden drawer fires no leave.
       // Attached and dispatched from a panel, because that is the path the capture listener on the
       // window actually answers to.
@@ -1800,7 +1814,7 @@ describe("App UI integration", () => {
         const press = () =>
           wrapper
             .get("#navigation-panel")
-            .element.dispatchEvent(new KeyboardEvent("keydown", { key: "b", metaKey: true, bubbles: true }));
+            .element.dispatchEvent(new KeyboardEvent("keydown", { key: "/", metaKey: true, bubbles: true }));
         const inspector = wrapper.findComponent({ name: "InspectorPane" });
         await wrapper.get(".inspector-hover-strip").trigger("pointerenter");
         expect(inspector.classes()).not.toContain("split-inspector-closed");
@@ -1949,6 +1963,9 @@ describe("App UI integration", () => {
     });
 
     it("names Ctrl when Ctrl is the key that worked", async () => {
+      // The label names the key rather than the platform, so it can only be read on the platform
+      // whose shortcut key is Ctrl — where Ctrl and the window's own chords are one key.
+      reportsPlatform("Linux x86_64");
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
 
       press({ key: "=", ctrlKey: true });
@@ -2499,14 +2516,14 @@ describe("App UI integration", () => {
       );
     });
 
-    it("collapses and brings back the navigation panel on Cmd+B", async () => {
+    it("collapses and brings back the navigation panel on Cmd+/", async () => {
       const panel = wrapper.findAllComponents({ name: "SplitterPanel" })[0]!;
 
-      expect(pressInSidebar({ key: "b", metaKey: true }).defaultPrevented).toBe(true);
+      expect(pressInSidebar({ key: "/", metaKey: true }).defaultPrevented).toBe(true);
       await flushPromises();
       expect(panel.emitted("collapse")).toBeTruthy();
 
-      pressInSidebar({ key: "b", metaKey: true });
+      pressInSidebar({ key: "/", metaKey: true });
       await flushPromises();
       expect(panel.emitted("expand")).toBeTruthy();
       wrapper.unmount();
@@ -2519,12 +2536,12 @@ describe("App UI integration", () => {
       const inspector = () => wrapper.findComponent({ name: "InspectorPane" });
 
       expect(inspector().isVisible()).toBe(true);
-      pressInSidebar({ key: "b", metaKey: true });
+      pressInSidebar({ key: "/", metaKey: true });
       await flushPromises();
       expect(panel.emitted("collapse")).toBeTruthy();
       expect(inspector().isVisible()).toBe(false);
 
-      pressInSidebar({ key: "b", metaKey: true });
+      pressInSidebar({ key: "/", metaKey: true });
       await flushPromises();
       expect(panel.emitted("expand")).toBeTruthy();
       expect(inspector().isVisible()).toBe(true);
@@ -2536,7 +2553,7 @@ describe("App UI integration", () => {
 
       expect(handle("#navigation-resize-handle").isVisible()).toBe(true);
       expect(handle("#inspector-resize-handle").isVisible()).toBe(true);
-      pressInSidebar({ key: "b", metaKey: true });
+      pressInSidebar({ key: "/", metaKey: true });
       await flushPromises();
       expect(handle("#navigation-resize-handle").exists() && handle("#navigation-resize-handle").isVisible()).toBe(
         false,
@@ -2560,7 +2577,7 @@ describe("App UI integration", () => {
         });
 
         expect(floating.findComponent({ name: "InspectorPane" }).isVisible()).toBe(true);
-        pressInSidebar({ key: "b", metaKey: true }, floating.get("#navigation-panel").element);
+        pressInSidebar({ key: "/", metaKey: true }, floating.get("#navigation-panel").element);
         await flushPromises();
         expect(floating.findComponent({ name: "InspectorPane" }).isVisible()).toBe(false);
         // The strip is the drawer peeking on hover, and a strip that opens nothing is a hotspot
@@ -2578,7 +2595,7 @@ describe("App UI integration", () => {
       mocks.onProgrammaticPanelResize = resizeCalls;
       resizeCalls.mockClear();
 
-      pressInSidebar({ key: "b", metaKey: true });
+      pressInSidebar({ key: "/", metaKey: true });
       await flushPromises();
       Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
       window.dispatchEvent(new Event("resize"));
@@ -2588,7 +2605,7 @@ describe("App UI integration", () => {
       await flushPromises();
       expect(resizeCalls).not.toHaveBeenCalled();
 
-      pressInSidebar({ key: "b", metaKey: true });
+      pressInSidebar({ key: "/", metaKey: true });
       await flushPromises();
       expect(wrapper.findComponent({ name: "InspectorPane" }).isVisible()).toBe(true);
       wrapper.unmount();
@@ -2596,14 +2613,14 @@ describe("App UI integration", () => {
 
     it("stops the key before the terminal or the editor can read it as input", async () => {
       // The whole reason the listener is on capture: by the time a keydown reaches the window on
-      // its way up, xterm has already turned it into input, and a shell reading Cmd+B as
-      // backwards-char is the failure this shortcut exists to prevent.
+      // its way up, xterm has already turned it into input, and a shell reading Cmd+/ as
+      // previous-command is the failure this shortcut exists to prevent.
       const seenByTerminal: string[] = [];
       (wrapper.get("#navigation-panel").element as HTMLElement).addEventListener("keydown", (event) => {
         seenByTerminal.push((event as KeyboardEvent).key);
       });
 
-      pressInSidebar({ key: "b", metaKey: true });
+      pressInSidebar({ key: "/", metaKey: true });
       await flushPromises();
 
       expect(seenByTerminal).toEqual([]);
@@ -2616,24 +2633,165 @@ describe("App UI integration", () => {
       wrapper.unmount();
 
       // The capture flag is part of the registration: a listener removed without it is not the one
-      // that was added, and this one would outlive the window and keep swallowing Cmd+B.
+      // that was added, and this one would outlive the window and keep swallowing Cmd+/.
       expect(removed).toHaveBeenCalledWith("keydown", expect.any(Function), true);
       removed.mockRestore();
     });
 
-    it("is Ctrl+B where Cmd is not the key, and leaves a plain b alone", async () => {
-      pressInSidebar({ key: "b", ctrlKey: true });
+    it("leaves a plain Escape alone", async () => {
+      pressInSidebar({ key: "/", metaKey: true });
       await flushPromises();
       expect(wrapper.findAllComponents({ name: "SplitterPanel" })[0]!.emitted("collapse")).toBeTruthy();
 
-      pressInSidebar({ key: "b", metaKey: true });
+      pressInSidebar({ key: "/", metaKey: true });
       await flushPromises();
       expect(wrapper.findAllComponents({ name: "SplitterPanel" })[0]!.emitted("collapse")).toHaveLength(1);
 
-      const plain = pressInSidebar({ key: "b" });
+      // A bare Escape is the drawer's own key and takes nothing away: one press has one answer,
+      // and a drawer that is not open cannot be closed by it either.
+      const plain = pressInSidebar({ key: "Escape" });
       expect(plain.defaultPrevented).toBe(false);
       await flushPromises();
       expect(wrapper.findAllComponents({ name: "SplitterPanel" })[0]!.emitted("collapse")).toHaveLength(1);
+      wrapper.unmount();
+    });
+
+    it("finds the key that spells the shortcut wherever the layout puts it", async () => {
+      // With Cmd held down macOS reports the key without shift, so a layout whose `/` is Shift+7
+      // delivers a `7` and never a `/`. That is what the real keystroke on such a machine is, and
+      // it is the one every layout is agreed on: the position, which `code` is.
+      const panel = wrapper.findAllComponents({ name: "SplitterPanel" })[0]!;
+
+      // Hide on one, bring back on the other: the two spellings are the same chord, so the second
+      // answers exactly what the first undid rather than adding a shortcut of its own.
+      for (const init of [
+        { key: "/", code: "Slash" },
+        { key: "7", code: "Digit7", shiftKey: true },
+      ]) {
+        expect(pressInSidebar({ ...init, metaKey: true }).defaultPrevented, JSON.stringify(init)).toBe(true);
+        await flushPromises();
+      }
+      expect(panel.emitted("collapse")).toHaveLength(1);
+      expect(panel.emitted("expand")).toHaveLength(1);
+
+      // Shift on its own is not the shortcut: the shift is what turns a 7 into a `/`, and a
+      // shortcut key must not answer on the number the same key types without it.
+      expect(pressInSidebar({ key: "7", code: "Digit7", metaKey: true }).defaultPrevented).toBe(false);
+      wrapper.unmount();
+    });
+
+    it("is Ctrl where Cmd is not the platform's key, and is nothing at all on a Mac", async () => {
+      // On a Mac Ctrl is the Control key and the terminal already answers to it, so the shortcut
+      // takes only Cmd. Everywhere else the same chord is the platform's own shortcut key, and
+      // Cmd on a Linux panel is the Super key, which belongs to the window manager.
+      const panel = wrapper.findAllComponents({ name: "SplitterPanel" })[0]!;
+
+      reportsPlatform("Linux x86_64");
+      pressInSidebar({ key: "/", ctrlKey: true });
+      await flushPromises();
+      expect(panel.emitted("collapse")).toBeTruthy();
+      pressInSidebar({ key: "/", metaKey: true });
+      await flushPromises();
+      expect(panel.emitted("collapse")).toHaveLength(1);
+
+      reportsPlatform("MacIntel");
+      const before = panel.emitted("collapse")?.length ?? 0;
+      // The Control key is not a shortcut here, and neither is the same key with Alt held down.
+      pressInSidebar({ key: "/", ctrlKey: true });
+      pressInSidebar({ key: "/", metaKey: true, altKey: true });
+      await flushPromises();
+      expect(panel.emitted("collapse")).toHaveLength(before);
+      wrapper.unmount();
+    });
+  });
+
+  describe("the new terminal shortcut", () => {
+    // Attached and dispatched from a panel, because that is the path the capture listener on the
+    // window answers to. The request itself is visible as the checkout selection: the pane turns
+    // that into the terminal, and it is the one thing about a request that is not the pane's.
+    const pressInPanel = (init: KeyboardEventInit, target: Element) => {
+      const event = new KeyboardEvent("keydown", { cancelable: true, bubbles: true, ...init });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    it("asks for a terminal in the workdir the window is on", async () => {
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one"), checkout("checkout:two")),
+        { ...DEFAULT_APP_LAYOUT },
+        { attachTo: document.body },
+      );
+
+      // The shell reads Cmd+N as downcase-word, so a key that reaches xterm is a key typed into
+      // whatever terminal had the focus rather than one this window answered.
+      expect(pressInPanel({ key: "n", metaKey: true }, wrapper.get("#navigation-panel").element).defaultPrevented).toBe(
+        true,
+      );
+      await flushPromises();
+
+      expect(mocks.selectCheckout).toHaveBeenCalledWith("checkout:one");
+      wrapper.unmount();
+    });
+
+    it("asks for one in Home when no workdir is open", async () => {
+      // Home is the checkout the app records for the user's own directory at startup, so a window
+      // with nothing open answers the key with a shell rather than ignoring it.
+      const homeCheckout = checkout("checkout:home");
+      const wrapper = await mountApp(
+        { ...workspaceWith(homeCheckout), activeCheckoutId: null, homeCheckoutId: homeCheckout.id },
+        { ...DEFAULT_APP_LAYOUT },
+        { attachTo: document.body },
+      );
+
+      pressInPanel({ key: "n", metaKey: true }, wrapper.get("#navigation-panel").element);
+      await flushPromises();
+
+      expect(mocks.selectCheckout).toHaveBeenCalledWith(homeCheckout.id);
+      wrapper.unmount();
+    });
+
+    it("is the only key that opens one, and the panels key does not double as one", async () => {
+      // Cmd+T used to open a terminal from the session pane and now does nothing: one shortcut, one
+      // job, so that a muscle memory pressed in the wrong place is not answered by the wrong pane.
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { attachTo: document.body },
+      );
+      const panel = () => wrapper.get("#navigation-panel").element;
+
+      expect(pressInPanel({ key: "t", metaKey: true }, panel()).defaultPrevented).toBe(false);
+      expect(pressInPanel({ key: "/", metaKey: true }, panel()).defaultPrevented).toBe(true);
+      await flushPromises();
+
+      expect(mocks.selectCheckout).not.toHaveBeenCalled();
+      expect(wrapper.findAllComponents({ name: "SplitterPanel" })[0]!.emitted("collapse")).toBeTruthy();
+      wrapper.unmount();
+    });
+
+    it("is on a key no shell is asking for", async () => {
+      // The panels key is `/` rather than something more memorable because the memorable ones are
+      // spoken for: Cmd+H belongs to the app menu's Hide item and Cmd+Esc never reaches the webview
+      // at all, and every letter is a readline binding that a terminal behind this window is using.
+      // This is the assertion that fails first if a future key choice lands on one of those.
+      const readline = ["b", "d", "e", "f", "k", "l", "p", "s", "t", "u", "w", "y"];
+      const macTeaches = ["h", "m", "w", "q", "c", "x", "v", "a", "z", ","];
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { attachTo: document.body },
+      );
+      const panel = () => wrapper.get("#navigation-panel").element;
+
+      for (const key of readline) {
+        expect(pressInPanel({ key, metaKey: true }, panel()).defaultPrevented, key).toBe(false);
+      }
+      for (const key of macTeaches) {
+        expect(pressInPanel({ key, metaKey: true }, panel()).defaultPrevented, key).toBe(false);
+      }
+      // And the two the window does answer are the two that are its own.
+      expect(pressInPanel({ key: "n", metaKey: true }, panel()).defaultPrevented).toBe(true);
+      expect(pressInPanel({ key: "/", metaKey: true }, panel()).defaultPrevented).toBe(true);
       wrapper.unmount();
     });
   });

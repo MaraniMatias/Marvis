@@ -54,6 +54,8 @@ const emit = defineEmits<{
   updateMode: [mode: DocumentMode];
   readingPositionChanged: [position: { top: number; left: number }];
   openMarkdownLink: [path: string];
+  /** A web link in the document, which the browser opens rather than the preview. */
+  openExternalUrl: [url: string];
   /** The toolbar's close button: the main panel goes back to the terminal it was showing. */
   close: [];
 }>();
@@ -183,10 +185,7 @@ const languageRows = computed<LanguageRow[]>(() => [
   ...matchingLanguages.value.map((language) => ({ name: language.name, label: language.label, hint: "" })),
 ]);
 
-const languageIndex = ref(0);
-const activeLanguageRow = computed(() => Math.min(languageIndex.value, Math.max(languageRows.value.length - 1, 0)));
 const languageList = ref<HTMLElement | null>(null);
-const languageKeyboardNavigation = ref(false);
 
 /**
  * The three preferences CodeMirror's own stylesheet has no room for, and the one it cannot answer
@@ -230,45 +229,12 @@ watch(
   },
 );
 
-watch(languageQuery, () => {
-  languageIndex.value = 0;
-  languageKeyboardNavigation.value = false;
-  scrollActiveLanguageRowIntoView();
-});
-
-watch(languageOpen, (open) => {
-  if (open) {
-    languageKeyboardNavigation.value = false;
-    scrollActiveLanguageRowIntoView();
-  }
-});
-
-function scrollActiveLanguageRowIntoView() {
-  void nextTick(() => {
-    languageList.value?.children[activeLanguageRow.value]?.scrollIntoView?.({ block: "nearest" });
-  });
-}
-
-function moveLanguageRow(step: number) {
-  const total = languageRows.value.length;
-  if (total > 0) {
-    languageIndex.value = (languageIndex.value + step + total) % total;
-    languageKeyboardNavigation.value = true;
-    scrollActiveLanguageRowIntoView();
-  }
-}
-
 function chooseLanguage(row: LanguageRow) {
   const key = languageKey.value;
   if (key === null) return;
   if (row.name === null) languageOverrides.delete(key);
   else languageOverrides.set(key, row.name);
   languageOpen.value = false;
-}
-
-function chooseActiveLanguage() {
-  const row = languageRows.value[activeLanguageRow.value];
-  if (row) chooseLanguage(row);
 }
 
 function errorText(error: unknown): string {
@@ -731,8 +697,18 @@ function onMarkdownLink(event: MouseEvent) {
   if (!(target instanceof Element) || props.path === null) return;
   const link = target.closest("a[href]");
   const href = link?.getAttribute("href");
-  if (!href || href.startsWith("#") || /^[a-z][a-z\d+.-]*:/i.test(href) || href.startsWith("/") || href.includes("\\"))
+  if (!href) return;
+  // A web link is the browser's to open: `https://host/page` names nothing in this checkout, and
+  // the webview is not a browser that can follow one. `mailto:` and `tel:` are deliberately not
+  // here — they name an app rather than a page, and this key is not the app's own.
+  if (/^https?:\/\//i.test(href)) {
+    event.preventDefault();
+    emit("openExternalUrl", href);
     return;
+  }
+  // Every other link with a scheme is not a path this window can resolve, and the ones left are
+  // the relative paths the preview owns.
+  if (href.startsWith("#") || /^[a-z][a-z\d+.-]*:/i.test(href) || href.startsWith("/") || href.includes("\\")) return;
   try {
     const base = props.path.split("/").slice(0, -1);
     for (const part of decodeURIComponent(href.split(/[?#]/, 1)[0] ?? "").split("/")) {
@@ -807,14 +783,8 @@ function onMarkdownLink(event: MouseEvent) {
                   aria-label="Search highlight languages"
                   aria-controls="language-options"
                   :aria-expanded="languageOpen"
-                  :aria-activedescendant="
-                    languageKeyboardNavigation ? `language-option-${activeLanguageRow}` : undefined
-                  "
                   placeholder="Search…"
                   class="marvis-menu-search min-w-0 appearance-none"
-                  @keydown.down.prevent="moveLanguageRow(1)"
-                  @keydown.up.prevent="moveLanguageRow(-1)"
-                  @keydown.enter.prevent="chooseActiveLanguage"
                 />
                 <!-- The rows scroll under the search rather than with it: there are grammars enough
                      to fill any reasonable column, and a filter that scrolls away is no filter. -->
@@ -826,15 +796,13 @@ function onMarkdownLink(event: MouseEvent) {
                   class="marvis-menu-scroll flex flex-col"
                 >
                   <button
-                    v-for="(row, index) in languageRows"
-                    :id="`language-option-${index}`"
+                    v-for="row in languageRows"
                     :key="row.name ?? 'auto'"
                     type="button"
                     role="option"
                     tabindex="-1"
                     :aria-selected="row.name === languageOverride"
                     class="menu-item select-none text-left"
-                    :class="{ 'is-active': index === activeLanguageRow && languageKeyboardNavigation }"
                     @click="chooseLanguage(row)"
                   >
                     <span class="menu-item-label">{{ row.label }}</span>

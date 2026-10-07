@@ -5,7 +5,7 @@ use tauri::State;
 
 use crate::{
     domain::ipc::{IpcError, IpcErrorCode},
-    services::agent::AgentService,
+    services::{agent::AgentService, opener},
     terminal::TerminalBackend,
 };
 
@@ -79,6 +79,28 @@ pub async fn app_prepare_exit(
                 format!("the sweep before exit did not finish: {error}"),
             )
         })
+}
+
+/// Hands a web link to the browser this machine has.
+///
+/// A document can print a link and this window cannot follow one: the preview is not a browser,
+/// and a webview is not one either. So the URL comes back over the bridge and leaves through the
+/// service, which is where the decision about what may be opened lives.
+///
+/// The opener is a process and `.status()` waits for it, so the call goes to a blocking thread
+/// rather than being spawned and forgotten: a browser that takes a moment to start is waited on
+/// where waiting does not hold the event loop.
+#[tauri::command]
+pub async fn open_url(url: String) -> Result<(), IpcError> {
+    tauri::async_runtime::spawn_blocking(move || opener::open_url(&url))
+        .await
+        .map_err(|error| {
+            IpcError::new(
+                IpcErrorCode::OperationFailed,
+                format!("the browser could not be asked to open the link: {error}"),
+            )
+        })?
+        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
 }
 
 #[cfg(test)]

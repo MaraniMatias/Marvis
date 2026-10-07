@@ -65,6 +65,7 @@ const emit = defineEmits<{
   readingPositionChanged: [position: { top: number; left: number }];
   diffPositionChanged: [top: number];
   openMarkdownLink: [path: string];
+  openExternalUrl: [url: string];
   openFile: [path: string];
   resizePreview: [width: number];
   closePreview: [];
@@ -105,12 +106,6 @@ function finishPreviewResize(event: PointerEvent) {
   const handle = event.currentTarget as HTMLElement;
   if (handle.hasPointerCapture(event.pointerId)) handle.releasePointerCapture(event.pointerId);
 }
-
-function onPreviewResizeKeydown(event: KeyboardEvent) {
-  if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-  event.preventDefault();
-  emit("resizePreview", props.previewWidth + (event.key === "ArrowLeft" ? 20 : -20));
-}
 </script>
 
 <template>
@@ -148,13 +143,11 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
       :aria-valuemin="260"
       :aria-valuemax="900"
       :aria-valuenow="previewWidth"
-      tabindex="0"
       class="splitter-handle shrink-0"
       @pointerdown.prevent="startPreviewResize"
       @pointermove="resizePreview"
       @pointerup="finishPreviewResize"
       @pointercancel="finishPreviewResize"
-      @keydown="onPreviewResizeKeydown"
     />
     <section
       v-show="!terminal"
@@ -178,6 +171,7 @@ function onPreviewResizeKeydown(event: KeyboardEvent) {
             @update-mode="$emit('updateDocumentMode', $event)"
             @reading-position-changed="$emit('readingPositionChanged', $event)"
             @open-markdown-link="$emit('openMarkdownLink', $event)"
+            @open-external-url="$emit('openExternalUrl', $event)"
             @close="$emit('closePreview')"
           />
         </section>

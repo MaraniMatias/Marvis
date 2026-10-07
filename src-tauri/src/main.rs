@@ -275,6 +275,7 @@ fn main() {
         })
         .invoke_handler(tauri::generate_handler![
             commands::app::app_prepare_exit,
+            commands::app::open_url,
             commands::app::frontend_diagnostic,
             commands::agent::agent_sessions,
             commands::agent::agent_candidate_sessions,

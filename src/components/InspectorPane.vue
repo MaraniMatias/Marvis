@@ -243,20 +243,11 @@ watch([activeTab, selectedPath, selectedChangedPath, expanded, treeScrollTop, ch
 
 function onInspectorTabKeydown(event: KeyboardEvent) {
   if (!(event.target instanceof HTMLElement) || event.target.getAttribute("role") !== "tab") return;
+  if (event.key !== "Home" && event.key !== "End") return;
   const ids = tabs.value.map((tab) => tab.id);
   const current: InspectorTab = event.target.id === "inspector-tab-changes" ? "changes" : "files";
-  const index = ids.indexOf(current);
-  const next =
-    event.key === "Home"
-      ? ids[0]
-      : event.key === "End"
-        ? ids[ids.length - 1]
-        : event.key === "ArrowRight"
-          ? ids[(index + 1) % ids.length]
-          : event.key === "ArrowLeft"
-            ? ids[(index + ids.length - 1) % ids.length]
-            : null;
-  if (!next) return;
+  const next = event.key === "Home" ? ids[0] : ids[ids.length - 1];
+  if (current === next) return;
   event.preventDefault();
   activeTab.value = next;
   void nextTick(() => document.getElementById(`inspector-tab-${next}`)?.focus());

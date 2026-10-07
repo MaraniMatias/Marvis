@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
+import { computed, nextTick, ref, watch } from "vue";
 import { isIpcError } from "../domain/ipc";
 import { Plus as PlusIcon } from "@lucide/vue";
 import type { Checkout, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
@@ -300,18 +300,6 @@ watch(
   },
 );
 
-function isEditableTarget(target: EventTarget | null) {
-  return target instanceof HTMLInputElement || target instanceof HTMLSelectElement;
-}
-
-function handleKeyboard(event: KeyboardEvent) {
-  if (!(event.metaKey || event.ctrlKey) || isEditableTarget(event.target) || !props.checkout) return;
-  if (event.key.toLowerCase() === "t") {
-    event.preventDefault();
-    void createTerminalSession();
-  }
-}
-
 /** The shell request this pane has already answered, so one request is one terminal. */
 let answeredShellToken = 0;
 
@@ -342,9 +330,6 @@ watch(
     });
   },
 );
-
-onMounted(() => window.addEventListener("keydown", handleKeyboard));
-onUnmounted(() => window.removeEventListener("keydown", handleKeyboard));
 </script>
 
 <template>

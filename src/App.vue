@@ -31,12 +31,14 @@ import WorktreeDialog from "./components/WorktreeDialog.vue";
 import SettingsDialog from "./components/SettingsDialog.vue";
 import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
 import { workdirTitle } from "./domain/workspace";
+import { carriesAppModifier } from "./domain/shortcuts";
 import {
   closeCheckout as persistCheckoutClose,
   closeMissingCheckout as persistMissingCheckoutClose,
   exportReviewMarkdown,
   getTerminalStatus,
   loadReviewTarget,
+  openExternalUrl as requestExternalUrl,
   renameTerminal,
   restoreArchivedWorktrees as persistArchivedRestore,
   selectCheckout as persistCheckoutSelection,
@@ -110,7 +112,7 @@ const { scheduleCheckoutUiSave, flushUiStateWrites } = useLayoutPersistence({
   reportCause,
 });
 const mainPane = ref<InstanceType<typeof MainPane> | null>(null);
-/** ⌘B's state: the navigation and the files and changes panel are one thing to the eye, so they go
+/** ⌘/'s state: the navigation and the files and changes panel are one thing to the eye, so they go
  *  together. A window with the main view alone in it is the point of the shortcut. */
 const sidePanelsVisible = ref(true);
 const sidebarPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
@@ -590,6 +592,18 @@ async function activateTerminalSession(sessionId: string) {
   mainPane.value?.focusActiveTerminal();
 }
 
+/**
+ * A web link in the document goes to the browser, which is the only place one can be opened.
+ *
+ * The preview's own links stay in the preview: a relative path names a file in this checkout and
+ * goes to `openFileDocument`. A refusal from the other end is reported rather than swallowed,
+ * because a link that was not opened and a link that was is not something a person can tell from
+ * looking at the screen.
+ */
+function openExternalUrl(url: string) {
+  void requestExternalUrl(url).catch(reportCause);
+}
+
 function toggleLayoutMode() {
   appLayout.value = { ...appLayout.value, mode: appLayout.value.mode === "split" ? "focus" : "split" };
 }
@@ -654,33 +668,77 @@ function closeSplitInspector() {
   splitInspectorOpen.value = false;
 }
 
+/**
+ * ⌘ on macOS and Ctrl everywhere else, which is the modifier every app shortcut here is pressed
+ * with — and the only one it answers, because on a Mac `Ctrl` is a key the terminal already has.
+ */
+function isAppShortcut(event: KeyboardEvent) {
+  return carriesAppModifier(event) && !event.altKey;
+}
+
+/**
+ * The app shortcut a key asks for, or nothing at all for a key that asks for none.
+ *
+ * The panels are on `⌘/`, and what makes that chord answerable is only that nothing in the menu
+ * bar takes it: `menus.rs` builds the app menu and an Edit submenu of undo, redo, cut, copy,
+ * paste and select all, and not one of those items carries `⌘/`, so it arrives at the webview
+ * whole. A chord a menu *does* carry never arrives — `⌘H` is the app menu's Hide item and `⌘Esc`
+ * is the system's own cancel, both of which resolve before the webview is told about the key.
+ */
+/**
+ * Whether a key is the one that spells `/`, wherever the layout puts it.
+ *
+ * `key` is not enough on its own, and the reason is specific to the modifier these shortcuts are
+ * pressed with: with ⌘ held down macOS hands the webview the character of the key *without* shift,
+ * so a layout whose `/` lives on the number row arrives as a plain `7`. With Ctrl the same
+ * keystroke arrives as `/`, which is what makes it a property of the modifier and not of the key.
+ *
+ * So the position is the shortcut, and the character is only how one layout spells it.
+ */
+function isSlashKey(event: KeyboardEvent) {
+  return event.key === "/" || event.code === "Slash" || (event.code === "Digit7" && event.shiftKey);
+}
+
+function appShortcutFor(event: KeyboardEvent): "panels" | "terminal" | undefined {
+  if (isSlashKey(event)) return "panels";
+  if (event.key.toLowerCase() === "n") return "terminal";
+  return undefined;
+}
+
+/**
+ * Every shortcut the window answers itself: the zoom, the side panels and a new terminal.
+ *
+ * This one listens on capture, which is the whole reason it works: by the time a keydown reaches
+ * the window on its way up, xterm has already turned it into input, and a shell reading ⌘N as
+ * downcase-word is exactly what a sidebar shortcut must not do.
+ * Stopping the key here means neither the terminal nor the editor ever sees it, whatever had
+ * the focus.
+ */
 function onAppKeydown(event: KeyboardEvent) {
-  if (event.key === "Escape" && splitInspectorOpen.value) {
-    closeSplitInspector();
-    return;
-  }
+  if (!isAppShortcut(event)) return;
   if (!appLayoutReady.value || settingsOpen.value) return;
   const direction = zoomKeyFor(event);
-  if (direction === undefined) return;
+  const shortcut = appShortcutFor(event);
+  if (direction === undefined && shortcut === undefined) return;
   // The webview is told the scale, and it does nothing with a `0` on its own, but the key is
   // stopped here anyway: a shortcut that also reaches the terminal as input is a shortcut that
   // types into whatever had the focus.
   event.preventDefault();
-  setZoom(zoomStep(appZoom.value, direction), event.metaKey ? "Cmd" : "Ctrl");
+  event.stopPropagation();
+  if (shortcut === "panels") {
+    toggleSidePanels();
+    return;
+  }
+  if (shortcut === "terminal") {
+    requestTerminalInActiveWorkdir();
+    return;
+  }
+  // Neither the panels key nor N is a zoom key, so a shortcut that got this far is a zoom request.
+  if (direction !== undefined) setZoom(zoomStep(appZoom.value, direction), event.metaKey ? "Cmd" : "Ctrl");
 }
 
-/**
- * ⌘B is the app's and nobody else's, and it takes both side panels with it.
- *
- * This one listens on capture, which is the whole reason it works: by the time a keydown reaches
- * the window on its way up, xterm has already turned it into input, and a shell reading ⌘B as
- * backwards-char is exactly what a sidebar shortcut must not do. Stopping it here means neither
- * the terminal nor the editor ever sees the key, whatever had the focus.
- */
-function onSidebarKeydown(event: KeyboardEvent) {
-  if (event.altKey || !(event.metaKey || event.ctrlKey) || event.key.toLowerCase() !== "b") return;
-  event.preventDefault();
-  event.stopPropagation();
+/** Takes both side panels away, or gives them back. */
+function toggleSidePanels() {
   sidePanelsVisible.value = !sidePanelsVisible.value;
   const show = sidePanelsVisible.value;
   sidebarPanel.value?.[show ? "expand" : "collapse"]();
@@ -692,6 +750,19 @@ function onSidebarKeydown(event: KeyboardEvent) {
   // A drawer has no width to give back and no width to take, so what shows it is the state the
   // drawer is bound to. The panel is only the panel's own when it sits beside the main view.
   if (!inspectorInDrawer.value) inspectorPanel.value?.[show ? "expand" : "collapse"]();
+}
+
+/**
+ * A terminal in the workdir the window is on, and in Home when there is none.
+ *
+ * The Home checkout is the one the app records for the user's own directory at startup, so a
+ * window with no workdir open still answers the key with a shell rather than ignoring it. Which
+ * directory it lands in is the checkout's own, so nothing here has to know what Home is.
+ */
+function requestTerminalInActiveWorkdir() {
+  const checkoutId = activeCheckout.value?.id ?? workspace.value.homeCheckoutId;
+  if (!checkoutId) return;
+  void requestShell(checkoutId);
 }
 
 let zoomToastId: number | undefined;
@@ -939,7 +1010,7 @@ function resizeAppPreview(width: number) {
 
 // A narrow window cannot hold the main panel and the inspector side by side, so the inspector
 // floats over it as a drawer. Its width is left alone, to be restored when space returns. A panel
-// ⌘B took away is collapsed as well, so a window that grows back does not reserve room for a panel
+// ⌘/ took away is collapsed as well, so a window that grows back does not reserve room for a panel
 // nobody can see.
 watch(
   [inspectorInDrawer, appLayoutReady],
@@ -996,8 +1067,7 @@ watch(
 
 onMounted(async () => {
   window.addEventListener("resize", onViewportResize);
-  window.addEventListener("keydown", onAppKeydown);
-  window.addEventListener("keydown", onSidebarKeydown, true);
+  window.addEventListener("keydown", onAppKeydown, true);
   const currentWindow = getCurrentWindow();
   try {
     unlistenCloseRequested = await currentWindow.onCloseRequested(async (event) => {
@@ -1062,10 +1132,9 @@ onUnmounted(() => {
   unlistenCloseRequested?.();
   unlistenWindowResized?.();
   window.removeEventListener("resize", onViewportResize);
-  window.removeEventListener("keydown", onAppKeydown);
   // The capture flag is part of the registration: a listener removed without it is not the one
   // that was added, and this one would outlive the window it belongs to.
-  window.removeEventListener("keydown", onSidebarKeydown, true);
+  window.removeEventListener("keydown", onAppKeydown, true);
   systemPrefersDark.removeEventListener("change", applyTheme);
   unlistenFileActivity?.();
   if (inspectorCloseTimer !== undefined) window.clearTimeout(inspectorCloseTimer);
@@ -1837,6 +1906,7 @@ function reportWarning(message: string) {
           @resize-preview="resizeAppPreview"
           @close-preview="activeCheckout && closePreview(activeCheckout.id)"
           @open-markdown-link="activeCheckout && openFileDocument({ checkoutId: activeCheckout.id, path: $event })"
+          @open-external-url="openExternalUrl"
           @open-file="activeCheckout && openFileDocument({ checkoutId: activeCheckout.id, path: $event })"
         />
       </SplitterPanel>
