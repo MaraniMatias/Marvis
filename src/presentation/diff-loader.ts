@@ -304,7 +304,13 @@ export function useDiffLoader(source: DiffLoaderSource) {
       // composer in state that a new DiffFile identity wipes, and git reports every write in the
       // workdir, not just in the file on screen: rebuilding on each one closed the composer the
       // moment the user started typing, for a diff that had not moved.
-      if (result.patch !== diff.value?.patch) {
+      //
+      // What is compared is the backend's revision of the diff rather than the patch, because the
+      // patch cannot answer it: a large, a too large and a binary diff carry none, so two different
+      // ones compared equal, the stale result stayed installed, and the pages went on serving the
+      // content the first one had. A diff that moved changes its revision; one that has not, does
+      // not, whatever else the workdir did.
+      if (result.revision !== diff.value?.revision) {
         if (sameFile) pages().reset();
         diff.value = result;
         collapsedHunks.value = [];

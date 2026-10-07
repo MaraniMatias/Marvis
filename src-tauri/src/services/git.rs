@@ -1,7 +1,8 @@
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::{hash_map::DefaultHasher, BTreeMap, BTreeSet},
     ffi::OsString,
     fs,
+    hash::{Hash, Hasher},
     io::{self, BufRead, BufReader, Read, Write},
     os::unix::{ffi::OsStrExt, fs::OpenOptionsExt, process::CommandExt},
     path::{Component, Path, PathBuf},
@@ -44,6 +45,12 @@ const MAX_DIFF_LINE_BYTES: usize = 64 * 1024;
 const MAX_DIFF_HUNKS: usize = 10_000;
 /// How much of a file is read looking for the NUL byte that makes Git call it binary.
 const BINARY_SNIFF_BYTES: usize = 8_000;
+/// How much of a file is in memory while its lines are counted, and is also how much of it a
+/// first read hands over, which is why it is larger than `BINARY_SNIFF_BYTES`: a file that is
+/// longer than the window has all of the window in hand before the window is judged. An
+/// untracked file in a working checkout is an unignored build artefact more often than not, and
+/// this is the ceiling on what counting one of those costs.
+const COUNT_BLOCK_BYTES: usize = 64 * 1024;
 /// How much of a file's own text a diff carries so its syntax can be read in context.
 ///
 /// A grammar reads a file, not a hunk: the lines inside `<script setup lang="ts">` are markup to a
@@ -163,6 +170,12 @@ pub struct GitStatus {
 pub struct GitFileDiff {
     pub path: String,
     pub patch: String,
+    /// What this diff is of, hashed from the lines the scan read. It is what a reader compares two
+    /// answers with, and `patch` cannot be that: a large, a too large and a binary diff carry no
+    /// patch at all, so any two of them compare equal while the pages drawn behind them are not.
+    /// Changing when what is on screen changes and not when the workdir happens to have been written
+    /// to, so a refresh that moved nothing leaves the open note composer in state.
+    pub revision: String,
     /// The text of each side of the diff, whole, which is what a grammar reads rather than the
     /// patch's hunks. Absent rather than empty when there is no text to read: a binary or symlink
     /// diff, a diff too large to hold, a side that does not exist (an added file's old side, a
@@ -285,6 +298,14 @@ struct WatchUpdate {
     /// directory, or the one every worktree shares. A write there moves an index or a merge base
     /// whatever the files beside it are, so no path can argue them out of being re-read.
     pinned: BTreeSet<String>,
+    /// Whether this batch let its paths go rather than carry more of them than the budget allows.
+    ///
+    /// It travels with the answer because the meaning outlives the budget that spent it. The worker
+    /// rebuilds a slot around every batch it answers, and a rebuilt slot that began with a whole
+    /// budget would let the next, smaller update carry its own paths into a batch that has already
+    /// decided to refresh every checkout it names -- which reaches the reader as exactly those
+    /// paths, and drops the ones the oversized update was carrying.
+    spent: bool,
 }
 
 /// One checkout's file activity, with the paths the batch moved inside it.
@@ -366,6 +387,7 @@ impl WatchSlot {
             worktrees,
             paths,
             pinned,
+            spent,
         } = update;
         for checkout_id in status {
             if !self.update.status.contains(&checkout_id) {
@@ -383,6 +405,9 @@ impl WatchSlot {
             }
         }
         self.update.pinned.extend(pinned);
+        // Merged in before the paths are: an update whose own batch already let its paths go spends
+        // this merge too, or the paths it carries would be the only ones the answer has.
+        self.update.spent |= spent;
         self.budget.merge_paths(&mut self.update, paths);
     }
 
@@ -414,10 +439,6 @@ struct PathBudget {
     /// How many it is carrying now, and how many bytes of those.
     paths: usize,
     bytes: usize,
-    /// Set once the burst has spent the budget. Sticky until the batch is taken, because the batch
-    /// has already decided to refresh every checkout it names: a later path is not carried, but it
-    /// is still a change to a checkout that is about to be re-read.
-    spent: bool,
 }
 
 impl PathBudget {
@@ -431,6 +452,10 @@ impl PathBudget {
     }
 
     /// Carries one event's paths into the batch, or stops carrying them.
+    ///
+    /// What it reads to decide that is `WatchUpdate::spent` rather than a counter of its own: the
+    /// fact that a batch let its paths go belongs to the batch, so every merge into it -- including
+    /// the ones into a slot rebuilt around an answer that already spent its budget -- spends too.
     fn merge_paths(
         &mut self,
         merged: &mut WatchUpdate,
@@ -443,7 +468,7 @@ impl PathBudget {
         // than once, and the answer this feeds is per path, so a list would hold a thousand copies of
         // one path and ask Git about it a thousand times.
         for (checkout_id, moved) in paths {
-            if self.spent {
+            if merged.spent {
                 break;
             }
             let carried = merged.paths.entry(checkout_id).or_default();
@@ -452,7 +477,7 @@ impl PathBudget {
                 // every path, so a path costs that much whether or not this is where it is counted.
                 let cost = path.as_os_str().as_bytes().len() + 1;
                 if self.paths >= self.max_paths || self.bytes + cost > self.max_bytes {
-                    self.spent = true;
+                    merged.spent = true;
                     break;
                 }
                 if carried.insert(path) {
@@ -461,7 +486,7 @@ impl PathBudget {
                 }
             }
         }
-        if self.spent {
+        if merged.spent {
             self.spend(merged, &named);
         }
     }
@@ -478,6 +503,11 @@ impl PathBudget {
     fn spend(&mut self, merged: &mut WatchUpdate, named: &[String]) {
         let affected: BTreeSet<String> = merged.paths.keys().chain(named).cloned().collect();
         merged.paths.clear();
+        // On the batch rather than on this budget, so what the paths cost is a fact about the answer
+        // and not about the counters that happened to notice it: the batch has already decided to
+        // refresh every checkout it names, and a later path is not carried, but it is still a change
+        // to a checkout that is about to be re-read.
+        merged.spent = true;
         self.paths = 0;
         self.bytes = 0;
         for checkout_id in affected {
@@ -1116,6 +1146,8 @@ fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<Wat
         worktrees: worktrees.into_iter().collect(),
         paths,
         pinned,
+        // One event carries what one event moved; only a budget can spend what a burst needs.
+        spent: false,
     })
 }
 
@@ -1145,6 +1177,7 @@ fn without_ignored_only(plan: &RepoWatchPlan, update: WatchUpdate) -> WatchUpdat
         worktrees,
         paths,
         pinned,
+        spent,
     } = update;
     if paths.is_empty() {
         return WatchUpdate {
@@ -1153,6 +1186,7 @@ fn without_ignored_only(plan: &RepoWatchPlan, update: WatchUpdate) -> WatchUpdat
             worktrees,
             paths,
             pinned,
+            spent,
         };
     }
     let mut ignored_only: BTreeSet<String> = BTreeSet::new();
@@ -1177,6 +1211,7 @@ fn without_ignored_only(plan: &RepoWatchPlan, update: WatchUpdate) -> WatchUpdat
             worktrees,
             paths,
             pinned,
+            spent,
         };
     }
     status.retain(|checkout_id| !ignored_only.contains(checkout_id));
@@ -1186,6 +1221,7 @@ fn without_ignored_only(plan: &RepoWatchPlan, update: WatchUpdate) -> WatchUpdat
         worktrees,
         paths,
         pinned,
+        spent,
     }
 }
 
@@ -1455,6 +1491,9 @@ fn receive_debounced_change(
     max_batch: Duration,
 ) -> WatchWakeup {
     let merged = match inbox.recv() {
+        // A whole budget behind the answer, not the spent one it was answered under: the slot is
+        // rebuilt here, and a later, smaller update merged into it must not be the only path the
+        // batch carries when the burst that began this one had more than it could.
         Ok(WatchWakeup::Changed(update)) => WatchSlot::holding(update),
         Ok(WatchWakeup::Failed(error)) => return WatchWakeup::Failed(error),
         Ok(WatchWakeup::Stop) | Err(_) => return WatchWakeup::Stop,
@@ -1829,15 +1868,41 @@ fn numstat_counts(
 /// A file Git declines to count has no number at all rather than a zero: a binary file is one
 /// of those, and a row showing `+0` for it would be a claim about a file Git never measured.
 /// The test below is the parity that keeps this honest.
+///
+/// The file is read a block at a time and never whole, because what is being decided here can be
+/// decided from the head: whether Git would call it binary, and if it would not, how many lines
+/// it has. Holding the file to decide that put the largest untracked file in the checkout into
+/// memory on every sidebar refresh, only to discard all of it as binary.
 fn untracked_line_count(path: &Path) -> Option<GitDiffStats> {
-    let bytes = fs::read(path).ok()?;
-    if is_binary(&bytes) {
-        return None;
+    let mut file = fs::File::open(path).ok()?;
+    let mut block = vec![0u8; COUNT_BLOCK_BYTES];
+    let mut newlines = 0u64;
+    let mut seen = false;
+    let mut last = 0u8;
+    loop {
+        let read = file.read(&mut block).ok()?;
+        if read == 0 {
+            break;
+        }
+        let bytes = &block[..read];
+        if !seen {
+            // Git's rule is written over a window and not over the file, so this judges the same
+            // window it does: a NUL byte inside it and nothing else makes the file binary, and a
+            // file that only reads as binary after it is text, which is the answer Git gives. The
+            // first block covers the whole window because the block is the larger of the two.
+            if is_binary(bytes) {
+                return None;
+            }
+            seen = true;
+        }
+        newlines += bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
+        // The last byte of the file is the last byte of the block it ended in, and a file that
+        // ends exactly where a block ends ends in a full one rather than in no block at all.
+        last = bytes[read - 1];
     }
-    let newlines = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
     // A file whose last line has no newline of its own is still a line, which is why Git
     // reports one more for `a` and one for `a\nb` alike.
-    let trailing = !bytes.is_empty() && !bytes.ends_with(b"\n");
+    let trailing = seen && last != b'\n';
     Some(GitDiffStats {
         additions: newlines + u64::from(trailing),
         deletions: 0,
@@ -1945,9 +2010,16 @@ pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFil
                 format!("could not read symlink target: {error}"),
             )
         })?;
+        let target = target.to_string_lossy().into_owned();
+        // Hash of what is drawn here rather than of the checkout, for the reason `DiffRevision`
+        // gives: a symlink diff carries no patch, so a target that was repointed would otherwise
+        // answer with the same identity as the one on screen and the view would never move.
+        let mut revision = DiffRevision::default();
+        revision.read(target.as_bytes());
         return Ok(GitFileDiff {
             path: path.to_owned(),
             patch: String::new(),
+            revision: revision.finish(),
             old_content: None,
             new_content: None,
             is_binary: false,
@@ -1955,14 +2027,16 @@ pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFil
             too_large: false,
             total_lines: 0,
             hunks: Vec::new(),
-            symlink_target: Some(target.to_string_lossy().into_owned()),
+            symlink_target: Some(target),
         });
     }
 
     let scan = scan_git_diff(
+        "git",
         &context.root,
         diff_args(&context, &snapshot, &changed_file, path)?,
         None,
+        GIT_READ_TIMEOUT,
     )?;
     ensure_diff_succeeded(&scan.output, changed_file.status == "??", scan.too_large)?;
     let patch = if scan.large || scan.too_large || scan.is_binary {
@@ -1989,6 +2063,7 @@ pub fn diff(database: &Database, checkout_id: &str, path: &str) -> Result<GitFil
     Ok(GitFileDiff {
         path: path.to_owned(),
         patch,
+        revision: scan.revision,
         old_content,
         new_content,
         is_binary: scan.is_binary,
@@ -2246,9 +2321,11 @@ pub fn diff_page(
         ));
     }
     let scan = scan_git_diff(
+        "git",
         &context.root,
         diff_args(&context, &snapshot, &changed_file, path)?,
         Some((offset, limit)),
+        GIT_READ_TIMEOUT,
     )?;
     ensure_diff_succeeded(&scan.output, changed_file.status == "??", scan.too_large)?;
     if scan.is_binary || scan.too_large {
@@ -2335,9 +2412,11 @@ fn diff_args(
     }
 }
 
+#[derive(Debug)]
 struct ScannedDiff {
     output: Output,
     patch: Vec<u8>,
+    revision: String,
     page: Vec<GitDiffPageLine>,
     hunks: Vec<GitDiffHunk>,
     total_lines: usize,
@@ -2346,17 +2425,74 @@ struct ScannedDiff {
     too_large: bool,
 }
 
+/// What the diff of one file is of, hashed from the lines the scan read.
+///
+/// Derived from the lines rather than from what is kept of them, because `patch` is what a large
+/// diff throws away and it is also what two large diffs both answer with: an empty string. A view
+/// that asks "is this the diff I am already showing" on the patch alone cannot tell two large diffs
+/// apart, so it keeps serving the pages of the first one and the file on screen stops moving.
+///
+/// Every consumed line is hashed, including the ones whose bytes went into `patch.clear()`: those
+/// are the lines the view is drawn from, so an identity that stopped looking at them would be blind
+/// to exactly the content that is on screen.
+///
+/// A `DefaultHasher` and not a digest, because this answers one question inside one running app --
+/// "is this the same diff as the one on screen" -- and is never persisted, never compared against
+/// anything written by another build, and never sent anywhere a caller could not recompute.
+#[derive(Default)]
+struct DiffRevision(DefaultHasher);
+
+impl DiffRevision {
+    fn read(&mut self, bytes: &[u8]) {
+        bytes.hash(&mut self.0);
+    }
+
+    fn finish(self) -> String {
+        format!("{:016x}", self.0.finish())
+    }
+}
+
+/// Reads one Git diff under a deadline, ends it as a whole group if it will not finish.
+///
+/// The parsing is on a thread of its own and the child stays here, which is the split every other
+/// runner in this file makes and for the reason `spawn_and_collect` gives: a read on a pipe is the
+/// one wait here with no deadline left to time it out with. So the scan streams and this thread
+/// polls -- on the answer from the scan, on the exit of the process, and on `GIT_READ_TIMEOUT` --
+/// and is the only one that may end it, because it is the only one holding a `Child` whose number
+/// the kernel has not given away.
+///
+/// stderr is drained on a thread of its own, and that is not tidiness. Git is given its own process
+/// group, so a diff filter it started cannot be waited for and cannot be pointed at; the two pipes
+/// have to be read at once or a Git that fills the buffer of one blocks on writing it while this
+/// thread blocks reading the other, and the pair of them waits on each other with nothing to break
+/// it. The scan cannot be moved onto `spawn_and_collect` instead, because it stops early on
+/// `MAX_DIFF_BYTES`, `MAX_DIFF_LINES`, `MAX_DIFF_HUNKS` and an oversized hunk header and builds
+/// what it hands back as it goes; a whole diff collected first would be a whole diff held in memory,
+/// which is the one thing those caps exist to prevent.
+///
+/// Nothing here compares Git's own wording, so nothing pins its locale: what Git said about a
+/// failure is quoted, not looked for, and `ensure_diff_succeeded` reads the status and the bytes
+/// rather than a sentence.
+///
+/// `program` and `timeout` are what `run_capped_git` takes as well, and for the same reason: a test
+/// needs to put a shell where Git is and a deadline short enough to run inside one.
 fn scan_git_diff(
+    program: &str,
     root: &Path,
     args: Vec<OsString>,
     page_range: Option<(usize, usize)>,
+    timeout: Duration,
 ) -> Result<ScannedDiff, IpcError> {
-    let mut child = Command::new("git")
+    let mut child = Command::new(program)
         .args(args)
         .current_dir(root)
         .env("GIT_OPTIONAL_LOCKS", "0")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
+        // Its own group, so what hung is ended whole rather than only the process `spawn`
+        // returned: a diff filter is what blocks a `diff` most of the time, and it is never the
+        // process named here.
+        .process_group(0)
         .spawn()
         .map_err(|error| {
             IpcError::new(
@@ -2365,8 +2501,172 @@ fn scan_git_diff(
             )
         })?;
     let stdout = child.stdout.take().expect("piped stdout");
+    // The scan is a thread and not an inlined loop because `read_diff_line` blocks with nothing left
+    // to time it out with, and it ends through a channel because a join cannot be waited on for a
+    // deadline either. A thread that could not be started leaves a Git writing into a pipe nobody
+    // will ever read, so the child is ended before the failure is handed back.
+    let (scanned, scans) = mpsc::sync_channel(1);
+    if let Err(error) = start_read_thread("marvis-git-diff", move || {
+        let _ = scanned.send(scan_diff_lines(stdout, page_range));
+    }) {
+        stop_git_read(&mut child, GroupIdentity::Reserved);
+        return Err(IpcError::new(
+            IpcErrorCode::GitFailed,
+            format!("could not read Git diff: {error}"),
+        ));
+    }
+    // What Git says about a failure is the diagnosis a caller is handed, so it is kept under
+    // `GIT_DIAGNOSTIC_CAP` like everywhere else. The answer here is the diff rather than what Git
+    // printed, so there is no refusal to make at the cap: the reader carries on and drops, which is
+    // what keeps a chatty diff off the pipe nobody would finish reading.
+    let stderr = match PipeReader::take(
+        child.stderr.take().expect("piped stderr"),
+        "stderr",
+        "marvis-git-diff-stderr",
+        GIT_DIAGNOSTIC_CAP,
+    ) {
+        Ok(pipe) => pipe,
+        Err(error) => {
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            return Err(IpcError::new(
+                IpcErrorCode::GitFailed,
+                format!("could not read Git diff: {error}"),
+            ));
+        }
+    };
+    let deadline = Instant::now() + timeout;
+    let mut poll = GIT_READ_POLL_MIN;
+    // Held rather than taken straight off the channel, for the reason `run_capped_git` holds its
+    // answer: a Git that has printed its whole diff and closed its pipe is a moment from exiting,
+    // and a scan that asked about the status too early would lose the diff to asking again.
+    let mut scan = None;
+    // Watched and not collected, for the reason `exited_unreaped` gives.
+    let mut exited = false;
+    loop {
+        if scan.is_none() {
+            match scans.try_recv() {
+                Ok(answer) => scan = Some(answer),
+                // The scan is gone without an answer, so there is nothing left to wait for.
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    stop_git_read(&mut child, GroupIdentity::Reserved);
+                    return Err(git_pipe_failure(&PipeFailure::ReaderGone {
+                        stream: "diff",
+                    }));
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+            }
+        }
+        // A pipe that broke mid-diff leaves what arrived short of the whole thing, and a scan that
+        // stopped at one of its caps has stopped reading altogether: either way the writer is in the
+        // way of nothing, and the whole group is ended for the reason `stop_git_read` gives -- the
+        // process doing the printing may be a diff filter rather than Git.
+        if scan.as_ref().is_some_and(|scan| match scan {
+            Ok(scan) => scan.too_large,
+            Err(_) => true,
+        }) {
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            break;
+        }
+        if !exited {
+            match exited_unreaped(&child) {
+                Ok(answer) => exited = answer,
+                // It cannot be asked again, so it is ended rather than waited for, and the words it
+                // got out first are still the diagnosis.
+                Err(error) => {
+                    stop_git_read(&mut child, GroupIdentity::Reserved);
+                    let said = summarize_git_output(&[], &stderr.collect());
+                    return Err(IpcError::new(
+                        IpcErrorCode::GitFailed,
+                        format!("could not read from Git: {error}: {said}"),
+                    ));
+                }
+            }
+        }
+        // Both halves are waited for, because neither answers alone: the scan says the diff is over,
+        // and the status says whether what came of it is text. A Git that has closed its pipe and is
+        // a moment from exiting is the ordinary case here.
+        if exited && scan.is_some() {
+            break;
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            stop_git_read(&mut child, GroupIdentity::Reserved);
+            return Err(git_read_timeout(timeout, &[], &stderr.collect()));
+        }
+        thread::sleep(poll.min(remaining));
+        poll = (poll * 2).min(GIT_READ_POLL_MAX);
+    }
+    // The loop ends on an answer from the scan in every case: either the scan is what ended it, or
+    // the group was ended because the scan had stopped reading. What Git said is collected under the
+    // drain deadline rather than waited on, because a helper that left the group can still hold the
+    // write end and the answer here is the diff rather than the diagnostic.
+    let scan = match scan.expect("the loop ends on an answer from the scan") {
+        Ok(scan) => scan,
+        Err(error) => {
+            return Err(IpcError::new(
+                IpcErrorCode::GitFailed,
+                format!("could not read Git diff: {error}"),
+            ))
+        }
+    };
+    // The status is what says whether the diff that arrived is the diff Git meant to print, so it is
+    // taken here even though the exit was watched above rather than collected. A collection that
+    // cannot answer is ended the way every other exit is rather than left as a zombie.
+    let status = match child.wait() {
+        Ok(status) => status,
+        Err(error) => {
+            let group = reserved_group(&child);
+            stop_git_read(&mut child, group);
+            return Err(IpcError::new(
+                IpcErrorCode::GitFailed,
+                format!("could not finish Git diff: {error}"),
+            ));
+        }
+    };
+    Ok(ScannedDiff {
+        output: Output {
+            status,
+            // The scan read the diff off this pipe line by line and nothing kept it, so the output
+            // carries the exit status and what Git said rather than the diff itself.
+            stdout: Vec::new(),
+            stderr: stderr.collect(),
+        },
+        patch: scan.patch,
+        revision: scan.revision,
+        page: scan.page,
+        hunks: scan.hunks,
+        total_lines: scan.total_lines,
+        is_binary: scan.is_binary,
+        large: scan.large,
+        too_large: scan.too_large,
+    })
+}
+
+/// What one scan of a diff consumed, with the process that printed it left to the caller.
+struct DiffScan {
+    patch: Vec<u8>,
+    revision: String,
+    page: Vec<GitDiffPageLine>,
+    hunks: Vec<GitDiffHunk>,
+    total_lines: usize,
+    is_binary: bool,
+    large: bool,
+    too_large: bool,
+}
+
+/// Parses one diff off a pipe, line by line, and stops as soon as it is past one of its caps.
+///
+/// Bounded memory is the whole of what this is for, which is why it streams and never collects: a
+/// `Vec` that grows until the end is a whole diff held in memory, and `MAX_DIFF_BYTES` is the size
+/// of the cap on that. The revision is hashed as the lines go by, so it sees the ones the patch
+/// dropped too.
+fn scan_diff_lines(
+    stdout: impl Read,
+    page_range: Option<(usize, usize)>,
+) -> Result<DiffScan, io::Error> {
     let mut reader = BufReader::new(stdout);
     let mut patch = Vec::with_capacity(SMALL_DIFF_BYTES.min(64 * 1024));
+    let mut revision = DiffRevision::default();
     let mut page = Vec::new();
     let mut hunks: Vec<GitDiffHunk> = Vec::new();
     let mut total_lines = 0;
@@ -2384,15 +2684,12 @@ fn scan_git_diff(
                 too_large = true;
                 break;
             }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(IpcError::new(
-                    IpcErrorCode::GitFailed,
-                    format!("could not read Git diff: {error}"),
-                ));
-            }
+            // A pipe that broke mid-diff leaves what arrived short of the whole thing, which is not a
+            // diff to draw: handed on, it is the prefix wearing the clothes of an answer. The caller
+            // ends the group and reports this instead.
+            Err(error) => return Err(error),
         };
+        revision.read(&raw_line);
         total_bytes += raw_line.len();
         if total_bytes > MAX_DIFF_BYTES {
             too_large = true;
@@ -2442,21 +2739,12 @@ fn scan_git_diff(
             }
         }
     }
-    if too_large {
-        let _ = child.kill();
-    }
-    let output = child.wait_with_output().map_err(|error| {
-        IpcError::new(
-            IpcErrorCode::GitFailed,
-            format!("could not finish Git diff: {error}"),
-        )
-    })?;
     if let Some(hunk) = hunks.last_mut() {
         hunk.end_line = total_lines;
     }
-    Ok(ScannedDiff {
-        output,
+    Ok(DiffScan {
         patch,
+        revision: revision.finish(),
         page,
         hunks,
         total_lines,
@@ -3980,13 +4268,13 @@ mod tests {
         invalidate_failed_watch, merge_base_content, parse_diff_display_line, parse_name_status,
         parse_numstat, parse_porcelain_v2, pipe_read, receive_debounced_change,
         receive_debounced_updates, requested_watch_ids, reserved_group, resolve_default_ref,
-        run_capped_git, run_command_with_input, run_command_with_timeout, shared_read,
-        should_refresh_path, status, untracked_line_count, watch_failure,
+        run_capped_git, run_command_with_input, run_command_with_timeout, scan_git_diff,
+        shared_read, should_refresh_path, status, untracked_line_count, watch_failure,
         watch_plan_matches_request, without_ignored_only, CachedGitSnapshot, FileActivity,
         GitCounts, GitDiffStats, GitSnapshotCache, GitStatus, GitWatcherManager, GroupIdentity,
         IpcError, PathBudget, PathBuf, ReadingInFlight, RepoWatchPlan, WatchInbox, WatchQueue,
-        WatchSlot, WatchUpdate, WatchWakeup, GIT_OUTPUT_CAP, MAX_SYNTAX_CONTEXT_BYTES,
-        WATCH_PATH_BUDGET, WATCH_PATH_BYTE_BUDGET,
+        WatchSlot, WatchUpdate, WatchWakeup, BINARY_SNIFF_BYTES, COUNT_BLOCK_BYTES, GIT_OUTPUT_CAP,
+        MAX_SYNTAX_CONTEXT_BYTES, WATCH_PATH_BUDGET, WATCH_PATH_BYTE_BUDGET,
     };
     use super::{BrokenStatusRead, ImpossibleReadThread};
 
@@ -5566,6 +5854,196 @@ line.txt";
         assert_processes_gone(&[read_pid(&git_pid), read_pid(&helper_pid)]);
     }
 
+    /// What the two-pipe deadlock looks like from the diff scanner: it reads its standard output and
+    /// leaves the diagnostic pipe to `wait_with_output` at the end, so a Git that fills that pipe's
+    /// buffer blocks on the write while this thread blocks on the read, and the pair of them waits on
+    /// each other with nothing to break it. A diff filter is an ordinary way to say that much.
+    ///
+    /// The stderr is drained past the cap rather than refused, which is the other half of it: what a
+    /// diff printed is not what this read keeps, so the answer is the diff and the diagnosis travels
+    /// only inside an error.
+    #[test]
+    fn a_diff_that_fills_its_diagnostic_pipe_is_read_rather_than_waited_on() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        // More than a pipe holds on stderr, and the diff itself after it, so the deadlock needs both
+        // sides writing: one until the pipe is full, the other until this reading stops.
+        let script = format!(
+            "echo $$ > \"{git}\"; \
+             head -c 262144 /dev/zero | tr '\\0' 'x' >&2; \
+             printf 'diff --git a/a.txt b/a.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n'",
+            git = git_pid.display()
+        );
+
+        let started = Instant::now();
+        let scan = scan_git_diff(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            None,
+            Duration::from_secs(20),
+        )
+        .expect("a diff behind a full diagnostic pipe is still a diff");
+
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the two pipes waited on each other: {:?}",
+            started.elapsed()
+        );
+        // The hunk header and the line on each side of it, which is the whole of this diff.
+        assert_eq!(scan.total_lines, 3);
+        assert!(String::from_utf8_lossy(&scan.patch).contains("+new"));
+        // Ended as a whole group and collected, for the reason `stop_git_read` gives.
+        assert_processes_gone(&[read_pid(&git_pid)]);
+    }
+
+    /// The other half of the same pair: a diff whose Git, or whose diff filter, never finishes. The
+    /// scan is a read on a pipe and has no deadline of its own, so the deadline belongs to the thread
+    /// holding the child -- and it is that one which ends the group, because it is the one still
+    /// holding a pid the kernel has not given away.
+    #[test]
+    fn a_diff_whose_git_never_finishes_fails_after_the_deadline_and_leaves_nothing_running() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let helper_pid = temp.path().join("helper-pid");
+        // Prints the whole diff and then waits on a helper nothing is going to answer, which is what a
+        // diff driver on a network looks like: the scan has its answer and the read has to end anyway.
+        let script = format!(
+            "echo $$ > \"{git}\"; sleep 30 & echo $! > \"{helper}\"; \
+             printf 'diff --git a/a.txt b/a.txt\\n@@ -1 +1 @@\\n-old\\n+new\\n'; wait",
+            git = git_pid.display(),
+            helper = helper_pid.display()
+        );
+
+        let started = Instant::now();
+        let error = scan_git_diff(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            None,
+            Duration::from_millis(300),
+        )
+        .expect_err("a Git that never finishes has no diff to draw");
+
+        assert_eq!(error.code, IpcErrorCode::GitFailed);
+        assert!(
+            error.message.starts_with("Git stopped reading after 0.3s"),
+            "{error:?}"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(10),
+            "the deadline did not end the scan: {:?}",
+            started.elapsed()
+        );
+        // Both, for the reason `stop_git_read` gives: the Git because a scan that stopped it and
+        // skipped the wait would leave a zombie, and the helper because a deadline that ended only
+        // the process it started would leave it holding the pipe being read.
+        assert_processes_gone(&[read_pid(&git_pid), read_pid(&helper_pid)]);
+    }
+
+    /// A diff past a cap is answered with the prefix that was read, and the Git behind the rest of it
+    /// is ended as a whole group rather than left printing into a pipe the scan has stopped reading.
+    #[test]
+    fn a_diff_that_is_too_large_ends_its_whole_group_and_leaves_nothing_running() {
+        let temp = tempdir().unwrap();
+        let git_pid = temp.path().join("git-pid");
+        let helper_pid = temp.path().join("helper-pid");
+        // An ordinary diff, then far more of one than `MAX_DIFF_HUNKS` asks for, and a helper still
+        // holding the write end when the scan has stopped at the cap.
+        let script = format!(
+            "echo $$ > \"{git}\"; sleep 30 & echo $! > \"{helper}\"; \
+             yes '@@ -1,1 +1,1 @@ a' ; wait",
+            git = git_pid.display(),
+            helper = helper_pid.display()
+        );
+
+        let scan = scan_git_diff(
+            "sh",
+            temp.path(),
+            vec!["-c".into(), script.into()],
+            None,
+            Duration::from_secs(20),
+        )
+        .expect("a diff past a cap is answered with what was read of it");
+
+        assert!(scan.too_large && scan.large);
+        assert!(!String::from_utf8_lossy(&scan.patch).contains("@@"));
+        assert_processes_gone(&[read_pid(&git_pid), read_pid(&helper_pid)]);
+    }
+
+    /// What the scan hashes is the lines it consumed, including the ones a large diff threw away from
+    /// its patch: two large diffs are both an empty patch, so an identity that stopped looking at the
+    /// dropped bytes would be the same answer twice and the view behind it would keep serving the
+    /// first diff's pages.
+    #[test]
+    fn two_large_diffs_of_the_same_file_are_told_apart_by_their_revision() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        let original = (0..5000)
+            .map(|line| format!("old-{line}\n"))
+            .collect::<String>();
+        fs::write(root.join("large.txt"), original).unwrap();
+        git(&root, &["add", "large.txt"]);
+        git(&root, &["commit", "-m", "large file"]);
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        let changed = (0..5000)
+            .map(|line| format!("new-{line}\n"))
+            .collect::<String>();
+        fs::write(root.join("large.txt"), changed).unwrap();
+        let first = diff(&database, &checkout_id, "large.txt").unwrap();
+        assert!(first.large && first.patch.is_empty());
+
+        // A second version of the same file, whose patch is equally empty and whose lines are the same
+        // ones the first one read.
+        let moved = (0..5000)
+            .map(|line| format!("newer-{line}\n"))
+            .collect::<String>();
+        fs::write(root.join("large.txt"), moved).unwrap();
+        let second = diff(&database, &checkout_id, "large.txt").unwrap();
+
+        assert!(second.large && second.patch.is_empty());
+        assert_ne!(
+            first.revision, second.revision,
+            "two large diffs are the same answer when nothing but the patch is compared"
+        );
+
+        // And the same diff read again is the same answer, which is what keeps a refresh that moved
+        // nothing from rebuilding the reading around the open note composer.
+        assert_eq!(
+            second.revision,
+            diff(&database, &checkout_id, "large.txt").unwrap().revision,
+            "a diff that had not moved answered with another identity"
+        );
+    }
+
+    /// The identity is set on the path that has no scan behind it at all, and a symlink's target can
+    /// be repointed while its patch stays empty.
+    #[test]
+    fn a_symlink_diff_is_told_apart_by_the_target_it_points_at() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        init_repo(&root);
+        std::os::unix::fs::symlink("one.txt", root.join("link.txt")).unwrap();
+        let (database, checkout_id) = git_database(temp.path(), &root);
+        fs::write(root.join("one.txt"), "one\n").unwrap();
+        fs::write(root.join("two.txt"), "two\n").unwrap();
+
+        let first = diff(&database, &checkout_id, "link.txt").unwrap();
+        assert_eq!(first.symlink_target.as_deref(), Some("one.txt"));
+        assert!(first.patch.is_empty());
+
+        fs::remove_file(root.join("link.txt")).unwrap();
+        std::os::unix::fs::symlink("two.txt", root.join("link.txt")).unwrap();
+        let second = diff(&database, &checkout_id, "link.txt").unwrap();
+
+        assert_eq!(second.symlink_target.as_deref(), Some("two.txt"));
+        assert_ne!(
+            first.revision, second.revision,
+            "a symlink repointed while the panel was on it answered with the same identity"
+        );
+    }
+
     fn assert_processes_gone(pids: &[libc::pid_t]) {
         assert_processes_gone_named(pids, "the stopped read");
     }
@@ -5592,7 +6070,7 @@ line.txt";
         // At the budget is not past it: the paths are still carried, still what `check-ignore`
         // would be asked about, and the checkout is not pinned by spending.
         assert_eq!(slot.update.paths[&"main".to_owned()].len(), 2);
-        assert!(slot.budget.paths == 2 && !slot.budget.spent);
+        assert!(slot.budget.paths == 2 && !slot.update.spent);
 
         slot.merge_update(moved_paths("main", &["build/c.js"]));
         let batch = slot.take();
@@ -5670,12 +6148,12 @@ line.txt";
     fn the_batch_after_an_overspent_one_carries_its_paths_again() {
         let mut slot = slot_with_budget(1, 4096);
         slot.merge_update(moved_paths("main", &["build/a.js", "build/b.js"]));
-        assert!(slot.budget.spent);
+        assert!(slot.update.spent);
         slot.take();
 
         slot.merge_update(moved_paths("main", &["build/c.js"]));
         assert_eq!(slot.update.paths[&"main".to_owned()].len(), 1);
-        assert!(!slot.budget.spent);
+        assert!(!slot.update.spent);
     }
 
     /// The same funnel the worker reads: the queue, the merge behind the wakeup and the terminal
@@ -5702,6 +6180,7 @@ line.txt";
                 activity: vec!["main".to_owned(), "task".to_owned()],
                 paths: BTreeMap::new(),
                 pinned: BTreeSet::from(["main".to_owned(), "task".to_owned()]),
+                spent: true,
                 ..WatchUpdate::default()
             })
         );
@@ -5715,6 +6194,64 @@ line.txt";
         assert_eq!(
             receive_debounced_change(&inbox, Duration::from_millis(1), Duration::from_secs(1)),
             WatchWakeup::Stop
+        );
+    }
+
+    /// The whole composed path a burst spends its budget on: the answer, the slot the worker rebuilds
+    /// around it, and the tail of the same burst that arrives while that answer is being built.
+    ///
+    /// Spending is a fact about the batch, not about the budget that noticed it, and the rebuild is
+    /// where a budget goes back to whole. A tail that carries paths into the rebuilt slot would
+    /// otherwise be the whole of what the answer names: the reader takes it as every path that moved,
+    /// and the ones the oversized update gave up are never asked about again.
+    #[test]
+    fn a_spent_batch_is_not_laundered_into_the_paths_of_the_update_that_follows_it() {
+        let (queue, inbox) = WatchQueue::new();
+        if let Ok(mut slot) = queue.merged.lock() {
+            slot.budget = PathBudget {
+                max_paths: 1,
+                max_bytes: 4096,
+                ..PathBudget::default()
+            };
+        }
+        queue.changed(moved_paths("main", &["build/a.js", "build/b.js"]));
+
+        // The two steps of `receive_debounced_change`: the answer, then the slot merged into.
+        let WatchWakeup::Changed(answered) = inbox.try_recv().expect("the burst that spent it")
+        else {
+            panic!("the burst was not answered as a change");
+        };
+        assert!(
+            answered.paths.is_empty(),
+            "the burst that ran out of budget is what let its paths go"
+        );
+        let mut tail = VecDeque::from([WatchWakeup::Changed(moved_paths("main", &["build/c.js"]))]);
+
+        let delivered = receive_debounced_updates(
+            WatchSlot::holding(answered),
+            Duration::from_millis(100),
+            Duration::from_secs(1),
+            || Duration::ZERO,
+            |_| match tail.pop_front() {
+                Some(wakeup) => Ok(wakeup),
+                None => Err(mpsc::RecvTimeoutError::Timeout),
+            },
+        );
+
+        let WatchWakeup::Changed(batch) = delivered else {
+            panic!("the batch was not answered as a change: {delivered:?}");
+        };
+        assert!(
+            batch.paths.is_empty(),
+            "a later update carrying one path does not make the batch a batch that carries only one"
+        );
+        assert_eq!(
+            file_activity(&batch),
+            vec![FileActivity {
+                checkout_id: "main".to_owned(),
+                paths: Vec::new(),
+            }],
+            "an empty list is the batch declining to say what it moved, which a reader asks everything about"
         );
     }
 
@@ -5779,7 +6316,7 @@ line.txt";
             ..WatchUpdate::default()
         });
         assert!(
-            !slot.budget.spent && slot.budget.paths == WATCH_PATH_BUDGET,
+            !slot.update.spent && slot.budget.paths == WATCH_PATH_BUDGET,
             "{WATCH_PATH_BUDGET} ordinary paths are inside the budget: {:?}",
             slot.budget
         );
@@ -6252,6 +6789,7 @@ line.txt";
                     BTreeSet::from([PathBuf::from("base.txt")]),
                 )]),
                 pinned: BTreeSet::new(),
+                spent: false,
             })
         );
     }
@@ -6758,6 +7296,7 @@ line.txt";
                 BTreeSet::from([PathBuf::from("docs/pic.png"), PathBuf::from("src/app.ts")]),
             )]),
             pinned: BTreeSet::new(),
+            spent: true,
         };
 
         assert_eq!(
@@ -6818,6 +7357,39 @@ line.txt";
         assert!(parse_numstat(b"not a record\0").is_err());
     }
 
+    /// `bytes` of text with a newline every third byte, so a test can ask for a file larger than
+    /// the block the count reads it in and still know what it put in it. It is built rather than
+    /// written out because what matters about these files is how many bytes they are.
+    fn text_of(bytes: usize) -> Vec<u8> {
+        let mut file = vec![b'\n'; bytes];
+        for (index, byte) in file.iter_mut().enumerate() {
+            if index % 3 == 0 {
+                *byte = b'a' + (index % 26) as u8;
+            }
+        }
+        file
+    }
+
+    /// The same text with its one NUL byte at `at`, which is how a test asks for a file Git calls
+    /// binary and for one it does not, at a size where the answer is not in doubt either way.
+    fn text_with_a_nul_at(bytes: usize, at: usize) -> Vec<u8> {
+        let mut file = text_of(bytes);
+        file[at] = 0;
+        file
+    }
+
+    /// What Git reports for a file, read off the bytes rather than asked of Git: a NUL byte
+    /// anywhere in the window it looks at and nothing else makes the file binary, and otherwise
+    /// the file has one line per newline, plus a last line when that one has no newline of its
+    /// own.
+    fn lines_git_reports(bytes: &[u8]) -> Option<u64> {
+        if bytes.iter().take(BINARY_SNIFF_BYTES).any(|byte| *byte == 0) {
+            return None;
+        }
+        let newlines = bytes.iter().filter(|byte| **byte == b'\n').count() as u64;
+        Some(newlines + u64::from(!bytes.is_empty() && !bytes.ends_with(b"\n")))
+    }
+
     /// What `git diff --no-index --numstat /dev/null <file>` prints, which is the answer the
     /// in-process count has to agree with.
     fn git_says_for_an_untracked_file(root: &Path, name: &str) -> Option<GitDiffStats> {
@@ -6866,7 +7438,7 @@ line.txt";
         let temp = tempdir().unwrap();
         let root = temp.path().join("repo");
         init_repo(&root);
-        let cases: &[(&str, &[u8])] = &[
+        let mut cases: Vec<(&str, &[u8])> = vec![
             ("empty.txt", b""),
             ("one-line.txt", b"a\n"),
             // The last line has no newline of its own and is still a line.
@@ -6878,15 +7450,81 @@ line.txt";
             ("binary.dat", &[0, 1, 2, 3]),
             ("binary-late.dat", b"aaaa\nbbbb\n\0\n"),
         ];
-        for (name, bytes) in cases {
+        // The count reads a file a block at a time, so the files only it can get wrong are the
+        // ones it cannot read in one go: a boundary crossed inside the file, and a NUL byte past
+        // the window Git looks at. Git counts both of them, and reads them whole to do it.
+        let built: Vec<(&str, Vec<u8>)> = vec![
+            ("multi-block.txt", text_of(2 * COUNT_BLOCK_BYTES + 13)),
+            (
+                "multi-block-no-trailing-newline.txt",
+                text_of(2 * COUNT_BLOCK_BYTES),
+            ),
+            (
+                "nul-past-the-window.txt",
+                text_with_a_nul_at(2 * COUNT_BLOCK_BYTES + 13, BINARY_SNIFF_BYTES),
+            ),
+        ];
+        for (name, bytes) in &built {
+            cases.push((name, bytes));
+        }
+        for (name, bytes) in &cases {
             fs::write(root.join(name), bytes).unwrap();
         }
 
-        for (name, _) in cases {
+        for (name, _) in &cases {
             assert_eq!(
                 untracked_line_count(&root.join(name)),
                 git_says_for_an_untracked_file(&root, name),
                 "{name} counted differently than Git counts it"
+            );
+        }
+    }
+
+    /// What a count owes a file too large to be read in one block: the number of lines its bytes
+    /// have, whichever block they arrive in. A last line that ends exactly where a block ends is
+    /// the case a reader gets wrong most easily, so both of those are here.
+    #[test]
+    fn a_file_larger_than_one_block_is_counted_by_the_newlines_it_has() {
+        let temp = tempdir().unwrap();
+        let two_blocks = text_of(2 * COUNT_BLOCK_BYTES);
+        let without_a_last_newline = {
+            let mut file = two_blocks.clone();
+            file.pop();
+            file
+        };
+        let cases: [(&str, Vec<u8>); 5] = [
+            ("multi-block.txt", text_of(2 * COUNT_BLOCK_BYTES + 13)),
+            (
+                "multi-block-no-trailing-newline.txt",
+                without_a_last_newline,
+            ),
+            // Two whole blocks, so the last line is the one that lands on the edge.
+            ("ends-on-a-block-edge.txt", two_blocks),
+            // The NUL byte is one past the window Git looks at, which is as far from the head as
+            // a file can be and still be text. Reading the head rather than the file is allowed
+            // to change what a count costs, never the number it reports.
+            (
+                "nul-past-the-window.txt",
+                text_with_a_nul_at(2 * COUNT_BLOCK_BYTES + 13, BINARY_SNIFF_BYTES),
+            ),
+            // One inside the window is the file Git declines to count, however large it is, and
+            // a file Git declines to count has no number rather than a zero.
+            (
+                "binary-big.dat",
+                text_with_a_nul_at(2 * COUNT_BLOCK_BYTES + 13, 4),
+            ),
+        ];
+
+        for (name, bytes) in &cases {
+            fs::write(temp.path().join(name), bytes).unwrap();
+
+            assert_eq!(
+                untracked_line_count(&temp.path().join(name)),
+                lines_git_reports(bytes).map(|additions| GitDiffStats {
+                    additions,
+                    deletions: 0
+                }),
+                "{name} counted differently than the bytes of it say"
             );
         }
     }

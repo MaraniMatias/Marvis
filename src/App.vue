@@ -694,6 +694,12 @@ function isAppShortcut(event: KeyboardEvent) {
  * keystroke arrives as `/`, which is what makes it a property of the modifier and not of the key.
  *
  * So the position is the shortcut, and the character is only how one layout spells it.
+ *
+ * Matching on position is deliberately blind to the layout, so it is wider than the shortcut: on a
+ * US keyboard ⌘⇧7 types `&`, and this answers for that too. The cost is one chord that means `&`
+ * where it means `/` elsewhere, and it is paid knowingly — demanding the character narrows the
+ * shortcut to the layouts that need no narrowing and loses the one that does. `App.test.ts` pins
+ * both halves: ⌘⇧7 opens the panels, and a bare number 7 without the shift is not captured.
  */
 function isSlashKey(event: KeyboardEvent) {
   return event.key === "/" || event.code === "Slash" || (event.code === "Digit7" && event.shiftKey);

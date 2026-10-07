@@ -1722,7 +1722,7 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
-    it("peeks the split inspector for 300ms and closes it with Escape", async () => {
+    it("peeks the split inspector for 300ms, closes it when the pointer leaves for good, and leaves the narrow drawer shut", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
         ...DEFAULT_APP_LAYOUT,
         mode: "split",
@@ -2647,8 +2647,10 @@ describe("App UI integration", () => {
       await flushPromises();
       expect(wrapper.findAllComponents({ name: "SplitterPanel" })[0]!.emitted("collapse")).toHaveLength(1);
 
-      // A bare Escape is the drawer's own key and takes nothing away: one press has one answer,
-      // and a drawer that is not open cannot be closed by it either.
+      // Escape is not a key this window answers: nothing in App.vue or the inspector has a branch
+      // for it, and the ones that do own one — a field, a dialog, the toast stack — are either
+      // elsewhere in the tree or have nothing to take. What is pinned here is narrower: a bare
+      // Escape is not swallowed by the shortcut, and does not toggle the panels.
       const plain = pressInSidebar({ key: "Escape" });
       expect(plain.defaultPrevented).toBe(false);
       await flushPromises();

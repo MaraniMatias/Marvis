@@ -9,13 +9,6 @@ pub struct FileTree {
 
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
-pub struct FileSearchResult {
-    pub entries: Vec<FileEntry>,
-    pub truncated: bool,
-}
-
-#[derive(Debug, Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
 pub struct FileEntry {
     pub name: String,
     pub path: String,

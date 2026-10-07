@@ -459,59 +459,6 @@ watch(
   },
   { immediate: true, flush: "post" },
 );
-
-/* E.1: the file search is out of this panel, and the block below is the whole search path,
-   commented out rather than deleted because the decision is reversible: `searchCheckoutFiles`
-   (src/lib/ipc.ts) and this scorer are untouched, and the input that fed them is the only
-   thing missing. Restoring it means uncommenting this block plus `searchCheckoutFiles` and
-   `FileSearchResult` in the imports, putting the input back in the files panel, and letting
-   the tree window read the matches instead of `visibleEntries`.
-
-function fuzzyScore(path: string, query: string): number {
-  const candidate = path.toLocaleLowerCase();
-  const normalized = query.toLocaleLowerCase().trim();
-  let cursor = 0;
-  let score = 0;
-  let previous = -2;
-  for (const character of normalized) {
-    const index = candidate.indexOf(character, cursor);
-    if (index < 0) return -1;
-    score += index - cursor + (index === previous + 1 ? -2 : index);
-    previous = index;
-    cursor = index + 1;
-  }
-  const basename = candidate.slice(candidate.lastIndexOf("/") + 1);
-  if (basename.startsWith(normalized)) score -= 100;
-  return score;
-}
-
-async function loadSearchIndex(checkoutId: string, force = false) {
-  if (!force && searchIndexCheckoutId === checkoutId) {
-    return { entries: searchEntries.value, truncated: searchTruncated.value };
-  }
-  if (searchIndexPromise?.checkoutId === checkoutId) return searchIndexPromise.promise;
-  const promise = searchCheckoutFiles(checkoutId);
-  searchIndexPromise = { checkoutId, promise };
-  try {
-    const result = await promise;
-    if (props.checkout?.id === checkoutId && searchIndexPromise?.promise === promise) {
-      searchIndexCheckoutId = checkoutId;
-      searchEntries.value = result.entries;
-      searchTruncated.value = result.truncated;
-    }
-    return result;
-  } finally {
-    if (searchIndexPromise?.promise === promise) searchIndexPromise = null;
-  }
-}
-
-const matchedSearchEntries = searchEntries.value
-  .map((entry) => ({ entry, score: fuzzyScore(entry.path, searchQuery.value.trim()) }))
-  .filter((match) => match.score >= 0)
-  .sort((left, right) => left.score - right.score || left.entry.path.localeCompare(right.entry.path))
-  .slice(0, 200)
-  .map(({ entry }) => ({ entry, depth: 0 }));
-*/
 </script>
 
 <template>

@@ -980,6 +980,84 @@ describe("TerminalSession UI", () => {
     confirm.mockRestore();
   });
 
+  it("waits for input in flight to reach the PTY before it closes the session", async () => {
+    // The last keystrokes typed before the close are the ones the close cannot take back: they are
+    // in the queue, the command they spell out is not in the buffer yet, and the PTY they were meant
+    // for is what the close takes away.
+    let finishWrite!: () => void;
+    vi.mocked(writeTerminal).mockImplementationOnce(() => new Promise<void>((resolve) => (finishWrite = resolve)));
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+    vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running", foregroundProcess: false });
+
+    terminalMock.input?.("cd /work/repo\n");
+    await flushPromises();
+    expect(writeTerminal).toHaveBeenCalledOnce();
+    const closed = wrapper.vm.requestClose();
+    await flushPromises();
+    // Still not closed, because the write this keystroke is waiting behind has not been written yet.
+    expect(closeTerminal).not.toHaveBeenCalled();
+
+    finishWrite();
+    await closed;
+
+    expect(writeTerminal).toHaveBeenCalledWith(
+      "checkout:repo",
+      "session:new",
+      new TextEncoder().encode("cd /work/repo\n"),
+    );
+    expect(closeTerminal).toHaveBeenCalledOnce();
+    wrapper.unmount();
+  });
+
+  it("closes a session whose input never lands, because waiting for it is bounded", async () => {
+    // The measured bug: the backend write holds the session's writer lock across a blocking write on
+    // the PTY, so a process that stopped reading fills that buffer and never answers. Nothing there
+    // times it out, which left a close that drained the queue first unable to reach the backend at
+    // all: the button did nothing for as long as it was pressed.
+    vi.useFakeTimers();
+    let rejectWrite!: (cause: unknown) => void;
+    const unhandled: unknown[] = [];
+    const collect = (cause: unknown) => unhandled.push(cause);
+    process.on("unhandledRejection", collect);
+    try {
+      vi.mocked(writeTerminal).mockImplementationOnce(() => new Promise<void>((_, reject) => (rejectWrite = reject)));
+      const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+      await flushPromises();
+      vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running", foregroundProcess: false });
+
+      terminalMock.input?.("y");
+      await flushPromises();
+      expect(writeTerminal).toHaveBeenCalledOnce();
+      const closed = wrapper.vm.requestClose();
+      await flushPromises();
+      expect(closeTerminal).not.toHaveBeenCalled();
+
+      // Bounded, not given up on at once: a shell that is merely slow still gets its keystroke, and
+      // the wait is abandoned at a moment where it is clear the answer is never coming.
+      await vi.advanceTimersByTimeAsync(999);
+      expect(closeTerminal).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+
+      // Which is the whole of it: the close reaches the backend anyway, because ending a session
+      // never takes the writer lock the blocked write is holding.
+      expect(closeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new");
+      await closed;
+      expect(wrapper.emitted("closed")).toHaveLength(1);
+
+      // And the write nobody waited for still fails into the terminal's own alert: abandoning the
+      // wait leaves the queue's rejection attached to it rather than loose in the window.
+      rejectWrite({ code: "operation_failed", message: "the PTY is gone" });
+      await flushPromises();
+      expect(wrapper.get('[role="alert"]').text()).toContain("the PTY is gone");
+      expect(unhandled).toEqual([]);
+      wrapper.unmount();
+    } finally {
+      process.off("unhandledRejection", collect);
+      vi.useRealTimers();
+    }
+  });
+
   it("drops a resize that arrives after the pane is gone", async () => {
     const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
     await flushPromises();

@@ -16,11 +16,6 @@ export interface FileTree {
   truncated: boolean;
 }
 
-export interface FileSearchResult {
-  entries: FileEntry[];
-  truncated: boolean;
-}
-
 export interface FileContent {
   path: string;
   content: string;

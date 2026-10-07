@@ -4,11 +4,11 @@ use tauri::State;
 
 use crate::{
     domain::{
-        files::{CheckoutImage, FileContent, FileProbe, FileSearchResult, FileTree},
+        files::{CheckoutImage, FileContent, FileProbe, FileTree},
         ipc::IpcError,
     },
     persistence::Database,
-    services::{self, files::ReviewRoot, workspace::HomeDirectory},
+    services::{self, files::ReviewRoot},
 };
 
 #[tauri::command]
@@ -20,21 +20,6 @@ pub async fn files_list(
     let database = database.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
         services::files::list(&database, &checkout_id, &path)
-    })
-    .await
-    .map_err(operation_error)?
-}
-
-#[tauri::command]
-pub async fn files_search(
-    checkout_id: String,
-    database: State<'_, Database>,
-    home: State<'_, HomeDirectory>,
-) -> Result<FileSearchResult, IpcError> {
-    let database = database.inner().clone();
-    let home = home.inner().clone();
-    tauri::async_runtime::spawn_blocking(move || {
-        services::files::search(&database, &checkout_id, &home)
     })
     .await
     .map_err(operation_error)?

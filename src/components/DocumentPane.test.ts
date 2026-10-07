@@ -23,7 +23,6 @@ const { toasts, dismiss } = useToasts();
 
 const mocks = vi.hoisted(() => ({
   listCheckoutFiles: vi.fn(),
-  searchCheckoutFiles: vi.fn(),
   readCheckoutFile: vi.fn(),
   writeCheckoutFile: vi.fn(),
   getReviewRootPath: vi.fn(),
@@ -38,7 +37,6 @@ const mocks = vi.hoisted(() => ({
 
 vi.mock("../lib/ipc", () => ({
   listCheckoutFiles: mocks.listCheckoutFiles,
-  searchCheckoutFiles: mocks.searchCheckoutFiles,
   readCheckoutFile: mocks.readCheckoutFile,
   writeCheckoutFile: mocks.writeCheckoutFile,
   getReviewRootPath: mocks.getReviewRootPath,
@@ -255,7 +253,7 @@ describe("DocumentPane", () => {
   beforeEach(() => {
     vi.resetAllMocks();
     mocks.listCheckoutFiles.mockResolvedValue({ entries: [], truncated: false });
-    mocks.searchCheckoutFiles.mockResolvedValue({ entries: [], truncated: false });
+
     mocks.readCheckoutMarkdownImage.mockResolvedValue({
       mimeType: "image/png",
       dataBase64: "iVBORw0KGgo=",
@@ -265,6 +263,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      revision: "src/app.ts#1",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -675,6 +674,7 @@ describe("DocumentPane", () => {
         "+const b = 2;",
         " const c = 3;",
       ].join("\n"),
+      revision: "src/example.ts#1",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -742,6 +742,7 @@ describe("DocumentPane", () => {
         "+const c = 3;",
         " const d = 4;",
       ].join("\n"),
+      revision: "src/example.ts#2",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -1086,6 +1087,101 @@ describe("DocumentPane", () => {
     wrapper.unmount();
   });
 
+  it("refreshes a figure the superseded read was triggered by, not only the one that replaced it", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "docs/readme.md",
+      content: "![preview](images/pic.png)\n\n# Marvis",
+    });
+    mocks.readCheckoutMarkdownImage.mockResolvedValue({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgo=",
+      sizeBytes: 8,
+    });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("docs/readme.md", "view"),
+        refreshRevision: 0,
+        refreshPaths: [],
+      },
+    });
+    await vi.waitFor(() =>
+      expect(wrapper.get(".markdown-preview img").attributes("src")).toBe("data:image/png;base64,iVBORw0KGgo="),
+    );
+
+    // The read that named the figure is still out when the activity for another file lands, and the
+    // read that lands is the one that gets to name what brought it here. What the first one was
+    // told about is only its own paths, so it has to have handed them over before it was sent.
+    let resolveRead!: (value: { path: string; content: string }) => void;
+    mocks.readCheckoutFile.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: ["docs/images/pic.png"] });
+
+    mocks.readCheckoutMarkdownImage.mockResolvedValue({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgp=",
+      sizeBytes: 8,
+    });
+    await wrapper.setProps({ refreshRevision: 2, refreshPaths: ["src/app.ts"] });
+    resolveRead({ path: "docs/readme.md", content: "![preview](images/pic.png)\n\n# Marvis" });
+
+    // Both batches are spent as one, so the figure the superseded read named is asked again and the
+    // batch that named nothing the page draws reads nothing itself.
+    await vi.waitFor(() =>
+      expect(wrapper.get(".markdown-preview img").attributes("src")).toBe("data:image/png;base64,iVBORw0KGgp="),
+    );
+    expect(mocks.readCheckoutMarkdownImage).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("asks every figure in use again when the batch that could not say what it moved is the superseded read", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({
+      path: "docs/readme.md",
+      content: "![one](one.png)\n\n![two](two.png)",
+    });
+    mocks.readCheckoutMarkdownImage.mockResolvedValue({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgo=",
+      sizeBytes: 8,
+    });
+    const wrapper = mount(DocumentPane, {
+      props: {
+        ...documentPaneProps("docs/readme.md", "view"),
+        refreshRevision: 0,
+        refreshPaths: [],
+      },
+    });
+    await vi.waitFor(() => expect(mocks.readCheckoutMarkdownImage).toHaveBeenCalledTimes(2));
+
+    // A batch that could not say what it moved is not a batch that moved nothing, and the read it
+    // triggered is not the read that lands, so it has to be holding the figures' share of it too.
+    let resolveRead!: (value: { path: string; content: string }) => void;
+    mocks.readCheckoutFile.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveRead = resolve;
+        }),
+    );
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: [] });
+
+    mocks.readCheckoutMarkdownImage.mockResolvedValue({
+      mimeType: "image/png",
+      dataBase64: "iVBORw0KGgp=",
+      sizeBytes: 8,
+    });
+    await wrapper.setProps({ refreshRevision: 2, refreshPaths: ["src/app.ts"] });
+    resolveRead({ path: "docs/readme.md", content: "![one](one.png)\n\n![two](two.png)" });
+
+    // Naming fewer paths than the batch before it does not undo it: both references in use are read
+    // again, and no more than those.
+    await vi.waitFor(() => expect(mocks.readCheckoutMarkdownImage).toHaveBeenCalledTimes(4));
+    expect(wrapper.get(".markdown-preview img").attributes("src")).toBe("data:image/png;base64,iVBORw0KGgp=");
+    wrapper.unmount();
+  });
+
   it("warns and drops a figure whose file is gone, and takes the warning back when it returns", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
@@ -1359,6 +1455,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockImplementation(async (_checkoutId: string, path: string) => ({
       path,
       patch: `diff --git a/${path} b/${path}\n@@ -1 +1 @@\n-old\n+new\n`,
+      revision: "path#1",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -1453,6 +1550,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.txt",
       patch: "",
+      revision: "large.txt#1",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -1488,6 +1586,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.txt",
       patch: "",
+      revision: "large.txt#2",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -1591,6 +1690,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.txt",
       patch: "@@ -0,0 +1,2 @@\n+first line\n+second line\n",
+      revision: "large.txt#3",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -1641,6 +1741,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.txt",
       patch: "@@ -0,0 +1,3 @@\n+first line\n+second line\n+third line\n",
+      revision: "large.txt#4",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -1697,6 +1798,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.txt",
       patch: "@@ -0,0 +1,3 @@\n+first line\n+second line\n+third line\n",
+      revision: "large.txt#5",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -1758,6 +1860,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.txt",
       patch: "@@ -1,3 +1,2 @@\n first\n-second\n-third\n+two thirds\n",
+      revision: "large.txt#6",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -1813,6 +1916,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.txt",
       patch: "@@ -0,0 +1,3 @@\n+first line\n+second line\n+third line\n",
+      revision: "large.txt#7",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -1877,6 +1981,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.ts",
       patch: "",
+      revision: "large.ts#1",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -1950,6 +2055,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.ts",
       patch: "",
+      revision: "large.ts#2",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -1995,6 +2101,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.txt",
       patch: "@@ -0,0 +1,2 @@\n+first line\n+second line\n",
+      revision: "large.txt#8",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -2046,6 +2153,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "@@ -1,2 +1,2 @@\n const a = 1;\n+const b = 2;\n",
+      revision: "src/app.ts#2",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -2085,6 +2193,7 @@ describe("DocumentPane", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "large.txt",
       patch: "@@ -0,0 +1,2 @@\n+first line\n+second line\n",
+      revision: "large.txt#9",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -2154,6 +2263,7 @@ describe("DocumentPane", () => {
       mocks.getGitDiff.mockResolvedValueOnce({
         path: "src/app.ts",
         patch: "",
+        revision: "src/app.ts#3",
         isBinary: result.isBinary,
         large: false,
         tooLarge: result.tooLarge,

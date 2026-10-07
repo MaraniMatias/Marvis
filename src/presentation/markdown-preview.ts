@@ -78,7 +78,12 @@ export function useMarkdownPreview(getCheckoutId: () => string | null, getOrigin
     markdownImageWarning.value = false;
   }
 
-  /** Holds the paths one batch moved for the next re-read, merged into whatever is already held. */
+  /** Holds the paths one batch moved for the next re-read, merged into whatever is already held.
+   *
+   *  Public because a caller can only know what a batch moved before it knows whether the read that
+   *  batch triggered will land: a read a newer one supersedes stops at its own guard and never gets
+   *  to name what brought it here, so the paths have to be with the figures already. Nothing spends
+   *  them but `refreshImages` or a settled `load`. */
   function hold(touched: readonly string[]): void {
     if (queued === null) {
       queued = [...touched];
@@ -315,6 +320,7 @@ export function useMarkdownPreview(getCheckoutId: () => string | null, getOrigin
     markdownImageWarning,
     isMarkdownPath,
     load,
+    hold,
     refreshImages,
     clear,
     invalidate,

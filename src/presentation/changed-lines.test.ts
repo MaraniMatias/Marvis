@@ -24,6 +24,7 @@ function patch(...lines: string[]): GitFileDiff {
   return {
     path: "src/app.ts",
     patch: lines.join("\n"),
+    revision: lines.join("\n"),
     isBinary: false,
     large: false,
     tooLarge: false,

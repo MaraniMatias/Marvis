@@ -57,9 +57,10 @@ vi.mock("../lib/ipc", () => ({
 }));
 
 function diff(overrides: Partial<GitFileDiff> = {}): GitFileDiff {
-  return {
+  const fixture: GitFileDiff = {
     path: "src/app.vue",
     patch: "@@ -1 +1 @@\n-old\n+new",
+    revision: "",
     oldContent: "old",
     newContent: "new",
     isBinary: false,
@@ -69,6 +70,10 @@ function diff(overrides: Partial<GitFileDiff> = {}): GitFileDiff {
     hunks: [{ startLine: 1, endLine: 1, title: "@@ -1 +1 @@" }],
     ...overrides,
   };
+  // The backend hashes the lines it read, so a fixture's revision stands for its content unless a
+  // test says otherwise: a fixture whose patch moved is a diff that moved, and one that carries no
+  // patch at all has to be told apart by whatever the test gives it instead.
+  return { ...fixture, revision: overrides.revision ?? fixture.patch };
 }
 
 function status(...files: string[]): GitStatus {
@@ -491,6 +496,107 @@ describe("useDiffLoader", () => {
     await flushPromises();
     // A patch that moved drops the pages, because a moved patch moves every line after the edit.
     expect(panel.pages.reset).toHaveBeenCalledTimes(1);
+
+    panel.wrapper.unmount();
+  });
+
+  it("installs a second large diff of the same file, which the empty patch alone could not tell apart", async () => {
+    // The shape the backend actually answers a large diff with: no patch at all, because a diff past
+    // the patch's cap drops the bytes it had collected. So every large diff compared equal on the
+    // patch, the stale answer stayed installed, and the pages went on serving the previous diff's
+    // lines while the file behind them moved.
+    vi.useFakeTimers();
+    mocks.getGitDiff.mockResolvedValue(
+      diff({
+        path: "src/big.vue",
+        patch: "",
+        large: true,
+        totalLines: 6001,
+        hunks: [{ startLine: 1, endLine: 6001, title: "@@ -1,6001 +1,6001 @@" }],
+        revision: "6001",
+      }),
+    );
+    const panel = host();
+    panel.path.value = "src/big.vue";
+    await flushPromises();
+    expect(panel.loader.diff.value?.totalLines).toBe(6001);
+    expect(panel.pages.reset).not.toHaveBeenCalled();
+    const reads = mocks.getGitDiff.mock.calls.length;
+
+    mocks.getGitDiff.mockResolvedValue(
+      diff({
+        path: "src/big.vue",
+        patch: "",
+        large: true,
+        totalLines: 7001,
+        hunks: [{ startLine: 1, endLine: 7001, title: "@@ -1,7001 +1,7001 @@" }],
+        revision: "7001",
+      }),
+    );
+    panel.gitSnapshot.value = snapshot({ statusRevision: 1, status: status("src/app.vue", "src/big.vue") });
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(STATUS_REFRESH_DEBOUNCE);
+    await flushPromises();
+
+    expect(mocks.getGitDiff.mock.calls.length).toBe(reads + 1);
+    expect(panel.loader.diff.value?.totalLines).toBe(7001);
+    // A diff that moved drops the pages, or they keep serving the lines of the one before it.
+    expect(panel.pages.reset).toHaveBeenCalledTimes(1);
+
+    panel.wrapper.unmount();
+  });
+
+  it("keeps the pages of a large diff that a refresh reported again without having moved", async () => {
+    // The other half of the same rule, and what the composer-preservation above rests on: an answer
+    // that is the same diff is not a new one. Dropping the pages on every write in the workdir blanked
+    // the window and then refilled it, which is the cycle the pages are dropped to avoid.
+    vi.useFakeTimers();
+    const large = {
+      path: "src/big.vue",
+      patch: "",
+      large: true,
+      totalLines: 6001,
+      hunks: [{ startLine: 1, endLine: 6001, title: "@@ -1,6001 +1,6001 @@" }],
+      revision: "6001",
+    };
+    mocks.getGitDiff.mockResolvedValue(diff(large));
+    const panel = host();
+    panel.path.value = "src/big.vue";
+    await flushPromises();
+    const reads = mocks.getGitDiff.mock.calls.length;
+
+    mocks.getGitDiff.mockResolvedValue(diff(large));
+    panel.gitSnapshot.value = snapshot({ statusRevision: 1, status: status("src/app.vue", "src/big.vue") });
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(STATUS_REFRESH_DEBOUNCE);
+    await flushPromises();
+
+    expect(mocks.getGitDiff.mock.calls.length).toBe(reads + 1);
+    expect(panel.loader.diff.value?.totalLines).toBe(6001);
+    expect(panel.pages.reset).not.toHaveBeenCalled();
+
+    panel.wrapper.unmount();
+  });
+
+  it("installs a symlink diff whose target was repointed", async () => {
+    // A symlink carries no patch either, so its identity cannot come from one: the target is the
+    // whole of what is drawn, and a link repointed while the user is looking at it has to move the
+    // view rather than leave the old target on screen.
+    vi.useFakeTimers();
+    mocks.getGitDiff.mockResolvedValue(diff({ patch: "", symlinkTarget: "old/target", revision: "link-old" }));
+    const panel = host();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(panel.loader.diff.value?.symlinkTarget).toBe("old/target");
+    const reads = mocks.getGitDiff.mock.calls.length;
+
+    mocks.getGitDiff.mockResolvedValue(diff({ patch: "", symlinkTarget: "new/target", revision: "link-new" }));
+    panel.gitSnapshot.value = snapshot({ statusRevision: 1 });
+    await nextTick();
+    await vi.advanceTimersByTimeAsync(STATUS_REFRESH_DEBOUNCE);
+    await flushPromises();
+
+    expect(mocks.getGitDiff.mock.calls.length).toBe(reads + 1);
+    expect(panel.loader.diff.value?.symlinkTarget).toBe("new/target");
 
     panel.wrapper.unmount();
   });

@@ -556,14 +556,42 @@ async function requestClose() {
   }
 }
 
+/**
+ * How long a close waits for the queues in front of it before it gives up on them.
+ *
+ * Both drains are real: input typed a moment before the close has to reach the PTY before the PTY
+ * goes away, and a resize still in flight when it closes is a size the session never learns about.
+ * But `write` holds the session's writer lock across a blocking write on the PTY, so a process that
+ * stopped reading fills that buffer, blocks the write and never answers it, and nothing in the
+ * backend times it out. A close that waited on the queue for as long as the queue took would then
+ * be a button that does nothing for as long as it is pressed, and ending a session never takes that
+ * lock, so a session on its way out is worth more than the bytes still behind it.
+ *
+ * Long enough that an ordinary shell answers well inside it, short enough that a PTY nobody is
+ * reading reads as a close that took a moment rather than one that was ignored.
+ */
+const CLOSE_DRAIN_MS = 1_000;
+
+/**
+ * The drain, or the bound, whichever lands first.
+ *
+ * Subscribed from the start, so a queue that answers after the bound still has somewhere to answer:
+ * a failure this wait has already stopped watching for is the terminal's own to show, not a
+ * rejection with nothing behind it.
+ */
+function drainBeforeClose(drain: Promise<void>): Promise<void> {
+  let bound!: ReturnType<typeof setTimeout>;
+  const giveUp = new Promise<void>((resolve) => (bound = setTimeout(resolve, CLOSE_DRAIN_MS)));
+  return Promise.race([drain, giveUp]).finally(() => clearTimeout(bound));
+}
+
 /** The close itself, once nothing is left to ask about. */
 async function stopSession(): Promise<void> {
   try {
-    await inputQueue;
-    // A resize still in flight when the PTY is closed is a size the session never learns about.
-    // One promise is the whole of the queue from here: the guard in `queueResize` refuses new work
-    // the moment closing begins, so the drain cannot hand back a replacement while this waits.
-    await resizeQueue;
+    // One wait over both, because the resize is only worth waiting for behind the input, and
+    // because the guard in `queueResize` refuses new work the moment closing begins: from here on,
+    // neither queue can hand back a replacement while this waits.
+    await drainBeforeClose(inputQueue.then(() => resizeQueue));
     emit("closed", await closeTerminal(props.checkoutId, sessionId!));
   } catch (cause) {
     showError(cause);

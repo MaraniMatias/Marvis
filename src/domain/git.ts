@@ -40,6 +40,12 @@ export interface GitStatus {
 export interface GitFileDiff {
   path: string;
   patch: string;
+  /** What this diff is of, hashed by the backend from the lines it read. It is what two answers are
+   *  compared on rather than the patch: a large, a too large and a binary diff all carry no patch at
+   *  all, so on the patch alone any two of them are the same diff and the view behind them keeps
+   *  serving the pages of the first. Stable when the diff has not moved, which is what keeps a
+   *  refresh of an unmoved diff from rebuilding the reading around the open note composer. */
+  revision: string;
   /** The whole text of each side of the diff, which is what a grammar reads rather than the
    *  patch's hunks: a hunk inside `<script setup lang="ts">` is markup to a grammar that never saw
    *  the opening tag. Absent when the side has no text: a binary or symlink diff, a diff too large

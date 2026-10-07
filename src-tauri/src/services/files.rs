@@ -1,7 +1,7 @@
 use std::{
     collections::{HashMap, HashSet},
     fs::{self, File, OpenOptions},
-    io::{BufRead, BufReader, Read, Write},
+    io::{Read, Write},
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::{Arc, Mutex, OnceLock, Weak},
@@ -13,15 +13,11 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use crate::{
     domain::review::MAX_ROUND_PROMPT_BYTES,
     domain::{
-        files::{
-            CheckoutImage, FileContent, FileEntry, FileEntryKind, FileProbe, FileSearchResult,
-            FileTree,
-        },
+        files::{CheckoutImage, FileContent, FileEntry, FileEntryKind, FileProbe, FileTree},
         ipc::{IpcError, IpcErrorCode},
         workspace::{Checkout, Repo, RepoKind},
     },
     persistence::Database,
-    services::workspace::HomeDirectory,
 };
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
@@ -30,7 +26,7 @@ const MAX_DIRECTORY_ENTRIES: usize = 2000;
 /// Git's own bookkeeping, never shown in the tree. `check-ignore` reports it ignored on every
 /// repository, which would otherwise put it in the list the moment ignores became visible.
 const GIT_DIRECTORY: &str = ".git";
-const MAX_SEARCH_ENTRIES: usize = 50_000;
+
 /// The one product choice behind `~/.marvis/tmp/code-reviews/`.
 const REVIEW_ROOT_FROM_HOME: &str = ".marvis/tmp/code-reviews";
 
@@ -137,183 +133,6 @@ pub fn list(
         entries: collected,
         truncated,
     })
-}
-
-pub fn search(
-    database: &Database,
-    checkout_id: &str,
-    home: &HomeDirectory,
-) -> Result<FileSearchResult, IpcError> {
-    let (repo, checkout) = registered_checkout(database, checkout_id)?;
-    ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
-    let root = Path::new(&checkout.canonical_path);
-    if root == home.0.as_path() {
-        return Err(IpcError::new(
-            IpcErrorCode::OperationFailed,
-            "file search is disabled for the Home workdir",
-        ));
-    }
-    let (mut entries, truncated) = if repo.kind == RepoKind::Git {
-        search_git_files(root)?
-    } else {
-        search_plain_files(root)?
-    };
-    entries.sort_by(|left, right| {
-        left.name
-            .to_lowercase()
-            .cmp(&right.name.to_lowercase())
-            .then_with(|| left.path.cmp(&right.path))
-    });
-    Ok(FileSearchResult { entries, truncated })
-}
-
-fn search_git_files(root: &Path) -> Result<(Vec<FileEntry>, bool), IpcError> {
-    let mut child = Command::new("git")
-        .arg("-C")
-        .arg(root)
-        .args([
-            "ls-files",
-            "--cached",
-            "--others",
-            "--exclude-standard",
-            "-z",
-        ])
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .map_err(|error| {
-            IpcError::new(
-                IpcErrorCode::GitFailed,
-                format!("could not search checkout files: {error}"),
-            )
-        })?;
-    let stdout = child.stdout.take().expect("piped stdout");
-    let mut reader = BufReader::new(stdout);
-    let mut entries = Vec::new();
-    let mut truncated = false;
-    loop {
-        let mut record = Vec::new();
-        let length = reader.read_until(0, &mut record).map_err(|error| {
-            IpcError::new(
-                IpcErrorCode::GitFailed,
-                format!("could not read checkout file search results: {error}"),
-            )
-        })?;
-        if length == 0 {
-            break;
-        }
-        if entries.len() == MAX_SEARCH_ENTRIES {
-            truncated = true;
-            break;
-        }
-        let Some(path) = record
-            .strip_suffix(&[0])
-            .and_then(|path| std::str::from_utf8(path).ok())
-        else {
-            continue;
-        };
-        let relative = Path::new(path);
-        if relative.components().any(
-            |component| matches!(component, std::path::Component::Normal(name) if name == ".git"),
-        ) {
-            continue;
-        }
-        let full_path = root.join(relative);
-        let Ok(metadata) = fs::symlink_metadata(&full_path) else {
-            continue;
-        };
-        let kind = if metadata.file_type().is_symlink() {
-            FileEntryKind::Symlink
-        } else if metadata.is_file() {
-            FileEntryKind::File
-        } else {
-            continue;
-        };
-        entries.push(FileEntry {
-            name: relative
-                .file_name()
-                .and_then(|name| name.to_str())
-                .unwrap_or_default()
-                .to_owned(),
-            path: path.replace(std::path::MAIN_SEPARATOR, "/"),
-            kind,
-            ignored: false,
-        });
-    }
-    if truncated {
-        let _ = child.kill();
-    }
-    let output = child.wait_with_output().map_err(|error| {
-        IpcError::new(
-            IpcErrorCode::GitFailed,
-            format!("could not finish checkout file search: {error}"),
-        )
-    })?;
-    if !truncated && !output.status.success() {
-        return Err(IpcError::new(
-            IpcErrorCode::GitFailed,
-            format!(
-                "could not search checkout files: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        ));
-    }
-    Ok((entries, truncated))
-}
-
-fn search_plain_files(root: &Path) -> Result<(Vec<FileEntry>, bool), IpcError> {
-    let mut pending = vec![root.to_path_buf()];
-    let mut entries = Vec::new();
-    while let Some(directory) = pending.pop() {
-        for item in fs::read_dir(&directory)
-            .map_err(|error| filesystem_error("could not search folder", error))?
-        {
-            let item =
-                item.map_err(|error| filesystem_error("could not read folder entry", error))?;
-            let name = match item.file_name().into_string() {
-                Ok(name) => name,
-                Err(_) => continue,
-            };
-            if name == ".git" {
-                continue;
-            }
-            let file_type = item
-                .file_type()
-                .map_err(|error| filesystem_error("could not inspect folder entry", error))?;
-            if file_type.is_dir() {
-                pending.push(item.path());
-                continue;
-            }
-            let kind = if file_type.is_symlink() {
-                FileEntryKind::Symlink
-            } else if file_type.is_file() {
-                FileEntryKind::File
-            } else {
-                continue;
-            };
-            let entry_path = item.path();
-            let relative = entry_path.strip_prefix(root).map_err(|_| {
-                IpcError::new(
-                    IpcErrorCode::PathOutsideCheckout,
-                    "entry is outside checkout",
-                )
-            })?;
-            let Some(path) = relative.to_str() else {
-                continue;
-            };
-            entries.push(FileEntry {
-                name,
-                path: path.replace(std::path::MAIN_SEPARATOR, "/"),
-                kind,
-                ignored: false,
-            });
-            if entries.len() > MAX_SEARCH_ENTRIES {
-                entries.pop();
-                return Ok((entries, true));
-            }
-        }
-    }
-    Ok((entries, false))
 }
 
 /**
@@ -1090,8 +909,8 @@ mod tests {
     };
 
     use super::{
-        export_review_markdown, list, probe, read, read_markdown_image, search, write, FileContent,
-        HomeDirectory, IpcError, MAX_ROUND_PROMPT_BYTES,
+        export_review_markdown, list, probe, read, read_markdown_image, write, FileContent,
+        IpcError, MAX_ROUND_PROMPT_BYTES,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -1763,73 +1582,5 @@ mod tests {
             .unwrap_err();
             assert!(matches!(escaped.code, IpcErrorCode::PathOutsideCheckout));
         }
-    }
-
-    #[test]
-    fn home_file_search_is_blocked_but_lazy_listing_still_works() {
-        let temp = tempdir().unwrap();
-        let home = temp.path().join("home");
-        fs::create_dir_all(home.join("nested")).unwrap();
-        fs::write(home.join("nested/file.txt"), "content").unwrap();
-        let database = db(temp.path());
-        let state = workspace::register_folder(&database, &home).unwrap();
-        let checkout_id = &state.repos[0].checkouts[0].id;
-        let canonical_home = HomeDirectory(home.canonicalize().unwrap());
-
-        let error = search(&database, checkout_id, &canonical_home).unwrap_err();
-        assert_eq!(error.code, IpcErrorCode::OperationFailed);
-        assert_eq!(
-            error.message,
-            "file search is disabled for the Home workdir"
-        );
-        assert!(list(&database, checkout_id, ".")
-            .unwrap()
-            .entries
-            .iter()
-            .any(|entry| entry.name == "nested"));
-    }
-
-    #[test]
-    fn file_search_includes_git_files_and_untracked_binary_files_but_honors_ignores() {
-        let temp = tempdir().unwrap();
-        let root = temp.path().join("repo");
-        fs::create_dir_all(&root).unwrap();
-        git(&root, &["init", "-b", "trunk"]);
-        fs::write(root.join("tracked.txt"), "tracked\n").unwrap();
-        fs::write(root.join(".gitignore"), "ignored.log\n").unwrap();
-        git(&root, &["add", "tracked.txt", ".gitignore"]);
-        git(
-            &root,
-            &[
-                "-c",
-                "user.name=Test",
-                "-c",
-                "user.email=test@example.invalid",
-                "commit",
-                "-m",
-                "base",
-            ],
-        );
-        fs::write(root.join("new binary.dat"), [0, 1, 2]).unwrap();
-        fs::write(root.join("ignored.log"), "ignore me").unwrap();
-        let database = db(temp.path());
-        let state = workspace::register_folder(&database, &root).unwrap();
-        let result = search(
-            &database,
-            &state.repos[0].checkouts[0].id,
-            &HomeDirectory(temp.path().join("unrelated-home")),
-        )
-        .unwrap();
-        let paths: Vec<_> = result
-            .entries
-            .iter()
-            .map(|entry| entry.path.as_str())
-            .collect();
-
-        assert!(paths.contains(&"tracked.txt"));
-        assert!(paths.contains(&"new binary.dat"));
-        assert!(!paths.contains(&"ignored.log"));
-        assert!(!paths.iter().any(|path| path.contains(".git/")));
-        assert!(!result.truncated);
     }
 }

@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Channel } from "@tauri-apps/api/core";
 import type { OpenedFolder } from "../domain/folder";
-import type { CheckoutImage, FileContent, FileProbe, FileSearchResult, FileTree } from "../domain/files";
+import type { CheckoutImage, FileContent, FileProbe, FileTree } from "../domain/files";
 import type { GitCheckoutDiffStats, GitDiffPage, GitFileDiff, GitFileDiffStats, GitStatus } from "../domain/git";
 import type { ReviewAnchorCheck, ReviewNote, ReviewRound, ReviewSide, ReviewTarget } from "../domain/review";
 import type { RecentPath, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
@@ -19,10 +19,6 @@ export interface CreatedTerminal {
 
 export function listCheckoutFiles(checkoutId: string, path: string): Promise<FileTree> {
   return invoke<FileTree>("files_list", { checkoutId, path });
-}
-
-export function searchCheckoutFiles(checkoutId: string): Promise<FileSearchResult> {
-  return invoke<FileSearchResult>("files_search", { checkoutId });
 }
 
 export function readCheckoutFile(checkoutId: string, path: string, origin: DocumentOrigin): Promise<FileContent> {

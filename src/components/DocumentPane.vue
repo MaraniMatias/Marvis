@@ -92,11 +92,19 @@ const deleted = computed(
 );
 const available = computed(() => !deleted.value);
 const readingPosition = ref(props.readingPosition);
-const { markdownHtml, markdownPreviewState, markdownImageWarning, isMarkdownPath, load, refreshImages, clear } =
-  useMarkdownPreview(
-    () => props.checkout?.id ?? null,
-    () => props.origin,
-  );
+const {
+  markdownHtml,
+  markdownPreviewState,
+  markdownImageWarning,
+  isMarkdownPath,
+  load,
+  hold: holdImagePaths,
+  refreshImages,
+  clear,
+} = useMarkdownPreview(
+  () => props.checkout?.id ?? null,
+  () => props.origin,
+);
 const identity = computed(() =>
   props.path === null ? null : `${props.checkout?.id ?? ""}\0${props.origin}\0${props.path}`,
 );
@@ -184,8 +192,6 @@ const languageRows = computed<LanguageRow[]>(() => [
   { name: PLAIN_TEXT, label: "Plain text", hint: "" },
   ...matchingLanguages.value.map((language) => ({ name: language.name, label: language.label, hint: "" })),
 ]);
-
-const languageList = ref<HTMLElement | null>(null);
 
 /**
  * The three preferences CodeMirror's own stylesheet has no room for, and the one it cannot answer
@@ -445,8 +451,11 @@ async function applyChangedLinesToEditor() {
  * Re-reads `path` into the panel, `touchedPaths` being the checkout-relative paths the file
  * activity that brought us here moved. They decide nothing about the text, which is compared on its
  * own; they are what a document that resolves references of its own needs.
+ *
+ * `null` is a read no batch of activity brought here, which is not a batch that could not say what
+ * it moved: an empty list is that one, and asks every reference in use again.
  */
-async function loadFile(preservePosition = false, touchedPaths: readonly string[] = []) {
+async function loadFile(preservePosition = false, touchedPaths: readonly string[] | null = null) {
   const checkoutId = props.checkout?.id;
   const path = props.path;
   const fileIdentity = identity.value;
@@ -482,6 +491,10 @@ async function loadFile(preservePosition = false, touchedPaths: readonly string[
     contentState.value = "loading";
     contentError.value = "";
   }
+  // Handed over before the read rather than after it, because a read that a newer one supersedes
+  // stops at the guard below and never names what brought it here to anything. The preview holds
+  // them until a read that does land spends them, merged with every batch that arrived since.
+  if (touchedPaths !== null) holdImagePaths(touchedPaths);
   try {
     const result = await readCheckoutFile(checkoutId, path, props.origin);
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
@@ -494,8 +507,10 @@ async function loadFile(preservePosition = false, touchedPaths: readonly string[
       originalContent.value = result.content;
       // What the page draws is not only those bytes. A Markdown preview also carries the images it
       // resolved, and the file that moved may be exactly one of them, so the ones the last render
-      // used are asked again — and nothing else is.
-      if (props.mode === "view" && isMarkdown.value && (await refreshImages(touchedPaths))) {
+      // used are asked again — and nothing else is. This read's own paths are already among what is
+      // held, and whatever a superseded read was holding went in with them: the pass spends the
+      // union, not the batch that happened to reach this line last.
+      if (props.mode === "view" && isMarkdown.value && (await refreshImages(touchedPaths ?? []))) {
         await restoreMarkdownReadingPosition(previousPosition, request, fileIdentity, checkoutId);
       }
       return;
@@ -788,13 +803,7 @@ function onMarkdownLink(event: MouseEvent) {
                 />
                 <!-- The rows scroll under the search rather than with it: there are grammars enough
                      to fill any reasonable column, and a filter that scrolls away is no filter. -->
-                <div
-                  id="language-options"
-                  ref="languageList"
-                  role="listbox"
-                  aria-label="Grammar"
-                  class="marvis-menu-scroll flex flex-col"
-                >
+                <div id="language-options" role="listbox" aria-label="Grammar" class="marvis-menu-scroll flex flex-col">
                   <button
                     v-for="row in languageRows"
                     :key="row.name ?? 'auto'"

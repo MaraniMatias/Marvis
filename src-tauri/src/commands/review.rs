@@ -217,9 +217,18 @@ pub async fn review_round_dispatch(
         review_round::check_prompt_size(
             &(request.markdown.clone() + &"x".repeat(review_round::marker_budget())),
         )?;
-        // `begin_round` links the notes, which is also what rejects a foreign note id, and
-        // stores the exact message this round will be sent with.
-        let round = review_round::begin_round(
+        // Whichever the caller asked for, this links the notes — which is also what rejects a
+        // foreign note id — and stores the exact message the round will be sent with.
+        //
+        // The queued case has to be recorded as `queued`, not as `dispatching`: `queued` is the
+        // state `flush_rounds` selects, so a round recorded as `dispatching` reads as a send in
+        // flight, is never flushed, and sits there until some reconnect happens to requeue it.
+        let record = if request.queue {
+            review_round::queue_round
+        } else {
+            review_round::begin_round
+        };
+        let round = record(
             &database,
             &request.checkout_id,
             &request.session_id,
@@ -340,7 +349,157 @@ pub async fn review_round_ack(
 
 #[cfg(test)]
 mod tests {
-    use super::ReviewRoundDispatchRequest;
+    use std::{
+        io::{BufRead, BufReader, Read, Write},
+        net::TcpListener,
+        sync::Arc,
+        thread,
+    };
+
+    use tauri::Manager;
+
+    use tempfile::tempdir;
+
+    use crate::{
+        domain::workspace::Repo,
+        persistence::Database,
+        services::{
+            agent::AgentService,
+            review::{self, NewReviewNote},
+        },
+    };
+
+    use super::{review_round_dispatch, review_round_flush, ReviewRoundDispatchRequest};
+
+    /// Answers one request per response, body included, so a send can be walked end to end.
+    fn mock_responses(responses: Vec<serde_json::Value>) -> u16 {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock server should bind");
+        let port = listener.local_addr().unwrap().port();
+        thread::spawn(move || {
+            for response in responses {
+                let Ok((mut stream, _)) = listener.accept() else {
+                    return;
+                };
+                let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                reader
+                    .read_line(&mut String::new())
+                    .expect("request line should be readable");
+                let mut content_length = 0;
+                loop {
+                    let mut line = String::new();
+                    if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                        break;
+                    }
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.trim_end().split_once(':') {
+                        if name.trim().eq_ignore_ascii_case("content-length") {
+                            content_length = value.trim().parse().expect("valid body length");
+                        }
+                    }
+                }
+                let mut sent = vec![0; content_length];
+                reader
+                    .read_exact(&mut sent)
+                    .expect("request body should be readable");
+                let body = serde_json::to_vec(&response).expect("response should encode");
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                    body.len()
+                )
+                .expect("response headers should be writable");
+                stream
+                    .write_all(&body)
+                    .expect("response body should be writable");
+            }
+        });
+        port
+    }
+
+    /// Queued has to persist `queued`, because that is the state the send path selects.
+    ///
+    /// `queue_round` already had unit coverage and the dispatch was still wrong, because the bug
+    /// was in the command, which recorded every round with `begin_round` and returned. So this one
+    /// enters through `review_round_dispatch` and leaves through `review_round_flush`, against a
+    /// server that answers the routes a send walks: a round stored as anything else is never
+    /// selected, so the flush reports nothing sent and the round never leaves `dispatching`.
+    #[test]
+    fn a_queued_dispatch_is_the_round_the_flush_sends() {
+        let temp = tempdir().unwrap();
+        let directory = temp.path().join("first");
+        std::fs::create_dir_all(&directory).unwrap();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        let repo = Repo::plain(&directory, "now").unwrap();
+        let checkout_id = repo.checkouts[0].id.clone();
+        database.register_plain_repo(repo).unwrap();
+        let note = review::add_note(
+            &database,
+            &checkout_id,
+            NewReviewNote {
+                path: "src/foo.js".into(),
+                side: "new".into(),
+                line_start: 10,
+                line_end: None,
+                content: "check this".into(),
+                code: "const result = a + b;".into(),
+            },
+        )
+        .unwrap();
+
+        let session = serde_json::json!({
+            "id": "ses_target",
+            "location": {"directory": directory.to_string_lossy()},
+        });
+        let port = mock_responses(vec![
+            // The transcript the flush reads before it sends anything: no marker, so the round
+            // reads as never delivered and the stored message has to go out.
+            serde_json::json!({"data": session.clone()}),
+            serde_json::json!({"data": [{"text": "unrelated transcript"}]}),
+            serde_json::json!({"data": session.clone()}),
+            serde_json::json!({"data": {"accepted": true}}),
+            serde_json::json!({"data": session}),
+            serde_json::json!({"data": {}}),
+        ]);
+        let agents = Arc::new(AgentService::with_test_server(port));
+        let app = tauri::test::mock_app();
+        app.manage(database.clone());
+        app.manage(Arc::clone(&agents));
+
+        let round = tauri::async_runtime::block_on(review_round_dispatch(
+            app.state::<Database>(),
+            app.state::<Arc<AgentService>>(),
+            ReviewRoundDispatchRequest {
+                checkout_id: checkout_id.clone(),
+                session_id: "ses_target".into(),
+                ids: vec![note.id],
+                markdown: "# Code Review".into(),
+                queue: true,
+            },
+        ))
+        .expect("a queued dispatch records the round");
+        assert_eq!(round.status, "queued");
+        assert_eq!(
+            database.review_rounds(&checkout_id).unwrap()[0].status,
+            "queued"
+        );
+
+        let sent = tauri::async_runtime::block_on(review_round_flush(
+            app.state::<Database>(),
+            app.state::<Arc<AgentService>>(),
+            checkout_id.clone(),
+        ))
+        .expect("the queued round is flushable");
+        assert_eq!(
+            sent, 1,
+            "the flush did not select the round that was dispatched"
+        );
+        assert_eq!(
+            database.review_rounds(&checkout_id).unwrap()[0].status,
+            "dispatched"
+        );
+    }
 
     /// The bridge contract is one build on both ends, so `queue` is required rather than defaulted:
     /// a request missing it is refused instead of being read as "send it now".

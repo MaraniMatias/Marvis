@@ -419,6 +419,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      revision: "src/app.ts#1",
       oldContent: "const before = 1;\n",
       newContent: "const after = 2;\n",
       isBinary: false,
@@ -556,6 +557,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -40,2 +40,2 @@ fn tail\n-old\n+new\n",
+      revision: "src/app.ts#2",
       oldContent: "const before = 1;\n",
       newContent: "const after = 2;\n",
       isBinary: false,
@@ -589,6 +591,7 @@ describe("FileDiff", () => {
       mocks.getGitDiff.mockResolvedValue({
         path: "src/app.ts",
         patch: `diff --git a/src/app.ts b/src/app.ts\n@@ -40,2 +40,2 @@ fn tail\n-old\n+${text}\n`,
+        revision: `src/app.ts#3-${text}`,
         oldContent: "const before = 1;\n",
         newContent: `const after = ${text.length};\n`,
         isBinary: false,
@@ -625,6 +628,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "",
+      revision: "src/app.ts#4",
       isBinary: false,
       large: true,
       tooLarge: false,
@@ -696,6 +700,7 @@ describe("FileDiff", () => {
       mocks.getGitDiff.mockResolvedValue({
         path,
         patch: `diff --git a/${path} b/${path}\n@@ -1 +1 @@\n-old\n+new\n`,
+        revision: "path#1",
         isBinary: false,
         large: false,
         tooLarge: false,
@@ -747,6 +752,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+newer\n",
+      revision: "src/app.ts#5",
       oldContent: "const before = 1;\n",
       newContent: "const after = 3;\n",
       isBinary: false,
@@ -768,6 +774,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "assets/logo.png",
       patch: "diff --git a/assets/logo.png b/assets/logo.png\n@@ -1 +1 @@\n-old\n+new\n",
+      revision: "assets/logo.png#1",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -811,6 +818,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/other.ts",
       patch: "diff --git a/src/other.ts b/src/other.ts\n@@ -1 +1 @@\n-old\n+new\n",
+      revision: "src/other.ts#1",
       oldContent: "const other = 1;\n",
       newContent: "const other = 2;\n",
       isBinary: false,
@@ -843,6 +851,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+newer\n",
+      revision: "src/app.ts#6",
       oldContent: "const before = 1;\n",
       newContent: "const after = 3;\n",
       isBinary: false,
@@ -875,6 +884,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "assets/logo.svg",
       patch: "diff --git a/assets/logo.svg b/assets/logo.svg\n@@ -1 +1 @@\n-old\n+new\n",
+      revision: "assets/logo.svg#1",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -929,6 +939,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "diff --git a/src/app.ts b/src/app.ts\n@@ -1 +1 @@\n-old\n+other\n",
+      revision: "src/app.ts#7",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -1046,6 +1057,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "@@ -1,3 +1,3 @@\n first\n-second\n+second changed\n third\n",
+      revision: "src/app.ts#8",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -1090,6 +1102,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "@@ -1,3 +1,3 @@\n first\n-second\n+second changed\n third\n",
+      revision: "src/app.ts#9",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -1144,6 +1157,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "@@ -1,3 +1,3 @@\n first\n-second\n+second changed\n third\n",
+      revision: "src/app.ts#10",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -1289,6 +1303,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "@@ -1,2 +1,2 @@\n const a = 1;\n+const b = 2;\n",
+      revision: "src/app.ts#11",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -1314,6 +1329,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "@@ -1,2 +1,2 @@\n const a = 1;\n+const b = 2;\n",
+      revision: "src/app.ts#12",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -1335,6 +1351,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "@@ -1,2 +1,2 @@\n const a = 1;\n+const b = 3;\n",
+      revision: "src/app.ts#13",
       isBinary: false,
       large: false,
       tooLarge: false,
@@ -1370,6 +1387,7 @@ describe("FileDiff", () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "src/app.ts",
       patch: "@@ -1,2 +1,2 @@\n const a = 1;\n+const b = 2;\n",
+      revision: "src/app.ts#14",
       isBinary: false,
       large: false,
       tooLarge: false,
