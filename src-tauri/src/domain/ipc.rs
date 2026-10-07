@@ -31,7 +31,10 @@ pub enum IpcErrorCode {
     BinaryFile,
     GitFailed,
     ProcessTerminated,
-    /// The agent server for this checkout is not running and could not be started.
+    /// The agent service for this checkout could not be reached at the endpoint this app holds, or
+    /// that endpoint has stopped being the one that answers. Nothing here is ever started by this
+    /// app: `services::opencode` connects to a service that is already running, so "unavailable"
+    /// is always about reaching it, never about having failed to launch it.
     AgentUnavailable,
     /// A session id does not belong to the checkout it was used against.
     AgentOwnershipMismatch,

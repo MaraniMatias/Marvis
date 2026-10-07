@@ -1550,7 +1550,11 @@ impl Database {
         checkout_id: &str,
     ) -> Result<Option<(Repo, Checkout)>, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
-        let workspace = load_workspace_for_checkout(&connection, checkout_id)?;
+        // Same two halves as `load_workspace`, and for the same reason: the folder check is a
+        // `stat` on the user's disk, and it does not belong inside the global critical section.
+        let mut workspace = load_workspace_for_checkout(&connection, checkout_id)?;
+        drop(connection);
+        mark_missing_checkouts(&mut workspace);
         let Some(repo) = workspace.repos.into_iter().next() else {
             return Ok(None);
         };
@@ -1567,8 +1571,15 @@ impl Database {
 
     pub fn load_workspace(&self) -> Result<WorkspaceState, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        // The rows are the database's to answer and the lock is released before the folders are
+        // asked about. `is_dir` is a `stat`, and a `stat` on a network mount, a spinning disk or a
+        // volume that is on its way out can take as long as the kernel feels like — none of which
+        // is the connection's business, and every unrelated read, write and bookkeeping call in
+        // the app is queued behind this one mutex. Checking the folders first would mean one slow
+        // path stalls the whole workspace; checking them second also means the answer is fresher.
         let mut state = load_workspace(&connection)?;
         drop(connection);
+        mark_missing_checkouts(&mut state);
         state.home_checkout_id = self
             .home_checkout_id
             .lock()
@@ -2457,6 +2468,9 @@ fn load_workspace_for_checkout(
 }
 
 // Full loads use four set queries; a scoped lookup uses the same three without preferences.
+// Rows come back carrying the stored `is_missing` only: whether a folder is still on disk is
+// the filesystem's answer, and it is `mark_missing_checkouts`' to give once the caller has
+// dropped the connection.
 fn load_workspace_filtered(
     connection: &Connection,
     checkout_id: Option<&str>,
@@ -2586,7 +2600,7 @@ fn load_workspace_filtered(
             checkouts.push(Checkout {
                 id: checkout_id,
                 repo_id: id.clone(),
-                is_missing: is_missing || !PathBuf::from(&canonical_path).is_dir(),
+                is_missing,
                 path,
                 canonical_path,
                 is_primary,
@@ -2640,6 +2654,20 @@ fn load_workspace_filtered(
         active_checkout_id,
         active_session_id,
     })
+}
+
+/// Fold the filesystem into a workspace that has already been read, marking as missing every
+/// checkout whose folder is gone. A row stored as missing stays missing even if its folder is
+/// back: that flag is the record of a worktree the user was told about, and a checkout that was
+/// missing once is still their decision to make, not a silent guess. Archived worktrees never
+/// reach here — they are not on the panel and are not statted while the panel is being built.
+fn mark_missing_checkouts(state: &mut WorkspaceState) {
+    for repo in &mut state.repos {
+        for checkout in &mut repo.checkouts {
+            checkout.is_missing =
+                checkout.is_missing || !PathBuf::from(&checkout.canonical_path).is_dir();
+        }
+    }
 }
 
 fn session_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, Session)> {
@@ -2817,8 +2845,8 @@ mod tests {
     };
 
     use super::{
-        AppLayoutState, CheckoutUiState, Database, PersistedDocument, ReviewNote, ReviewRound,
-        SCHEMA_VERSION, UI_LAYOUT,
+        load_workspace, mark_missing_checkouts, AppLayoutState, CheckoutUiState, Database,
+        PersistedDocument, ReviewNote, ReviewRound, SCHEMA_VERSION, UI_LAYOUT,
     };
 
     fn plain_repo(path: &Path, now: &str) -> Repo {
@@ -4467,6 +4495,113 @@ mod tests {
         assert_eq!(state.repos.len(), 1);
         assert_eq!(state.repos[0].id, repo.id);
         assert!(state.repos[0].checkouts[0].is_missing);
+    }
+
+    /// The workspace read is two halves: the rows, under the lock, and the folders, after it.
+    /// The split cannot be observed by timing, so it is observed by what the locked half alone
+    /// answers: a checkout whose folder is gone still comes back as stored, which is only
+    /// possible when nothing in that half has stat'ed anything.
+    #[test]
+    fn folder_checks_are_folded_into_the_state_after_the_lock_is_released() {
+        let temp = tempdir().expect("temporary directory");
+        let live = temp.path().join("live");
+        let stored_missing = temp.path().join("stored missing");
+        for folder in [&live, &stored_missing] {
+            fs::create_dir(folder).unwrap();
+        }
+        let repo = plain_repo(&live, "1");
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_plain_repo(repo.clone()).unwrap();
+        let live_id = repo.checkouts[0].id.clone();
+        // Two of these four folders are never created, so only the filesystem can report them
+        // gone, and only the stored flags can report the rest.
+        let rows = [
+            ("checkout:gone", temp.path().join("gone"), 2, false, false),
+            (
+                "checkout:stored-missing",
+                stored_missing.canonicalize().unwrap(),
+                3,
+                false,
+                true,
+            ),
+            (
+                "checkout:archived",
+                temp.path().join("archived"),
+                4,
+                true,
+                false,
+            ),
+        ];
+        {
+            let connection = database.connection.lock().unwrap();
+            for (id, path, position, is_archived, is_missing) in &rows {
+                connection
+                    .execute(
+                        "INSERT INTO checkouts
+                         (id, repo_id, path, canonical_path, is_primary, is_archived, is_missing, position)
+                         VALUES (?1, ?2, ?3, ?4, 0, ?5, ?6, ?7)",
+                        params![
+                            id,
+                            repo.id,
+                            path.display().to_string(),
+                            path.display().to_string(),
+                            is_archived,
+                            is_missing,
+                            position
+                        ],
+                    )
+                    .unwrap();
+            }
+        }
+
+        // The locked half reads rows and nothing else, so it reports what is stored even where
+        // the disk disagrees, and an archived worktree is still off the panel and not gone.
+        let rows_only = {
+            let connection = database.connection.lock().unwrap();
+            load_workspace(&connection).expect("read rows")
+        };
+        let flagged = |state: &crate::domain::workspace::WorkspaceState, id: &str| {
+            state
+                .repos
+                .iter()
+                .flat_map(|repo| &repo.checkouts)
+                .find(|checkout| checkout.id == id)
+                .expect("checkout on the panel")
+                .is_missing
+        };
+        assert!(!flagged(&rows_only, &live_id));
+        assert!(!flagged(&rows_only, "checkout:gone"));
+        assert!(flagged(&rows_only, "checkout:stored-missing"));
+        assert_eq!(rows_only.repos[0].checkouts.len(), 3);
+        assert!(rows_only
+            .archived_worktrees
+            .iter()
+            .any(|archived| archived.id == "checkout:archived"));
+
+        // The unlocked half asks the disk, and only ever adds: gone becomes missing, a checkout
+        // stored as missing keeps the flag with its folder right there, and a live one stays.
+        let mut state = rows_only;
+        mark_missing_checkouts(&mut state);
+        assert!(!flagged(&state, &live_id));
+        assert!(flagged(&state, "checkout:gone"));
+        assert!(flagged(&state, "checkout:stored-missing"));
+        assert_eq!(state.repos[0].checkouts.len(), 3);
+
+        // The same state, through both entry points, which is where the halves are joined.
+        let loaded = database.load_workspace().expect("load workspace");
+        assert!(!flagged(&loaded, &live_id));
+        assert!(flagged(&loaded, "checkout:gone"));
+        assert!(flagged(&loaded, "checkout:stored-missing"));
+        let (_, gone) = database
+            .load_registered_checkout("checkout:gone")
+            .unwrap()
+            .expect("registered checkout");
+        assert!(gone.is_missing);
+        let (_, stored) = database
+            .load_registered_checkout("checkout:stored-missing")
+            .unwrap()
+            .expect("registered checkout");
+        assert!(stored.is_missing);
     }
 
     /// A Git repository with its primary and every given worktree on disk, without running

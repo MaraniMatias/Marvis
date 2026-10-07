@@ -677,15 +677,6 @@ function isAppShortcut(event: KeyboardEvent) {
 }
 
 /**
- * The app shortcut a key asks for, or nothing at all for a key that asks for none.
- *
- * The panels are on `⌘/`, and what makes that chord answerable is only that nothing in the menu
- * bar takes it: `menus.rs` builds the app menu and an Edit submenu of undo, redo, cut, copy,
- * paste and select all, and not one of those items carries `⌘/`, so it arrives at the webview
- * whole. A chord a menu *does* carry never arrives — `⌘H` is the app menu's Hide item and `⌘Esc`
- * is the system's own cancel, both of which resolve before the webview is told about the key.
- */
-/**
  * Whether a key is the one that spells `/`, wherever the layout puts it.
  *
  * `key` is not enough on its own, and the reason is specific to the modifier these shortcuts are
@@ -705,6 +696,15 @@ function isSlashKey(event: KeyboardEvent) {
   return event.key === "/" || event.code === "Slash" || (event.code === "Digit7" && event.shiftKey);
 }
 
+/**
+ * The app shortcut a key asks for, or nothing at all for a key that asks for none.
+ *
+ * The panels are on `⌘/`, and what makes that chord answerable is only that nothing in the menu
+ * bar takes it: `menus.rs` builds the app menu and an Edit submenu of undo, redo, cut, copy,
+ * paste and select all, and not one of those items carries `⌘/`, so it arrives at the webview
+ * whole. A chord a menu *does* carry never arrives — `⌘H` is the app menu's Hide item and `⌘Esc`
+ * is the system's own cancel, both of which resolve before the webview is told about the key.
+ */
 function appShortcutFor(event: KeyboardEvent): "panels" | "terminal" | undefined {
   if (isSlashKey(event)) return "panels";
   if (event.key.toLowerCase() === "n") return "terminal";

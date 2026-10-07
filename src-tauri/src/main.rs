@@ -47,9 +47,12 @@ fn log_max_file_size() -> u128 {
 ///
 /// `KeepOne` is the other default worth replacing: it deletes rather than renames, so the evidence
 /// is gone the first time the file fills. `KeepAll` would keep it and grow without bound inside a
-/// log directory a shipped app owns, which is its own bug. Three archives beside the live file, at
-/// `log_max_file_size()` each, is about four megabytes and holds this session and the three before
-/// it — which is what "reproducible" needs.
+/// log directory a shipped app owns, which is its own bug. Three archives beside the live file is
+/// about four megabytes and is what "yesterday" is worth here — but it is three *files*, not three
+/// sessions: rotation is by size, so a quiet afternoon keeps days of history while one session with a
+/// terminal and a line per agent request can fill all three and push the previous one out. The
+/// evidence that survives is therefore the recent megabytes, not the recent sessions, and a bug
+/// report is better attached before the next heavy run than after it.
 fn log_rotated_files_kept() -> usize {
     3
 }
