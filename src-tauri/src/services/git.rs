@@ -2164,7 +2164,10 @@ fn exited_unreaped_unbroken(child: &Child) -> io::Result<bool> {
     // A report names the child it is about, and no report is a success that carries no process:
     // `WNOHANG` asking too early says the child is still running, and saying that as an exit would
     // end a read that was only just getting started.
-    Ok(unsafe { (*info.as_ptr()).si_pid == child.id() as libc::pid_t })
+    // SAFETY: `waitid` wrote the report into `info`, or wrote nothing and left the structure
+    // zeroed, which is the same initialised structure either way.
+    let info = unsafe { info.assume_init_ref() };
+    Ok(crate::terminal::process::wait_status_pid(info) == child.id() as libc::pid_t)
 }
 
 /// Runs one Git under a deadline and reads what it printed through a pipe under a cap.

@@ -44,6 +44,10 @@ mod imp {
             .ok()?;
         file_name(path)
     }
+
+    pub fn wait_status_pid(info: &libc::siginfo_t) -> libc::pid_t {
+        info.si_pid
+    }
 }
 
 #[cfg(target_os = "linux")]
@@ -55,6 +59,12 @@ mod imp {
         let comm = std::fs::read_to_string(format!("/proc/{pid}/comm")).ok()?;
         file_name(comm.trim())
     }
+
+    pub fn wait_status_pid(info: &libc::siginfo_t) -> libc::pid_t {
+        // SAFETY: the caller owns the structure `waitid` reported into, and reading the pid out of
+        // it is what libc exposes the accessor for.
+        unsafe { info.si_pid() }
+    }
 }
 
 #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -62,6 +72,21 @@ mod imp {
     pub fn executable_name(_pid: u32) -> Option<String> {
         None
     }
+
+    /// No platform to read it from, so this reports the same thing as no report at all.
+    pub fn wait_status_pid(_info: &libc::siginfo_t) -> libc::pid_t {
+        0
+    }
+}
+
+/// The process a `waitid` report is about, on whichever way this platform spells it.
+///
+/// `si_pid` is a field on macOS and a method on Linux, so the same reading is a field access on one
+/// and a call on the other, and code written the way one platform spells it does not compile on the
+/// other. Both callers are deciding whether a report arrived at all, which is the one reading a
+/// build that cannot compile takes the whole Linux build with it.
+pub fn wait_status_pid(info: &libc::siginfo_t) -> libc::pid_t {
+    imp::wait_status_pid(info)
 }
 
 /// The last path component, which is what a row in the sidebar has room for.

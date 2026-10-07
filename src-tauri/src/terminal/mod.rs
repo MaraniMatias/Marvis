@@ -970,6 +970,7 @@ mod tests {
     #[cfg(unix)]
     use std::os::unix::process::CommandExt;
 
+    use super::process::wait_status_pid;
     #[cfg(unix)]
     use super::{process_group_exists, signal_group_with, GroupSignal, REAP_POLL_INTERVAL};
     use super::{
@@ -1463,7 +1464,9 @@ mod tests {
                 libc::WEXITED | libc::WNOWAIT,
             )
         } != 0
-            || unsafe { (*info.as_ptr()).si_pid } != group as libc::pid_t
+            // SAFETY: `waitid` wrote the report into `info`, or wrote nothing and left the
+            // structure zeroed, which is the same initialised structure either way.
+            || wait_status_pid(unsafe { info.assume_init_ref() }) != group as libc::pid_t
         {
             assert!(Instant::now() < deadline, "the child never exited");
             thread::sleep(REAP_POLL_INTERVAL);
