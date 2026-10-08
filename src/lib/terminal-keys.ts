@@ -10,21 +10,18 @@
  * what the program announced about its own keyboard, answer it when it asks, and only then answer a
  * modified key with an encoding it can read.
  *
- * A program announces the encoding by pushing the flags it wants (`ESC [ > flags u`), which is also
- * how the older form sets them (`ESC [ = flags ; mode u`). Bit 0 is the one that turns the encoding
- * off, which is why a program that never pushes is a program this leaves alone. An answer to a query
- * (`ESC [ ? flags u`) is deliberately not one of those: it says what this terminal supports, and a
- * program that has decided to read keys this way says so by pushing, not by asking.
+ * What a program announces is a set of flags, and the one that matters here is the first: pushed as
+ * `ESC [ > flags u` (popped and restored with `ESC [ < u`, and set the older way with
+ * `ESC [ = flags ; mode u`), it turns the disambiguation on. A question (`ESC [ ? u`) is answered
+ * with the flags in force, and is deliberately not treated as agreement: a program that has decided
+ * to read keys this way says so by pushing, not by asking.
  */
 
-/** The one flag that answers "no keys in this encoding", in every form the protocol has. */
-const DISABLED_FLAG = 0b1;
+/** The flag that turns every ambiguous escape code into a key of its own. */
+const DISAMBIGUATE_FLAG = 0b1;
 
-/**
- * What this terminal says it supports: every escape code the protocol defines is disambiguated, and
- * nothing is disabled. It is what a query is answered with.
- */
-const SUPPORTED_FLAGS = 0;
+/** What a terminal supports before any program has asked for anything: the legacy encodings. */
+const INITIAL_FLAGS = 0;
 
 /**
  * Enough of the previous chunk to hold an announcement the channel boundary cut in half. The longest
@@ -35,11 +32,15 @@ const ANNOUNCEMENT_TAIL = 32;
 /** The escape, as a code rather than as a character: written out, it is a control character. */
 const ESCAPE = String.fromCharCode(0x1b);
 
-/** A push of the flags a program wants, an answer to a query, or the older form that sets them. */
-const ANNOUNCEMENT = new RegExp(`${ESCAPE}\\[([>?=])(\\d+)(?:[;: ]\\d+)*u`, "g");
+/**
+ * A push of the flags a program wants, a pop, a question, or an answer to one — and, for the older
+ * form, the mode that says how the flags are to be applied.
+ */
+const ANNOUNCEMENT = new RegExp(`${ESCAPE}\\[([<>?=])(\\d*)(?:[;: ](\\d+))*u`, "g");
 
-/** The question a program asks before it decides, which is answered rather than obeyed. */
-const QUERY = new RegExp(`${ESCAPE}\\[\\?u`);
+/** How the older form applies what it is given: add to the flags in force, or take away from them. */
+const ADD = 2;
+const REMOVE = 3;
 
 export interface KeyboardProtocol {
   /** Whether a modified key can be sent as a key of its own rather than as the bare one it looks like. */
@@ -53,23 +54,43 @@ export interface KeyboardProtocol {
 }
 
 export function watchKeyboardProtocol(answer: (data: string) => void): KeyboardProtocol {
-  let enabled = false;
+  let flags = INITIAL_FLAGS;
+  const pushed: number[] = [];
+  // The tail is the part of the last chunk that could still be half an announcement, and it is only
+  // ever content no match reached: a chunk of output ends wherever it ends.
   let tail = "";
   return {
     get csiU() {
-      return enabled;
+      return (flags & DISAMBIGUATE_FLAG) !== 0;
     },
     read(output: ArrayBuffer) {
       // Latin-1 rather than UTF-8: an announcement is ASCII, and decoding would only put the bytes
       // of a character cut in half inside the window. One that ends mid character is harmless here
       // in a way that one ending mid announcement is not.
       const chunk = tail + Array.from(new Uint8Array(output), (byte) => String.fromCharCode(byte)).join("");
-      tail = chunk.slice(-ANNOUNCEMENT_TAIL);
-      for (const [, form, flags] of chunk.matchAll(ANNOUNCEMENT)) {
-        if (form === "?") continue;
-        enabled = (Number(flags) & DISABLED_FLAG) === 0;
+      // The carry is only ever content a match did not reach, so the whole of the chunk is read
+      // again and nothing is read twice: a question carried whole would otherwise be answered by
+      // every chunk that follows it.
+      let lastRead = 0;
+      for (const match of chunk.matchAll(ANNOUNCEMENT)) {
+        const [, form, announced, mode] = match;
+        if (form === "<") {
+          flags = pushed.pop() ?? INITIAL_FLAGS;
+        } else if (form === "?") {
+          if (announced === "") answer(`${ESCAPE}[?${flags}u`);
+        } else if (form === "=") {
+          const asked = Number(announced);
+          const how = Number(mode);
+          flags = how === ADD ? flags | asked : how === REMOVE ? flags & ~asked : asked;
+        } else {
+          pushed.push(flags);
+          flags = Number(announced);
+        }
+        lastRead = match.index + match[0].length;
       }
-      if (QUERY.test(chunk)) answer(`${ESCAPE}[?${SUPPORTED_FLAGS}u`);
+      const carried = chunk.length - lastRead;
+      tail =
+        carried > ANNOUNCEMENT_TAIL ? chunk.slice(lastRead + (carried - ANNOUNCEMENT_TAIL)) : chunk.slice(lastRead);
     },
   };
 }

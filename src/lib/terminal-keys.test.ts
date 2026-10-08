@@ -18,45 +18,89 @@ describe("watchKeyboardProtocol", () => {
     expect(answer).not.toHaveBeenCalled();
   });
 
-  it("takes the encoding from the flags a program pushed, including the flag that turns it off", () => {
+  it("takes the encoding from the flags a program pushed, which is how a program asks for it", () => {
     const protocol = watchKeyboardProtocol(vi.fn());
-    protocol.read(output(`hello${ESC}[>0u`));
+    // What the protocol tells a program to emit at startup: one bit, the disambiguation.
+    protocol.read(output(`hello${ESC}[>1u`));
     expect(protocol.csiU).toBe(true);
-    // Still on with the flags that report escape codes and event types alongside.
-    protocol.read(output(`${ESC}[>14u`));
+    // Still on with the flags that report event types and alternate keys alongside.
+    protocol.read(output(`${ESC}[>7u`));
     expect(protocol.csiU).toBe(true);
-    // The older form says the same thing.
-    protocol.read(output(`${ESC}[=0;2u`));
-    expect(protocol.csiU).toBe(true);
-    // One bit is all it takes to turn it off.
-    protocol.read(output(`${ESC}[>1u`));
+    // Pushing nothing is a program asking for the legacy encodings back.
+    protocol.read(output(`${ESC}[>0u`));
     expect(protocol.csiU).toBe(false);
   });
 
-  it("answers a query with what this terminal supports without taking that as the program agreeing", () => {
+  it("restores the flags a program left behind when it pops", () => {
+    const protocol = watchKeyboardProtocol(vi.fn());
+    protocol.read(output(`${ESC}[>1u`));
+    expect(protocol.csiU).toBe(true);
+    // A nested push inside the alternate screen, and a pop out of it.
+    protocol.read(output(`${ESC}[>0u`));
+    expect(protocol.csiU).toBe(false);
+    protocol.read(output(`${ESC}[<u`));
+    expect(protocol.csiU).toBe(true);
+    protocol.read(output(`${ESC}[<u`));
+    expect(protocol.csiU).toBe(false);
+  });
+
+  it("applies the older form by the mode it is given", () => {
+    const protocol = watchKeyboardProtocol(vi.fn());
+    protocol.read(output(`${ESC}[=1u`));
+    expect(protocol.csiU).toBe(true);
+    // Mode 2 only adds, so the flag in force stays.
+    protocol.read(output(`${ESC}[=2;2u`));
+    expect(protocol.csiU).toBe(true);
+    // Mode 3 takes away, and mode 1 replaces what was there.
+    protocol.read(output(`${ESC}[=1;3u`));
+    expect(protocol.csiU).toBe(false);
+    protocol.read(output(`${ESC}[=1;2u`));
+    expect(protocol.csiU).toBe(true);
+  });
+
+  it("answers a question with the flags in force without taking that as the program agreeing", () => {
     const answer = vi.fn();
     const protocol = watchKeyboardProtocol(answer);
     protocol.read(output(`${ESC}[?u`));
     expect(answer).toHaveBeenCalledWith(`${ESC}[?0u`);
     expect(protocol.csiU).toBe(false);
-    // The push that follows the answer is what turns it on.
-    protocol.read(output(`${ESC}[>0u`));
+    protocol.read(output(`${ESC}[>1u`));
+    protocol.read(output(`${ESC}[?u`));
+    expect(answer).toHaveBeenLastCalledWith(`${ESC}[?1u`);
     expect(protocol.csiU).toBe(true);
   });
 
   it("reads an announcement the channel boundary cut in half", () => {
-    const protocol = watchKeyboardProtocol(vi.fn());
+    const answer = vi.fn();
+    const protocol = watchKeyboardProtocol(answer);
     protocol.read(output(`${ESC}[>`));
     expect(protocol.csiU).toBe(false);
-    protocol.read(output("0u"));
+    protocol.read(output("1u"));
     expect(protocol.csiU).toBe(true);
+    // A question cut in half is one answer, not one per chunk that follows it.
+    protocol.read(output(`${ESC}[?`));
+    protocol.read(output("u"));
+    protocol.read(output("more output"));
+    expect(answer).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads an announcement once however many chunks follow it", () => {
+    const answer = vi.fn();
+    const protocol = watchKeyboardProtocol(answer);
+    protocol.read(output(`${ESC}[>1u`));
+    protocol.read(output("[?25h"));
+    protocol.read(output("[?25l"));
+    expect(protocol.csiU).toBe(true);
+    expect(answer).not.toHaveBeenCalled();
   });
 
   it("leaves its own answer, echoed back, as nothing to obey", () => {
-    const protocol = watchKeyboardProtocol(vi.fn());
-    // A shell with echo on hands the answer straight back, and a question with digits behind it is
-    // not a question.
+    const answer = vi.fn();
+    const protocol = watchKeyboardProtocol(answer);
+    // A shell with echo on hands the answer straight back, and a question with flags behind it is
+    // an answer rather than a question.
     protocol.read(output(`${ESC}[?0u`));
     expect(protocol.csiU).toBe(false);
+    expect(answer).not.toHaveBeenCalled();
   });
 });

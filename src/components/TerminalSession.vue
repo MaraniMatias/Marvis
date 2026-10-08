@@ -793,14 +793,18 @@ const keyboardProtocol = watchKeyboardProtocol((data) => void queueInput(data));
  * cannot read. Either way `false` comes back, so xterm sends no carriage return as well.
  */
 function forwardShiftEnter(event: KeyboardEvent): boolean {
-  // xterm asks about the release and about the character event as well, and the press that was
-  // handled here is not `keyDownHandled`, so all three reach this handler for one keystroke.
-  if (event.type !== "keydown" || event.key !== "Enter" || !event.shiftKey) return true;
+  if (event.key !== "Enter" || !event.shiftKey) return true;
   // A shift on its own is the key this is about. With another modifier held it is that other
   // shortcut, and a terminal that cannot even name the modifiers is not where to decide what they
   // should have been.
   if (event.ctrlKey || event.altKey || event.metaKey) return true;
-  void queueInput(keyboardProtocol.csiU ? "\u001b[13;2u" : "\n");
+  // The character event is swallowed along with the keydown. xterm 6 registers its keydown listener
+  // without the preventDefault that would stop the browser from raising one, so the press is looked
+  // at twice, and letting the second look through is where xterm's own carriage return came from:
+  // sent right beside the key that goes out here, which a reader holding both as "return" answers
+  // by sending the message and breaking the line at once.
+  if (event.type === "keyup") return true;
+  if (event.type === "keydown") void queueInput(keyboardProtocol.csiU ? "\u001b[13;2u" : "\n");
   return false;
 }
 terminal.attachCustomKeyEventHandler(forwardShiftEnter);

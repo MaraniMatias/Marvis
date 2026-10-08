@@ -319,15 +319,16 @@ describe("TerminalSession UI", () => {
     for (const modifier of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }]) {
       expect(handler(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, ...modifier }))).toBe(true);
     }
-    // The release and the character event reach the handler for the same press.
-    handler(new KeyboardEvent("keyup", { key: "Enter", shiftKey: true }));
-    handler(new KeyboardEvent("keypress", { key: "Enter", shiftKey: true }));
+    // The character event xterm looks at a second time, and the release, neither of which may send
+    // anything: xterm's own carriage return beside ours is a message sent and a line broken at once.
+    expect(handler(new KeyboardEvent("keypress", { key: "Enter", shiftKey: true }))).toBe(false);
+    expect(handler(new KeyboardEvent("keyup", { key: "Enter", shiftKey: true }))).toBe(true);
     // A bare Return is xterm's, and it still arrives.
     expect(handler(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
     terminalMock.input?.("\r");
 
     // A program that pushed the flags gets the key with its modifier attached.
-    terminalMock.channel?.onmessage(new TextEncoder().encode("\u001b[>0u").buffer as ArrayBuffer);
+    terminalMock.channel?.onmessage(new TextEncoder().encode("\u001b[>1u").buffer as ArrayBuffer);
     expect(handler(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true }))).toBe(false);
     await flushPromises();
 
