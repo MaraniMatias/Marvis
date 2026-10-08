@@ -12,7 +12,8 @@ import { useMarkdownPreview } from "../presentation/markdown-preview";
 import { useSourceHighlight } from "../presentation/source-highlight";
 import { isIpcError } from "../domain/ipc";
 import { absoluteFilePath } from "../domain/files";
-import { getReviewRootPath, readCheckoutFile, writeCheckoutFile } from "../lib/ipc";
+import { mediaKind, svgBlob } from "../domain/media";
+import { getReviewRootPath, readCheckoutFile, readCheckoutMedia, writeCheckoutFile } from "../lib/ipc";
 import { DEFAULT_SETTINGS } from "../domain/settings";
 import type { EditorSettings } from "../domain/settings";
 import type { SourceLanguageOption } from "../lib/source-languages";
@@ -109,12 +110,55 @@ const identity = computed(() =>
   props.path === null ? null : `${props.checkout?.id ?? ""}\0${props.origin}\0${props.path}`,
 );
 const isMarkdown = computed(() => props.path !== null && isMarkdownPath(props.path));
+const kind = computed(() => (props.path === null || props.origin !== "checkout" ? null : mediaKind(props.path)));
+const binaryMedia = computed(() => kind.value === "image" || kind.value === "video");
+const mediaUrl = ref("");
+const mediaError = ref("");
+const video = ref<HTMLVideoElement | null>(null);
+function clearMedia() {
+  video.value?.pause();
+  if (mediaUrl.value) URL.revokeObjectURL(mediaUrl.value);
+  mediaUrl.value = "";
+  mediaError.value = "";
+}
+function showMedia(blob: Blob) {
+  clearMedia();
+  mediaUrl.value = URL.createObjectURL(blob);
+}
+function renderSvg() {
+  clearMedia();
+  try {
+    showMedia(svgBlob(content.value));
+  } catch (error) {
+    mediaError.value = errorText(error);
+  }
+}
+watch(
+  () => [kind.value, props.mode, content.value, contentState.value] as const,
+  () => {
+    if (
+      kind.value === "svg" &&
+      props.mode === "view" &&
+      contentState.value === "ready" &&
+      contentIdentity.value === identity.value
+    )
+      renderSvg();
+  },
+);
+function mediaDecodeError(event: Event) {
+  if ((event.currentTarget as HTMLElement).getAttribute("src") !== mediaUrl.value) return;
+  clearMedia();
+  mediaError.value =
+    kind.value === "video"
+      ? "This video could not be decoded or its codec is unsupported."
+      : "This image could not be decoded.";
+}
 const sourceLines = computed(() => content.value.split(/\r?\n/));
 const sourceLineNumbers = computed(() => sourceLines.value.map((_, index) => index + 1).join("\n"));
 const compactSource = computed(() => sourceLines.value.length > 5000);
 const { changedLines, changedLineNumbers } = useChangedLines({
   checkoutId: () => props.checkout?.id,
-  path: () => props.path,
+  path: () => (binaryMedia.value ? null : props.path),
   origin: () => props.origin,
   gitSnapshot: () => props.gitSnapshot,
   fileIdentity: () => identity.value,
@@ -145,13 +189,15 @@ const { highlightedLines, highlighting, startHighlight, invalidateHighlight } = 
   content: () => content.value,
   language: () => effectiveLanguage.value,
   fileIdentity: () => identity.value,
-  markdownPreview: () => props.mode === "view" && isMarkdown.value,
+  markdownPreview: () => binaryMedia.value || (props.mode === "view" && (isMarkdown.value || kind.value === "svg")),
 });
 const isDirty = computed(() => (identity.value === null ? false : drafts.has(identity.value)));
 const currentDraft = computed(() => (identity.value === null ? undefined : drafts.get(identity.value)));
 
 // A Markdown preview renders its own fences, so in View mode there is no grammar left to choose.
-const showsSource = computed(() => !(props.mode === "view" && isMarkdown.value));
+const showsSource = computed(
+  () => !binaryMedia.value && !(props.mode === "view" && (isMarkdown.value || kind.value === "svg")),
+);
 
 // The button says what is happening now: in Auto that is the detected grammar, and a file whose
 // extension names none is worth saying out loud rather than showing a language that is not applied.
@@ -327,7 +373,8 @@ function restoreSourcePosition(position: { top: number; left: number }) {
 
 async function ensureEditor(fileIdentity: string) {
   await nextTick();
-  if (identity.value !== fileIdentity || props.mode !== "code" || contentState.value !== "ready") return;
+  if (binaryMedia.value || identity.value !== fileIdentity || props.mode !== "code" || contentState.value !== "ready")
+    return;
   const host = editorHost.value;
   if (!host) return;
   if (editorView && editorIdentity === fileIdentity && editorLanguage === effectiveLanguage.value) {
@@ -496,6 +543,16 @@ async function loadFile(preservePosition = false, touchedPaths: readonly string[
   // them until a read that does land spends them, merged with every batch that arrived since.
   if (touchedPaths !== null) holdImagePaths(touchedPaths);
   try {
+    if (binaryMedia.value) {
+      const blob = await readCheckoutMedia(checkoutId, path);
+      if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
+      showMedia(blob);
+      content.value = "";
+      contentIdentity.value = fileIdentity;
+      contentState.value = "ready";
+      loadedIdentity = fileIdentity;
+      return;
+    }
     const result = await readCheckoutFile(checkoutId, path, props.origin);
     if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
     const draft = drafts.get(fileIdentity);
@@ -524,7 +581,7 @@ async function loadFile(preservePosition = false, touchedPaths: readonly string[
     contentIdentity.value = fileIdentity;
     contentState.value = "ready";
     loadedIdentity = fileIdentity;
-    if (props.mode === "view" && isMarkdown.value) {
+    if (props.mode === "view" && (isMarkdown.value || kind.value === "svg")) {
       invalidateHighlight();
     } else if (props.mode === "code") {
       // CodeMirror is the Code view; Shiki renders nothing behind it.
@@ -564,6 +621,7 @@ async function loadFile(preservePosition = false, touchedPaths: readonly string[
     content.value = "";
     originalContent.value = "";
     contentIdentity.value = fileIdentity;
+    clearMedia();
     contentError.value = errorText(error);
     contentState.value = "error";
     loadedIdentity = fileIdentity;
@@ -602,7 +660,11 @@ watch(
   async ([fileIdentity, mode, isAvailable]) => {
     // Another view owns the main panel: what is loaded here stays loaded, and E.3 does not
     // apply because nothing is being selected.
-    if (fileIdentity === null) return;
+    if (fileIdentity === null) {
+      requestGeneration += 1;
+      video.value?.pause();
+      return;
+    }
     if (loadedIdentity !== fileIdentity) {
       requestGeneration += 1;
       invalidateHighlight(false);
@@ -610,6 +672,7 @@ watch(
       contentState.value = contentIdentity.value === null ? "idle" : "loading";
       contentError.value = "";
       clear();
+      clearMedia();
       readingPosition.value = props.readingPosition;
       if (fileViewport.value) {
         fileViewport.value.scrollTop = 0;
@@ -625,6 +688,7 @@ watch(
       contentIdentity.value = fileIdentity;
       contentState.value = "error";
       contentError.value = unavailableText();
+      clearMedia();
       clear();
       return;
     }
@@ -632,6 +696,12 @@ watch(
       await loadFile();
       return;
     }
+    if (binaryMedia.value) return;
+    if (mode === "view" && kind.value === "svg") {
+      invalidateHighlight();
+      return;
+    }
+    if (kind.value === "svg") clearMedia();
     if (mode === "view" && isMarkdown.value && contentState.value === "ready") {
       const checkoutId = props.checkout?.id;
       if (checkoutId) {
@@ -657,6 +727,7 @@ watch(
   (revision, previous) => {
     // The paths are read at the moment the revision lands, so they are the ones that caused it.
     if (revision !== previous && props.checkout?.id && props.path !== null) {
+      if (binaryMedia.value && props.refreshPaths.length > 0 && !props.refreshPaths.includes(props.path)) return;
       void loadFile(true, props.refreshPaths);
     }
   },
@@ -678,7 +749,7 @@ watch(effectiveLanguage, () => {
 watch(
   () => [identity.value, props.mode] as const,
   ([fileIdentity, mode]) => {
-    if (fileIdentity === null || mode !== "code") {
+    if (fileIdentity === null || mode !== "code" || binaryMedia.value) {
       disposeEditor();
       return;
     }
@@ -686,7 +757,11 @@ watch(
   },
 );
 
-onUnmounted(disposeEditor);
+onUnmounted(() => {
+  requestGeneration += 1;
+  disposeEditor();
+  clearMedia();
+});
 
 function onFileScroll(event: Event) {
   const viewport = event.currentTarget as HTMLElement;
@@ -825,7 +900,7 @@ function onMarkdownLink(event: MouseEvent) {
           </PopoverRoot>
         </div>
         <div
-          v-if="isMarkdown"
+          v-if="isMarkdown || kind === 'svg'"
           role="group"
           aria-label="Document mode"
           class="document-mode-control flex shrink-0 items-center gap-0.5"
@@ -855,7 +930,10 @@ function onMarkdownLink(event: MouseEvent) {
           aria-label="Close preview"
           data-testid="close-preview"
           class="toolbar-icon-button shrink-0"
-          @click="emit('close')"
+          @click="
+            video?.pause();
+            emit('close');
+          "
         >
           <XIcon class="icon-xs" aria-hidden="true" />
         </button>
@@ -882,7 +960,9 @@ function onMarkdownLink(event: MouseEvent) {
         {{ contentError }}
       </p>
       <p
-        v-else-if="contentState === 'ready' && content.length === 0 && mode !== 'code'"
+        v-else-if="
+          contentState === 'ready' && !binaryMedia && kind !== 'svg' && content.length === 0 && mode !== 'code'
+        "
         role="status"
         class="pane-state text-sm"
       >
@@ -890,7 +970,27 @@ function onMarkdownLink(event: MouseEvent) {
       </p>
       <p v-else-if="highlighting" role="status" class="pane-state text-sm">Highlighting source…</p>
       <template v-else-if="contentState === 'ready' || (contentState === 'loading' && contentIdentity === identity)">
-        <template v-if="mode === 'view' && isMarkdown">
+        <div v-if="binaryMedia || (kind === 'svg' && mode === 'view')" class="media-preview">
+          <p v-if="mediaError" role="alert" class="pane-state text-sm">{{ mediaError }}</p>
+          <video
+            v-else-if="kind === 'video' && mediaUrl"
+            :key="mediaUrl"
+            ref="video"
+            :src="mediaUrl"
+            controls
+            playsinline
+            aria-label="Video preview"
+            @error="mediaDecodeError"
+          />
+          <img
+            v-else-if="mediaUrl"
+            :key="mediaUrl"
+            :src="mediaUrl"
+            :alt="path ?? 'Image preview'"
+            @error="mediaDecodeError"
+          />
+        </div>
+        <template v-else-if="mode === 'view' && isMarkdown">
           <p
             v-if="markdownPreviewState === 'loading'"
             role="status"
@@ -987,11 +1087,26 @@ function onMarkdownLink(event: MouseEvent) {
          inside it: the browser's is off in both (in `style.css`) so a long line ends flush against
          the pane instead of short of a gutter. -->
     <OverlayScrollbar :target="fileViewport" label="Document" />
-    <OverlayScrollbar :target="editorScroller" label="Source code" />
+    <OverlayScrollbar v-if="showsSource" :target="editorScroller" label="Source code" />
   </main>
 </template>
 
 <style scoped>
+.media-preview {
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: repeating-conic-gradient(#80808018 0% 25%, transparent 0% 50%) 0 0 / 20px 20px;
+}
+.media-preview img,
+.media-preview video {
+  display: block;
+  max-width: 100%;
+  max-height: 100%;
+  object-fit: contain;
+}
+
 .markdown-preview {
   max-width: 78ch;
   margin: 0 auto;

@@ -151,6 +151,7 @@ export const LANGUAGE_BY_EXTENSION: ReadonlyMap<string, string> = new Map<string
   ["sql", "sql"],
   ["styl", "stylus"],
   ["sv", "system-verilog"],
+  ["svg", "xml"],
   ["svelte", "svelte"],
   ["swift", "swift"],
   ["tex", "latex"],

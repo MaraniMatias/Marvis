@@ -64,6 +64,7 @@ import type { Zoom, ZoomModifier } from "./domain/zoom";
 import { buildReviewMarkdown, localReviewTimestamp } from "./domain/review";
 import { useLayoutPersistence } from "./presentation/layout-persistence";
 import { isMarkdownPath } from "./presentation/markdown-preview";
+import { mediaKind } from "./domain/media";
 import {
   DEFAULT_APP_LAYOUT,
   DEFAULT_CHECKOUT_UI_STATE,
@@ -565,7 +566,7 @@ function openFileDocument(selection: { checkoutId: string; path: string }) {
   showView(selection.checkoutId, {
     kind: "document",
     path: selection.path,
-    mode: isMarkdownPath(selection.path) ? "view" : "code",
+    mode: isMarkdownPath(selection.path) || mediaKind(selection.path) !== null ? "view" : "code",
     origin: "checkout",
   });
 }

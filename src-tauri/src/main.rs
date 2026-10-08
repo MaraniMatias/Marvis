@@ -301,6 +301,7 @@ fn main() {
             commands::workspace::select_session,
             commands::files::files_list,
             commands::files::file_read,
+            commands::files::file_read_media,
             commands::files::file_probe,
             commands::files::file_write,
             commands::files::review_export_markdown,
@@ -422,9 +423,18 @@ mod security_tests {
         assert!(!registered_commands.contains("fs::read"));
 
         let config: Value = serde_json::from_str(include_str!("../tauri.conf.json")).unwrap();
-        let csp = config["app"]["security"]["csp"].as_str().unwrap();
-        assert!(!csp.contains("unsafe-eval"));
-        assert!(!csp.contains("*"));
+        for key in ["csp", "devCsp"] {
+            let csp = config["app"]["security"][key].as_str().unwrap();
+            assert!(!csp.contains("unsafe-eval"));
+            assert!(!csp.contains("*"));
+            assert!(csp.split(';').any(|d| d.trim() == "media-src blob:"));
+            assert!(csp
+                .split(';')
+                .find(|d| d.trim().starts_with("img-src "))
+                .unwrap()
+                .split_whitespace()
+                .any(|s| s == "blob:"));
+        }
 
         // The whole Tauri API is reached through the `@tauri-apps/api` imports, so injecting it a
         // second way as a global on the window would be reachability nothing needs and anything

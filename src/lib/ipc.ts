@@ -21,6 +21,33 @@ export function listCheckoutFiles(checkoutId: string, path: string): Promise<Fil
   return invoke<FileTree>("files_list", { checkoutId, path });
 }
 
+/** Raw response: bounded ASCII MIME, newline, then validated file bytes. */
+export async function readCheckoutMedia(checkoutId: string, path: string): Promise<Blob> {
+  const response = await invoke<ArrayBuffer | number[]>("file_read_media", { checkoutId, path });
+  const bytes = response instanceof ArrayBuffer ? new Uint8Array(response) : Uint8Array.from(response);
+  const separator = bytes.subarray(0, 64).indexOf(10);
+  if (separator < 1) throw new Error("Invalid media response.");
+  const mime = new TextDecoder().decode(bytes.subarray(0, separator));
+  if (
+    ![
+      "image/png",
+      "image/jpeg",
+      "image/gif",
+      "image/webp",
+      "image/avif",
+      "image/x-icon",
+      "image/bmp",
+      "video/mp4",
+      "video/webm",
+      "video/quicktime",
+      "video/ogg",
+    ].includes(mime)
+  ) {
+    throw new Error("Invalid media type.");
+  }
+  return new Blob([bytes.slice(separator + 1)], { type: mime });
+}
+
 export function readCheckoutFile(checkoutId: string, path: string, origin: DocumentOrigin): Promise<FileContent> {
   return invoke<FileContent>("file_read", { checkoutId, path, origin });
 }

@@ -8,6 +8,8 @@ here still gets its generated notes.
 
 ## Unreleased
 
+- Preview images and videos directly; switch SVGs between an editable source and a live preview.
+
 - **Settings now says what the keyboard does.** The chords the window answers were written down in
   the source and nowhere else, so learning them meant reading `App.vue`. There is now a Shortcuts
   section in Settings that writes them down: the side panels, a new terminal and the three zoom

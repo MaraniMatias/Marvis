@@ -26,6 +26,20 @@ pub async fn files_list(
 }
 
 #[tauri::command]
+pub async fn file_read_media(
+    checkout_id: String,
+    path: String,
+    database: State<'_, Database>,
+) -> Result<tauri::ipc::Response, IpcError> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        services::files::read_media(&database, &checkout_id, &path).map(tauri::ipc::Response::new)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+#[tauri::command]
 pub async fn file_read(
     checkout_id: String,
     path: PathBuf,

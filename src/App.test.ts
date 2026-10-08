@@ -1967,6 +1967,28 @@ describe("App UI integration", () => {
       }
     });
 
+    it("opens media from both the inspector and terminal in View mode", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
+      for (const ext of ["png", "jpeg", "gif", "webp", "avif", "ico", "bmp", "svg", "mp4", "webm", "mov", "ogv"]) {
+        wrapper
+          .getComponent({ name: "InspectorPane" })
+          .vm.$emit("openFile", { checkoutId: "checkout:one", path: "asset." + ext });
+        await flushPromises();
+        expect(wrapper.getComponent({ name: "MainPane" }).props("view")).toMatchObject({
+          kind: "document",
+          path: "asset." + ext,
+          mode: "view",
+        });
+      }
+      wrapper.getComponent({ name: "MainPane" }).vm.$emit("openFile", "terminal.mov");
+      await flushPromises();
+      expect(wrapper.getComponent({ name: "MainPane" }).props("view")).toMatchObject({
+        path: "terminal.mov",
+        mode: "view",
+      });
+      wrapper.unmount();
+    });
+
     it("gives the main panel back to the terminal when a preview is closed", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])));
 

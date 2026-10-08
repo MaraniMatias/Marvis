@@ -24,6 +24,7 @@ const { toasts, dismiss } = useToasts();
 const mocks = vi.hoisted(() => ({
   listCheckoutFiles: vi.fn(),
   readCheckoutFile: vi.fn(),
+  readCheckoutMedia: vi.fn(),
   writeCheckoutFile: vi.fn(),
   getReviewRootPath: vi.fn(),
   readCheckoutMarkdownImage: vi.fn(),
@@ -38,6 +39,7 @@ const mocks = vi.hoisted(() => ({
 vi.mock("../lib/ipc", () => ({
   listCheckoutFiles: mocks.listCheckoutFiles,
   readCheckoutFile: mocks.readCheckoutFile,
+  readCheckoutMedia: mocks.readCheckoutMedia,
   writeCheckoutFile: mocks.writeCheckoutFile,
   getReviewRootPath: mocks.getReviewRootPath,
   readCheckoutMarkdownImage: mocks.readCheckoutMarkdownImage,
@@ -248,6 +250,198 @@ async function pickLanguage(wrapper: VueWrapper, label: string) {
   if (!row) throw new Error(`no row for ${label}`);
   await row.trigger("click");
 }
+
+describe("media documents", () => {
+  beforeEach(() => {
+    vi.resetAllMocks();
+    let index = 0;
+    vi.spyOn(URL, "createObjectURL").mockImplementation(() => "blob:media-" + ++index);
+    vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
+    mocks.readCheckoutMedia.mockResolvedValue(new Blob([new Uint8Array([0, 255])], { type: "image/png" }));
+  });
+
+  it.each(["png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "bmp", "mp4", "webm", "mov", "ogv"])(
+    "opens %s as media even with restored Code mode",
+    async (ext) => {
+      const wrapper = mount(DocumentPane, {
+        props: documentPaneProps(
+          "asset." + ext,
+          "code",
+          checkout("checkout:one"),
+          snapshot("checkout:one", [{ path: "asset." + ext, status: "M" }]),
+        ),
+      });
+      await flushPromises();
+      expect(wrapper.find(".media-preview img, .media-preview video").exists()).toBe(true);
+      expect(wrapper.find('[aria-label="Document mode"]').exists()).toBe(false);
+      expect(wrapper.find('[role="listbox"]').exists()).toBe(false);
+      expect(wrapper.find('[aria-label="Source code"]').exists()).toBe(false);
+      expect(mocks.readCheckoutFile).not.toHaveBeenCalled();
+      expect(mocks.getGitDiff).not.toHaveBeenCalled();
+      wrapper.unmount();
+      expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:media-1");
+    },
+  );
+
+  it("refreshes only named media (or unknown batches), revokes replacements and surfaces decoding errors", async () => {
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("asset.png", "view") });
+    await flushPromises();
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: ["unrelated.ts"] });
+    expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(1);
+    await wrapper.setProps({ refreshRevision: 2, refreshPaths: ["asset.png"] });
+    await flushPromises();
+    expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(2);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:media-1");
+    await wrapper.setProps({ refreshRevision: 3, refreshPaths: [] });
+    await flushPromises();
+    expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(3);
+    await wrapper.get(".media-preview img").trigger("error");
+    expect(wrapper.get('[role="alert"]').text()).toContain("could not be decoded");
+    wrapper.unmount();
+  });
+
+  it("discards stale requests after navigation and unmount", async () => {
+    let resolve!: (blob: Blob) => void;
+    mocks.readCheckoutMedia.mockImplementationOnce(
+      () =>
+        new Promise<Blob>((done) => {
+          resolve = done;
+        }),
+    );
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("old.png", "view") });
+    await wrapper.setProps({ path: "new.png" });
+    await flushPromises();
+    resolve(new Blob(["stale"]));
+    await flushPromises();
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+    expect(URL.revokeObjectURL).toHaveBeenCalledTimes(1);
+    mocks.readCheckoutMedia.mockImplementationOnce(
+      () =>
+        new Promise<Blob>((done) => {
+          resolve = done;
+        }),
+    );
+    const pending = mount(DocumentPane, { props: documentPaneProps("pending.png", "view") });
+    pending.unmount();
+    resolve(new Blob(["late"]));
+    await flushPromises();
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows loading/read failures and revokes failed refreshes", async () => {
+    mocks.readCheckoutMedia.mockRejectedValueOnce(new Error("Media read failed"));
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("asset.png", "view") });
+    expect(wrapper.text()).toContain("Loading file");
+    await flushPromises();
+    expect(wrapper.get('[role="alert"]').text()).toContain("Media read failed");
+    await wrapper.setProps({ refreshRevision: 1 });
+    await flushPromises();
+    mocks.readCheckoutMedia.mockRejectedValueOnce(new Error("Gone"));
+    await wrapper.setProps({ refreshRevision: 2 });
+    await flushPromises();
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:media-1");
+    wrapper.unmount();
+  });
+
+  it("pauses video when the retained pane is hidden or replaced", async () => {
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("clip.mp4", "view") });
+    await flushPromises();
+    const element = wrapper.get("video").element as HTMLVideoElement;
+    const pause = vi.spyOn(element, "pause");
+    expect(element.controls).toBe(true);
+    expect(element.hasAttribute("playsinline")).toBe(true);
+    expect(element.autoplay).toBe(false);
+    await wrapper.get('[data-testid="close-preview"]').trigger("click");
+    expect(pause).toHaveBeenCalled();
+    pause.mockClear();
+    await wrapper.setProps({ path: null, mode: "code" });
+    expect(pause).toHaveBeenCalled();
+    await wrapper.setProps({ path: "clip.mp4", mode: "view" });
+    await flushPromises();
+    expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(1);
+    const nextPause = vi.spyOn(wrapper.get("video").element as HTMLVideoElement, "pause");
+    await wrapper.setProps({ path: "asset.png" });
+    expect(nextPause).toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it.each(["terminal", "diff"])("pauses video when MainPane hides it for %s", async (destination) => {
+    const currentCheckout = checkout("checkout:one");
+    const wrapper = mount(MainPane, {
+      props: {
+        checkout: currentCheckout,
+        view: { kind: "document", path: "clip.mp4", mode: "view", origin: "checkout" },
+        ready: true,
+        gitSnapshot: snapshot(currentCheckout.id),
+        review: reviewApi(),
+        activeSessionId: null,
+        isOpening: false,
+      },
+      global: { stubs: { SessionPane: true, FileDiff: true } },
+    });
+    await flushPromises();
+    const pause = vi.spyOn(wrapper.get("video").element as HTMLVideoElement, "pause");
+    const pane = wrapper.getComponent(DocumentPane);
+    await wrapper.setProps({
+      view: destination === "terminal" ? { kind: "terminal", sessionId: null } : { kind: "diff", path: "file.ts" },
+    });
+    expect(wrapper.getComponent(DocumentPane).element).toBe(pane.element);
+    expect(pause).toHaveBeenCalled();
+    expect(pane.props("path")).toBeNull();
+    expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).toBe("none");
+    wrapper.unmount();
+  });
+
+  it("renders SVG only as an image and previews the unsaved XML draft", async () => {
+    const source = '<svg xmlns="http://www.w3.org/2000/svg"><rect width="1" /></svg>';
+    mocks.readCheckoutFile.mockResolvedValue({ path: "icon.svg", content: source });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("icon.svg", "code") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-editor").exists()).toBe(true));
+    expect(wrapper.get(".code-editor-host").attributes("data-language")).toBe("xml");
+    const { EditorView } = await import("@codemirror/view");
+    const editor = EditorView.findFromDOM(wrapper.get(".cm-editor").element as HTMLElement)!;
+    const draft = source.replace('width="1"', 'width="2"');
+    editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: draft } });
+    await wrapper.setProps({ mode: "view" });
+    await flushPromises();
+    expect(wrapper.find('[aria-label="Document mode"]').exists()).toBe(true);
+    expect(wrapper.find(".media-preview svg").exists()).toBe(false);
+    expect(wrapper.get(".media-preview img").attributes("src")).toBe("blob:media-1");
+    const blob = vi.mocked(URL.createObjectURL).mock.calls[0]![0] as Blob;
+    expect(await blob.text()).toBe(draft);
+    expect(mocks.readCheckoutFile).toHaveBeenCalledTimes(1);
+    await wrapper.setProps({ mode: "code" });
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:media-1");
+    wrapper.unmount();
+  });
+
+  it.each(["<html><!-- <svg> --></html>", '<svg xmlns="http://www.w3.org/2000/svg">', '<svg xmlns="wrong"/>'])(
+    "rejects a non-SVG root or malformed XML in View: %s",
+    async (content) => {
+      mocks.readCheckoutFile.mockResolvedValue({ path: "bad.svg", content });
+      const wrapper = mount(DocumentPane, { props: documentPaneProps("bad.svg", "view") });
+      await flushPromises();
+      expect(wrapper.get('[role="alert"]').text()).toContain("not a valid SVG");
+      expect(URL.createObjectURL).not.toHaveBeenCalled();
+      await wrapper.setProps({ mode: "code" });
+      await vi.waitFor(() => expect(wrapper.find(".cm-editor").exists()).toBe(true));
+      const { EditorView } = await import("@codemirror/view");
+      const editor = EditorView.findFromDOM(wrapper.get(".cm-editor").element as HTMLElement)!;
+      expect(editor.state.doc.toString()).toBe(content);
+      editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: "<svg" } });
+      await flushPromises();
+      await wrapper.get('button[aria-label="Save"]').trigger("click");
+      await flushPromises();
+      expect(mocks.writeCheckoutFile).toHaveBeenCalledWith("checkout:one", "bad.svg", "<svg", content, "checkout");
+      await wrapper.setProps({ mode: "view" });
+      await flushPromises();
+      expect(wrapper.get('[role="alert"]').text()).toContain("not a valid SVG");
+      expect(URL.createObjectURL).not.toHaveBeenCalled();
+      wrapper.unmount();
+    },
+  );
+});
 
 describe("DocumentPane", () => {
   beforeEach(() => {
@@ -1310,7 +1504,7 @@ describe("DocumentPane", () => {
   it("keeps a file it cannot read on screen while the checkout reads it again", async () => {
     // A reason it cannot be read is not something to take away and hand back during a refresh.
     mocks.readCheckoutFile.mockRejectedValue({ code: "binary_file", message: "not utf-8" });
-    const wrapper = mount(DocumentPane, { props: documentPaneProps("assets/logo.png") });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("assets/unsupported.bin") });
     await flushPromises();
     expect(wrapper.get('[role="alert"]').text()).toBe("This file is binary or is not valid UTF-8.");
 
@@ -1325,7 +1519,7 @@ describe("DocumentPane", () => {
     expect(wrapper.get('[role="alert"]').text()).toBe("This file is binary or is not valid UTF-8.");
     expect(wrapper.text()).not.toContain("Loading file");
 
-    reRead({ path: "assets/logo.png", content: "readable now" });
+    reRead({ path: "assets/unsupported.bin", content: "readable now" });
     await flushPromises();
     expect(wrapper.text()).toContain("readable now");
     expect(wrapper.find('[role="alert"]').exists()).toBe(false);
@@ -1337,13 +1531,13 @@ describe("DocumentPane", () => {
     // down went with it. The editor that lived in it must not survive: the next file that opens
     // would find one still naming itself, reuse it instead of building its own, and show nothing.
     mocks.readCheckoutFile.mockImplementation(async (_checkoutId: string, path: string) => {
-      if (path === "assets/logo.png") throw { code: "binary_file", message: "not utf-8" };
+      if (path === "assets/unsupported.bin") throw { code: "binary_file", message: "not utf-8" };
       return { path, content: "node_modules/\n" };
     });
     const wrapper = mount(DocumentPane, { props: documentPaneProps(".gitignore") });
     await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
 
-    await wrapper.setProps({ path: "assets/logo.png" });
+    await wrapper.setProps({ path: "assets/unsupported.bin" });
     await flushPromises();
     expect(wrapper.get('[role="alert"]').text()).toBe("This file is binary or is not valid UTF-8.");
     expect(wrapper.find(".cm-editor").exists()).toBe(false);

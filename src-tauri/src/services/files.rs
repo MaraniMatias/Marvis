@@ -22,6 +22,7 @@ use crate::{
 
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
+const MAX_MEDIA_HEADER_BYTES: u64 = 64 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 2000;
 /// Git's own bookkeeping, never shown in the tree. `check-ignore` reports it ignored on every
 /// repository, which would otherwise put it in the list the moment ignores became visible.
@@ -207,7 +208,7 @@ pub fn read(
 /// This is `read` without the content, and it exists because the terminal asks the question on
 /// hover: the answer has to be cheap and it has to agree with the reader, or a link would
 /// underline itself for a file that then refuses to open. So it is the same limits, the same
-/// containment, and the same checks, minus the string it throws away.
+/// containment, and text checks. Media classification reads at most 64 KiB, never the payload.
 pub fn probe(
     database: &Database,
     checkout_id: &str,
@@ -236,7 +237,17 @@ pub fn probe(
         Ok(resolved) => resolved,
         Err(_) => return Ok(None),
     };
-    if read_preview_text(&resolved).is_err() {
+    let readable = if media_limit(&relative_path).is_some() {
+        read_media_file(&resolved, &relative_path, MAX_MEDIA_HEADER_BYTES).map(|_| ())
+    } else {
+        read_preview_text(&resolved).and_then(|text| {
+            if extension(&relative_path) == "svg" {
+                validate_svg(&text)?;
+            }
+            Ok(())
+        })
+    };
+    if readable.is_err() {
         return Ok(None);
     }
     Ok(Some(FileProbe {
@@ -704,6 +715,207 @@ fn image_mime_type(bytes: &[u8]) -> Option<&'static str> {
     }
 }
 
+fn extension(path: &Path) -> String {
+    path.extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_ascii_lowercase()
+}
+
+fn validate_svg(content: &str) -> Result<(), IpcError> {
+    let doc = roxmltree::Document::parse(content).map_err(|_| invalid_media())?;
+    let root = doc.root_element().tag_name();
+    if root.name() != "svg" || root.namespace() != Some("http://www.w3.org/2000/svg") {
+        return Err(invalid_media());
+    }
+    Ok(())
+}
+
+fn invalid_media() -> IpcError {
+    IpcError::new(
+        IpcErrorCode::InvalidPath,
+        "file is not a supported media format matching its extension",
+    )
+}
+
+fn media_limit(path: &Path) -> Option<u64> {
+    match extension(path).as_str() {
+        "png" | "jpg" | "jpeg" | "gif" | "webp" | "avif" | "ico" | "bmp" => Some(16 * 1024 * 1024),
+        "mp4" | "webm" | "mov" | "ogv" => Some(64 * 1024 * 1024),
+        _ => None,
+    }
+}
+
+/// MIME is assigned here, never by the caller. No asset protocol or filesystem permission.
+pub fn read_media(database: &Database, checkout_id: &str, path: &str) -> Result<Vec<u8>, IpcError> {
+    let (repo, checkout) = registered_checkout(database, checkout_id)?;
+    ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
+    let relative = parse_relative_path(path)?;
+    let resolved = crate::services::checkout::resolve_checkout_path(&repo, checkout_id, &relative)?;
+    let (mime, bytes) = read_media_file(&resolved, &relative, u64::MAX)?;
+    let mut response = Vec::with_capacity(mime.len() + 1 + bytes.len());
+    response.extend_from_slice(mime.as_bytes());
+    response.push(b'\n');
+    response.extend_from_slice(&bytes);
+    Ok(response)
+}
+
+fn read_media_file(
+    path: &Path,
+    relative: &Path,
+    read_limit: u64,
+) -> Result<(&'static str, Vec<u8>), IpcError> {
+    let limit = media_limit(relative).ok_or_else(invalid_media)?;
+    let metadata =
+        fs::metadata(path).map_err(|e| filesystem_error("could not inspect media", e))?;
+    if !metadata.is_file() {
+        return Err(invalid_media());
+    }
+    if metadata.len() > limit {
+        return Err(too_large());
+    }
+    let mut bytes = Vec::with_capacity(metadata.len().min(read_limit) as usize);
+    File::open(path)
+        .and_then(|f| f.take((limit + 1).min(read_limit)).read_to_end(&mut bytes))
+        .map_err(|e| filesystem_error("could not read media", e))?;
+    if bytes.len() as u64 > limit {
+        return Err(too_large());
+    }
+    let mime = media_mime(&extension(relative), &bytes).ok_or_else(invalid_media)?;
+    Ok((mime, bytes))
+}
+
+/// An ftyp atom's declared brands, not an arbitrary string elsewhere in the file.
+fn bmff_brand(bytes: &[u8], brands: &[&[u8; 4]]) -> bool {
+    if bytes.len() < 16 || &bytes[4..8] != b"ftyp" {
+        return false;
+    }
+    let size = u32::from_be_bytes(bytes[..4].try_into().unwrap()) as usize;
+    if size < 16 || size > bytes.len() || !size.is_multiple_of(4) {
+        return false;
+    }
+    brands.iter().any(|brand| {
+        &bytes[8..12] == *brand
+            || bytes[16..size]
+                .as_chunks::<4>()
+                .0
+                .iter()
+                .any(|b| b == *brand)
+    })
+}
+
+fn ebml_vint(bytes: &[u8], offset: &mut usize, id: bool) -> Option<u64> {
+    let first = *bytes.get(*offset)?;
+    let len = first.leading_zeros() as usize + 1;
+    if len > 8 || (id && len > 4) {
+        return None;
+    }
+    let value = bytes.get(*offset..*offset + len)?;
+    *offset += len;
+    let mut result = if id {
+        first as u64
+    } else {
+        first as u64 & (0xffu64 >> len)
+    };
+    for b in &value[1..] {
+        result = (result << 8) | *b as u64;
+    }
+    Some(result)
+}
+
+fn is_webm(bytes: &[u8]) -> bool {
+    let mut offset = 0;
+    if ebml_vint(bytes, &mut offset, true) != Some(0x1a45dfa3) {
+        return false;
+    }
+    let Some(size) = ebml_vint(bytes, &mut offset, false).and_then(|s| usize::try_from(s).ok())
+    else {
+        return false;
+    };
+    let Some(end) = offset.checked_add(size).filter(|e| *e <= bytes.len()) else {
+        return false;
+    };
+    let header = &bytes[..end];
+    while offset < end {
+        let Some(id) = ebml_vint(header, &mut offset, true) else {
+            return false;
+        };
+        let Some(size) =
+            ebml_vint(header, &mut offset, false).and_then(|s| usize::try_from(s).ok())
+        else {
+            return false;
+        };
+        let Some(next) = offset.checked_add(size).filter(|e| *e <= end) else {
+            return false;
+        };
+        if id == 0x4282 {
+            return &header[offset..next] == b"webm";
+        }
+        offset = next;
+    }
+    false
+}
+
+/// Ogg can carry audio. Require a BOS page with a Theora video identification packet.
+fn is_ogg_video(bytes: &[u8]) -> bool {
+    let mut offset = 0;
+    while offset < bytes.len().min(64 * 1024) {
+        let Some(header) = bytes.get(offset..offset + 27) else {
+            return false;
+        };
+        if &header[..4] != b"OggS" || header[4] != 0 {
+            return false;
+        }
+        let count = header[26] as usize;
+        let Some(laces) = bytes.get(offset + 27..offset + 27 + count) else {
+            return false;
+        };
+        let body = offset + 27 + count;
+        let size: usize = laces.iter().map(|b| *b as usize).sum();
+        let Some(packet) = bytes.get(body..body + size) else {
+            return false;
+        };
+        if header[5] & 2 != 0
+            && laces.first().is_some_and(|n| *n >= 7)
+            && packet.starts_with(b"\x80theora")
+        {
+            return true;
+        }
+        offset = body + size;
+    }
+    false
+}
+
+fn media_mime(ext: &str, bytes: &[u8]) -> Option<&'static str> {
+    match ext {
+        "png" if image_mime_type(bytes) == Some("image/png") => Some("image/png"),
+        "jpg" | "jpeg" if image_mime_type(bytes) == Some("image/jpeg") => Some("image/jpeg"),
+        "gif" if image_mime_type(bytes) == Some("image/gif") => Some("image/gif"),
+        "webp" if image_mime_type(bytes) == Some("image/webp") => Some("image/webp"),
+        "bmp" if bytes.len() >= 26 && bytes.starts_with(b"BM") => Some("image/bmp"),
+        "ico" if bytes.len() >= 22 && bytes.starts_with(b"\0\0\x01\0") && bytes[4..6] != [0, 0] => {
+            Some("image/x-icon")
+        }
+        "avif" if bmff_brand(bytes, &[b"avif", b"avis"]) => Some("image/avif"),
+        "mp4"
+            if !bmff_brand(bytes, &[b"avif", b"avis", b"qt  "])
+                && bmff_brand(
+                    bytes,
+                    &[
+                        b"isom", b"iso2", b"iso3", b"iso4", b"iso5", b"iso6", b"mp41", b"mp42",
+                        b"avc1", b"M4V ", b"dash",
+                    ],
+                ) =>
+        {
+            Some("video/mp4")
+        }
+        "mov" if bmff_brand(bytes, &[b"qt  "]) => Some("video/quicktime"),
+        "webm" if is_webm(bytes) => Some("video/webm"),
+        "ogv" if is_ogg_video(bytes) => Some("video/ogg"),
+        _ => None,
+    }
+}
+
 fn registered_checkout(
     database: &Database,
     checkout_id: &str,
@@ -960,6 +1172,174 @@ mod tests {
             expected_content,
             Path::new(""),
         )
+    }
+
+    #[test]
+    fn media_formats_match_extensions_and_container_identifiers() {
+        use super::media_mime;
+        let bmff = |brand: &[u8]| {
+            let mut b = vec![0, 0, 0, 16];
+            b.extend_from_slice(b"ftyp");
+            b.extend_from_slice(brand);
+            b.extend_from_slice(&[0; 4]);
+            b
+        };
+        let mut bmp = vec![0; 26];
+        bmp[..2].copy_from_slice(b"BM");
+        let mut ico = vec![0; 22];
+        ico[..6].copy_from_slice(&[0, 0, 1, 0, 1, 0]);
+        let mut ogg = vec![0; 27];
+        ogg[..4].copy_from_slice(b"OggS");
+        ogg[5] = 2;
+        ogg[26] = 1;
+        ogg.push(7);
+        ogg.extend_from_slice(b"\x80theora");
+        let webm = b"\x1a\x45\xdf\xa3\x87\x42\x82\x84webm".to_vec();
+        for (ext, bytes, mime) in [
+            ("png", b"\x89PNG\r\n\x1a\n".to_vec(), "image/png"),
+            ("jpg", b"\xff\xd8\xff".to_vec(), "image/jpeg"),
+            ("jpeg", b"\xff\xd8\xff".to_vec(), "image/jpeg"),
+            ("gif", b"GIF89a".to_vec(), "image/gif"),
+            ("webp", b"RIFF\0\0\0\0WEBP".to_vec(), "image/webp"),
+            ("bmp", bmp, "image/bmp"),
+            ("ico", ico, "image/x-icon"),
+            ("avif", bmff(b"avif"), "image/avif"),
+            ("mp4", bmff(b"isom"), "video/mp4"),
+            ("mov", bmff(b"qt  "), "video/quicktime"),
+            ("webm", webm, "video/webm"),
+            ("ogv", ogg.clone(), "video/ogg"),
+        ] {
+            assert_eq!(media_mime(ext, &bytes), Some(mime), "{ext}");
+            assert_eq!(media_mime("txt", &bytes), None);
+            for length in 0..bytes.len() {
+                assert_eq!(
+                    media_mime(ext, &bytes[..length]),
+                    None,
+                    "truncated {ext} at {length}"
+                );
+            }
+        }
+        assert_eq!(media_mime("png", b"GIF89a"), None);
+        assert_eq!(media_mime("mp4", &bmff(b"avif")), None);
+        assert_eq!(media_mime("mp4", &bmff(b"qt  ")), None);
+        assert_eq!(media_mime("mp4", &bmff(b"zzzz")), None);
+        assert_eq!(media_mime("mov", &bmff(b"isom")), None);
+        assert_eq!(
+            media_mime("webm", b"\x1a\x45\xdf\xa3\x8b\x42\x82\x88matroska"),
+            None
+        );
+        ogg[28..].copy_from_slice(b"vorbis!");
+        assert_eq!(media_mime("ogv", &ogg), None);
+        assert_eq!(media_mime("ogv", b"OggS"), None);
+        // Eight-byte sizes must not panic, and must stay bounded by the input.
+        assert_eq!(
+            media_mime("webm", b"\x1a\x45\xdf\xa3\x01\xff\xff\xff\xff\xff\xff\xff"),
+            None
+        );
+    }
+
+    #[test]
+    fn sec_media_reads_and_probe_reuse_containment_and_caps() {
+        use super::read_media;
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let id = &state.repos[0].checkouts[0].id;
+        let png = b"\x89PNG\r\n\x1a\n";
+        fs::write(root.join("image.PNG"), png).unwrap();
+        assert_eq!(
+            read_media(&database, id, "image.PNG").unwrap(),
+            [b"image/png\n".as_slice(), png].concat()
+        );
+        assert!(probe(&database, id, "image.PNG").unwrap().is_some());
+        assert!(read_media(&database, "unknown", "image.PNG").is_err());
+        for path in ["../image.PNG", ".git/image.PNG", "/image.PNG"] {
+            assert!(read_media(&database, id, path).is_err());
+        }
+        fs::write(root.join("mismatch.jpg"), png).unwrap();
+        assert!(read_media(&database, id, "mismatch.jpg").is_err());
+        assert!(probe(&database, id, "mismatch.jpg").unwrap().is_none());
+        #[cfg(unix)]
+        {
+            let outside = temp.path().join("outside.png");
+            fs::write(&outside, png).unwrap();
+            std::os::unix::fs::symlink(outside, root.join("escape.png")).unwrap();
+            assert!(read_media(&database, id, "escape.png").is_err());
+            assert!(probe(&database, id, "escape.png").unwrap().is_none());
+        }
+        for (name, cap) in [
+            ("large.png", 16 * 1024 * 1024),
+            ("large.mp4", 64 * 1024 * 1024),
+        ] {
+            let file = fs::File::create(root.join(name)).unwrap();
+            file.set_len(cap + 1).unwrap();
+            assert!(matches!(
+                read_media(&database, id, name).unwrap_err().code,
+                IpcErrorCode::FileTooLarge
+            ));
+            assert!(probe(&database, id, name).unwrap().is_none());
+        }
+        assert!(read_media(&database, id, ".").is_err());
+    }
+
+    #[test]
+    fn media_probe_reads_only_a_bounded_header_of_large_videos() {
+        use super::{read_media_file, MAX_MEDIA_HEADER_BYTES};
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let id = &state.repos[0].checkouts[0].id;
+        let path = root.join("large.mp4");
+        fs::write(&path, b"\0\0\0\x10ftypisom\0\0\0\0").unwrap();
+        fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_len(64 * 1024 * 1024)
+            .unwrap();
+        let (mime, header) =
+            read_media_file(&path, Path::new("large.mp4"), MAX_MEDIA_HEADER_BYTES).unwrap();
+        assert_eq!(mime, "video/mp4");
+        assert_eq!(header.len() as u64, MAX_MEDIA_HEADER_BYTES);
+        assert!(probe(&database, id, "large.mp4").unwrap().is_some());
+    }
+
+    #[test]
+    fn svg_source_remains_editable_while_probe_validates_the_xml_root() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let id = &state.repos[0].checkouts[0].id;
+        let svg = "<svg xmlns='http://www.w3.org/2000/svg'/>";
+        fs::write(root.join("icon.svg"), svg).unwrap();
+        assert_eq!(
+            read_checkout(&database, id, "icon.svg").unwrap().content,
+            svg
+        );
+        assert!(probe(&database, id, "icon.svg").unwrap().is_some());
+        let next = "<s:svg xmlns:s='http://www.w3.org/2000/svg'><s:rect/></s:svg>";
+        write_checkout(&database, id, "icon.svg", next, svg).unwrap();
+        write_checkout(&database, id, "icon.svg", "<svg", next).unwrap();
+        assert_eq!(fs::read_to_string(root.join("icon.svg")).unwrap(), "<svg");
+        write_checkout(&database, id, "icon.svg", svg, "<svg").unwrap();
+        for invalid in ["<html><!-- <svg> --></html>", "<svg>", "<svg/>", "<svg xmlns='wrong'/>", "<!DOCTYPE svg [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><svg xmlns='http://www.w3.org/2000/svg'>&x;</svg>"] {
+            fs::write(root.join("bad.svg"), invalid).unwrap();
+            assert_eq!(read_checkout(&database, id, "bad.svg").unwrap().content, invalid);
+            assert!(probe(&database, id, "bad.svg").unwrap().is_none());
+            write_checkout(&database, id, "bad.svg", "<svg", invalid).unwrap();
+        }
+        let file = fs::File::create(root.join("large.svg")).unwrap();
+        file.set_len(1024 * 1024 + 1).unwrap();
+        assert!(matches!(
+            read_checkout(&database, id, "large.svg").unwrap_err().code,
+            IpcErrorCode::FileTooLarge
+        ));
     }
 
     #[test]
