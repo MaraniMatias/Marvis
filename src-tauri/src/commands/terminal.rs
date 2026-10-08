@@ -13,7 +13,9 @@ use crate::{
     },
     persistence::Database,
     services::terminal,
-    terminal::{OutputGate, OutputSink, TerminalBackend, OUTPUT_RESUME_TIMEOUT},
+    terminal::{
+        OutputGate, OutputSink, TerminalBackend, MAX_TERMINAL_INPUT_BYTES, OUTPUT_RESUME_TIMEOUT,
+    },
 };
 
 #[tauri::command]
@@ -240,6 +242,11 @@ pub async fn terminal_write(
     database: State<'_, Database>,
     backend: State<'_, std::sync::Arc<TerminalBackend>>,
 ) -> Result<(), IpcError> {
+    if bytes.len() > MAX_TERMINAL_INPUT_BYTES {
+        return Err(operation_error(format!(
+            "terminal input exceeds the {MAX_TERMINAL_INPUT_BYTES}-byte limit"
+        )));
+    }
     let database = database.inner().clone();
     let backend = backend.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {

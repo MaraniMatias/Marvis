@@ -1,7 +1,7 @@
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::{
     collections::HashMap,
-    io::{Read, Write},
+    io::{self, Read, Write},
     path::PathBuf,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -27,6 +27,7 @@ pub struct SpawnOptions {
 
 struct Session {
     master: Mutex<Box<dyn MasterPty + Send>>,
+    master_fd: libc::c_int,
     writer: Mutex<Box<dyn Write + Send>>,
     child: Mutex<ChildState>,
     process_id: Option<u32>,
@@ -88,6 +89,17 @@ impl TerminalBackend {
                 pixel_height: 0,
             })
             .map_err(|error| error.to_string())?;
+        #[cfg(unix)]
+        let master_fd = pair
+            .master
+            .as_raw_fd()
+            .ok_or_else(|| "PTY master descriptor is unavailable".to_string())?;
+        #[cfg(unix)]
+        set_nonblocking(master_fd)
+            .map_err(|error| format!("could not configure PTY input: {error}"))?;
+        #[cfg(not(unix))]
+        let master_fd = -1;
+
         let mut command = CommandBuilder::new(options.program);
         command.args(options.args);
         command.cwd(options.cwd);
@@ -114,6 +126,7 @@ impl TerminalBackend {
 
         let session = Arc::new(Session {
             master: Mutex::new(pair.master),
+            master_fd,
             writer: Mutex::new(writer),
             child: Mutex::new(ChildState {
                 child: Some(child),
@@ -125,9 +138,15 @@ impl TerminalBackend {
             terminal_session_id,
             closing: AtomicBool::new(false),
         });
+        let reader_session = Arc::clone(&session);
+        let reader_fd = session.master_fd;
         if let Err(error) = thread::Builder::new()
             .name("marvis-pty-reader".into())
-            .spawn(move || read_output(reader, &mut output))
+            .spawn(move || {
+                // Keep the master descriptor alive while the reader polls it.
+                let _session = reader_session;
+                read_output(reader, reader_fd, &mut output);
+            })
         {
             let _ = terminate_session(&session, &id);
             return Err(error.to_string());
@@ -160,13 +179,36 @@ impl TerminalBackend {
     }
 
     pub fn write(&self, id: &str, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() > MAX_TERMINAL_INPUT_BYTES {
+            return Err(format!(
+                "terminal input exceeds the {}-byte limit",
+                MAX_TERMINAL_INPUT_BYTES
+            ));
+        }
         let session = self.session(id)?;
-        let mut writer = session.writer.lock().map_err(|error| error.to_string())?;
+        let writer = match session.writer.try_lock() {
+            Ok(writer) => writer,
+            Err(std::sync::TryLockError::Poisoned(error)) => error.into_inner(),
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return Err(format!(
+                    "terminal session {id} already has input being written"
+                ));
+            }
+        };
         if session.closing.load(Ordering::Acquire) {
             return Err(format!("terminal session {id} is closing"));
         }
-        writer.write_all(bytes).map_err(|error| error.to_string())?;
-        writer.flush().map_err(|error| error.to_string())
+        #[cfg(unix)]
+        {
+            let _writer = writer;
+            write_pty_input(session.master_fd, bytes, &session.closing, id)
+        }
+        #[cfg(not(unix))]
+        {
+            let mut writer = writer;
+            writer.write_all(bytes).map_err(|error| error.to_string())?;
+            writer.flush().map_err(|error| error.to_string())
+        }
     }
 
     pub fn resize(&self, id: &str, cols: u16, rows: u16) -> Result<(u16, u16), String> {
@@ -325,9 +367,104 @@ impl Drop for TerminalBackend {
     }
 }
 
+pub const MAX_TERMINAL_INPUT_BYTES: usize = 1024 * 1024;
+const TERMINAL_WRITE_TIMEOUT: Duration = Duration::from_secs(1);
 const TERMINATE_GRACE: Duration = Duration::from_millis(200);
 const TERMINATE_TIMEOUT: Duration = Duration::from_secs(1);
 const REAP_POLL_INTERVAL: Duration = Duration::from_millis(10);
+
+#[cfg(unix)]
+fn set_nonblocking(fd: libc::c_int) -> std::io::Result<()> {
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(io::Error::last_os_error());
+    }
+    Ok(())
+}
+
+#[cfg(unix)]
+fn write_pty_input(
+    fd: libc::c_int,
+    bytes: &[u8],
+    closing: &AtomicBool,
+    id: &str,
+) -> Result<(), String> {
+    let deadline = Instant::now() + TERMINAL_WRITE_TIMEOUT;
+    let mut written = 0;
+    while written < bytes.len() {
+        if closing.load(Ordering::Acquire) {
+            return Err(format!(
+                "terminal {id} input cancelled after writing {written} of {} bytes: session is closing",
+                bytes.len()
+            ));
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(format!(
+                "terminal {id} input timed out after writing {written} of {} bytes",
+                bytes.len()
+            ));
+        }
+        let result =
+            unsafe { libc::write(fd, bytes[written..].as_ptr().cast(), bytes.len() - written) };
+        if result > 0 {
+            written += result as usize;
+            continue;
+        }
+        if result == 0 {
+            return Err(format!(
+                "terminal {id} input stopped after writing {written} of {} bytes",
+                bytes.len()
+            ));
+        }
+
+        let error = io::Error::last_os_error();
+        match error.kind() {
+            io::ErrorKind::Interrupted => continue,
+            io::ErrorKind::WouldBlock => {
+                let mut descriptor = libc::pollfd {
+                    fd,
+                    events: libc::POLLOUT,
+                    revents: 0,
+                };
+                let timeout_ms = remaining.as_millis().max(1).min(i32::MAX as u128) as i32;
+                let ready = unsafe { libc::poll(&mut descriptor, 1, timeout_ms) };
+                if ready == 0 {
+                    return Err(format!(
+                        "terminal {id} input timed out after writing {written} of {} bytes",
+                        bytes.len()
+                    ));
+                }
+                if ready < 0 {
+                    let error = io::Error::last_os_error();
+                    if error.kind() == io::ErrorKind::Interrupted {
+                        continue;
+                    }
+                    return Err(format!(
+                        "terminal {id} input failed after writing {written} of {} bytes: {error}",
+                        bytes.len()
+                    ));
+                }
+                if descriptor.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
+                    return Err(format!(
+                        "terminal {id} PTY stopped accepting input after writing {written} of {} bytes",
+                        bytes.len()
+                    ));
+                }
+            }
+            _ => {
+                return Err(format!(
+                    "terminal {id} input failed after writing {written} of {} bytes: {error}",
+                    bytes.len()
+                ));
+            }
+        }
+    }
+    Ok(())
+}
 
 fn terminate_session(session: &Session, id: &str) -> Result<(), String> {
     terminate_session_with(session, id, || {})
@@ -757,14 +894,53 @@ fn signal_process(
     }
 }
 
-fn read_output(mut reader: Box<dyn Read + Send>, output: &mut OutputSink) {
+#[cfg(unix)]
+fn wait_pty_readable(fd: libc::c_int) -> io::Result<()> {
+    let mut descriptor = libc::pollfd {
+        fd,
+        events: libc::POLLIN,
+        revents: 0,
+    };
+    loop {
+        let ready = unsafe { libc::poll(&mut descriptor, 1, -1) };
+        if ready > 0 {
+            if descriptor.revents & libc::POLLNVAL != 0 {
+                return Err(io::Error::other("PTY reader descriptor became invalid"));
+            }
+            if descriptor.revents & (libc::POLLIN | libc::POLLHUP) != 0 {
+                return Ok(());
+            }
+            if descriptor.revents & libc::POLLERR != 0 {
+                return Err(io::Error::other("PTY reader poll reported an error"));
+            }
+        }
+        let error = io::Error::last_os_error();
+        if ready < 0 && error.kind() == io::ErrorKind::Interrupted {
+            continue;
+        }
+        return Err(error);
+    }
+}
+
+fn read_output(mut reader: Box<dyn Read + Send>, master_fd: libc::c_int, output: &mut OutputSink) {
     let mut buffer = [0_u8; 64 * 1024];
     // Said once. A window that is gone refuses every chunk from here to the end of the session,
     // and a line per chunk would bury everything else the log is for.
     let mut reported = false;
     loop {
+        #[cfg(unix)]
+        if let Err(error) = wait_pty_readable(master_fd) {
+            log::warn!("terminal PTY reader poll failed: {error}");
+            break;
+        }
+        #[cfg(not(unix))]
+        let _ = master_fd;
+
         match reader.read(&mut buffer) {
-            Ok(0) | Err(_) => break,
+            Ok(0) => break,
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
+            Err(_) => break,
             Ok(count) => {
                 // A disconnected renderer must not stop draining the PTY and deadlock its child.
                 if let Err(error) = output(&buffer[..count]) {
@@ -954,7 +1130,7 @@ impl OutputGate {
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{self, Write},
+        io,
         path::PathBuf,
         sync::{
             atomic::{AtomicUsize, Ordering},
@@ -975,7 +1151,8 @@ mod tests {
     use super::{process_group_exists, signal_group_with, GroupSignal, REAP_POLL_INTERVAL};
     use super::{
         start_child_reaper, ChildState, OutputGate, OutputSink, SpawnOptions, TerminalBackend,
-        OUTPUT_HIGH_WATER_BYTES, OUTPUT_LOW_WATER_BYTES, OUTPUT_RESUME_TIMEOUT,
+        MAX_TERMINAL_INPUT_BYTES, OUTPUT_HIGH_WATER_BYTES, OUTPUT_LOW_WATER_BYTES,
+        OUTPUT_RESUME_TIMEOUT,
     };
 
     fn spawn(
@@ -1008,27 +1185,6 @@ mod tests {
         )
     }
 
-    struct PausingWriter {
-        entered: Option<mpsc::Sender<()>>,
-        release: mpsc::Receiver<()>,
-    }
-
-    impl Write for PausingWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.entered.take().unwrap().send(()).map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "test writer receiver dropped")
-            })?;
-            self.release.recv().map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "test writer release dropped")
-            })?;
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
     fn synchronize_shell(backend: &TerminalBackend, receiver: &mpsc::Receiver<Vec<u8>>, id: &str) {
         backend
             .write(id, b"printf '\\036MARVIS_READY\\037\\n'\n")
@@ -1046,6 +1202,24 @@ mod tests {
                 Ok(bytes) => actual.extend(bytes),
                 Err(error) => panic!("terminal output marker timed out: {error}"),
             }
+        }
+    }
+
+    fn wait_for_input_writer(session: &super::Session) {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        loop {
+            match session.writer.try_lock() {
+                Ok(writer) => drop(writer),
+                Err(std::sync::TryLockError::WouldBlock) => return,
+                Err(std::sync::TryLockError::Poisoned(_)) => {
+                    panic!("terminal writer lock poisoned")
+                }
+            }
+            assert!(
+                Instant::now() < deadline,
+                "PTY input did not enter the writer"
+            );
+            thread::yield_now();
         }
     }
 
@@ -1201,60 +1375,91 @@ mod tests {
         assert!(!backend.close("second").unwrap());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn blocked_writer_does_not_block_other_sessions_or_close() {
+    fn nonreading_process_times_out_input_and_other_sessions_remain_responsive() {
         let backend = Arc::new(TerminalBackend::default());
-        let (blocked_output, _) = sink();
-        let (other_output, _) = sink();
-        spawn(&backend, "blocked", "/bin/cat", &[], blocked_output);
+        let (blocked_output, blocked_receiver) = sink();
+        let (other_output, other_receiver) = sink();
+        spawn(&backend, "blocked", "/bin/sh", &["-i"], blocked_output);
         spawn(&backend, "other", "/bin/cat", &[], other_output);
-
-        let (entered, entered_rx) = mpsc::channel();
-        let (release, release_rx) = mpsc::channel();
-        let session = backend.sessions.lock().unwrap()["blocked"]
-            .session()
-            .clone();
-        *session.writer.lock().unwrap() = Box::new(PausingWriter {
-            entered: Some(entered),
-            release: release_rx,
-        });
-        drop(session);
+        backend
+            .write(
+                "blocked",
+                b"stty -echo -icanon; printf '\\036MARVIS_BLOCKED\\037\\n'; sleep 30\n",
+            )
+            .unwrap();
+        wait_for_output(
+            &blocked_receiver,
+            b"\x1eMARVIS_BLOCKED\x1f",
+            Duration::from_secs(5),
+        );
 
         let (write_done, write_result) = mpsc::channel();
         let write_backend = Arc::clone(&backend);
         let write_thread = thread::spawn(move || {
-            let _ = write_done.send(write_backend.write("blocked", b"blocked"));
+            let result = write_backend.write("blocked", &vec![b'x'; MAX_TERMINAL_INPUT_BYTES]);
+            let _ = write_done.send(result);
         });
-        entered_rx.recv_timeout(Duration::from_secs(3)).unwrap();
+        backend.write("other", b"still responsive\n").unwrap();
+        wait_for_output(&other_receiver, b"still responsive", Duration::from_secs(2));
+        let error = write_result
+            .recv_timeout(Duration::from_secs(3))
+            .expect("PTY input write exceeded its deadline")
+            .unwrap_err();
+        assert!(error.contains("input timed out"), "{error}");
+        assert!(error.contains("of 1048576 bytes"), "{error}");
+        let written = error
+            .strip_prefix("terminal blocked input timed out after writing ")
+            .and_then(|details| details.split_once(" of ").map(|(written, _)| written))
+            .and_then(|written| written.parse::<usize>().ok())
+            .expect("timeout reports how many input bytes were accepted");
+        assert!(written > 0 && written < MAX_TERMINAL_INPUT_BYTES);
+        write_thread.join().unwrap();
 
-        let (other_done, other_result) = mpsc::channel();
-        let other_backend = Arc::clone(&backend);
-        let other_thread = thread::spawn(move || {
-            let _ = other_done.send(other_backend.write("other", b"unblocked\n"));
-        });
-        let other_result = other_result.recv_timeout(Duration::from_secs(2));
-
-        let (close_done, close_result) = mpsc::channel();
-        let close_backend = Arc::clone(&backend);
-        let close_thread = thread::spawn(move || {
-            let _ = close_done.send(close_backend.close("blocked"));
-        });
-        let close_result = close_result.recv_timeout(Duration::from_secs(2));
-
-        release.send(()).unwrap();
-        let write_result = write_result.recv_timeout(Duration::from_secs(2));
-        let _ = write_thread.join();
-        let _ = other_thread.join();
-        let _ = close_thread.join();
-
-        assert!(other_result
-            .expect("other session write was blocked")
-            .is_ok());
-        assert!(close_result
-            .expect("close waited for the blocked writer")
-            .unwrap());
-        assert!(write_result.expect("blocked writer did not resume").is_ok());
+        assert!(backend.close("blocked").unwrap());
         assert!(backend.close("other").unwrap());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn close_does_not_wait_for_an_inflight_nonblocking_write() {
+        let backend = Arc::new(TerminalBackend::default());
+        let (output, receiver) = sink();
+        spawn(&backend, "closing-write", "/bin/sh", &["-i"], output);
+        backend
+            .write(
+                "closing-write",
+                b"stty -echo -icanon; printf '\\036MARVIS_CLOSING\\037\\n'; sleep 30\n",
+            )
+            .unwrap();
+        wait_for_output(&receiver, b"\x1eMARVIS_CLOSING\x1f", Duration::from_secs(5));
+        let session = backend.sessions.lock().unwrap()["closing-write"]
+            .session()
+            .clone();
+
+        let (write_done, write_result) = mpsc::channel();
+        let write_backend = Arc::clone(&backend);
+        let write_thread = thread::spawn(move || {
+            let result =
+                write_backend.write("closing-write", &vec![b'x'; MAX_TERMINAL_INPUT_BYTES]);
+            let _ = write_done.send(result);
+        });
+        wait_for_input_writer(&session);
+        assert!(matches!(
+            write_result.try_recv(),
+            Err(mpsc::TryRecvError::Empty)
+        ));
+
+        let close_started = Instant::now();
+        assert!(backend.close("closing-write").unwrap());
+        assert!(close_started.elapsed() < Duration::from_secs(2));
+        let error = write_result
+            .recv_timeout(Duration::from_secs(2))
+            .expect("close did not release the active PTY write")
+            .unwrap_err();
+        assert!(error.contains("terminal closing-write"), "{error}");
+        write_thread.join().unwrap();
     }
 
     #[cfg(unix)]

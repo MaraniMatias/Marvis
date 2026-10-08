@@ -26,6 +26,7 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     resizes: [] as Array<(size: { cols: number; rows: number }) => void>,
     titles: [] as Array<(title: string) => void>,
     scrolls: [] as Array<() => void>,
+    customKeyHandlers: [] as Array<(event: KeyboardEvent) => boolean>,
     output: [] as number[][],
     /**
      * The callbacks xterm owes the writer, one per write handed over and not parsed yet. A test
@@ -75,6 +76,9 @@ const { MockTerminal, terminalMock } = vi.hoisted(() => {
     }
     onData(callback: (value: string) => void) {
       terminalMock.input = callback;
+    }
+    attachCustomKeyEventHandler(handler: (event: KeyboardEvent) => boolean) {
+      terminalMock.customKeyHandlers.push(handler);
     }
     onResize(callback: (size: { cols: number; rows: number }) => void) {
       terminalMock.resizes.push(callback);
@@ -253,6 +257,7 @@ describe("TerminalSession UI", () => {
     terminalMock.resizes = [];
     terminalMock.titles = [];
     terminalMock.scrolls = [];
+    terminalMock.customKeyHandlers = [];
     terminalMock.output = [];
     terminalMock.writeCallbacks = [];
     terminalMock.openCalls = 0;
@@ -296,6 +301,73 @@ describe("TerminalSession UI", () => {
     expect(terminalLib.attachTerminalRenderer).toHaveBeenCalledTimes(1);
     expect(writeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", new TextEncoder().encode("λ pasted"));
     expect(resizeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", 97, 31);
+    wrapper.unmount();
+  });
+
+  it("answers Shift+Enter in the encoding the program announced, and drops no modifier", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    const handler = terminalMock.customKeyHandlers[0]!;
+    // A program that never said anything gets the line ending, which is what it reads as Enter.
+    expect(handler(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true }))).toBe(false);
+    await flushPromises();
+    expect(writeTerminal).toHaveBeenLastCalledWith("checkout:repo", "session:new", new TextEncoder().encode("\n"));
+
+    // The other modifiers are other shortcuts, and this leaves them to xterm rather than answer a
+    // Ctrl+Shift+Enter as a Shift+Enter.
+    for (const modifier of [{ ctrlKey: true }, { altKey: true }, { metaKey: true }]) {
+      expect(handler(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true, ...modifier }))).toBe(true);
+    }
+    // The release and the character event reach the handler for the same press.
+    handler(new KeyboardEvent("keyup", { key: "Enter", shiftKey: true }));
+    handler(new KeyboardEvent("keypress", { key: "Enter", shiftKey: true }));
+    // A bare Return is xterm's, and it still arrives.
+    expect(handler(new KeyboardEvent("keydown", { key: "Enter" }))).toBe(true);
+    terminalMock.input?.("\r");
+
+    // A program that pushed the flags gets the key with its modifier attached.
+    terminalMock.channel?.onmessage(new TextEncoder().encode("\u001b[>0u").buffer as ArrayBuffer);
+    expect(handler(new KeyboardEvent("keydown", { key: "Enter", shiftKey: true }))).toBe(false);
+    await flushPromises();
+
+    expect(writeTerminal).toHaveBeenCalledTimes(3);
+    expect(writeTerminal).toHaveBeenNthCalledWith(1, "checkout:repo", "session:new", new TextEncoder().encode("\n"));
+    expect(writeTerminal).toHaveBeenNthCalledWith(2, "checkout:repo", "session:new", new TextEncoder().encode("\r"));
+    expect(writeTerminal).toHaveBeenLastCalledWith(
+      "checkout:repo",
+      "session:new",
+      new TextEncoder().encode("\u001b[13;2u"),
+    );
+    wrapper.unmount();
+  });
+
+  it("rejects terminal input above the byte budget with a visible error", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    terminalMock.input?.("x".repeat(1024 * 1024 + 1));
+    await flushPromises();
+
+    expect(writeTerminal).not.toHaveBeenCalled();
+    expect(wrapper.get('[role="alert"]').text()).toContain("1 MiB limit");
+    wrapper.unmount();
+  });
+
+  it("bounds queued terminal input by request count", async () => {
+    let finishFirstWrite!: () => void;
+    vi.mocked(writeTerminal).mockImplementationOnce(() => new Promise<void>((resolve) => (finishFirstWrite = resolve)));
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    for (let request = 0; request < 129; request += 1) terminalMock.input?.("x");
+    await flushPromises();
+    expect(writeTerminal).toHaveBeenCalledOnce();
+    expect(wrapper.get('[role="alert"]').text()).toContain("queue is full");
+
+    finishFirstWrite();
+    await flushPromises();
+    expect(writeTerminal).toHaveBeenCalledTimes(128);
     wrapper.unmount();
   });
 
@@ -1010,23 +1082,24 @@ describe("TerminalSession UI", () => {
     wrapper.unmount();
   });
 
-  it("closes a session whose input never lands, because waiting for it is bounded", async () => {
-    // The measured bug: the backend write holds the session's writer lock across a blocking write on
-    // the PTY, so a process that stopped reading fills that buffer and never answers. Nothing there
-    // times it out, which left a close that drained the queue first unable to reach the backend at
-    // all: the button did nothing for as long as it was pressed.
+  it("closes a session whose input IPC never settles, because waiting for it is bounded", async () => {
+    // The backend has its own PTY write deadline, but this promise models an IPC call that never
+    // answers. Close must still reach its backend command after the frontend drain budget expires.
     vi.useFakeTimers();
-    let rejectWrite!: (cause: unknown) => void;
+    const { toasts, dismiss } = useToasts();
+    for (const toast of [...toasts.value]) dismiss(toast.id);
+    let finishWrite!: () => void;
     const unhandled: unknown[] = [];
     const collect = (cause: unknown) => unhandled.push(cause);
     process.on("unhandledRejection", collect);
     try {
-      vi.mocked(writeTerminal).mockImplementationOnce(() => new Promise<void>((_, reject) => (rejectWrite = reject)));
+      vi.mocked(writeTerminal).mockImplementationOnce(() => new Promise<void>((resolve) => (finishWrite = resolve)));
       const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
       await flushPromises();
       vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running", foregroundProcess: false });
 
       terminalMock.input?.("y");
+      terminalMock.input?.("must not be sent after close");
       await flushPromises();
       expect(writeTerminal).toHaveBeenCalledOnce();
       const closed = wrapper.vm.requestClose();
@@ -1045,13 +1118,18 @@ describe("TerminalSession UI", () => {
       await closed;
       expect(wrapper.emitted("closed")).toHaveLength(1);
 
-      // And the write nobody waited for still fails into the terminal's own alert: abandoning the
-      // wait leaves the queue's rejection attached to it rather than loose in the window.
-      rejectWrite({ code: "operation_failed", message: "the PTY is gone" });
+      // Closing invalidates the request waiting behind this one. Even if the active request later
+      // succeeds, it must not release stale input back into the closed session.
+      expect(wrapper.get('[role="alert"]').text()).toContain("still pending when close timed out");
+      expect(toasts.value.map((toast) => toast.message)).toContain(
+        "Terminal input was still pending when close timed out; it may have been partially delivered, and queued input was discarded.",
+      );
+      finishWrite();
       await flushPromises();
-      expect(wrapper.get('[role="alert"]').text()).toContain("the PTY is gone");
+      expect(writeTerminal).toHaveBeenCalledOnce();
       expect(unhandled).toEqual([]);
       wrapper.unmount();
+      for (const toast of [...toasts.value]) dismiss(toast.id);
     } finally {
       process.off("unhandledRejection", collect);
       vi.useRealTimers();
@@ -1112,21 +1190,71 @@ describe("TerminalSession UI", () => {
     wrapper.unmount();
   });
 
-  it("returns false when an input write fails and continues the queue", async () => {
+  it("discards writes queued behind a failed input and accepts a fresh input", async () => {
+    let rejectFirstWrite!: (cause: unknown) => void;
     const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
     await flushPromises();
-    vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running", foregroundProcess: false });
-    vi.mocked(writeTerminal).mockRejectedValueOnce({
-      code: "terminal_ownership_mismatch",
-      message: "terminal session does not belong to the requested checkout",
-    });
+    vi.mocked(writeTerminal).mockImplementationOnce(
+      () => new Promise<void>((_, reject) => (rejectFirstWrite = reject)),
+    );
 
-    expect(await wrapper.vm.changeDirectory("/work/repo-wt")).toBe(false);
+    terminalMock.input?.("first");
+    terminalMock.input?.("queued");
+    terminalMock.input?.("discarded");
     await flushPromises();
-    expect(wrapper.get('[role="alert"]').text()).toBe("terminal session does not belong to the requested checkout");
-    expect(await wrapper.vm.changeDirectory("/work/repo-wt")).toBe(true);
+    expect(writeTerminal).toHaveBeenCalledOnce();
+
+    rejectFirstWrite(new Error("PTY input timed out after writing 2 of 5 bytes"));
+    await flushPromises();
+    expect(writeTerminal).toHaveBeenCalledOnce();
+    expect(wrapper.get('[role="alert"]').text()).toContain("discarded 2 queued writes (15 bytes)");
+
+    terminalMock.input?.("new");
+    await flushPromises();
     expect(writeTerminal).toHaveBeenCalledTimes(2);
+    expect(writeTerminal).toHaveBeenLastCalledWith("checkout:repo", "session:new", new TextEncoder().encode("new"));
     wrapper.unmount();
+  });
+
+  it("never retargets queued input when the terminal moves checkouts", async () => {
+    let finishFirstWrite!: () => void;
+    vi.mocked(writeTerminal).mockImplementationOnce(() => new Promise<void>((resolve) => (finishFirstWrite = resolve)));
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    terminalMock.input?.("sent to current checkout");
+    terminalMock.input?.("must not be retargeted");
+    await flushPromises();
+    expect(writeTerminal).toHaveBeenCalledOnce();
+    await wrapper.setProps({ checkoutId: "checkout:target" });
+    finishFirstWrite();
+    await flushPromises();
+
+    expect(writeTerminal).toHaveBeenCalledOnce();
+    expect(writeTerminal).toHaveBeenCalledWith(
+      "checkout:repo",
+      "session:new",
+      new TextEncoder().encode("sent to current checkout"),
+    );
+    expect(wrapper.get('[role="alert"]').text()).toContain("session changed");
+    wrapper.unmount();
+  });
+
+  it("does not send input still queued when the terminal unmounts", async () => {
+    let finishFirstWrite!: () => void;
+    vi.mocked(writeTerminal).mockImplementationOnce(() => new Promise<void>((resolve) => (finishFirstWrite = resolve)));
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    terminalMock.input?.("in flight");
+    terminalMock.input?.("stale queued input");
+    await flushPromises();
+    expect(writeTerminal).toHaveBeenCalledOnce();
+
+    wrapper.unmount();
+    finishFirstWrite();
+    await flushPromises();
+    expect(writeTerminal).toHaveBeenCalledOnce();
   });
 
   it("keeps the real PTY error visible after a successful move when the cd write fails", async () => {

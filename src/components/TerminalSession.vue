@@ -22,6 +22,7 @@ import {
   watchTerminalRendererRecovery,
 } from "../lib/marvis-terminal";
 import { registerFilePathLinks } from "../lib/terminal-file-links";
+import { watchKeyboardProtocol } from "../lib/terminal-keys";
 import { createPtyOutputWriter } from "../lib/terminal-renderer";
 import type { PtyOutputWriter } from "../lib/terminal-renderer";
 import { scrollbarOffsetForTop, terminalScrollbarGeometry } from "../lib/terminal-scrollbar";
@@ -93,6 +94,11 @@ let resizeObserver: ResizeObserver | undefined;
 let statusTimer: number | undefined;
 let statusPollInFlight = false;
 let statusPollError: string | null = null;
+const MAX_TERMINAL_INPUT_BYTES = 1024 * 1024;
+const MAX_QUEUED_TERMINAL_INPUTS = 128;
+let queuedTerminalInputBytes = 0;
+let queuedTerminalInputRequests = 0;
+let inputGeneration = 0;
 let inputQueue: Promise<void> = Promise.resolve();
 let resizeQueue: Promise<void> = Promise.resolve();
 let resizeScheduled = false;
@@ -495,14 +501,54 @@ function queueResize(cols: number, rows: number) {
 
 function queueInput(value: string): Promise<boolean> {
   if (!sessionId || closing.value || state.value.state !== "running") return Promise.resolve(false);
+  if (!value) return Promise.resolve(true);
+  if (value.length > MAX_TERMINAL_INPUT_BYTES) {
+    showError("Terminal input exceeds the 1 MiB limit.");
+    return Promise.resolve(false);
+  }
   const id = sessionId;
+  const checkoutId = props.checkoutId;
+  const generation = inputGeneration;
   const bytes = new TextEncoder().encode(value);
-  const write = inputQueue.then(() => writeTerminal(props.checkoutId, id, bytes));
-  inputQueue = write.catch(showError);
-  return write.then(
-    () => true,
-    () => false,
+  if (
+    bytes.length > MAX_TERMINAL_INPUT_BYTES ||
+    queuedTerminalInputBytes + bytes.length > MAX_TERMINAL_INPUT_BYTES ||
+    queuedTerminalInputRequests >= MAX_QUEUED_TERMINAL_INPUTS
+  ) {
+    showError("Terminal input queue is full; wait for pending input to finish.");
+    return Promise.resolve(false);
+  }
+  queuedTerminalInputBytes += bytes.length;
+  queuedTerminalInputRequests += 1;
+  const write = inputQueue
+    .then(async () => {
+      if (disposed || generation !== inputGeneration) return false;
+      if (sessionId !== id || props.checkoutId !== checkoutId) {
+        showError("Queued terminal input was discarded because the session changed.");
+        return false;
+      }
+      await writeTerminal(checkoutId, id, bytes);
+      return true;
+    })
+    .finally(() => {
+      queuedTerminalInputBytes -= bytes.length;
+      queuedTerminalInputRequests -= 1;
+    });
+  inputQueue = write.then(
+    () => undefined,
+    (cause) => {
+      inputGeneration += 1;
+      if (disposed) return;
+      const discardedBytes = queuedTerminalInputBytes;
+      const discardedRequests = queuedTerminalInputRequests;
+      showError(
+        discardedRequests > 0
+          ? `${errorMessage(cause)}; discarded ${discardedRequests} queued writes (${discardedBytes} bytes). Inspect the terminal state before typing again.`
+          : cause,
+      );
+    },
   );
+  return write.catch(() => false);
 }
 
 /**
@@ -558,18 +604,11 @@ async function requestClose() {
 }
 
 /**
- * How long a close waits for the queues in front of it before it gives up on them.
+ * How long a close waits for queued input and resize requests before proceeding.
  *
- * Both drains are real: input typed a moment before the close has to reach the PTY before the PTY
- * goes away, and a resize still in flight when it closes is a size the session never learns about.
- * But `write` holds the session's writer lock across a blocking write on the PTY, so a process that
- * stopped reading fills that buffer, blocks the write and never answers it, and nothing in the
- * backend times it out. A close that waited on the queue for as long as the queue took would then
- * be a button that does nothing for as long as it is pressed, and ending a session never takes that
- * lock, so a session on its way out is worth more than the bytes still behind it.
- *
- * Long enough that an ordinary shell answers well inside it, short enough that a PTY nobody is
- * reading reads as a close that took a moment rather than one that was ignored.
+ * PTY writes have their own deadline, but an IPC response or resize can still fail to settle. The
+ * bound keeps close responsive; lifecycle checks prevent unsent input from targeting a moved or
+ * unmounted session.
  */
 const CLOSE_DRAIN_MS = 1_000;
 
@@ -580,10 +619,19 @@ const CLOSE_DRAIN_MS = 1_000;
  * a failure this wait has already stopped watching for is the terminal's own to show, not a
  * rejection with nothing behind it.
  */
-function drainBeforeClose(drain: Promise<void>): Promise<void> {
+function drainBeforeClose(drain: Promise<void>): Promise<boolean> {
   let bound!: ReturnType<typeof setTimeout>;
-  const giveUp = new Promise<void>((resolve) => (bound = setTimeout(resolve, CLOSE_DRAIN_MS)));
-  return Promise.race([drain, giveUp]).finally(() => clearTimeout(bound));
+  let timedOut = false;
+  const giveUp = new Promise<void>(
+    (resolve) =>
+      (bound = setTimeout(() => {
+        timedOut = true;
+        resolve();
+      }, CLOSE_DRAIN_MS)),
+  );
+  return Promise.race([drain, giveUp])
+    .then(() => !timedOut)
+    .finally(() => clearTimeout(bound));
 }
 
 /** The close itself, once nothing is left to ask about. */
@@ -592,7 +640,15 @@ async function stopSession(): Promise<void> {
     // One wait over both, because the resize is only worth waiting for behind the input, and
     // because the guard in `queueResize` refuses new work the moment closing begins: from here on,
     // neither queue can hand back a replacement while this waits.
-    await drainBeforeClose(inputQueue.then(() => resizeQueue));
+    if (!(await drainBeforeClose(inputQueue.then(() => resizeQueue)))) {
+      inputGeneration += 1;
+      if (queuedTerminalInputRequests > 0) {
+        const message =
+          "Terminal input was still pending when close timed out; it may have been partially delivered, and queued input was discarded.";
+        showError(message);
+        pushCause(message);
+      }
+    }
     emit("closed", await closeTerminal(props.checkoutId, sessionId!));
   } catch (cause) {
     showError(cause);
@@ -680,7 +736,13 @@ async function startSession() {
     reportOutputFlow();
   });
   channel = new Channel<ArrayBuffer>();
-  channel.onmessage = (buffer) => outputWriter?.push(buffer);
+  channel.onmessage = (buffer) => {
+    // Read before the writer, because what the program said about its own keyboard arrives in the
+    // same output as everything it draws, and a modified key is answered differently depending on
+    // whether it has already said so.
+    keyboardProtocol.read(buffer);
+    outputWriter?.push(buffer);
+  };
   const initialSize = { cols: terminal.cols || 80, rows: terminal.rows || 24 };
   try {
     const created = await createTerminal(props.checkoutId, initialSize.cols, initialSize.rows, channel);
@@ -711,6 +773,38 @@ async function startSession() {
 }
 
 terminal.onData(queueInput);
+
+// The same queue is how a question reaches the program, so a key answer and a keyboard answer are
+// one path: both are bytes going down to whoever is behind the PTY.
+const keyboardProtocol = watchKeyboardProtocol((data) => void queueInput(data));
+
+/**
+ * Shift+Enter is a different key from Enter, and xterm.js 6 cannot say so: its keyboard mapping
+ * turns Return into `\r` without ever looking at the shift, while the same mapping does read the
+ * shift for Tab. So behind a reader that binds the two to different things — OpenCode sends the
+ * prompt on `return` and breaks the line on `shift+return` — Shift+Enter arrives as the return and
+ * the prompt goes instead of the line.
+ *
+ * Which encoding it is sent in is the reader's to have chosen. A program that pushed the flags of
+ * the keyboard protocol is reading keys in the CSI-u form, and gets the key with its modifier
+ * attached: `ESC [ 13 ; 2 u`, 13 being the key and 2 the shift, one bit above the base value. A
+ * program that never said anything gets the line ending that is also what `ctrl+j` sends and what
+ * every program treats as Enter, so a shell still runs the line instead of printing an escape it
+ * cannot read. Either way `false` comes back, so xterm sends no carriage return as well.
+ */
+function forwardShiftEnter(event: KeyboardEvent): boolean {
+  // xterm asks about the release and about the character event as well, and the press that was
+  // handled here is not `keyDownHandled`, so all three reach this handler for one keystroke.
+  if (event.type !== "keydown" || event.key !== "Enter" || !event.shiftKey) return true;
+  // A shift on its own is the key this is about. With another modifier held it is that other
+  // shortcut, and a terminal that cannot even name the modifiers is not where to decide what they
+  // should have been.
+  if (event.ctrlKey || event.altKey || event.metaKey) return true;
+  void queueInput(keyboardProtocol.csiU ? "\u001b[13;2u" : "\n");
+  return false;
+}
+terminal.attachCustomKeyEventHandler(forwardShiftEnter);
+
 terminal.onTitleChange((title) => {
   // PTY titles are untrusted text: keep them short and strip control characters before exposing them to UI.
   terminalTitle =
