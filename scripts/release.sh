@@ -23,12 +23,17 @@
 # The second command finds the manifests already at 0.2.1 and the tag already made, and only has the
 # tag to push. It also resumes a release whose build failed, which `gh run rerun <id>` would also do.
 #
-# The gate runs before anything is written, and only on the way to writing something: the tag is the
-# one step here that cannot be undone, so the tree it points at is proved here rather than by the
-# run the tag starts.
+# Two gates stand between this and a tag, and both are about the tree rather than about the version.
+# The first is local and runs before anything is written: version consistency, formatting, both
+# linters, the type checker and the tests, on this machine. The second waits for the checks workflow
+# on the commit itself, which is the only answer that covers every platform a release is built for.
+# Neither is skippable, because the tag is the one step here that cannot be undone: a version whose
+# checks were never green stays on the remote forever with no release behind it, and every later
+# attempt has to be a new number for a problem that was answerable before the first one.
 #
-# If a build fails the tag is already pushed, so nothing was published and the run can be retried
-# with `gh run rerun <id>`: the same tag, the same commit, no new version.
+# If the build fails after the tag, nothing was published and the run can be retried with
+# `gh run rerun <id>`: the same tag, the same commit, no new version. If the checks fail before it,
+# there is no tag to retry and nothing to clean up.
 #
 set -euo pipefail
 
@@ -36,6 +41,51 @@ cd "$(dirname "$0")/.."
 
 step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
 die() { printf '\033[31m%s\033[0m\n' "$1" >&2; exit 1; }
+
+# Waits for the checks run of one commit and says whether it passed.
+#
+# This is the gate that has to exist here. The local gate below answers for this machine, and the
+# machine a release is built for is not it: a commit can be green on a Mac and red on Linux, which
+# is where every release that failed so far failed. Nothing about that is visible before the tag
+# goes out, because nothing else runs the suite on Linux, so this is where that answer is asked for.
+#
+# `gh run watch` is deliberately not used: it ends when the connection to the runner does, and a
+# run that is still going reads as a release that failed. Polling cannot be confused with either --
+# the run's own state is asked for, and a request that fails answers nothing rather than "failed" --
+# so a flaky network costs a few seconds here instead of a version.
+wait_for_checks() {
+  local commit="$1" run="" short jobs reported="" status conclusion deadline
+  short="$(git rev-parse --short "$commit")"
+  for _ in $(seq 1 18); do
+    run="$(gh run list --workflow ci.yml --commit "$commit" --event push --limit 1 \
+      --json databaseId --jq '.[0].databaseId // empty')"
+    [[ -n "$run" ]] && break
+    sleep 5
+  done
+  [[ -n "$run" ]] || return 2
+  echo "run $run: https://github.com/$repository/actions/runs/$run"
+  # Sixty minutes is far longer than these checks take and is here so a runner that wedges cannot
+  # leave this waiting for the rest of the day: the run is still there to be looked at.
+  deadline=$((SECONDS + 3600))
+  while ((SECONDS < deadline)); do
+    status="$(gh run view "$run" --json status --jq .status 2>/dev/null)"
+    if [[ "$status" == "completed" ]]; then
+      break
+    fi
+    jobs="$(gh run view "$run" --json jobs --jq '[.jobs[] | "\(.name): \(.status)"] | join("  ")' 2>/dev/null)"
+    if [[ -n "$jobs" && "$jobs" != "$reported" ]]; then
+      printf '  %s\n' "$jobs"
+      reported="$jobs"
+    fi
+    sleep 20
+  done
+  conclusion="$(gh run view "$run" --json conclusion --jq .conclusion 2>/dev/null)"
+  if [[ "$conclusion" != "success" ]]; then
+    gh run view "$run" --json jobs --jq '.jobs[] | select(.conclusion == "failure") | "  \(.name)"' >&2
+    return 1
+  fi
+  echo "$short passed the checks on every platform"
+}
 
 usage() {
   cat <<'USAGE'
@@ -143,6 +193,23 @@ Fix it, commit, and run this again."
   # against, and the earlier HEAD is a commit no run is ever made for, so polling for it waits out
   # the whole timeout and reports a release that is already building.
   release_commit="$(git rev-parse HEAD)"
+
+  step "Waiting for the checks on $(git rev-parse --short "$release_commit")"
+  # On the right of || rather than after a semicolon: `set -e` ends the script on a command that
+  # fails on its own, and this one's answer is what decides which of the two failures below it is.
+  checks=0
+  wait_for_checks "$release_commit" || checks=$?
+  case $checks in
+    0) ;;
+    1)
+      die "the checks failed for $(git rev-parse --short "$release_commit") on the jobs named above.
+No tag was pushed, so there is no version to redo: fix it on main and run this again."
+      ;;
+    *)
+      die "no checks run appeared for $(git rev-parse --short "$release_commit").
+Check https://github.com/$repository/actions and run this again."
+      ;;
+  esac
 
   if $dry_run; then
     step "Building $tag without tagging it"

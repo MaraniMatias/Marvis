@@ -87,7 +87,13 @@ fn open_url_with(opener: &str, url: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::{is_web_url, open_url_with};
-    use std::{fs, os::unix::fs::PermissionsExt, path::Path};
+    use std::{
+        fs,
+        os::unix::fs::PermissionsExt,
+        path::Path,
+        thread,
+        time::{Duration, Instant},
+    };
     use tempfile::tempdir;
 
     /// A program on disk that runs `script`, so the opener is a real process whose ending the test
@@ -97,6 +103,31 @@ mod tests {
         fs::write(&path, format!("#!/bin/sh\n{script}\n")).expect("a program to run");
         fs::set_permissions(&path, fs::Permissions::from_mode(0o755)).expect("it to be runnable");
         path.display().to_string()
+    }
+
+    /// `open_url_with` on a page, waiting out the one refusal that belongs to another thread.
+    ///
+    /// Writing a program and then running it cannot always be done back to back. A fork anywhere
+    /// else in this binary carries the writing end of that file into the child, and a file still
+    /// open for writing somewhere is one the kernel refuses to execute: `Text file busy`, which on
+    /// Linux and on macOS is error 26 both. The tests below run in parallel with each other, so a
+    /// fork here is a fork there, and the state is that fork's rather than this one's: it lasts as
+    /// long as the fork does and nothing about the program changes while it is waited out, which is
+    /// why this retries rather than spawning something else. A refusal that is not this one is
+    /// returned as it is, because a page that would not open for any other reason is what the tests
+    /// above this one are about.
+    fn open_page(opener: &str) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let outcome = open_url_with(opener, "https://example.com");
+            let another_threads_fork = outcome
+                .as_ref()
+                .is_err_and(|message| message.ends_with("(os error 26)"));
+            if !another_threads_fork || Instant::now() >= deadline {
+                return outcome;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
     }
 
     #[test]
@@ -150,7 +181,7 @@ mod tests {
         let temp = tempdir().expect("a directory for the opener");
         let opener = opener_in(temp.path(), "exit 0");
 
-        assert_eq!(open_url_with(&opener, "https://example.com"), Ok(()));
+        assert_eq!(open_page(&opener), Ok(()));
     }
 
     #[test]
@@ -161,7 +192,7 @@ mod tests {
         // Named for its exit rather than folded into the URL refusal, because the two are not the
         // same fact: the link was a web page and the machine is what would not open it.
         assert_eq!(
-            open_url_with(&opener, "https://example.com").expect_err("exit 17 opened nothing"),
+            open_page(&opener).expect_err("exit 17 opened nothing"),
             format!("{opener} did not open the link (exit code 17)")
         );
     }
@@ -175,8 +206,7 @@ mod tests {
         let opener = opener_in(temp.path(), "kill -TERM $$");
 
         assert_eq!(
-            open_url_with(&opener, "https://example.com")
-                .expect_err("a killed opener opened nothing"),
+            open_page(&opener).expect_err("a killed opener opened nothing"),
             format!("{opener} did not open the link (terminated without an exit code)")
         );
     }
