@@ -31,7 +31,7 @@ function session(overrides: Partial<AgentSession> = {}): AgentSession {
     title: "review",
     running: false,
     idleAt: 1,
-    blockedOnPermission: false,
+    awaitingReply: false,
     agent: null,
     model: null,
     parentId: null,
@@ -75,10 +75,10 @@ describe("applyAgentEvent", () => {
     expect(started[0].running).toBe(true);
   });
 
-  it("reports an unanswerable permission instead of pretending the agent is working", () => {
-    const blocked = applyAgentEvent([session({ running: true })], event({ kind: "permissionAsked" }));
-    expect(blocked[0].blockedOnPermission).toBe(true);
-    expect(blocked[0].running).toBe(false);
+  it.each(["permissionAsked", "questionAsked"] as const)("reports %s without overwriting running", (kind) => {
+    const blocked = applyAgentEvent([session({ running: true })], event({ kind }));
+    expect(blocked[0].awaitingReply).toBe(true);
+    expect(blocked[0].running).toBe(true);
   });
 
   it("ignores events for another session and events with no session", () => {
@@ -192,10 +192,10 @@ describe("useAgentSessions", () => {
     await settle();
     expect(state.events.at(-1)?.kind).toBe("turnStarted");
 
-    // An unanswerable permission is the one state the server cannot report for us.
+    // Asked events show waiting optimistically; subsequent polling is authoritative.
     handler?.({ payload: event({ kind: "permissionAsked", rawType: "permission.asked" }) });
     await settle();
-    expect(state.sessions[0].blockedOnPermission).toBe(true);
+    expect(state.sessions[0].awaitingReply).toBe(true);
     expect(state.sessions[0].running).toBe(false);
 
     handler?.({ payload: event({ kind: "turnStarted", checkoutId: "checkout:other" }) });
@@ -265,6 +265,39 @@ describe("useAgentSessions", () => {
     expect(state.turnsCompleted).toBe(1);
     vi.useRealTimers();
   });
+
+  it.each([false, true])(
+    "polls pending turns without counting completion, initial pending: %s",
+    async (initialPending) => {
+      vi.useFakeTimers();
+      mocks.listAgentSessions.mockResolvedValue([session({ running: !initialPending, awaitingReply: initialPending })]);
+      const state = useAgentSessions(
+        computed(() => checkout),
+        computed(() => gitRepo),
+      );
+      await settle();
+      mocks.listAgentSessions.mockResolvedValue([session({ awaitingReply: true })]);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(state.turnsCompleted).toBe(0);
+      expect(state.sessions[0].awaitingReply).toBe(true);
+      await vi.advanceTimersByTimeAsync(4000);
+      expect(state.turnsCompleted).toBe(0);
+
+      mocks.listAgentSessions.mockRejectedValue(new Error("pending endpoint failed"));
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(state.state).toBe("error");
+      expect(state.sessions[0].awaitingReply).toBe(true);
+      expect(state.turnsCompleted).toBe(0);
+
+      mocks.listAgentSessions.mockResolvedValue([session()]);
+      await vi.advanceTimersByTimeAsync(2000);
+      expect(state.sessions[0].awaitingReply).toBe(false);
+      expect(state.turnsCompleted).toBe(1);
+      await state.reload();
+      expect(state.turnsCompleted).toBe(1);
+      vi.useRealTimers();
+    },
+  );
 
   it("keeps counting when a turn fails, without waiting for an idle time", async () => {
     vi.useFakeTimers();
@@ -576,10 +609,22 @@ describe("useTerminalAgentRows", () => {
     // terminal, and the only thing that can say which session it has open is its own title. A row
     // matches against this list itself, so anything the list drops cannot be named by anybody.
     expect(state.byCheckout["checkout:first"].sessions).toEqual([
-      { title: "review", agent: { label: "Coder", color: "#4ed6bf", attention: "busy" }, running: true, updatedAt: 1 },
+      {
+        title: "review",
+        agent: { label: "Coder", color: "#4ed6bf", attention: "busy" },
+        running: true,
+        awaitingReply: false,
+        updatedAt: 1,
+      },
     ]);
     expect(state.byCheckout["checkout:second"].sessions).toEqual([
-      { title: "review", agent: { label: "Plan", color: null, attention: "none" }, running: false, updatedAt: 1 },
+      {
+        title: "review",
+        agent: { label: "Plan", color: null, attention: "none" },
+        running: false,
+        awaitingReply: false,
+        updatedAt: 1,
+      },
     ]);
   });
 
@@ -623,11 +668,11 @@ describe("useTerminalAgentRows", () => {
     expect(state.row("checkout:absent")).toEqual({ sessions: [] });
   });
 
-  it("offers a session with no agent as a session, so a title can still match it", async () => {
+  it.each([false, true])("offers a session with no agent, awaiting reply: %s", async (awaitingReply) => {
     // A fresh session has no agent behind it yet, which is not the same as not existing: its title
     // is what a terminal with it open writes into its own title, and the row can still say which
     // session it is looking at. It just has no mode to name.
-    perCheckout({ "checkout:first": [{ id: "ses_fresh", agent: null }] });
+    perCheckout({ "checkout:first": [{ id: "ses_fresh", agent: null, awaitingReply }] });
 
     const state = useTerminalAgentRows(computed(() => ["checkout:first"]));
     await settle();
@@ -635,7 +680,7 @@ describe("useTerminalAgentRows", () => {
     // The clock rides along because it is the only duration a terminal row has: the elapsed time in a
     // row's trailing slot is this session's own last update, read from the service and nowhere else.
     expect(state.byCheckout["checkout:first"].sessions).toEqual([
-      { title: "review", agent: null, running: false, updatedAt: 1 },
+      { title: "review", agent: null, running: false, awaitingReply, updatedAt: 1 },
     ]);
   });
 

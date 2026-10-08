@@ -67,7 +67,7 @@ const mocks = vi.hoisted(() => ({
     checkoutId: string;
     title: string;
     busy: boolean;
-    blockedOnPermission: boolean;
+    awaitingReply: boolean;
     createdAt: number;
     updatedAt: number;
   }>,
@@ -745,7 +745,7 @@ describe("App UI integration", () => {
       title: "review",
       busy: false,
       idleAt: 1,
-      blockedOnPermission: false,
+      awaitingReply: false,
       createdAt: 1,
       updatedAt,
     };

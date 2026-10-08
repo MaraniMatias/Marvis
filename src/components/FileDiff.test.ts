@@ -315,7 +315,7 @@ function session(id: string, overrides: Partial<AgentSession> = {}): AgentSessio
     title: id,
     running: false,
     idleAt: 1,
-    blockedOnPermission: false,
+    awaitingReply: false,
     agent: null,
     model: null,
     parentId: null,

@@ -14,8 +14,8 @@ pub struct AgentSession {
     /// and one that is working right now. `/api/session/active` reports the latter separately;
     /// this remains the timestamp fact rather than a derived verdict.
     pub idle_at: Option<i64>,
-    /// Set when a permission request arrived and Marvis could not answer it.
-    pub blocked_on_permission: bool,
+    /// A question or permission is waiting for a reply in OpenCode.
+    pub awaiting_reply: bool,
     /// The agent running this session, and therefore the mode it is in: OpenCode spells
     /// `build`/`plan` as agents, so one name answers both questions.
     pub agent: Option<String>,
@@ -78,8 +78,10 @@ pub enum AgentEventKind {
     TurnFailed,
     /// A tool was invoked. `data` carries `name` and `input`.
     ToolCalled,
-    /// A permission was requested and cannot be answered on this server version.
+    /// A permission was requested.
     PermissionAsked,
+    /// A question was asked.
+    QuestionAsked,
 }
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
@@ -117,6 +119,7 @@ pub fn agent_event_kind(raw_type: &str) -> AgentEventKind {
         "session.execution.failed" | "session.step.failed" => AgentEventKind::TurnFailed,
         "session.tool.called" => AgentEventKind::ToolCalled,
         "permission.asked" => AgentEventKind::PermissionAsked,
+        "question.asked" => AgentEventKind::QuestionAsked,
         _ => AgentEventKind::Unknown,
     }
 }
@@ -142,6 +145,10 @@ mod tests {
         assert_eq!(
             agent_event_kind("permission.asked"),
             AgentEventKind::PermissionAsked
+        );
+        assert_eq!(
+            agent_event_kind("question.asked"),
+            AgentEventKind::QuestionAsked
         );
         assert_eq!(
             agent_event_kind("session.execution.failed"),

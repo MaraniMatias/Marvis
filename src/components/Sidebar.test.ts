@@ -647,12 +647,14 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Copy ids into lists",
                 agent: { label: "coder", color: null, attention: "busy" },
+                awaitingReply: false,
                 running: true,
                 updatedAt: Date.now(),
               },
               {
                 title: "An old session from another checkout's checkout",
                 agent: null,
+                awaitingReply: false,
                 running: false,
                 updatedAt: Date.now(),
               },
@@ -707,6 +709,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: long,
                 agent: { label: "plan", color: null, attention: "none" },
+                awaitingReply: false,
                 running: false,
                 updatedAt: Date.now(),
               },
@@ -753,12 +756,14 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Add icon box, tinted chip, dot ring",
                 agent: { label: "coder", color: null, attention: "none" },
+                awaitingReply: false,
                 running: false,
                 updatedAt: Date.now(),
               },
               {
                 title: "Plan de implementación para la sidebar",
                 agent: { label: "plan", color: null, attention: "busy" },
+                awaitingReply: false,
                 running: true,
                 updatedAt: Date.now(),
               },
@@ -818,12 +823,14 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Humanizer",
                 agent: { label: "coder", color: null, attention: "busy" },
+                awaitingReply: false,
                 running: true,
                 updatedAt: Date.now(),
               },
               {
                 title: "Humanizer",
                 agent: { label: "plan", color: null, attention: "none" },
+                awaitingReply: false,
                 running: false,
                 updatedAt: Date.now() - 60_000,
               },
@@ -875,6 +882,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Copy ids into lists",
                 agent: { label: "coder", color: null, attention: "busy" },
+                awaitingReply: false,
                 running: true,
                 updatedAt: Date.now(),
               },
@@ -991,6 +999,7 @@ describe("Sidebar workdir rows", () => {
                 {
                   title: "Copy ids into lists",
                   agent: { label: "plan", color: null, attention: "busy" },
+                  awaitingReply: false,
                   running: true,
                   updatedAt: Date.now(),
                 },
@@ -1032,7 +1041,7 @@ describe("Sidebar workdir rows", () => {
     other.unmount();
   });
 
-  it("puts the state in the glyph's colour and the mode beside the name, on one line", () => {
+  it("uses the agent colour on a working glyph and keeps the mode beside the name", () => {
     const wrapper = mount(Sidebar, {
       props: {
         repos: [
@@ -1058,6 +1067,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Copy ids into lists",
                 agent: { label: "plan", color: "#FF966C", attention: "busy" },
+                awaitingReply: false,
                 running: true,
                 updatedAt: Date.now(),
               },
@@ -1075,20 +1085,89 @@ describe("Sidebar workdir rows", () => {
       },
     });
 
-    // The session's own title is the row's name and the mode is the detail beside it. The state is
-    // the glyph: a spinner in the accent, because that is the one state that moves. OpenCode's own
-    // colour for the agent is not painted, so the colour on the row means one thing.
+    // The session's own title is the row's name and the mode is the detail beside it. The spinner
+    // still says that a turn is moving, but now wears the agent colour OpenCode reports.
     expect(wrapper.get(".workdir-child .nm").text()).toBe("Copy ids into lists");
     expect(wrapper.get(".workdir-child .dm").text()).toBe("plan");
-    expect(wrapper.get(".workdir-child").classes()).toContain("state-working");
-    expect(wrapper.get(".workdir-child .workdir-icon").classes()).toContain("lucide-loader-circle");
-    // The agent's own hex is the server's value and is not drawn: the state, not the agent, is coloured.
-    expect(sidebarStyles()).not.toContain("#FF966C");
+    const row = wrapper.get(".workdir-child");
+    expect(row.classes()).toContain("state-working");
+    expect(row.classes()).toContain("agent-tinted");
+    expect(row.attributes("style")).toContain("--agent-color: #FF966C");
+    expect(row.get(".workdir-icon").classes()).toContain("lucide-loader-circle");
+    expect(rule(".state-working.agent-tinted .workdir-icon")).toContain(
+      "color: color-mix(in srgb, var(--agent-color) 75%, var(--marvis-text-muted));",
+    );
     // A colour is not something a screen reader reads, so the state is spelled out where the glyph
     // is not: the accessible name, built from the same `item.state` the colour came from.
     expect(wrapper.get(".workdir-child > .workdir-select").attributes("aria-label")).toBe(
       "Terminal session: Copy ids into lists, plan \u2014 0s \u2014 Working",
     );
+    wrapper.unmount();
+  });
+
+  it("tints idle agents but keeps waiting, failures, and other harnesses unchanged", () => {
+    const checkoutId = "checkout:agent-colors";
+    const sessions = [
+      { id: "idle", title: "Idle agent", attention: "none" },
+      { id: "waiting", title: "Waiting agent", attention: "blocked" },
+      { id: "failed", title: "Failed agent", attention: "failed" },
+    ] as const;
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              checkout({
+                id: checkoutId,
+                sessions: [
+                  ...sessions.map(({ id }) => session(`session:${id}`, "zsh", checkoutId)),
+                  session("session:nvim", "zsh", checkoutId),
+                ],
+              }),
+            ],
+          }),
+        ],
+        activeCheckoutId: checkoutId,
+        activeSessionId: null,
+        isOpening: false,
+        agentRows: {
+          [checkoutId]: {
+            sessions: sessions.map(({ title, attention }) => ({
+              title,
+              agent: { label: "coder", color: "#4ED6BF", attention },
+              awaitingReply: false,
+              running: false,
+              updatedAt: Date.now(),
+            })),
+          },
+        },
+        sessionRuntimeStatuses: {
+          ...Object.fromEntries(
+            sessions.map(({ id, title }) => [
+              `session:${id}`,
+              {
+                state: "running",
+                foregroundProcess: true,
+                foregroundApp: "opencode",
+                terminalTitle: `OC | ${title}`,
+              },
+            ]),
+          ),
+          "session:nvim": { state: "running", foregroundProcess: true, foregroundApp: "nvim" },
+        },
+      },
+    });
+
+    const row = (id: string) => wrapper.get(`[data-session-id="session:${id}"]`);
+    expect(row("idle").classes()).toContain("agent-tinted");
+    expect(row("idle").attributes("style")).toContain("--agent-color: #4ED6BF");
+    expect(row("idle").get(".workdir-icon").classes()).toContain("lucide-sparkles");
+    expect(row("waiting").classes()).toContain("state-waiting");
+    expect(row("waiting").classes()).not.toContain("agent-tinted");
+    expect(row("failed").classes()).toContain("state-failed");
+    expect(row("failed").classes()).not.toContain("agent-tinted");
+    expect(row("nvim").classes()).toContain("state-running");
+    expect(row("nvim").classes()).not.toContain("agent-tinted");
     wrapper.unmount();
   });
 
@@ -1703,6 +1782,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Copy ids",
                 agent: { label: "coder", color: null, attention: "busy" },
+                awaitingReply: false,
                 running: true,
                 updatedAt: Date.now(),
               },
@@ -1751,6 +1831,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Copy ids",
                 agent: { label: "coder", color: null, attention: "none" },
+                awaitingReply: false,
                 running: false,
                 updatedAt: Date.now(),
               },
@@ -1813,6 +1894,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Copy ids",
                 agent: { label: "coder", color: "#4ED6BF", attention: "none" },
+                awaitingReply: false,
                 running: false,
                 updatedAt: Date.now(),
               },
@@ -1823,6 +1905,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Plan it",
                 agent: { label: "plan", color: "#FF966C", attention: "busy" },
+                awaitingReply: false,
                 running: true,
                 updatedAt: Date.now(),
               },
@@ -1880,6 +1963,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Copy ids",
                 agent: { label: "coder", color: "#4ED6BF", attention: "busy" },
+                awaitingReply: false,
                 running: true,
                 updatedAt: Date.now(),
               },
@@ -1890,6 +1974,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Plan it",
                 agent: { label: "plan", color: "#FF966C", attention: "none" },
+                awaitingReply: false,
                 running: false,
                 updatedAt: Date.now(),
               },
@@ -1950,6 +2035,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Copy ids into lists",
                 agent: { label: "plan", color: "#FF966C", attention: "blocked" },
+                awaitingReply: false,
                 running: true,
                 updatedAt: Date.now(),
               },
@@ -1960,6 +2046,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Fix it",
                 agent: { label: "coder", color: "#4ED6BF", attention: "failed" },
+                awaitingReply: false,
                 running: false,
                 updatedAt: Date.now(),
               },
@@ -2025,6 +2112,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: "Copy ids",
                 agent: { label: "coder", color: "#4ED6BF", attention: "busy" },
+                awaitingReply: false,
                 running: true,
                 updatedAt: Date.now(),
               },
@@ -2183,6 +2271,7 @@ describe("Sidebar workdir rows", () => {
               {
                 title: long,
                 agent: { label: "plan", color: null, attention: "none" },
+                awaitingReply: false,
                 running: false,
                 updatedAt: Date.now(),
               },
@@ -2277,6 +2366,7 @@ describe("Sidebar workdir rows", () => {
                     color: null,
                     attention: (["busy", "blocked", "failed", "none"] as const)[index]!,
                   },
+                  awaitingReply: index === 1,
                   running: index < 2,
                   updatedAt: Date.now(),
                 },
@@ -3016,7 +3106,7 @@ describe("Sidebar workdir rows", () => {
   });
 });
 
-it("draws an identified session that is running as working, even with no agent to name", () => {
+it.each([false, true])("draws a running session with no agent, awaiting reply: %s", (awaitingReply) => {
   // `attention` is only carried for a session that HAS an agent, so reading it alone drew a running
   // turn as idle grey — the row said nothing was happening while the service said a turn was open.
   // The session's own answer wins over whether there happens to be a mode to show.
@@ -3032,7 +3122,7 @@ it("draws an identified session that is running as working, even with no agent t
       isOpening: false,
       agentRows: {
         "checkout:agent": {
-          sessions: [{ title: "Untitled session", agent: null, running: true, updatedAt: Date.now() }],
+          sessions: [{ title: "Untitled session", agent: null, awaitingReply, running: true, updatedAt: Date.now() }],
         },
       },
       sessionRuntimeStatuses: {
@@ -3046,8 +3136,10 @@ it("draws an identified session that is running as working, even with no agent t
     },
   });
   const row = wrapper.get(".workdir-child");
-  expect(row.classes()).toContain("state-working");
-  expect(wrapper.get('.workdir-child [aria-label^="Terminal session:"]').attributes("aria-label")).toContain("Working");
+  expect(row.classes()).toContain(awaitingReply ? "state-waiting" : "state-working");
+  expect(wrapper.get('.workdir-child [aria-label^="Terminal session:"]').attributes("aria-label")).toContain(
+    awaitingReply ? "Waiting" : "Working",
+  );
   // And it says what is missing beside the name, which is not the same as saying nothing is happening.
   expect(row.get(".dm").text()).toBe("sin sesión");
   wrapper.unmount();

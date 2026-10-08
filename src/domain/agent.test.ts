@@ -18,7 +18,7 @@ function session(overrides: Partial<AgentSession> = {}): AgentSession {
     title: "review",
     running: false,
     idleAt: 1,
-    blockedOnPermission: false,
+    awaitingReply: false,
     agent: null,
     model: null,
     parentId: null,
@@ -52,8 +52,8 @@ describe("agent session helpers", () => {
     expect(agentAttention(undefined)).toBe("none");
     expect(agentAttention(session())).toBe("none");
     expect(agentAttention(session({ running: true }))).toBe("busy");
-    expect(agentAttention(session({ running: true, blockedOnPermission: true }))).toBe("blocked");
-    expect(agentAttention(session({ blockedOnPermission: true }))).toBe("blocked");
+    expect(agentAttention(session({ running: true, awaitingReply: true }))).toBe("blocked");
+    expect(agentAttention(session({ awaitingReply: true }))).toBe("blocked");
   });
 
   it("reads a turn the server ended badly as the last word, not as quiet", () => {

@@ -76,16 +76,15 @@ function errorText(cause: unknown): string {
 }
 
 /**
- * Counts the turns that ended since the last read, and leaves `wasRunning` holding what is
- * running now.
+ * Counts settled turns, keeping running or awaiting-reply turns in `wasRunning`.
  *
  * `wasRunning` is updated in place because it is the only record of what the previous read said:
- * a session that was running and is not has finished, and one that was not and is has started.
+ * A pending reply is not completion, even when the service no longer reports running.
  */
 function settledTurns(sessions: AgentSession[], wasRunning: Set<string>): number {
   let settled = 0;
   for (const session of sessions) {
-    if (session.running) {
+    if (session.running || session.awaitingReply) {
       wasRunning.add(session.id);
     } else if (wasRunning.delete(session.id)) {
       settled += 1;
@@ -109,7 +108,7 @@ function settledTurns(sessions: AgentSession[], wasRunning: Set<string>): number
 function recordRunning(sessions: AgentSession[], wasRunning: Set<string>): void {
   wasRunning.clear();
   for (const session of sessions) {
-    if (session.running) wasRunning.add(session.id);
+    if (session.running || session.awaitingReply) wasRunning.add(session.id);
   }
 }
 
@@ -129,9 +128,9 @@ export function applyAgentEvent(sessions: AgentSession[], event: AgentEvent): Ag
       case "turnStarted":
         return { ...session, running: true };
       case "permissionAsked":
-        // This server version cannot answer a permission, so the turn is stuck until the
-        // policy changes. Say so instead of pretending the agent is working.
-        return { ...session, running: false, blockedOnPermission: true };
+      case "questionAsked":
+        // The next read clears this only when every pending request has been answered.
+        return { ...session, awaitingReply: true };
       default:
         return session;
     }
@@ -351,14 +350,14 @@ export function useAgentSessions(
   );
 
   /**
-   * Re-reads the sessions while the service reports one of them running.
+   * Re-reads while a session is running or awaiting a reply.
    *
    * The service announces no completion event, so a turn ending is a transition seen between two
-   * reads. This polls only while something is running, so an idle app is not polled, and it
+   * reads. Pending turns also poll so replies clear the waiting state; idle turns do not poll. It
    * covers a turn started in the person's own TUI, which is the common case here.
    */
   function pollRunningSessions() {
-    if (!state.sessions.some((session) => session.running)) return;
+    if (!state.sessions.some((session) => session.running || session.awaitingReply)) return;
     refreshNow();
   }
 
@@ -423,6 +422,8 @@ export interface TerminalAgentSession {
   agent: AgentHeadline | null;
   /** Whether the service reports a turn running in this session right now. */
   running: boolean;
+  /** Pending requests outrank running even when the session has no agent to name. */
+  awaitingReply: boolean;
   /**
    * When the service last touched this session, in epoch milliseconds.
    *
@@ -531,6 +532,7 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
           title: session.title,
           agent: label ? { label, color: agentColor(agents, session.agent), attention: agentAttention(session) } : null,
           running: session.running,
+          awaitingReply: session.awaitingReply,
           updatedAt: session.updatedAt,
         };
       }),

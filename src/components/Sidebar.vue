@@ -555,8 +555,10 @@ interface WorkdirItem {
   detail?: string;
   /** The glyph the row wears: what it is. */
   icon: Component;
-  /** What the glyph says about it, in colour. The state lives here and nowhere else. */
+  /** The row's state; an identified OpenCode agent may also supply the glyph's tint. */
   state: RowState;
+  /** OpenCode's colour for this session's agent, when the state leaves room for it. */
+  tint: string | null;
   /**
    * How long ago the session this terminal has open was last updated, drawn compactly.
    *
@@ -1033,15 +1035,20 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
        * One attention for the whole row, and the session's own answer wins.
        *
        * A session the service reports as running is working whether or not it has an agent to name.
-       * `attention` is only carried for a session that HAS an agent, so reading it alone drew a
+       * Pending replies are carried independently of the agent. `attention` only exists when an
+       * agent can be named, so reading it alone drew a
        * running turn as idle grey: the row said nothing was happening while the service said a turn
        * was open. A session that names no agent and runs no turn is idle, which is a fact rather than
        * a shrug.
        */
       const attention: AgentAttention = identified
-        ? (identified.agent?.attention ?? (identified.running ? "busy" : "none"))
+        ? identified.awaitingReply
+          ? "blocked"
+          : (identified.agent?.attention ?? (identified.running ? "busy" : "none"))
         : "none";
       const agent = identified ? AGENT_STATE[attention] : undefined;
+      const tint =
+        identified?.agent?.color && (attention === "busy" || attention === "none") ? identified.agent.color : null;
       return {
         session,
         destinations: repo.checkouts
@@ -1063,9 +1070,9 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
         /**
          * The glyph and its colour, which between them are the whole of the row's state.
          *
-         * - An identified session draws the state the service reported, and only that session's:
-         *   the spinner in the accent while it works, the sparkles in the warning colour while it
-         *   waits for a reply, the sparkles in the danger colour when its last turn failed.
+         * - An identified OpenCode session wears its own agent colour while working or idle. The
+         *   spinner still moves while it works; waiting and a failed turn keep their warning and
+         *   danger colours, because those states need to stay unmistakable.
          * - A plain terminal with something in front of the shell is a process that is up, which is
          *   green and which nothing else in the panel is.
          * - A plain terminal whose last command failed is red. The backend cannot see that at all: the
@@ -1077,9 +1084,9 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
          *   in front of you now. A shell that has exited stays idle whatever code it left with: the
          *   panel already names that state in the row's accessible name, and the colour is for the
          *   thing nothing else can report.
-         * - Everything else is idle: the agent's own glyph or a terminal's, both grey. An OpenCode
-         *   whose session nobody identified lands here too, which is why it also says `sin sesión` —
-         *   a colour cannot say "nothing was observed" without lying about the state.
+         * - Everything else is idle: an agent without its own colour and a terminal are grey. An
+         *   OpenCode whose session nobody identified lands here too, which is why it also says
+         *   `sin sesión` — a colour cannot say "nothing was observed" without lying about the state.
          */
         icon: agentTerminal
           ? agent?.state === "working"
@@ -1098,6 +1105,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
               : status?.foregroundProcess
                 ? "running"
                 : "idle"),
+        tint,
         // Only a row that identified a session has a clock to read, and that row is the only one
         // that draws a time.
         elapsed: identified ? elapsedSince(identified.updatedAt) : null,
@@ -1408,9 +1416,11 @@ function rowLabel(item: WorkdirItem): string {
                   {
                     active: item.active,
                     selected: item.active,
+                    'agent-tinted': item.tint !== null,
                     'is-being-dragged': pointerDrag?.started && pointerDrag.session.id === item.session.id,
                   },
                 ]"
+                :style="item.tint ? { '--agent-color': item.tint } : undefined"
               >
                 <!-- Editing swaps the button for the field, rather than nesting an input inside
                    one: a control inside a control cannot be focused or read on its own. The row
@@ -2145,11 +2155,15 @@ function rowLabel(item: WorkdirItem): string {
   color: var(--marvis-success);
 }
 
-/* Idle is the one state with no colour of its own, so its ink is the panel's own muted foreground —
-   lifted one step from the faintest token, because this glyph now has to read on the selected row's
-   tint as well as on the panel, and faint does not. Nothing else about the state is touched. */
+/* An idle row without an OpenCode agent colour uses the panel's muted foreground — lifted one step
+   from the faintest token, because this glyph also has to read on the selected row's tint. */
 .state-idle .workdir-icon {
   color: var(--marvis-text-muted);
+}
+
+.state-idle.agent-tinted .workdir-icon,
+.state-working.agent-tinted .workdir-icon {
+  color: color-mix(in srgb, var(--agent-color) 75%, var(--marvis-text-muted));
 }
 
 @keyframes row-spin {

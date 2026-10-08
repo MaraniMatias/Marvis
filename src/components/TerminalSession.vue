@@ -23,7 +23,7 @@ import {
 } from "../lib/marvis-terminal";
 import { registerFilePathLinks } from "../lib/terminal-file-links";
 import { watchKeyboardProtocol } from "../lib/terminal-keys";
-import { createPtyOutputWriter, renderPtyOutput } from "../lib/terminal-renderer";
+import { createPtyOutputWriter } from "../lib/terminal-renderer";
 import type { PtyOutputWriter } from "../lib/terminal-renderer";
 import { registerShellIntegration } from "../lib/terminal-shell-integration";
 import { scrollbarOffsetForTop, terminalScrollbarGeometry } from "../lib/terminal-scrollbar";

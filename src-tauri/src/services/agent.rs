@@ -185,6 +185,13 @@ struct ApiActiveSession {
     kind: String,
 }
 
+/// Pending forms (questions) and permissions carry the same session reference.
+#[derive(Debug, Deserialize)]
+struct ApiPendingRequest {
+    #[serde(rename = "sessionID")]
+    session_id: String,
+}
+
 /// One entry of `GET /api/agent`, which is where the color an agent is painted with lives.
 #[derive(Debug, Deserialize)]
 struct ApiAgent {
@@ -398,19 +405,25 @@ impl AgentBridge {
         path: &str,
         timeout: Duration,
     ) -> Result<T, BridgeError> {
+        self.get_json_in_directory(path, self.directory(), timeout)
+    }
+
+    fn get_json_in_directory<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        directory: &Path,
+        timeout: Duration,
+    ) -> Result<T, BridgeError> {
         let url = format!("{}{path}", self.base_url());
         let envelope: ApiEnvelope<T> = send_json(retry_interrupted(|| {
             with_timeout(self.client.get(&url), timeout)
-                .query("directory", self.directory().to_string_lossy().as_ref())
+                .query("directory", directory.to_string_lossy().as_ref())
                 .header("authorization", self.auth_header())
-                .header(
-                    DIRECTORY_HEADER,
-                    self.directory().to_string_lossy().as_ref(),
-                )
+                .header(DIRECTORY_HEADER, directory.to_string_lossy().as_ref())
                 .header("accept", "application/json")
                 .call()
         }))?;
-        envelope.into_scoped(self.directory())
+        envelope.into_scoped(directory)
     }
 
     /// Fetches `path` as the service answers it for every directory it knows.
@@ -474,6 +487,22 @@ impl AgentBridge {
             .collect())
     }
 
+    /// OpenCode v2.0.25 exposes questions as forms. Both lists answer for one location,
+    /// not the whole service, even when the directory header is omitted.
+    fn awaiting_sessions(
+        &self,
+        directory: &Path,
+        timeout: Duration,
+    ) -> Result<HashSet<String>, BridgeError> {
+        let mut pending = HashSet::new();
+        for path in ["/api/form", "/api/permission/request"] {
+            let requests: Vec<ApiPendingRequest> =
+                self.get_json_in_directory(path, directory, timeout)?;
+            pending.extend(requests.into_iter().map(|request| request.session_id));
+        }
+        Ok(pending)
+    }
+
     /// Resolves a session id inside this bridge only, then hands back the raw session.
     fn session(&self, session_id: &str) -> Result<ApiSession, BridgeError> {
         validate_session_id(session_id)?;
@@ -497,7 +526,12 @@ impl AgentBridge {
             .map_err(|error| BridgeError::Failed(format!("could not read the transcript: {error}")))
     }
 
-    fn to_agent_session(&self, raw: &ApiSession, running: bool) -> AgentSession {
+    fn to_agent_session(
+        &self,
+        raw: &ApiSession,
+        running: bool,
+        awaiting_reply: bool,
+    ) -> AgentSession {
         AgentSession {
             id: raw.id.clone(),
             checkout_id: self.checkout_id.clone(),
@@ -507,7 +541,7 @@ impl AgentBridge {
                 raw.title.clone()
             },
             idle_at: raw.time.idle,
-            blocked_on_permission: false,
+            awaiting_reply,
             agent: raw.agent.clone(),
             model: raw.model.as_ref().map(ApiModel::label),
             parent_id: raw.parent_id.clone(),
@@ -1437,24 +1471,25 @@ impl<T> Cached<T> {
     }
 }
 
-/// The service's own session list, with the running answer that arrived with it.
+/// The service's session list, with its running and pending-reply membership.
 ///
-/// Both halves answer for every location the service knows, which is what makes one read of them
+/// The snapshot covers every candidate location, which makes one read of it
 /// the answer for every checkout: `running` in particular is a property of a turn, not of a
 /// worktree. The arcs are what let the read be shared without being copied per checkout.
 #[derive(Debug, Clone)]
 struct CandidateRead {
     sessions: Arc<Vec<ApiSession>>,
     running: Arc<HashSet<String>>,
+    awaiting: Arc<HashSet<String>>,
 }
 
 /// The service-wide list, and the read that is answering for it right now.
 ///
 /// `reading` is what keeps one poll for nine checkouts from turning into nine identical reads: the
 /// first caller publishes itself, releases the lock and goes to the network, and the rest find that
-/// read and wait for its answer. Nothing else happens under the lock, and the network does not
-/// happen under it at all — two requests of thirty seconds each must not block every other reader
-/// of the cache, least of all the event reader, which can reach this cache from its own thread.
+/// read and wait for its answer. Nothing else happens under the lock: network requests must not
+/// block every other reader of the cache, least of all the event reader, which can reach it from its
+/// own thread.
 struct CandidateSlot {
     cached: Option<Cached<CandidateRead>>,
     reading: Option<Arc<CandidateFetch>>,
@@ -1496,8 +1531,8 @@ impl CandidateFetch {
 
     /// The answer of the read that is already running, shared rather than repeated.
     ///
-    /// Bounded by that read's own worst case, because waiting longer than the read cannot buy an
-    /// answer and a wait with no bound at all is a caller that never returns.
+    /// Bounded so a coalesced caller cannot wait forever. Expiry releases only that caller; it does
+    /// not cancel the read that is still answering for the cache.
     fn wait(&self) -> Result<CandidateRead, BridgeError> {
         let deadline = Instant::now() + CANDIDATE_READ_WAIT;
         let mut published = self
@@ -1523,23 +1558,38 @@ impl CandidateFetch {
     }
 }
 
-/// How long a caller waits for a session list that is already being read.
+/// How long a coalesced caller waits for the service-wide candidate read.
 ///
-/// Two requests make that read, and a signal may make either of them be asked again, so this is the
-/// read's own worst case rather than a budget invented for the waiter.
+/// This bounds the caller, not the owner: expiry does not cancel pending location lookups or prevent
+/// the completed snapshot from being published.
 const CANDIDATE_READ_WAIT: Duration =
     Duration::from_secs(JSON_REQUEST_TIMEOUT.as_secs() * 2 * INTERRUPTED_READ_ATTEMPTS as u64);
 
-/// The two requests one read of the service-wide list is made of.
+/// The service-wide candidate list, running state and pending requests at its candidate locations.
 fn read_candidates(bridge: &AgentBridge) -> Result<CandidateRead, BridgeError> {
     let sessions: Vec<ApiSession> = bridge.get_unscoped_json(
         &format!("/api/session?limit={CANDIDATE_SESSION_LIMIT}"),
         JSON_REQUEST_TIMEOUT,
     )?;
     let running = bridge.running_sessions()?;
+    let directories: HashSet<PathBuf> = sessions
+        .iter()
+        .map(|session| {
+            session
+                .location
+                .as_ref()
+                .map(|location| PathBuf::from(location.directory.as_str()))
+                .unwrap_or_else(|| bridge.directory().to_path_buf())
+        })
+        .collect();
+    let mut awaiting = HashSet::new();
+    for directory in directories {
+        awaiting.extend(bridge.awaiting_sessions(&directory, JSON_REQUEST_TIMEOUT)?);
+    }
     Ok(CandidateRead {
         sessions: Arc::new(sessions),
         running: Arc::new(running),
+        awaiting: Arc::new(awaiting),
     })
 }
 
@@ -1673,11 +1723,12 @@ impl AgentService {
                     let checkout = turns.entry(event.checkout_id.clone()).or_default();
                     match event.kind {
                         crate::domain::agent::AgentEventKind::TurnStarted
-                        | crate::domain::agent::AgentEventKind::TurnFinished => {
+                        | crate::domain::agent::AgentEventKind::TurnFinished
+                        | crate::domain::agent::AgentEventKind::PermissionAsked
+                        | crate::domain::agent::AgentEventKind::QuestionAsked => {
                             checkout.insert(session_id.to_string(), TrackedTurn::Started);
                         }
-                        crate::domain::agent::AgentEventKind::TurnFailed
-                        | crate::domain::agent::AgentEventKind::PermissionAsked => {
+                        crate::domain::agent::AgentEventKind::TurnFailed => {
                             checkout.remove(session_id);
                         }
                         _ => {}
@@ -1863,8 +1914,16 @@ impl AgentService {
                 }
             }
         };
-        let listed: Vec<ApiSession> = self.read_and_refresh(checkout_id, &bridge, || {
-            bridge.get_json_with_timeout("/api/session", Duration::from_secs(5))
+        let (listed, awaiting, running): (
+            Vec<ApiSession>,
+            HashSet<String>,
+            HashMap<String, ApiActiveSession>,
+        ) = self.read_and_refresh(checkout_id, &bridge, || {
+            let listed = bridge.get_json_with_timeout("/api/session", Duration::from_secs(5))?;
+            let awaiting = bridge.awaiting_sessions(bridge.directory(), Duration::from_secs(5))?;
+            let running: HashMap<String, ApiActiveSession> =
+                bridge.get_json_with_timeout("/api/session/active", Duration::from_secs(5))?;
+            Ok((listed, awaiting, running))
         })?;
         let turns = self
             .busy_turns
@@ -1880,10 +1939,19 @@ impl AgentService {
                 continue;
             }
             seen.insert(raw.id.clone());
+            let is_running = running
+                .get(&raw.id)
+                .is_some_and(|session| session.kind == "running");
+            if awaiting.contains(&raw.id) || is_running {
+                active.push(bridge.to_agent_session(&raw, is_running, awaiting.contains(&raw.id)));
+                continue;
+            }
             match tracked.get(&raw.id) {
-                Some(TrackedTurn::Pending) => active.push(bridge.to_agent_session(&raw, true)),
+                Some(TrackedTurn::Pending) => {
+                    active.push(bridge.to_agent_session(&raw, true, false))
+                }
                 Some(TrackedTurn::Started) if raw.time.idle.is_none() => {
-                    active.push(bridge.to_agent_session(&raw, true));
+                    active.push(bridge.to_agent_session(&raw, true, false));
                 }
                 Some(TrackedTurn::Started) => {
                     idle.insert(raw.id.clone());
@@ -1898,7 +1966,7 @@ impl AgentService {
                     checkout_id: checkout_id.to_string(),
                     title: "OpenCode prompt status is unknown".into(),
                     idle_at: None,
-                    blocked_on_permission: false,
+                    awaiting_reply: false,
                     agent: None,
                     model: None,
                     parent_id: None,
@@ -2162,12 +2230,17 @@ impl AgentService {
             // Asked once per list rather than per session: the route answers for the whole service,
             // so membership is what scopes it to this directory.
             let running = bridge.running_sessions()?;
+            let awaiting = bridge.awaiting_sessions(directory, JSON_REQUEST_TIMEOUT)?;
             let mut sessions = Vec::new();
             for raw in listed {
                 // The list spans every directory the server knows, so foreign sessions are
                 // filtered out here. Addressing one by id is what rejects them, below.
                 if raw.check_scope(directory).is_ok() {
-                    sessions.push(bridge.to_agent_session(&raw, running.contains(&raw.id)));
+                    sessions.push(bridge.to_agent_session(
+                        &raw,
+                        running.contains(&raw.id),
+                        awaiting.contains(&raw.id),
+                    ));
                 }
             }
             Ok(sessions)
@@ -2208,7 +2281,13 @@ impl AgentService {
         Ok(read
             .sessions
             .iter()
-            .map(|raw| bridge.to_agent_session(raw, read.running.contains(&raw.id)))
+            .map(|raw| {
+                bridge.to_agent_session(
+                    raw,
+                    read.running.contains(&raw.id),
+                    read.awaiting.contains(&raw.id),
+                )
+            })
             .collect())
     }
 
@@ -2218,7 +2297,7 @@ impl AgentService {
     /// requests a tick. The first one to arrive publishes itself as the read in flight and releases
     /// the lock before it goes to the network; the rest find that read and wait for its answer
     /// rather than ask again. The lock therefore only ever covers the state of the slot, never the
-    /// two requests of it, and a caller that has to react to a failure — the endpoint no longer
+    /// its network requests, and a caller that has to react to a failure — the endpoint no longer
     /// serving — still reacts once this has given the lock back.
     fn candidate_read(&self, bridge: &AgentBridge) -> Result<CandidateRead, BridgeError> {
         let fetch = {
@@ -2317,7 +2396,10 @@ impl AgentService {
         self.read_and_refresh(checkout_id, &bridge, || {
             let raw = bridge.session(session_id)?;
             let running = bridge.running_sessions()?.contains(session_id);
-            Ok(bridge.to_agent_session(&raw, running))
+            let awaiting = bridge
+                .awaiting_sessions(directory, JSON_REQUEST_TIMEOUT)?
+                .contains(session_id);
+            Ok(bridge.to_agent_session(&raw, running, awaiting))
         })
     }
 
@@ -2363,7 +2445,10 @@ impl AgentService {
                 bridge.post_json("/api/session", &serde_json::json!({ "title": title }))?;
             created.check_scope(directory)?;
             let running = bridge.running_sessions()?.contains(&created.id);
-            Ok(bridge.to_agent_session(&created, running))
+            let awaiting = bridge
+                .awaiting_sessions(directory, JSON_REQUEST_TIMEOUT)?
+                .contains(&created.id);
+            Ok(bridge.to_agent_session(&created, running, awaiting))
         })
     }
 
@@ -2441,7 +2526,10 @@ impl AgentService {
             )?;
             let raw = bridge.session(session_id)?;
             let running = bridge.running_sessions()?.contains(session_id);
-            Ok(bridge.to_agent_session(&raw, running))
+            let awaiting = bridge
+                .awaiting_sessions(directory, JSON_REQUEST_TIMEOUT)?
+                .contains(session_id);
+            Ok(bridge.to_agent_session(&raw, running, awaiting))
         })
     }
 
@@ -2583,8 +2671,8 @@ mod tests {
         validate_session_id, AgentBridge, AgentEvent, AgentService, ApiAgent, ApiModel, ApiSession,
         BridgeError, BridgeState, BridgeStopper, EventSink, RemovalState, ServerCredentials,
         StreamLoss, CANDIDATE_SESSION_LIMIT, DIRECTORY_HEADER, INTERRUPTED_READ_ATTEMPTS,
-        INTERRUPTED_REQUEST, MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES,
-        MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
+        INTERRUPTED_REQUEST, JSON_REQUEST_TIMEOUT, MAX_EVENT_HEADERS_BYTES,
+        MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
     };
     use crate::services::opencode::ServiceEndpoint;
 
@@ -2805,7 +2893,7 @@ mod tests {
         connections: AtomicUsize,
     }
 
-    /// A service that answers the two requests one read of the service-wide list is made of.
+    /// A service that answers a candidate snapshot and its pending lookups.
     ///
     /// Both counts are the point: `requests` says how many reads were made, and `connections` says
     /// whether the client that made them pooled them. Connections are deliberately left open, which
@@ -2834,6 +2922,10 @@ mod tests {
             }))
             .expect("the active map should encode"),
         );
+        let pending = Arc::new(
+            serde_json::to_vec(&serde_json::json!({ "data": [] }))
+                .expect("the pending lists should encode"),
+        );
         let (arrived_tx, arrived) = mpsc::channel();
         let served = Arc::clone(&counts);
         std::thread::spawn(move || {
@@ -2844,6 +2936,7 @@ mod tests {
                     counts: Arc::clone(&served),
                     sessions: Arc::clone(&sessions),
                     active: Arc::clone(&active),
+                    pending: Arc::clone(&pending),
                     arrived: arrived_tx.clone(),
                     delay,
                 };
@@ -2858,6 +2951,7 @@ mod tests {
         counts: Arc<MockCounts>,
         sessions: Arc<Vec<u8>>,
         active: Arc<Vec<u8>>,
+        pending: Arc<Vec<u8>>,
         arrived: mpsc::Sender<()>,
         delay: Duration,
     }
@@ -2890,6 +2984,10 @@ mod tests {
                 let _ = reader.read_exact(&mut body);
                 let payload = if request_line.starts_with("GET /api/session/active") {
                     Arc::clone(&self.active)
+                } else if request_line.starts_with("GET /api/form")
+                    || request_line.starts_with("GET /api/permission/request")
+                {
+                    Arc::clone(&self.pending)
                 } else if request_line.starts_with("GET /api/session") {
                     let _ = self.arrived.send(());
                     sleep(self.delay);
@@ -3223,6 +3321,130 @@ mod tests {
     }
 
     #[test]
+    fn asked_events_keep_the_turn_tracked_instead_of_treating_it_as_failure() {
+        use crate::domain::agent::AgentEventKind;
+        let agents = AgentService::without_service();
+        agents.set_event_sink(Arc::new(|_| {}));
+        let sink = agents.sink.lock().unwrap().clone().unwrap();
+        for kind in [
+            AgentEventKind::PermissionAsked,
+            AgentEventKind::QuestionAsked,
+        ] {
+            sink(AgentEvent {
+                checkout_id: "local".into(),
+                session_id: Some("ses_waiting".into()),
+                kind,
+                raw_type: "asked".into(),
+                data: serde_json::json!({}),
+            });
+            assert!(agents.busy_turns.lock().unwrap()["local"].contains_key("ses_waiting"));
+        }
+    }
+
+    #[test]
+    fn pending_requests_survive_reads_until_every_form_and_permission_is_answered() {
+        let directory = tempfile::tempdir().unwrap();
+        let location = serde_json::json!({"directory": directory.path().to_string_lossy()});
+        let listed = serde_json::json!({"data": [{
+            "id": "ses_waiting", "title": "Waiting", "location": location,
+            "time": {"created": 1, "updated": 2, "idle": 3}
+        }]});
+        let forms = serde_json::json!({"location": location, "data": [
+            {"id": "frm_one", "sessionID": "ses_waiting"},
+            {"id": "frm_two", "sessionID": "ses_waiting"}
+        ]});
+        let permissions = serde_json::json!({"location": location, "data": [
+            {"id": "per_one", "sessionID": "ses_waiting"}
+        ]});
+        let empty = serde_json::json!({"location": location, "data": []});
+        let inactive = serde_json::json!({"data": {}});
+        let (port, server) = mock_json_responses(vec![
+            listed.clone(),
+            inactive.clone(),
+            forms.clone(),
+            permissions.clone(),
+            listed.clone(),
+            inactive.clone(),
+            empty.clone(),
+            permissions.clone(),
+            listed.clone(),
+            inactive.clone(),
+            empty.clone(),
+            empty.clone(),
+            // A fresh scoped read (no preceding events), followed by the removal guard.
+            listed.clone(),
+            inactive.clone(),
+            forms.clone(),
+            empty.clone(),
+            listed,
+            forms,
+            empty,
+            inactive,
+        ]);
+        let agents = AgentService::with_test_server(port);
+        for pending in [true, true, false] {
+            agents.candidates.lock().unwrap().cached = None;
+            let sessions = agents
+                .candidate_sessions("local", directory.path())
+                .unwrap();
+            assert_eq!(sessions[0].awaiting_reply, pending);
+            assert!(!sessions[0].running, "pending must not fabricate running");
+        }
+        assert!(agents.sessions("local", directory.path()).unwrap()[0].awaiting_reply);
+        let guarded = agents.active_worktree_agent_sessions("local").unwrap();
+        assert_eq!(
+            guarded.len(),
+            1,
+            "an untracked pending turn blocks removal even with an idle timestamp"
+        );
+        assert!(guarded[0].awaiting_reply);
+        let requests = server.join().unwrap();
+        assert_eq!(requests.len(), 20);
+        assert!(requests
+            .iter()
+            .filter(|request| request.0.contains("/api/form")
+                || request.0.contains("/api/permission/request"))
+            .all(|request| request
+                .3
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case(DIRECTORY_HEADER)
+                    && value == directory.path().to_string_lossy().as_ref())));
+    }
+
+    #[test]
+    fn pending_reads_refuse_foreign_scopes_malformed_payloads_and_http_failure() {
+        let local = tempfile::tempdir().unwrap();
+        let foreign = tempfile::tempdir().unwrap();
+        let (port, server) = mock_json_responses(vec![serde_json::json!({
+            "location": {"directory": foreign.path().to_string_lossy()}, "data": []
+        })]);
+        let bridge = test_event_bridge(local.path(), port);
+        assert!(matches!(
+            bridge.awaiting_sessions(local.path(), JSON_REQUEST_TIMEOUT),
+            Err(BridgeError::Foreign(_))
+        ));
+        server.join().unwrap();
+        let (port, server) =
+            mock_json_responses(vec![serde_json::json!({"data": [{"id": "frm_broken"}]})]);
+        let bridge = test_event_bridge(local.path(), port);
+        assert!(bridge
+            .awaiting_sessions(local.path(), JSON_REQUEST_TIMEOUT)
+            .is_err());
+        server.join().unwrap();
+        let (bridge, server) = mock_event_response(
+            local.path(),
+            b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n".to_vec(),
+        );
+        assert!(
+            bridge
+                .awaiting_sessions(local.path(), JSON_REQUEST_TIMEOUT)
+                .is_err(),
+            "404 is not an empty pending list"
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
     fn candidate_sessions_offer_a_sibling_worktrees_session_while_sessions_do_not() {
         // The measured case: a terminal filed under one worktree had a session open that lives in a
         // sibling one, so the scoped list could not name it and the row drew no state at all.
@@ -3243,8 +3465,14 @@ mod tests {
         let (port, server) = mock_json_responses(vec![
             serde_json::json!({"data": [owned.clone(), sibling.clone()]}),
             serde_json::json!({"data": {"ses_sibling": {"type": "running"}}}),
+            serde_json::json!({"data": []}),
+            serde_json::json!({"data": []}),
             serde_json::json!({"data": [owned.clone(), sibling.clone()]}),
             serde_json::json!({"data": {"ses_sibling": {"type": "running"}}}),
+            serde_json::json!({"data": []}),
+            serde_json::json!({"data": []}),
+            serde_json::json!({"data": []}),
+            serde_json::json!({"data": []}),
         ]);
         let agents = AgentService::with_test_server(port);
 
@@ -3266,23 +3494,23 @@ mod tests {
         let requests = server.join().expect("mock server should finish");
         let route = |line: &str| line.split('?').next().unwrap_or_default().to_string();
         assert_eq!(route(&requests[0].0), "GET /api/session");
-        assert_eq!(route(&requests[2].0), "GET /api/session");
+        assert_eq!(route(&requests[4].0), "GET /api/session");
         // The answer above only exists because the second read of the same route named no
         // directory. This is the assertion that was missing: the mock replays the same sessions for
         // either request, so the test passed while the read was scoped and the real service — which
         // filters by that directory — answered with the two sessions this worktree owns.
         assert!(
-            !requests[2].0.contains("directory="),
+            !requests[4].0.contains("directory="),
             "the candidate read must not be scoped: {}",
-            requests[2].0
+            requests[4].0
         );
-        assert!(!requests[2]
+        assert!(!requests[4]
             .3
             .iter()
             .any(|(name, _)| name.eq_ignore_ascii_case(DIRECTORY_HEADER)));
         // It asks for more than the route's own fifty, because a terminal left open on an older
         // session is still a row in the panel.
-        assert!(requests[2]
+        assert!(requests[4]
             .0
             .contains(&format!("limit={CANDIDATE_SESSION_LIMIT}")));
     }
@@ -3290,7 +3518,7 @@ mod tests {
     #[test]
     fn one_unscoped_read_answers_every_checkout_that_asks_in_the_same_tick() {
         // The service's session list is the same for every checkout, so a poll that arrives once per
-        // checkout must cost one request. The mock serves exactly the two responses one read makes;
+        // checkout must share one snapshot. The mock serves exactly the responses one read makes;
         // a second read would find nothing listening and fail, which is the regression this pins.
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
@@ -3305,6 +3533,8 @@ mod tests {
         let (port, server) = mock_json_responses(vec![
             listed.clone(),
             serde_json::json!({"data": {"ses_one": {"type": "running"}}}),
+            serde_json::json!({"location": {"directory": second.path().to_string_lossy()}, "data": [{"id": "frm_one", "sessionID": "ses_one"}]}),
+            serde_json::json!({"data": []}),
         ]);
         let agents = AgentService::with_test_server(port);
 
@@ -3317,7 +3547,18 @@ mod tests {
         assert_eq!(asked_second[0].checkout_id, "second");
         assert_eq!(asked_second[0].id, "ses_one");
         assert!(asked_second[0].running);
-        assert_eq!(server.join().expect("mock server should finish").len(), 2);
+        assert!(asked_first[0].awaiting_reply);
+        assert!(asked_second[0].awaiting_reply);
+        let requests = server.join().expect("mock server should finish");
+        assert_eq!(requests.len(), 4);
+        assert!(
+            requests[2]
+                .3
+                .iter()
+                .any(|(name, value)| name.eq_ignore_ascii_case(DIRECTORY_HEADER)
+                    && value == second.path().to_string_lossy().as_ref()),
+            "pending must be read at the candidate's location, not the caller's"
+        );
     }
 
     /// One session as the mock candidate service answers it, in `directory`.
@@ -3382,14 +3623,14 @@ mod tests {
         }
         assert_eq!(
             counts.requests.load(Ordering::SeqCst),
-            2,
-            "nine callers must share the list and the running answer, not make nine reads"
+            4,
+            "nine callers must share the list, running answer and pending lookups"
         );
     }
 
     #[test]
     fn a_caller_arriving_during_a_read_finds_the_cache_lock_free() {
-        // The read's two requests used to happen with the cache lock held, so everything that has to
+        // The read used to happen with the cache lock held, so everything that has to
         // touch the cache — including the event reader, which reaches it from its own thread — was
         // stuck for the whole of it. The lock is only ever held for the state now, which a test can
         // take while a read is on the wire, and a caller that arrives then shares that read rather
@@ -3436,7 +3677,7 @@ mod tests {
         }
         assert_eq!(
             counts.requests.load(Ordering::SeqCst),
-            2,
+            4,
             "the caller that arrived during the read must share it"
         );
     }
@@ -3445,7 +3686,7 @@ mod tests {
     fn a_bridge_reads_over_one_pooled_connection() {
         // One agent per request is one connection pool per request, so every read opened its own
         // socket to a service one loopback hop away. The mock counts the sockets it had to accept,
-        // and a read that needs two requests has to need one connection.
+        // and a candidate snapshot with pending lookups should reuse one connection.
         let directory = tempfile::tempdir().unwrap();
         let (port, counts, _arrived) = serving_candidate_reads(
             vec![listed_session(directory.path(), "ses_one")],
@@ -3459,11 +3700,11 @@ mod tests {
             .expect("the read should succeed");
 
         assert_eq!(sessions.len(), 1);
-        assert_eq!(counts.requests.load(Ordering::SeqCst), 2);
+        assert_eq!(counts.requests.load(Ordering::SeqCst), 4);
         assert_eq!(
             counts.connections.load(Ordering::SeqCst),
             1,
-            "both requests of one read should travel over one pooled connection"
+            "one read and its pending lookups should travel over one pooled connection"
         );
     }
 
@@ -3520,10 +3761,14 @@ mod tests {
             serde_json::json!({"data": [owned_session.clone(), foreign_session]}),
             // The service's own running answer for the list read just above.
             serde_json::json!({"data": {"ses_owned": {"type": "running"}}}),
+            serde_json::json!({"data": []}),
+            serde_json::json!({"data": []}),
             serde_json::json!({"data": owned_session.clone()}),
             serde_json::json!({"data": {"accepted": true}}),
             serde_json::json!({"data": owned_session.clone()}),
             serde_json::json!({"data": {"ses_owned": {"type": "running"}}}),
+            serde_json::json!({"data": []}),
+            serde_json::json!({"data": []}),
         ]);
         let (second_port, second_server) = mock_json_responses(vec![serde_json::json!({
             "data": {
@@ -3557,7 +3802,7 @@ mod tests {
         let first_requests = first_server
             .join()
             .expect("first mock server should finish");
-        assert_eq!(first_requests.len(), 7);
+        assert_eq!(first_requests.len(), 11);
         // Compared on the route only: the query carries this checkout's own temporary path,
         // which differs on every run and is asserted on in the scoping test below.
         let route = |line: &str| line.split('?').next().unwrap_or_default().to_string();
@@ -3570,10 +3815,14 @@ mod tests {
                 "GET /api/agent",
                 "GET /api/session",
                 "GET /api/session/active",
+                "GET /api/form",
+                "GET /api/permission/request",
                 "GET /api/session/ses_owned",
                 "POST /api/session/ses_owned/prompt",
                 "GET /api/session/ses_owned",
                 "GET /api/session/active",
+                "GET /api/form",
+                "GET /api/permission/request",
             ]
         );
         // Every one of them is scoped, which is what makes the answers above this checkout's.
@@ -3590,7 +3839,7 @@ mod tests {
             .iter()
             .all(|request| request.1 == first_authorization));
         assert_eq!(
-            serde_json::from_slice::<serde_json::Value>(&first_requests[4].2).unwrap(),
+            serde_json::from_slice::<serde_json::Value>(&first_requests[6].2).unwrap(),
             serde_json::json!({"text": "send one prompt"})
         );
 

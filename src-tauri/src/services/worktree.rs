@@ -1245,6 +1245,7 @@ mod tests {
                     // The service's own running answer. Empty here, so the session reads as idle
                     // unless a test makes it otherwise, which is what an idle mock should say.
                     ("GET", "/api/session/active") => serde_json::json!({}),
+                    ("GET", "/api/form" | "/api/permission/request") => serde_json::json!([]),
                     ("GET", "/api/session/ses_integrated") => session.clone(),
                     ("POST", "/api/session/ses_integrated/prompt") => {
                         let _ = prompt_started_tx.send(());

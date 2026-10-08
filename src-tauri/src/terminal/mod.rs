@@ -1413,10 +1413,9 @@ mod tests {
     #[cfg(unix)]
     use super::{process_group_exists, signal_group_with, GroupSignal, REAP_POLL_INTERVAL};
     use super::{
-        start_child_reaper, ChildState, OutputGate, OutputSink, Session, SessionEntry, SpawnOptions,
-        StartupGate, StartupState, TerminalBackend, MAX_TERMINAL_INPUT_BYTES,
-        OUTPUT_HIGH_WATER_BYTES, OUTPUT_LOW_WATER_BYTES, OUTPUT_RESUME_TIMEOUT, STARTUP_BACKSTOP,
-        STARTUP_TIMEOUT,
+        start_child_reaper, ChildState, OutputGate, OutputSink, Session, SessionEntry,
+        SpawnOptions, StartupGate, StartupState, TerminalBackend, MAX_TERMINAL_INPUT_BYTES,
+        OUTPUT_HIGH_WATER_BYTES, OUTPUT_LOW_WATER_BYTES, OUTPUT_RESUME_TIMEOUT, STARTUP_TIMEOUT,
     };
 
     fn spawn(
@@ -1644,22 +1643,13 @@ mod tests {
     }
 
     /// The other half of the same ordering: the gate must not hand input over while the startup line
-    /// is still pending, however long that takes.
-    ///
-    /// `a_keystroke_never_overtakes_the_startup_line` covers the ordering while the startup thread is
-    /// alive and settling. This covers the other way the two can cross, which is the gate giving up.
-    /// The only state in which the line is still pending long after the startup thread's own
-    /// `STARTUP_TIMEOUT` is a thread that has been spawned and has not run yet — which is what a
-    /// loaded machine does, and which the gate's sixty-second backstop did not stop it doing. A
-    /// keystroke let through at sixty seconds is a command the startup line then arrives behind, and
-    /// the line clears the screen, so that command is not reordered but destroyed.
+    /// is still pending, however long that takes. The startup thread's timeout does not bound the gate: a
+    /// thread that has been spawned but has not run yet leaves input waiting until it resolves the line.
     ///
     /// The session is assembled here rather than spawned because this is the one state the spawn path
     /// cannot be asked for: a spawn whose startup thread failed to start registers no session at all,
-    /// and one whose thread does start resolves within `STARTUP_TIMEOUT` of running, so a real spawn
-    /// releases input through the thread in both cases and never through a gate timeout. Sixty seconds
-    /// is a long time to ask of a test suite, and it is asked for here because the alternative is
-    /// asserting that a constant exists rather than that a deadline does not.
+    /// and one whose thread does start releases input when it resolves the line. This test observes the
+    /// pending gate briefly, then resolves it explicitly.
     #[test]
     fn the_gate_does_not_give_up_on_a_startup_line_that_is_still_pending() {
         let pair = native_pty_system()
@@ -1673,8 +1663,10 @@ mod tests {
         // A spawn that reached its startup thread and one whose thread failed to start are both
         // accounted for in the doc comment above; what is left is the session itself, with a line
         // still owed to it and nothing yet to say so.
+        let master_fd = pair.master.as_raw_fd().unwrap();
         let session = Arc::new(Session {
             master: Mutex::new(pair.master),
+            master_fd,
             writer: Mutex::new(Box::new(io::sink())),
             child: Mutex::new(ChildState {
                 child: None,
@@ -1699,16 +1691,19 @@ mod tests {
             .insert("pending".into(), SessionEntry::Active(Arc::clone(&session)));
 
         let (wrote, is_written) = mpsc::channel();
+        let (started, has_started) = mpsc::channel();
         let writer = Arc::clone(&backend);
         thread::spawn(move || {
+            let _ = started.send(());
             let _ = writer.write("pending", b"echo TYPED_FIRST\n");
             let _ = wrote.send(());
         });
 
-        // The gate used to carry a sixty-second backstop for this, so a wait past it is what
-        // distinguishes the two: before, the write came through with the line still owed.
+        has_started
+            .recv_timeout(Duration::from_secs(5))
+            .expect("writer thread did not start");
         assert!(
-            is_written.recv_timeout(Duration::from_secs(62)).is_err(),
+            is_written.recv_timeout(Duration::from_millis(100)).is_err(),
             "input was released while the startup line was still pending"
         );
         // And it is held by the line rather than by anything being wrong: the write goes through as
@@ -1733,8 +1728,10 @@ mod tests {
                 pixel_height: 0,
             })
             .unwrap();
+        let master_fd = pair.master.as_raw_fd().unwrap();
         let session = Session {
             master: Mutex::new(pair.master),
+            master_fd,
             writer: Mutex::new(Box::new(io::sink())),
             child: Mutex::new(ChildState {
                 child: None,

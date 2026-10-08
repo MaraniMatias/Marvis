@@ -1,5 +1,5 @@
 export type AgentEventKind =
-  "unknown" | "turnStarted" | "turnFinished" | "turnFailed" | "toolCalled" | "permissionAsked";
+  "unknown" | "turnStarted" | "turnFinished" | "turnFailed" | "toolCalled" | "permissionAsked" | "questionAsked";
 
 /** One OpenCode session in a checkout. `id` is only valid inside that checkout's server. */
 export interface AgentSession {
@@ -16,8 +16,8 @@ export interface AgentSession {
   running: boolean;
   /** When the server last saw this session go idle, if ever. */
   idleAt: number | null;
-  /** Set when a permission arrived that this server version cannot answer. */
-  blockedOnPermission: boolean;
+  /** A question or permission is waiting for a reply in OpenCode. */
+  awaitingReply: boolean;
   /** The agent running it, which is also the mode: OpenCode spells `build`/`plan` as agents. */
   agent: string | null;
   /** The model behind it, as `provider/id#variant`. */
@@ -59,7 +59,7 @@ export type AgentAttention = "none" | "busy" | "blocked" | "failed";
 /** An agent session is busy, blocked, failed, or simply not there. */
 export function agentAttention(session: AgentSession | undefined): AgentAttention {
   if (!session) return "none";
-  if (session.blockedOnPermission) return "blocked";
+  if (session.awaitingReply) return "blocked";
   if (session.running) return "busy";
   // A turn the server ended badly is the last word, so it outranks a quiet session.
   return session.outcome === "failed" ? "failed" : "none";
