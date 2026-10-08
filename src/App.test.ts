@@ -1723,6 +1723,48 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
+    it("keeps the sidebar at the width it is drawn at when the split layout takes its room", async () => {
+      // reka-ui rebuilds the whole row from the widths the panels were mounted with whenever a
+      // panel's limits change, and the split layout changes what the main panel needs. A window too
+      // narrow for the sidebar's saved width draws it narrower than that, and the rebuild grew it
+      // back out of the main view, so the sidebar was given the width it was drawn at.
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one", [session("session:one", "Terminal 1")])), {
+        mode: "focus",
+        sidebarWidth: 500,
+        inspectorWidth: 200,
+        previewWidth: 360,
+      });
+      const resizeCalls = vi.fn();
+      mocks.onProgrammaticPanelResize = resizeCalls;
+      vi.spyOn(Element.prototype, "getBoundingClientRect").mockImplementation(function (this: Element) {
+        const measured = this.id === "navigation-panel" ? 460 : 900;
+        return {
+          width: measured,
+          height: 800,
+          top: 0,
+          left: 0,
+          right: measured,
+          bottom: 800,
+          x: 0,
+          y: 0,
+          toJSON: () => ({}),
+        } as DOMRect;
+      });
+
+      await wrapper.get('[data-testid="layout-toggle"]').trigger("click");
+      await flushPromises();
+
+      expect(resizeCalls).toHaveBeenCalledWith("navigation-panel", 460);
+
+      // In split mode the main panel's minimum changes again when a document replaces the terminal;
+      // that constraint rebuild must preserve the same drawn sidebar width too.
+      resizeCalls.mockClear();
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+      await flushPromises();
+      expect(resizeCalls).toHaveBeenCalledExactlyOnceWith("navigation-panel", 460);
+      wrapper.unmount();
+    });
+
     it("gives the inspector its full width back when space returns", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
         mode: "focus",

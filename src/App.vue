@@ -116,8 +116,14 @@ const mainPane = ref<InstanceType<typeof MainPane> | null>(null);
 /** ⌘/'s state: the navigation and the files and changes panel are one thing to the eye, so they go
  *  together. A window with the main view alone in it is the point of the shortcut. */
 const sidePanelsVisible = ref(true);
-const sidebarPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
-const inspectorPanel = ref<{ collapse(): void; expand(): void; resize(size: number): void } | null>(null);
+type PanelRef = {
+  collapse(): void;
+  expand(): void;
+  resize(size: number): void;
+  $el: HTMLElement;
+};
+const sidebarPanel = ref<PanelRef | null>(null);
+const inspectorPanel = ref<PanelRef | null>(null);
 const viewportWidth = ref(window.innerWidth / DEFAULT_ZOOM);
 /** The preferences in `~/.marvis/config.yml`, in the shape the file has them in. */
 const settings = ref<AppSettings>(cloneSettings(DEFAULT_SETTINGS));
@@ -1024,6 +1030,25 @@ function resizeAppPreview(width: number) {
   appLayout.value = resizeLayoutPanel(appLayout.value, "preview", width);
 }
 
+/**
+ * The width the sidebar is drawn at, read while the arrangement is still the one on screen.
+ *
+ * reka-ui rebuilds the whole row from the widths the panels were mounted with as soon as any panel's
+ * limits change, and it asks each panel for the width it was mounted with rather than the one being
+ * drawn. A window too narrow for that width draws a narrower sidebar, so switching to the split
+ * layout — which changes what the main panel needs — grows the sidebar into the space the main view
+ * had. The width is read before the row changes and given back after, so the sidebar stays where
+ * the reader left it and the main view keeps what it was given.
+ */
+let sidebarWidthOnScreen = 0;
+watch(
+  [isSplitLayout, () => (isSplitLayout.value ? activeMainView.value.kind : null), appZoom],
+  () => {
+    sidebarWidthOnScreen = toLayout(sidebarPanel.value?.$el.getBoundingClientRect().width ?? 0);
+  },
+  { flush: "pre" },
+);
+
 // A narrow window cannot hold the main panel and the inspector side by side, so the inspector
 // floats over it as a drawer. Its width is left alone, to be restored when space returns. A panel
 // ⌘/ took away is collapsed as well, so a window that grows back does not reserve room for a panel
@@ -1035,7 +1060,14 @@ function resizeAppPreview(width: number) {
 // the width of a drawer drawn over the main view. ⌘/ only sets `sidePanelsVisible` and lets this
 // answer.
 watch(
-  [inspectorInDrawer, sidePanelsVisible, isSplitLayout, appLayoutReady],
+  [
+    inspectorInDrawer,
+    sidePanelsVisible,
+    isSplitLayout,
+    () => (isSplitLayout.value ? activeMainView.value.kind : null),
+    appZoom,
+    appLayoutReady,
+  ],
   async () => {
     if (!appLayoutReady.value) return;
     await nextTick();
@@ -1043,6 +1075,13 @@ watch(
     else {
       inspectorPanel.value?.expand();
       inspectorPanel.value?.resize(toScreen(appLayout.value.inspectorWidth));
+    }
+    // The width the sidebar was drawn at before this change, given back to the row that has just
+    // been rebuilt without it. It is read ahead of the change because afterwards the panel is
+    // already the width the rebuild asked for.
+    if (sidebarWidthOnScreen) {
+      sidebarPanel.value?.resize(toScreen(sidebarWidthOnScreen));
+      sidebarWidthOnScreen = 0;
     }
   },
   { immediate: true, flush: "post" },
