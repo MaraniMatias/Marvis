@@ -4,8 +4,8 @@
    `>`, the formatter rewrites that to `/>`. The formatter owns it, as in the other panes that
    hold a field. */
 /* eslint-disable vue/html-self-closing */
-import type { Component } from "vue";
-import { computed, nextTick, onUnmounted, ref, shallowRef, toRef } from "vue";
+import type { Component, Ref } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, shallowRef, toRef, watch } from "vue";
 import {
   ArchiveRestore as ArchiveRestoreIcon,
   ChevronDown as ChevronDownIcon,
@@ -31,6 +31,7 @@ import { matchAgentSessionTitle } from "../domain/agent";
 import type { TerminalAgentRow } from "../presentation/agent-sessions";
 import { useDiffStats } from "../presentation/diff-stats";
 import { WORKDIR_ICONS } from "../presentation/workdir-icons";
+import { nameSteps, pathSteps, widestThatFits } from "../lib/fit-text";
 import OverlayScrollbar from "./OverlayScrollbar.vue";
 
 defineOptions({ name: "FolderSidebar" });
@@ -69,6 +70,12 @@ const props = withDefaults(
      * The sidebar draws the list of what is on the panel; this is what is behind it.
      */
     archivedWorktrees?: ArchivedCheckout[];
+    /**
+     * The ratio the window's type is drawn at, which the panel needs only to know when to weigh its
+     * labels again: a font scale moves every word in the panel without moving the panel, so nothing
+     * about the panel's own box changes and nothing else would say so.
+     */
+    fontScale?: number;
   }>(),
   {
     homeCheckoutId: null,
@@ -76,6 +83,7 @@ const props = withDefaults(
     sessionOrder: () => ({}),
     agentRows: () => ({}),
     archivedWorktrees: () => [],
+    fontScale: 1,
   },
 );
 
@@ -440,6 +448,7 @@ function autoScroll() {
 onUnmounted(() => {
   finishPointerDrag();
   if (suppressedClickTimer !== undefined) window.clearTimeout(suppressedClickTimer);
+  detachLabelObserver();
 });
 
 /** Opens the list without a button: the context-menu key, or the same gesture with a pointer. */
@@ -610,9 +619,10 @@ interface Workdir {
 interface Group {
   id: string;
   label: string;
-  /** Where the repo lives, cut for drawing; the full path is the tooltip. */
+  /** Where the repo lives, at full length: it is the header's tooltip and nothing else. */
   path: string;
-  shortPath: string;
+  /** Where the repo lives in the forms the header can draw it, widest first; the last is nothing. */
+  pathSteps: string[];
   /** The repo root, which is the checkout the header's actions are addressed to. */
   root: Checkout | null;
   git: boolean;
@@ -656,7 +666,7 @@ const groups = computed<Group[]>(() =>
       id: repo.id,
       label: repo.name,
       path: root?.path ?? "",
-      shortPath: shortPath(root?.path ?? ""),
+      pathSteps: pathSteps(root?.path ?? ""),
       root,
       git,
       home,
@@ -671,15 +681,240 @@ const groups = computed<Group[]>(() =>
   }),
 );
 
+/** The four type sizes a label in this panel is drawn in, one specimen each. */
+type FitStyle = "groupName" | "groupPath" | "rowName" | "rowDetail";
+
+const groupNameSpecimen = ref<HTMLElement | null>(null);
+const groupPathSpecimen = ref<HTMLElement | null>(null);
+const rowNameSpecimen = ref<HTMLElement | null>(null);
+const rowDetailSpecimen = ref<HTMLElement | null>(null);
+const probes: Record<FitStyle, Readonly<Ref<HTMLElement | null>>> = {
+  groupName: groupNameSpecimen,
+  groupPath: groupPathSpecimen,
+  rowName: rowNameSpecimen,
+  rowDetail: rowDetailSpecimen,
+};
+
+/** What each word is worth, kept per specimen because the type is not the same in every one. */
+const fitWidths = new Map<string, number>();
+/** Every row of one kind, keyed by the id the row carries, for the pass that weighs them. */
+const blockCache = new Map<string, Map<string, HTMLElement>>();
+
 /**
- * A path small enough to sit under a header: the last two segments, with a leading ellipsis when
- * something was dropped. CSS cannot truncate the middle of a string, and the end of a path is
- * the half that says where it is.
+ * The step each label is drawn at, keyed by the row it belongs to.
+ *
+ * Empty until the panel has been weighed, and a row with no entry is drawn at its widest: a panel
+ * that has not been measured says nothing about how much room it has, so the shape that fits the
+ * most room is the one nothing has been proved against.
  */
-function shortPath(path: string): string {
-  const parts = path.split(/[\\/]/).filter(Boolean);
-  return parts.length <= 2 ? path : `…/${parts.slice(-2).join("/")}`;
+const fitSteps = shallowRef<Record<string, number>>({});
+
+/**
+ * Weighs the panel's labels and records the step each is drawn at.
+ *
+ * A row has a room and a set of rungs, and the widest rung that fits is the one drawn; the ellipsis
+ * in CSS runs after the last rung, which is why nothing here cuts a word. The room is read off the
+ * row's own control rather than off the label beside it: a label is itself shrinkable, so once it
+ * overflows it reports the width it was squeezed to and the row would give up a little more room on
+ * every pass and never come back.
+ */
+function measureLabels() {
+  const root = sidebarScroll.value;
+  if (!root) return;
+  blockCache.clear();
+  const steps: Record<string, number> = {};
+  /** The room a row's label has: its control's content box less the glyph and the gap beside it. */
+  const roomOf = (select: HTMLElement | null | undefined): number | null => {
+    // The row being renamed is a field and not a label, so there is nothing in it to weigh.
+    if (!select?.querySelector<HTMLElement>(".lbl")) return null;
+    const glyph = select.querySelector<HTMLElement>(".workdir-icon");
+    return contentWidth(select) - (glyph?.offsetWidth ?? 0) - gapOf(select);
+  };
+
+  for (const group of groups.value) {
+    const block = blocksById(root, "group", ".workdir-group", "repoId").get(group.id);
+    const control = block?.querySelector<HTMLElement>(".group-heading-text");
+    if (!control) continue;
+    const room = contentWidth(control) - gapOf(control);
+    if (room <= 0) continue;
+    const gap = gapOf(control);
+    const name = widthOf("groupName", group.label);
+    // Rung for rung: the name with the whole path, the name with a shorter one, and the name alone,
+    // which is what a header says once the panel cannot say where the repo lives.
+    steps[`header:${group.id}`] = widestThatFits(
+      group.pathSteps.map((path) => name + (path ? gap + widthOf("groupPath", path) : 0)),
+      room,
+    );
+  }
+
+  const worktrees = groups.value.flatMap((group) => group.workdirs);
+
+  for (const workdir of worktrees) {
+    const block = blocksById(root, "workdir", ".workdir-checkouts", "workdirCheckout").get(workdir.checkout.id);
+    const room = roomOf(block?.querySelector<HTMLElement>(".workdir-select"));
+    if (room === null || room <= 0) continue;
+    steps[`workdir:${workdir.checkout.id}`] = widestThatFits(
+      nameSteps(workdir.title).map((name) => widthOf("rowName", name)),
+      room,
+    );
+  }
+
+  // A terminal is weighed in a pass of its own rather than inside the loop above, because a worktree
+  // row with nothing to say about its room is not a reason to leave its terminals unweighed: the two
+  // rows have rooms of their own and one of them being unknown says nothing about the other.
+  for (const workdir of worktrees) {
+    for (const item of workdir.items) {
+      const row = blocksById(root, "session", ".workdir-child[data-session-id]", "sessionId").get(item.session.id);
+      const select = row?.querySelector<HTMLElement>(".workdir-select");
+      const room = roomOf(select);
+      if (room === null || room <= 0) continue;
+      // The detail goes before the name does, and it goes whole: a mode word is drawn or it is not
+      // there, and a name cut to keep half of one is the worse of the two rungs.
+      const gap = gapOf(select!.querySelector<HTMLElement>(".lbl")!);
+      const detail = item.detail ?? "";
+      const detailWidth = detail ? gap + widthOf("rowDetail", detail) : 0;
+      const both = widthOf("rowName", item.title) + detailWidth;
+      const withDetail = Boolean(detail) && room >= both;
+      steps[`detail:${item.session.id}`] = withDetail ? 0 : 1;
+      steps[`name:${item.session.id}`] = widestThatFits(
+        nameSteps(item.title).map((name) => widthOf("rowName", name)),
+        room - (withDetail ? detailWidth : 0),
+      );
+    }
+  }
+
+  applyFitSteps(steps);
 }
+
+/** Every row of one kind, keyed by the id its own row carries, read from the panel that drew them. */
+function blocksById(
+  root: HTMLElement,
+  cacheKey: string,
+  selector: string,
+  datasetKey: string,
+): Map<string, HTMLElement> {
+  const cached = blockCache.get(cacheKey);
+  if (cached) return cached;
+  const blocks = new Map<string, HTMLElement>();
+  for (const block of root.querySelectorAll<HTMLElement>(selector)) {
+    blocks.set(block.dataset[datasetKey] ?? "", block);
+  }
+  blockCache.set(cacheKey, blocks);
+  return blocks;
+}
+
+/** The width a box has for its own contents: `clientWidth` counts the padding the box is drawn with. */
+function contentWidth(element: HTMLElement): number {
+  const style = window.getComputedStyle(element);
+  return element.clientWidth - (parseFloat(style.paddingLeft) || 0) - (parseFloat(style.paddingRight) || 0);
+}
+
+/** The space two flex children are put apart by, which is what separates the halves of a label. */
+function gapOf(element: HTMLElement): number {
+  return parseFloat(window.getComputedStyle(element).columnGap) || 0;
+}
+
+/**
+ * How wide a piece of text is in one of the panel's type sizes.
+ *
+ * Both numbers are read in the same units on purpose: the room is a `clientWidth` and the text is a
+ * `scrollWidth`, so a window zoomed or scaled scales both or neither. The widths are kept, because a
+ * resize re-weighs every row and most of them are asking about the same words.
+ */
+function widthOf(style: FitStyle, text: string): number {
+  const specimen = probes[style].value;
+  if (!specimen || !text) return 0;
+  const key = `${style} ${text}`;
+  const known = fitWidths.get(key);
+  if (known !== undefined) return known;
+  specimen.textContent = text;
+  const width = specimen.scrollWidth;
+  fitWidths.set(key, width);
+  return width;
+}
+
+/**
+ * The drawn steps, kept only when they are not the steps already drawn.
+ *
+ * The pass runs on every resize and on every change to what the panel lists, and a panel whose rows
+ * all fit re-weighs to exactly what it had: a whole list re-rendering to say nothing would make
+ * dragging its own edge expensive for nothing.
+ */
+function applyFitSteps(steps: Record<string, number>) {
+  const drawn = fitSteps.value;
+  const keys = Object.keys(steps);
+  if (keys.length === Object.keys(drawn).length && keys.every((key) => drawn[key] === steps[key])) return;
+  fitSteps.value = steps;
+}
+
+/** What a repo's header says about where it lives, which at the last step is nothing at all. */
+function groupPathText(group: Group): string {
+  return group.pathSteps[fitSteps.value[`header:${group.id}`] ?? 0] ?? "";
+}
+
+/** The worktree's name, given up a segment at a time rather than cut from either end. */
+function workdirNameText(workdir: Workdir): string {
+  const steps = nameSteps(workdir.title);
+  return steps[fitSteps.value[`workdir:${workdir.checkout.id}`] ?? 0] ?? workdir.title;
+}
+
+/** The terminal's name, given up a segment at a time rather than cut from either end. */
+function sessionNameText(item: WorkdirItem): string {
+  const steps = nameSteps(item.title);
+  return steps[fitSteps.value[`name:${item.session.id}`] ?? 0] ?? item.title;
+}
+
+/** The mode beside the terminal's name, which is drawn whole or not drawn at all. */
+function sessionDetailText(item: WorkdirItem): string {
+  return (fitSteps.value[`detail:${item.session.id}`] ?? 0) === 0 ? (item.detail ?? "") : "";
+}
+
+/**
+ * The panel's own box is what every room in it comes from, so that box is what is watched.
+ *
+ * Its width is the splitter's and not the labels': nothing a row draws can make the panel wider
+ * (every label is `min-width: 0` inside a scroller), so watching it cannot feed back into itself.
+ * The specimens are deliberately not watched — writing a word into one changes that box, and a
+ * callback that changed the boxes it watches is a loop — and the one change they cannot see coming
+ * is the type, which arrives as `fontScale` instead.
+ */
+let labelObserver: ResizeObserver | undefined;
+let labelFrame: number | undefined;
+
+function attachLabelObserver() {
+  detachLabelObserver();
+  const panel = sidebarScroll.value;
+  if (!panel) return;
+  labelObserver = new ResizeObserver(() => scheduleMeasureLabels());
+  labelObserver.observe(panel);
+  scheduleMeasureLabels();
+}
+
+function detachLabelObserver() {
+  labelObserver?.disconnect();
+  labelObserver = undefined;
+  if (labelFrame !== undefined) window.cancelAnimationFrame(labelFrame);
+  labelFrame = undefined;
+}
+
+/** One pass per frame however many things asked for one: a resize says this once. */
+function scheduleMeasureLabels() {
+  if (labelFrame !== undefined) return;
+  labelFrame = window.requestAnimationFrame(() => {
+    labelFrame = undefined;
+    measureLabels();
+  });
+}
+
+onMounted(attachLabelObserver);
+
+// What the panel lists, and the type it is drawn in: either one changes a row's words or a word's
+// width without the panel moving a pixel, so nothing else would ask for the pass they need.
+watch([groups, () => props.fontScale], scheduleMeasureLabels, { flush: "post" });
+watch(
+  () => props.fontScale,
+  () => fitWidths.clear(),
+);
 
 /** Every header action closes the menu first, so the list never outlives the thing it chose. */
 function addWorktree(group: Group) {
@@ -941,6 +1176,7 @@ function rowLabel(item: WorkdirItem): string {
         :key="group.id"
         class="workdir-group"
         :class="{ 'is-collapsed': isRepoCollapsed(group) }"
+        :data-repo-id="group.id"
       >
         <!-- The header is where the repo as a whole is acted on, and all of it lives in one menu:
              the three dots, or a right click anywhere on the header. Adding a worktree is the only
@@ -966,7 +1202,14 @@ function rowLabel(item: WorkdirItem): string {
             @click="toggleRepo(group)"
           >
             <span class="group-name">{{ group.label }}</span>
-            <span v-if="group.shortPath" class="group-path">{{ group.shortPath }}</span>
+            <!-- Where the repo lives, in the form the panel had room for. The name is what gives way
+                 last, and the path is what gives way first, because the name is the only half of
+                 this row that says which repository it is. -->
+            <span v-if="groupPathText(group)" class="group-path">{{ groupPathText(group) }}</span>
+            <!-- A path the panel cannot draw is still part of what the header names, so it is said
+                 here rather than dropped: what is not drawn must still be readable, and this row's
+                 own title carries the whole path as well. -->
+            <span v-else-if="group.pathSteps[0]" class="sr-only">{{ group.pathSteps[0] }}</span>
           </button>
 
           <!-- reka's menu, the same one the titlebar crumbs open, so the outside press, the
@@ -1069,19 +1312,25 @@ function rowLabel(item: WorkdirItem): string {
             >
               <component :is="workdir.icon" class="workdir-icon" aria-hidden="true" />
               <span class="lbl">
-                <span class="nm">{{ workdir.title }}</span>
+                <span class="nm">{{ workdirNameText(workdir) }}</span>
               </span>
             </button>
 
             <!-- The row's own trailing slot. The counts live here and nowhere else, in the
-                 monospace the reference draws them in and right against the row's edge, and a
-                 worktree that can be taken off the panel yields this slot to that action rather
-                 than having the action painted over the counts. -->
+                 monospace the reference draws them in and right against the row's edge. At rest it
+                 holds a bare `+−`, coloured as the figures it stands in for, and on hover it grows
+                 into them, with the cross standing beside them in the strip it opened. -->
             <span class="workdir-end" :class="{ 'workdir-end-error': !!workdir.error }">
               <span v-if="workdir.error" class="workdir-end-note">{{ workdir.error }}</span>
               <span v-else-if="workdir.additions || workdir.deletions" class="workdir-diff">
-                <span v-if="workdir.additions" class="ad">+{{ workdir.additions }}</span>
-                <span v-if="workdir.deletions" class="rm">−{{ workdir.deletions }}</span>
+                <span class="workdir-diff-mark" aria-hidden="true">
+                  <span class="ad">+</span>
+                  <span class="rm">−</span>
+                </span>
+                <span class="workdir-diff-nums">
+                  <span v-if="workdir.additions" class="ad">+{{ workdir.additions }}</span>
+                  <span v-if="workdir.deletions" class="rm">−{{ workdir.deletions }}</span>
+                </span>
               </span>
             </span>
 
@@ -1186,9 +1435,12 @@ function rowLabel(item: WorkdirItem): string {
                      nothing is. There is no badge, no chip and no second line, so the icon is the
                      only place the state can live and it has to be right. -->
                   <component :is="item.icon" class="workdir-icon" aria-hidden="true" />
+                  <!-- The mode goes before the name does, and it goes whole: a mode word is drawn or
+                       it is not there, and a name cut in half to keep one is the worse row. The
+                       row's accessible name and its tooltip carry both either way. -->
                   <span class="lbl">
-                    <span class="nm">{{ item.title }}</span>
-                    <span v-if="item.detail" class="dm">{{ item.detail }}</span>
+                    <span class="nm">{{ sessionNameText(item) }}</span>
+                    <span v-if="sessionDetailText(item)" class="dm">{{ sessionDetailText(item) }}</span>
                   </span>
                 </button>
 
@@ -1285,6 +1537,16 @@ function rowLabel(item: WorkdirItem): string {
         </span>
       </button>
     </div>
+
+    <!-- The four type sizes a label in this panel is drawn in, one specimen each, so the panel can
+         weigh a label against the room its row has. They carry the class of the thing they weigh,
+         so a specimen is the type that row is really drawn in and cannot drift from it, and they
+         are held out of sight and out of the flow rather than given a box to sit in. -->
+    <span ref="groupNameSpecimen" class="fit-probe group-name" aria-hidden="true" />
+    <span ref="groupPathSpecimen" class="fit-probe group-path" aria-hidden="true" />
+    <span ref="rowNameSpecimen" class="fit-probe nm" aria-hidden="true" />
+    <span ref="rowDetailSpecimen" class="fit-probe dm" aria-hidden="true" />
+
     <Teleport to="body">
       <div
         v-if="pointerDrag?.started"
@@ -1357,6 +1619,15 @@ function rowLabel(item: WorkdirItem): string {
   display: none;
 }
 
+/* The two halves of a header, and what each of them is allowed to do about a narrow panel.
+
+   Neither one is cut here. `measureLabels` weighs the row and the panel drops a whole segment off
+   the front of the path, then the path itself, before either word loses a character — which is why
+   these two are the last thing that happens rather than the first, and why the name keeps the room
+   it needs while the path is still there. The ellipsis on both is the rung after the last whole
+   shape: a repo whose own name is longer than the panel cannot be drawn whole, and the tooltip
+   carries the rest. */
+
 .group-name {
   overflow: hidden;
   flex-shrink: 1;
@@ -1374,6 +1645,27 @@ function rowLabel(item: WorkdirItem): string {
   font-size: 0.6875rem;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* The specimens `widthOf` measures against: one per type size a label is drawn in, held out of the
+   flow and out of sight so they take no room and are never read. They carry the class of the thing
+   they weigh, which is what keeps a specimen the type that row is really drawn in.
+
+   The `min-width` is the one declaration they undo. `.dm`'s floor is there so a mode word is cut
+   rather than deleted, and a floor on a specimen would report a word wider than the row draws —
+   which is the one measurement here that would lie. */
+.fit-probe {
+  position: absolute;
+  visibility: hidden;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.fit-probe.group-name,
+.fit-probe.group-path,
+.fit-probe.nm,
+.fit-probe.dm {
+  min-width: 0;
 }
 
 .group-more {
@@ -1688,11 +1980,65 @@ function rowLabel(item: WorkdirItem): string {
 
 /* The counts: monospaced, because they are read down a column of rows rather than one at a time,
    and a proportional digit moves them sideways. Green for additions and red for deletions, which
-   are the two colours the reference uses and the two the palette already has. */
+   are the two colours the reference uses and the two the palette already has.
+
+   At rest the slot holds a bare `+−`, which says the row has changes in the one width the trailing
+   edge of a row in this panel has ever been reserved for. The figures are one pointer away, and
+   the two swap places by WIDTH rather than by display: two grid tracks, one open and one closed,
+   so the figures grow out from under the mark instead of the mark being replaced by them.
+
+   The closed track is `0px` and NOT `0fr`, and that is the whole trick. This container has no
+   width of its own — it is a `flex: none` item sized by its contents — and a flexible track in a
+   container of indefinite size is sized by its MAX-CONTENT contribution whatever its flex factor
+   is, so `0fr` is not zero here: it measured the figures in full and left the mark stranded at the
+   left of a slot twice as wide as it needed, squeezing the branch name for nothing. A length is
+   definite whatever the container is doing, so `0px` is zero. Both values interpolate — `1fr` to
+   `0fr` and `0px` to `1fr` — so the swap still animates, and on an engine that cannot interpolate
+   a flex track against a length it snaps instead, which is only a missing animation.
+
+   The mark is `aria-hidden` and the figures are not: the figures are the row's real content, and a
+   reader who never lands a pointer on the row still has to be told what changed. */
 .workdir-diff {
+  display: grid;
+  grid-template-columns: 1fr 0px;
+  font-family: var(--marvis-font);
+  /* The cross's strip — 8px of row padding plus its own 20px — spent out of the figures' box so
+     the name does not have to move for the cross to have somewhere to stand. */
+  margin-right: 0;
+  transition:
+    grid-template-columns 0.18s ease,
+    margin-right 0.18s ease;
+}
+
+/* Both tracks clip: the closed one has to be closed by something, and `min-width: 0` is what stops
+   the figures inside it from holding the track open on their own. */
+.workdir-diff > * {
+  min-width: 0;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.workdir-diff-nums {
   display: flex;
   gap: 5px;
-  font-family: var(--marvis-font);
+}
+
+/* The mark wears the figures' own two colours, because it is them with the digits left off, and
+   the same 5px they are separated by: the `+` therefore sits at the same offset in the mark as in
+   the figures, so the swap reads as digits being added rather than as one thing becoming another. */
+.workdir-diff-mark {
+  display: flex;
+  gap: 5px;
+}
+
+/* Hover, and the one other way a keyboard arrives at the same place — the same pairing the cross
+   answers to, so a row reveals itself the same way whether the pointer or the Tab key found it. The
+   mark closes on a length for the same reason it did at rest: `0fr` here would leave it measuring
+   itself and push the figures right by the width of a mark nobody can see. */
+.workdir-row:hover .workdir-diff,
+.workdir-row:focus-within .workdir-diff {
+  grid-template-columns: 0px 1fr;
+  margin-right: 28px;
 }
 
 .ad {
@@ -1730,7 +2076,9 @@ function rowLabel(item: WorkdirItem): string {
   z-index: 1;
   background: var(--marvis-bg-1);
   opacity: 0;
-  transition: opacity 0.12s ease;
+  /* The same 0.18s the figures take to arrive, so the strip opens as one gesture rather than as a
+     cross fading in over figures that are still growing. */
+  transition: opacity 0.18s ease;
 }
 
 /* The surface the cross paints is the row's own, and it follows the row: the panel at rest, the hover
@@ -1753,11 +2101,12 @@ function rowLabel(item: WorkdirItem): string {
   opacity: 1;
 }
 
-/* **Nothing on a row moves when the pointer arrives.** There is no yield rule, and that is the whole
-   of it: the trailing slot's box is identical at rest and hovered, so a branch's change figures and a
-   terminal's elapsed time stay exactly where they were drawn. The cross covers what is under it
-   rather than asking it to step aside, because a count that slides left the instant the pointer lands
-   is a number a reader has to re-find at the exact moment they are looking at the row. */
+/* **Nothing on a row moves but the trailing slot.** The figures are one pointer away, so the slot
+   has to be able to grow into them, and it grows out of its own box towards the left: the name
+   truncates by the width of the figures for as long as the pointer is on the row, and is whole
+   again the moment it leaves. The row's height, its chevron, its icon and the rhythm of every
+   other row do not move — only the text between the name and the row's edge, which is where the
+   numbers go. The cross is still out of flow, so it opens a strip rather than pushing the row. */
 
 /* ---------------------------------------------------------------------------------------------
    The state, in the icon's colour. Five answers, and the words are in the row's accessible name.
@@ -1798,6 +2147,10 @@ function rowLabel(item: WorkdirItem): string {
   }
 
   .chv {
+    transition: none;
+  }
+
+  .workdir-diff {
     transition: none;
   }
 }

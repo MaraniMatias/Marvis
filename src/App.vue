@@ -1906,6 +1906,7 @@ function reportWarning(message: string) {
       >
         <Sidebar
           :repos="workspace.repos"
+          :font-scale="fontScale"
           :home-checkout-id="workspace.homeCheckoutId"
           :active-checkout-id="workspace.activeCheckoutId"
           :active-session-id="activeSessionId"

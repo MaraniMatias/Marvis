@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
 import type { ArchivedCheckout, Checkout, Repo, Session } from "../domain/workspace";
 
@@ -163,7 +163,9 @@ describe("Sidebar workdir rows", () => {
     // The repo is a group: its name and where it lives are the header, and the three dots
     // there are everything done to the repo as a whole.
     expect(wrapper.get(".group-name").text()).toBe("test");
-    expect(wrapper.get(".group-path").text()).toBe("/test");
+    // The specimen carries this class too — it is what a path is weighed in — so the query is scoped
+    // to the header rather than to the panel.
+    expect(wrapper.get(".group-heading-text .group-path").text()).toBe("/test");
     // The repo root is named by the branch it is on, like a worktree is, and the branch is
     // never repeated beside it.
     expect(wrapper.get(".workdir-row .nm").text()).toBe("main");
@@ -1100,11 +1102,13 @@ describe("Sidebar workdir rows", () => {
     expect(rule(".app-sidebar")).not.toContain("border");
   });
 
-  it("swaps a row's time for its cross in the one slot, so nothing can move", () => {
+  it("swaps a row's time for its cross in the one slot, so the time is never pushed", () => {
     // The slot is `min-width: 20px`, which is the width of the cross, so the two are the same size
     // and the cross is drawn exactly where the time stood. The cross is out of flow, so it cannot
     // push the name or the row's right edge, and the time is not removed on hover \u2014 it yields, like
-    // every other trailing content in the panel, and both are readable at once.
+    // every other trailing content in the panel, and both are readable at once. A terminal's elapsed
+    // time yields to the cross and to nothing else: it is not a change figure, so the reveal below
+    // never touches it.
     expect(rule(".workdir-end")).toContain("min-width: 20px;");
     expect(rule(".workdir-end")).toContain("flex: none;");
     expect(rule(".workdir-close")).toContain("position: absolute;");
@@ -1115,14 +1119,21 @@ describe("Sidebar workdir rows", () => {
     expect(sidebarStyles()).not.toContain("padding-right: 32px");
   });
 
-  it("overlays the cross on hover without moving the row's trailing content", () => {
-    // The user rejected the yield rule outright: a count that slides left the instant the pointer
-    // lands is a number the reader has to re-find at the exact moment they are looking at that row.
-    // So NOTHING on the row moves. The change indicators keep the box they were drawn in, and the
-    // cross arrives on top of them, like an actions menu opening over the row.
+  it("opens the slot into the counts on hover, out of the figures' own box", () => {
+    // The figures are one pointer away, so the slot has to be able to grow into them. It grows out
+    // of its OWN box — `margin-right` on the figures, never padding on the slot — because the slot
+    // also carries a missing-directory note and a terminal's elapsed time, and neither of those is
+    // a count that has anything to reveal.
+    const hovered = sidebarStyles().match(/\.workdir-row:hover[^{]*\.workdir-diff,[^{]*\{([^}]*)\}/)?.[1] ?? "";
+    expect(hovered).toContain("grid-template-columns: 0px 1fr;");
+    expect(hovered).toContain("margin-right: 28px;");
     expect(sidebarStyles()).not.toMatch(/\.workdir-row:hover[^{]*workdir-end[^{]*\{[^}]*padding/);
     expect(sidebarStyles()).not.toMatch(/\.workdir-row:focus-within[^{]*workdir-end[^{]*\{[^}]*padding/);
-    expect(sidebarStyles()).not.toMatch(/\.workdir-row:hover[^{]*workdir-end[^{]*\{[^}]*transition/);
+    // The slot's own minimum is still the cross's width, and it never grows one: nothing is reserved
+    // at rest for an action the row is not showing.
+    expect(rule(".workdir-end")).toContain("min-width: 20px;");
+    expect(rule(".workdir-end")).not.toContain("padding-right");
+    expect(sidebarStyles()).not.toContain("padding-right: 32px");
     // The cross is out of flow, so the row never reflows and nothing is pushed along by it.
     expect(rule(".workdir-close")).toContain("position: absolute;");
     expect(rule(".workdir-close")).toContain("right: 8px;");
@@ -1134,18 +1145,13 @@ describe("Sidebar workdir rows", () => {
     // The cross gives no hover fill of its own, so a cross on a row is a glyph and not a cell: the
     // shared `.workdir-action` rule is all it would have, and the row's own rule outranks it.
     expect(rule(".workdir-close:hover")).toBe("");
-    // And there is no permanently reserved strip either: at rest the figures sit hard against the
-    // row's right edge, because the cross is transparent and out of flow rather than a reserved band.
-    expect(rule(".workdir-end")).not.toContain("padding-right");
-    expect(rule(".workdir-end")).toContain("min-width: 20px;");
-    expect(rule(".workdir-end")).toContain("flex: none;");
+    // The title is the row's own first flex child and no hover rule touches its padding, so the name
+    // gives up width to the figures and nothing else on the row gives up anything.
     expect(sidebarStyles()).not.toMatch(/\.workdir-row:hover[^{]*workdir-select[^{]*\{[^}]*padding/);
     expect(sidebarStyles()).not.toMatch(/\.workdir-row:hover[^{]*\.lbl[^{]*\{[^}]*padding/);
-    // The slot's own minimum is the cross's width, so the cross lands on the slot and never past it.
-    expect(rule(".workdir-end")).toContain("min-width: 20px;");
   });
 
-  it("keeps the hovered branch row's cross inside its own slot and its title where it was", async () => {
+  it("keeps the hovered branch row's cross inside its own slot, in the figures' own box", async () => {
     // The guarantee as a shape in the DOM: the cross is the row's last child and the figures are in
     // the slot immediately before it, inside the same row box, so a cross can only ever be over its
     // own row\u0027s slot \u2014 and the slot is the thing that yields.
@@ -1186,16 +1192,24 @@ describe("Sidebar workdir rows", () => {
       "workdir-end",
       "workdir-action workdir-close",
     ]);
-    // The figures are in that slot, whole \u2014 `+1299 \u22124`, both of them readable at rest \u2014 and the cross
-    // stands beside them rather than over them.
-    expect(row.get(".workdir-end .workdir-diff").text()).toBe("+1299\u22124");
+    // The figures are in that slot as two layers \u2014 the bare `+−`, and one pointer away,
+    // `+1299 −4`. The mark is the one hidden from a screen reader, because the figures are the
+    // row's real content and a reader who never hovers the row still has to be told what changed.
+    expect(row.get(".workdir-end .workdir-diff-mark").text()).toBe("+−");
+    expect(row.get(".workdir-end .workdir-diff-mark").attributes("aria-hidden")).toBe("true");
+    // The mark is the figures with the digits left off, so it is drawn in the figures' own colours
+    // rather than in one neutral ink that would claim the row has neither additions nor deletions.
+    expect(row.get(".workdir-end .workdir-diff-mark .ad").text()).toBe("+");
+    expect(row.get(".workdir-end .workdir-diff-mark .rm").text()).toBe("−");
+    expect(row.get(".workdir-end .workdir-diff-nums").text()).toBe("+1299\u22124");
     expect(row.get(".workdir-close").attributes("aria-label")).toBe(
       "Remove or archive worktree bug/13133933180-copy-id-into-the-lists-that-have-them",
     );
-    // And the title is the row\u0027s own first flex child, which no hover rule touches: the yield is
-    // the trailing slot\u0027s right padding, spent out of the slot\u0027s own box and nowhere else.
+    // And the title is the row\u0027s own first flex child, which no hover rule touches its padding
+    // on: the yield is the figures\u0027 own margin, spent out of the figures\u0027 box and nowhere else.
     const title = row.get(".workdir-select");
     expect(rule(".workdir-end")).not.toContain("padding-right");
+    expect(rule(".workdir-end")).not.toContain("margin-right");
     expect(sidebarStyles()).not.toMatch(/\.workdir-row:hover[^{]*workdir-select[^{]*\{[^}]*padding/);
     const atRest = title.element.getBoundingClientRect().width;
     await title.trigger("mouseenter");
@@ -1213,6 +1227,23 @@ describe("Sidebar workdir rows", () => {
     expect(rule(".workdir-end")).toContain("font-variant-numeric: tabular-nums;");
     // The slot is right against the row's edge, so the figures line up down the list.
     expect(rule(".workdir-end")).toContain("justify-content: flex-end;");
+    // The resting mark is the figures with the digits left off, so it wears the figures' own two
+    // colours and their own 5px gap: the `+` lands at the same offset in the mark as in the figures,
+    // so the swap reads as digits being added rather than as one thing becoming another.
+    expect(rule(".workdir-diff-mark")).toContain("gap: 5px;");
+    expect(rule(".workdir-diff-mark")).not.toContain("color:");
+    // The mark and the figures swap by width, not by display, so neither is ever removed from the
+    // row: the figures are there for a reader who cannot hover and the mark is there for a reader
+    // who is looking at the list.
+    expect(rule(".workdir-diff > *")).toContain("overflow: hidden;");
+    expect(rule(".workdir-diff > *")).toContain("min-width: 0;");
+    // And the closed track is `0px` and NOT `0fr`. This container is sized by its own contents, and
+    // a flexible track in a container of indefinite size is measured by its max-content contribution
+    // whatever its flex factor is: `0fr` came out as wide as the figures, which stranded the mark at
+    // the left of a slot twice as wide as it needed and squeezed the branch name for nothing. A
+    // length is definite whatever the container is doing, which is the whole of the fix.
+    expect(rule(".workdir-diff")).toContain("grid-template-columns: 1fr 0px;");
+    expect(rule(".workdir-diff")).not.toContain("0fr");
   });
 
   it("names a terminal row after the session, and repeats nothing its parent already says", () => {
@@ -2663,11 +2694,13 @@ describe("Sidebar workdir rows", () => {
     // One call covers the sidebar: the inactive checkout is counted without being visited.
     expect(mocks.getGitCheckoutDiffStats).toHaveBeenCalledTimes(1);
     const [base, feature] = wrapper.findAll(".workdir-row .workdir-end");
-    expect(base.get(".ad").text()).toBe("+12");
-    expect(base.get(".rm").text()).toBe("\u22124");
-    // A zero addition has nothing to draw, and the deletion stands on its own.
-    expect(feature.find(".ad").exists()).toBe(false);
-    expect(feature.get(".rm").text()).toBe("\u22127");
+    expect(base.get(".workdir-diff-nums .ad").text()).toBe("+12");
+    expect(base.get(".workdir-diff-nums .rm").text()).toBe("\u22124");
+    // A zero addition has nothing to draw, and the deletion stands on its own. The `.ad` and the `.rm`
+    // are read inside the figures and not inside the whole slot, because the mark above them is
+    // drawn in the same two colours and carries a bare `+` and `−` of its own.
+    expect(feature.find(".workdir-diff-nums .ad").exists()).toBe(false);
+    expect(feature.get(".workdir-diff-nums .rm").text()).toBe("\u22127");
     wrapper.unmount();
   });
 
@@ -2711,7 +2744,7 @@ describe("Sidebar workdir rows", () => {
     await flushPromises();
 
     const [base, gone] = wrapper.findAll(".workdir-row .workdir-end");
-    expect(base.text()).toBe("+12\u22124");
+    expect(base.get(".workdir-diff-nums").text()).toBe("+12\u22124");
     // E.4: a failure of one workdir is written in that row, and it takes the slot the counts
     // would have used, so a row never shows a failure next to figures it cannot have.
     expect(gone.text()).toBe("Directory missing");
@@ -3207,5 +3240,305 @@ describe("a row's glyph keeps its state when the row is selected", () => {
     expect(rule(".state-waiting .workdir-icon")).toContain("color: var(--marvis-warning);");
     expect(rule(".state-failed .workdir-icon")).toContain("color: var(--marvis-danger-fg);");
     expect(rule(".state-running .workdir-icon")).toContain("color: var(--marvis-success);");
+  });
+});
+
+/**
+ * What one character is worth, in a font that is only that.
+ *
+ * The panel weighs a label by putting the words in a specimen and reading it, so a test that says
+ * "the room is this wide" is saying the same thing as "this many characters fit" — which is the
+ * only way a claim about a truncation can be written down.
+ */
+const CHAR_PX = 7;
+
+type FitCallback = () => void;
+const fitObservers: { callback: FitCallback; targets: Element[] }[] = [];
+
+class FitResizeObserver {
+  callback: FitCallback;
+  targets: Element[] = [];
+
+  constructor(callback: FitCallback) {
+    this.callback = callback;
+    fitObservers.push(this);
+  }
+
+  observe(target: Element) {
+    this.targets.push(target);
+  }
+
+  unobserve(target: Element) {
+    this.targets = this.targets.filter((element) => element !== target);
+  }
+
+  disconnect() {
+    this.targets = [];
+  }
+}
+
+/** How wide one box is, which happy-dom has no opinion about at all. */
+function room(element: Element, px: number) {
+  Object.defineProperty(element, "clientWidth", { configurable: true, value: px });
+}
+
+/** The panel has been resized, which is the only box it watches. */
+function resizePanel() {
+  for (const observer of fitObservers) observer.callback();
+}
+
+/** One pass per frame, and the frame has to happen. */
+async function weighed() {
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await nextTick();
+}
+
+describe("a label is weighed against its row rather than cut between its halves", () => {
+  beforeEach(() => {
+    fitObservers.length = 0;
+    vi.stubGlobal("ResizeObserver", FitResizeObserver);
+    // Only the specimens are measured, so only the specimens answer with a width.
+    Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+      configurable: true,
+      get(this: HTMLElement) {
+        return this.classList.contains("fit-probe") ? (this.textContent?.length ?? 0) * CHAR_PX : 0;
+      },
+    });
+  });
+
+  afterEach(() => {
+    Reflect.deleteProperty(HTMLElement.prototype, "scrollWidth");
+    vi.unstubAllGlobals();
+  });
+
+  async function mountWebapp() {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:webapp",
+            name: "webapp",
+            root: "/Users/matiasmarani/Trabajo/xStudio/webapp",
+            checkouts: [
+              {
+                ...checkout({
+                  id: "checkout:webapp",
+                  repoId: "repo:webapp",
+                  path: "/Users/matiasmarani/Trabajo/xStudio/webapp",
+                  canonicalPath: "/Users/matiasmarani/Trabajo/xStudio/webapp",
+                  branch: "main",
+                }),
+                sessions: [session("a", "zsh", "checkout:webapp")],
+              },
+              {
+                ...checkout({
+                  id: "checkout:feature",
+                  repoId: "repo:webapp",
+                  path: "/Users/matiasmarani/Trabajo/xStudio/webapp-feature",
+                  canonicalPath: "/Users/matiasmarani/Trabajo/xStudio/webapp-feature",
+                  isPrimary: false,
+                  branch: "feature/sidebar/weigh-a-label",
+                }),
+                sessions: [],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:webapp",
+        activeSessionId: "a",
+        isOpening: false,
+        agentRows: {
+          "checkout:webapp": {
+            sessions: [
+              {
+                title: "Review the duplicated rows",
+                agent: { label: "plan", color: null, attention: "none" },
+                running: false,
+                updatedAt: Date.now(),
+              },
+            ],
+          },
+        },
+        sessionRuntimeStatuses: {
+          a: {
+            state: "running",
+            foregroundProcess: true,
+            foregroundApp: "opencode",
+            terminalTitle: "OC | Review the duplicated rows",
+          },
+        },
+      },
+    });
+    await weighed();
+    return wrapper;
+  }
+
+  it("draws a repo's whole path beside its whole name when the panel has the room", async () => {
+    const wrapper = await mountWebapp();
+    // `webapp` is 6 characters and `…/xStudio/webapp` is 16, so 170px of header holds the two.
+    room(wrapper.get(".group-heading-text").element, 170);
+    resizePanel();
+    await weighed();
+
+    expect(wrapper.get(".group-name").text()).toBe("webapp");
+    expect(wrapper.get(".group-heading-text .group-path").text()).toBe("…/xStudio/webapp");
+    wrapper.unmount();
+  });
+
+  it("gives the path a segment away before it lets the name lose a character", async () => {
+    const wrapper = await mountWebapp();
+    // 120px holds the name and one segment of the path and not the two it started with. The measured
+    // defect was both halves ellipsized at once, which is what two halves sharing one shrink factor
+    // does: `weba…` beside `…/xStudio/weba…`.
+    room(wrapper.get(".group-heading-text").element, 120);
+    resizePanel();
+    await weighed();
+
+    expect(wrapper.get(".group-name").text()).toBe("webapp");
+    expect(wrapper.get(".group-heading-text .group-path").text()).toBe("…/webapp");
+    wrapper.unmount();
+  });
+
+  it("drops the path rather than the name, and keeps saying it to whatever is not reading pixels", async () => {
+    const wrapper = await mountWebapp();
+    // 60px holds the name and neither form of the path.
+    room(wrapper.get(".group-heading-text").element, 60);
+    resizePanel();
+    await weighed();
+
+    // The name is the whole row now, and it is whole.
+    expect(wrapper.get(".group-name").text()).toBe("webapp");
+    expect(wrapper.find(".group-heading-text .group-path").exists()).toBe(false);
+    // What stopped being drawn did not stop being said: the row still reads whole to a screen
+    // reader, and its tooltip carries the whole path.
+    expect(wrapper.get(".group-heading-text").text()).toContain("…/xStudio/webapp");
+    expect(wrapper.get(".group-heading-text").attributes("title")).toBe("/Users/matiasmarani/Trabajo/xStudio/webapp");
+    wrapper.unmount();
+  });
+
+  it("gives a branch its namespace away rather than cutting it out of the middle", async () => {
+    const wrapper = await mountWebapp();
+    const control = wrapper.get('[data-workdir-checkout="checkout:feature"] .workdir-select').element;
+    // `feature/sidebar/weigh-a-label` is 27 characters; 150px holds it and `…/weigh-a-label`.
+    room(control, 150);
+    room(wrapper.get(".group-heading-text").element, 170);
+    resizePanel();
+    await weighed();
+
+    expect(wrapper.get('[data-workdir-checkout="checkout:feature"] .nm').text()).toBe("…/weigh-a-label");
+    // And the whole branch is still what the row says on hover.
+    expect(wrapper.get('[data-workdir-checkout="checkout:feature"] .workdir-select').attributes("title")).toBe(
+      "feature/sidebar/weigh-a-label — /Users/matiasmarani/Trabajo/xStudio/webapp-feature",
+    );
+    wrapper.unmount();
+  });
+
+  it("takes the mode word away whole before the terminal's name is touched", async () => {
+    const wrapper = await mountWebapp();
+    const row = wrapper.get(".workdir-child");
+    const control = row.get(".workdir-select").element;
+    // `Review the duplicated rows` is 26 characters and `plan` is 4, so the two together want 210px
+    // and the name alone wants 182. 240px holds both and 200px does not, and a name cut in half to
+    // keep half a mode word is the worse of the two rungs.
+    room(control, 240);
+    room(wrapper.get(".group-heading-text").element, 170);
+    resizePanel();
+    await weighed();
+    expect(row.get(".dm").text()).toBe("plan");
+    expect(row.get(".nm").text()).toBe("Review the duplicated rows");
+
+    room(control, 200);
+    resizePanel();
+    await weighed();
+    expect(row.find(".dm").exists()).toBe(false);
+    expect(row.get(".nm").text()).toBe("Review the duplicated rows");
+    // The word the row dropped is in its accessible name and its tooltip, which is where a row that
+    // cannot fit it still says it.
+    expect(row.get(".workdir-select").attributes("aria-label")).toContain("plan");
+    wrapper.unmount();
+  });
+
+  it("reads the room off the row rather than off the label that is being squeezed", async () => {
+    const wrapper = await mountWebapp();
+    const row = wrapper.get(".workdir-child");
+    // The row is wide and the label reports itself as clipped to nothing, which is what a label
+    // that overflows says about itself. Weighing the row is what keeps this from narrowing on every
+    // pass until the name is one word long.
+    room(row.get(".workdir-select").element, 240);
+    room(row.get(".lbl").element, 0);
+    room(wrapper.get(".group-heading-text").element, 170);
+    resizePanel();
+    await weighed();
+    resizePanel();
+    await weighed();
+
+    expect(row.get(".dm").text()).toBe("plan");
+    expect(row.get(".nm").text()).toBe("Review the duplicated rows");
+    wrapper.unmount();
+  });
+
+  it("draws every label whole on a panel that has never been measured", async () => {
+    // No room is known before the panel is laid out, and a room of zero is not a room nothing fits:
+    // happy-dom lays nothing out, and a panel that has not been mounted has nothing to weigh either.
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:webapp",
+            name: "webapp",
+            root: "/Users/matiasmarani/Trabajo/xStudio/webapp",
+            checkouts: [
+              {
+                ...checkout({
+                  id: "checkout:webapp",
+                  repoId: "repo:webapp",
+                  path: "/Users/matiasmarani/Trabajo/xStudio/webapp",
+                  canonicalPath: "/Users/matiasmarani/Trabajo/xStudio/webapp",
+                }),
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    await weighed();
+    resizePanel();
+    await weighed();
+
+    expect(wrapper.get(".group-name").text()).toBe("webapp");
+    expect(wrapper.get(".group-heading-text .group-path").text()).toBe("…/xStudio/webapp");
+    wrapper.unmount();
+  });
+
+  it("re-weighs when the type changes, which is the one thing that moves no box", async () => {
+    const wrapper = await mountWebapp();
+    room(wrapper.get(".group-heading-text").element, 60);
+    resizePanel();
+    await weighed();
+    expect(wrapper.find(".group-heading-text .group-path").exists()).toBe(false);
+
+    // A font scale moves every word and not one box, so nothing this panel watches would say so; the
+    // widths it kept are in the old type and are of no use in the new one.
+    await wrapper.setProps({ fontScale: 1.5 });
+    await weighed();
+    expect(wrapper.get(".group-name").text()).toBe("webapp");
+    wrapper.unmount();
+  });
+
+  it("holds its specimens out of the flow and out of sight", () => {
+    // Four specimens, one per type size a label is drawn in, each carrying the class of the thing it
+    // weighs: a specimen that is not the type that row is drawn in reports a width the row has not.
+    const styles = sidebarStyles();
+    expect(rule(".fit-probe")).toContain("position: absolute;");
+    expect(rule(".fit-probe")).toContain("visibility: hidden;");
+    expect(rule(".fit-probe.group-name")).toContain("min-width: 0;");
+    expect(rule(".fit-probe.dm")).toContain("min-width: 0;");
+    expect(styles).toContain('class="fit-probe group-name"');
+    expect(styles).toContain('class="fit-probe group-path"');
+    expect(styles).toContain('class="fit-probe nm"');
+    expect(styles).toContain('class="fit-probe dm"');
   });
 });
