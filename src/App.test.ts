@@ -1691,6 +1691,38 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
+    it("takes the inspector's width away when the split layout draws it as a drawer", async () => {
+      // A window narrow enough for the drawer reaches the split layout already being a drawer, so
+      // the flag that says the inspector is a drawer never changes and nothing re-collapses the
+      // panel. A drawer drawn over the main view leaves an empty strip of reserved space down the
+      // side of the window with nothing in it.
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
+        mode: "focus",
+        sidebarWidth: 300,
+        inspectorWidth: 300,
+        previewWidth: 360,
+      });
+      const inspectorPanel = wrapper.findAllComponents({ name: "SplitterPanel" })[2]!;
+      const resizeCalls = vi.fn();
+      mocks.onProgrammaticPanelResize = resizeCalls;
+
+      Object.defineProperty(window, "innerWidth", { configurable: true, value: 900 });
+      window.dispatchEvent(new Event("resize"));
+      await flushPromises();
+      expect(inspectorPanel.emitted("collapse")).toBeTruthy();
+      const collapsesBeforeTheSwitch = inspectorPanel.emitted("collapse")?.length ?? 0;
+      resizeCalls.mockClear();
+
+      await wrapper.get('[data-testid="layout-toggle"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.get('[data-testid="layout-toggle"]').attributes("aria-pressed")).toBe("true");
+
+      // A drawer is given no width of its own, so the switch adds a collapse and no resize.
+      expect(inspectorPanel.emitted("collapse")?.length ?? 0).toBe(collapsesBeforeTheSwitch + 1);
+      expect(resizeCalls).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
     it("gives the inspector its full width back when space returns", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")), {
         mode: "focus",

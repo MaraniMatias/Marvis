@@ -764,9 +764,8 @@ function toggleSidePanels() {
   // later close, so the drawer would come back unable to close. Restoring the panels should not
   // find it already open either, which is why this runs in both directions.
   closeSplitInspector();
-  // A drawer has no width to give back and no width to take, so what shows it is the state the
-  // drawer is bound to. The panel is only the panel's own when it sits beside the main view.
-  if (!inspectorInDrawer.value) inspectorPanel.value?.[show ? "expand" : "collapse"]();
+  // The inspector panel is not sized here: the watcher below answers the flag this just set, so
+  // the two cannot disagree about a panel holding the width of a drawer that is not drawn.
 }
 
 /**
@@ -1029,8 +1028,14 @@ function resizeAppPreview(width: number) {
 // floats over it as a drawer. Its width is left alone, to be restored when space returns. A panel
 // ⌘/ took away is collapsed as well, so a window that grows back does not reserve room for a panel
 // nobody can see.
+//
+// The layout mode is watched in its own right because `inspectorInDrawer` is already true on both
+// sides of a switch between the two modes: a window narrow enough to need the drawer can reach the
+// split layout without that flag ever changing, which leaves this never run and the panel holding
+// the width of a drawer drawn over the main view. ⌘/ only sets `sidePanelsVisible` and lets this
+// answer.
 watch(
-  [inspectorInDrawer, appLayoutReady],
+  [inspectorInDrawer, sidePanelsVisible, isSplitLayout, appLayoutReady],
   async () => {
     if (!appLayoutReady.value) return;
     await nextTick();
