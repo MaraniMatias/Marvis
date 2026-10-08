@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 import { flushPromises, mount } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { reactive } from "vue";
 import type { GitStatus } from "../domain/git";
 import { DEFAULT_CHECKOUT_UI_STATE } from "../domain/ui-state";
@@ -31,6 +31,33 @@ const { toasts, dismiss } = useToasts();
 const ROW_HEIGHT = 26;
 const WINDOW_SIZE = 64;
 const OVERSCAN = 10;
+
+class TestResizeObserver implements ResizeObserver {
+  static instances: TestResizeObserver[] = [];
+  readonly targets = new Set<Element>();
+  disconnected = false;
+
+  constructor(private callback: ResizeObserverCallback) {
+    TestResizeObserver.instances.push(this);
+  }
+
+  observe(target: Element) {
+    this.targets.add(target);
+  }
+
+  unobserve(target: Element) {
+    this.targets.delete(target);
+  }
+
+  disconnect() {
+    this.disconnected = true;
+    this.targets.clear();
+  }
+
+  resize(target: Element, height: number) {
+    this.callback([{ target, contentRect: { height } as DOMRectReadOnly } as ResizeObserverEntry], this);
+  }
+}
 
 function checkout(id: string, isMissing = false): Checkout {
   return {
@@ -92,10 +119,14 @@ function publishedRowHeight(wrapper: ReturnType<typeof mountInspector>): number 
 describe("InspectorPane", () => {
   beforeEach(() => {
     vi.resetAllMocks();
+    TestResizeObserver.instances = [];
+    vi.stubGlobal("ResizeObserver", TestResizeObserver);
     mocks.getGitCheckoutDiffStats.mockResolvedValue({});
     mocks.getGitDiffStats.mockResolvedValue([]);
     for (const toast of [...toasts.value]) dismiss(toast.id);
   });
+
+  afterEach(() => vi.unstubAllGlobals());
 
   it("draws no edge of its own, so the handle that moves it is the only divider", () => {
     // A border down the panel's left, next to the five pixels of handle that move it, is one line
@@ -271,6 +302,77 @@ describe("InspectorPane", () => {
     expect(tree.text()).toContain("file-499.txt");
     expect(tree.text()).not.toContain("file-0.txt");
     wrapper.unmount();
+  });
+
+  it("restores virtual scroll positions when each list becomes visible again", async () => {
+    const files = Array.from({ length: 200 }, (_, index) => ({
+      name: "file-" + index + ".txt",
+      path: "file-" + index + ".txt",
+      kind: "file" as const,
+    }));
+    const status: GitStatus = {
+      branch: "feature",
+      defaultBranch: "main",
+      aheadCount: 1,
+      files: Array.from({ length: 180 }, (_, index) => ({ path: "changed-" + index + ".txt", status: "M" })),
+    };
+    const savedFilesTop = 100 * ROW_HEIGHT;
+    const savedChangesTop = 70 * ROW_HEIGHT;
+    mocks.listCheckoutFiles.mockResolvedValue({ entries: files, truncated: false });
+    const wrapper = mountInspector({
+      checkout: checkout("restore-scroll"),
+      repo,
+      gitSnapshot: gitSnapshot("restore-scroll", status),
+      savedState: {
+        ...DEFAULT_CHECKOUT_UI_STATE,
+        filesScrollTop: savedFilesTop,
+        changesScrollTop: savedChangesTop,
+      },
+    });
+    await flushPromises();
+
+    const tree = wrapper.get('[aria-label="Checkout files"]');
+    const changes = wrapper.get('[aria-label="Changed files"]');
+    const treeElement = tree.element as HTMLElement;
+    const changesElement = changes.element as HTMLElement;
+    const observer = TestResizeObserver.instances.find(
+      (candidate) => candidate.targets.has(treeElement) && candidate.targets.has(changesElement),
+    );
+    expect(observer).toBeDefined();
+    if (!observer) throw new Error("Inspector scroll observer was not attached");
+
+    // Hiding a scroll viewport clears its DOM offset while the virtual window still remembers it.
+    treeElement.scrollTop = 0;
+    observer.resize(treeElement, 0);
+    observer.resize(treeElement, 600);
+    expect(treeElement.scrollTop).toBe(savedFilesTop);
+
+    // A shorter list can clamp the restored DOM offset; keep the virtual window on that clamped row.
+    let actualTreeTop = 0;
+    Object.defineProperty(treeElement, "scrollTop", {
+      configurable: true,
+      get: () => actualTreeTop,
+      set: (value: number) => {
+        actualTreeTop = Math.min(value, savedFilesTop / 2);
+      },
+    });
+    treeElement.scrollTop = 0;
+    observer.resize(treeElement, 0);
+    observer.resize(treeElement, 600);
+    expect(treeElement.scrollTop).toBe(savedFilesTop / 2);
+    await flushPromises();
+    expect(tree.findAll("button")[0]!.text()).toContain("file-40.txt");
+    expect(wrapper.emitted("updateUiState")?.at(-1)?.[0]).toMatchObject({ filesScrollTop: savedFilesTop / 2 });
+
+    await wrapper.get("#inspector-tab-changes").trigger("click");
+    await flushPromises();
+    changesElement.scrollTop = 0;
+    observer.resize(changesElement, 0);
+    observer.resize(changesElement, 600);
+    expect(changesElement.scrollTop).toBe(savedChangesTop);
+
+    wrapper.unmount();
+    expect(observer.disconnected).toBe(true);
   });
 
   it("scales the row height with the UI font size, and windows the list at the height it draws", async () => {

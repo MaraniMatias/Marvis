@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, ref, watch } from "vue";
+import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { ChevronRight as ChevronRightIcon, SquareArrowOutUpRight as SquareArrowOutUpRightIcon } from "@lucide/vue";
 import { isIpcError } from "../domain/ipc";
 import type { FileEntry } from "../domain/files";
@@ -448,6 +448,47 @@ function onTreeScroll(event: Event) {
 function onChangesScroll(event: Event) {
   changesScrollTop.value = (event.currentTarget as HTMLElement).scrollTop;
 }
+
+let scrollRestoreObserver: ResizeObserver | undefined;
+const observedViewports = new Set<HTMLElement>();
+const wasVisible = new WeakMap<HTMLElement, boolean>();
+function observeScrollViewports() {
+  if (!scrollRestoreObserver) return;
+  const viewports = [treeViewport.value, changesViewport.value].filter(
+    (viewport): viewport is HTMLElement => !!viewport,
+  );
+  for (const viewport of observedViewports) {
+    if (viewports.includes(viewport)) continue;
+    scrollRestoreObserver.unobserve(viewport);
+    observedViewports.delete(viewport);
+  }
+  for (const viewport of viewports) {
+    if (observedViewports.has(viewport)) continue;
+    observedViewports.add(viewport);
+    wasVisible.set(viewport, viewport.clientHeight > 0);
+    scrollRestoreObserver.observe(viewport);
+  }
+}
+watch([treeViewport, changesViewport], observeScrollViewports, { flush: "post" });
+onMounted(() => {
+  scrollRestoreObserver = new ResizeObserver((entries) => {
+    for (const entry of entries) {
+      const viewport = entry.target as HTMLElement;
+      const isTree = viewport === treeViewport.value;
+      if (!isTree && viewport !== changesViewport.value) continue;
+      const visible = entry.contentRect.height > 0;
+      const hadBeenVisible = wasVisible.get(viewport) ?? false;
+      wasVisible.set(viewport, visible);
+      if (!visible || hadBeenVisible) continue;
+
+      viewport.scrollTop = isTree ? treeScrollTop.value : changesScrollTop.value;
+      if (isTree) treeScrollTop.value = viewport.scrollTop;
+      else changesScrollTop.value = viewport.scrollTop;
+    }
+  });
+  observeScrollViewports();
+});
+onUnmounted(() => scrollRestoreObserver?.disconnect());
 
 watch(
   () => [props.checkout?.id, props.gitSnapshot.statusState] as const,
