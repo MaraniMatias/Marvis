@@ -1205,8 +1205,19 @@ mod tests {
         }
     }
 
+    /// Waits until the write of a session is in flight, which is the state the caller closes in.
+    ///
+    /// This sleeps between attempts rather than spinning, and that is the whole fix. `write` takes
+    /// this same lock with `try_lock` and answers an error instead of waiting for it, so a loop that
+    /// keeps taking the lock is taking it from the write it is waiting for: the write is refused
+    /// before it ever starts, and a wait for a write that will not begin runs out its deadline
+    /// saying it never began. Sleeping hands the lock back between attempts, which is what lets the
+    /// write take it and hold it for as long as `TERMINAL_WRITE_TIMEOUT` while this looks on.
+    ///
+    /// The deadline is longer than the write's own for the same reason: the write has to be scheduled
+    /// before it can hold anything, and how long that takes is the machine's answer, not this test's.
     fn wait_for_input_writer(session: &super::Session) {
-        let deadline = Instant::now() + Duration::from_secs(2);
+        let deadline = Instant::now() + Duration::from_secs(10);
         loop {
             match session.writer.try_lock() {
                 Ok(writer) => drop(writer),
@@ -1219,7 +1230,7 @@ mod tests {
                 Instant::now() < deadline,
                 "PTY input did not enter the writer"
             );
-            thread::yield_now();
+            thread::sleep(Duration::from_millis(1));
         }
     }
 
@@ -1440,9 +1451,20 @@ mod tests {
 
         let (write_done, write_result) = mpsc::channel();
         let write_backend = Arc::clone(&backend);
+        // Retried while this test's own wait is holding the lock, because the refusal that says so is
+        // the wait's doing and not the terminal's: losing that race once is not a fact about a write
+        // that is still to come. Only that refusal is retried; any other is the answer under test.
         let write_thread = thread::spawn(move || {
-            let result =
+            let mut result =
                 write_backend.write("closing-write", &vec![b'x'; MAX_TERMINAL_INPUT_BYTES]);
+            while let Err(error) = &result {
+                if !error.contains("already has input being written") {
+                    break;
+                }
+                thread::sleep(Duration::from_millis(5));
+                result =
+                    write_backend.write("closing-write", &vec![b'x'; MAX_TERMINAL_INPUT_BYTES]);
+            }
             let _ = write_done.send(result);
         });
         wait_for_input_writer(&session);
