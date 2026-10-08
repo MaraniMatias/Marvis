@@ -156,14 +156,19 @@ describe("what a terminal shows after it sets up shell integration", () => {
     const withStartedMarker = SESSIONS.filter((name) => !name.startsWith("bash"));
     for (const name of withStartedMarker) {
       const stream = new TextDecoder().decode(capture(name));
-      expect(stream, `${name} never announced a starting command`).toContain("\x1b]133;A\x07");
+      // These committed captures predate the switch from prompt-start A to command-start C. Live
+      // shell tests assert C; here either encoding preserves the screen-rendering fixture contract.
+      expect(stream.includes("\x1b]133;C\x07") || stream.includes("\x1b]133;A\x07"), name).toBe(true);
     }
     // And the bash capture is not silently passing because it is empty: it carries a real session, and
     // it carries no started marker. Asserting the gap is what keeps it from becoming a hole that a
     // future bash without `PS0` would widen without anybody noticing.
     const bash = new TextDecoder().decode(capture("bash-login"));
     expect(bash).toContain("\x1b]133;D;1\x07");
-    expect(bash.includes("\x1b]133;A\x07"), "bash 3.2 has no PS0, so this should be absent").toBe(false);
+    expect(
+      bash.includes("\x1b]133;C\x07") || bash.includes("\x1b]133;A\x07"),
+      "bash 3.2 has no PS0, so this should be absent",
+    ).toBe(false);
   });
 
   it("shows the failing command and its prompt, so the capture is a real session and not an empty one", async () => {

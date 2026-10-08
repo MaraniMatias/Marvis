@@ -684,6 +684,21 @@ describe("useTerminalAgentRows", () => {
     ]);
   });
 
+  it("publishes pending transitions without an agent or any other session change", async () => {
+    perCheckout({ "checkout:first": [{ agent: null }] });
+    const scope = effectScope();
+    const state = scope.run(() => useTerminalAgentRows(computed(() => ["checkout:first"])))!;
+    await settle();
+    for (const awaitingReply of [false, true, false]) {
+      perCheckout({ "checkout:first": [{ agent: null, awaitingReply }] });
+      await state.reload();
+      expect(state.row("checkout:first").sessions).toEqual([
+        { title: "review", agent: null, running: false, awaitingReply, updatedAt: 1 },
+      ]);
+    }
+    scope.stop();
+  });
+
   it("re-reads fast while a row is running and slowly once every row is idle", async () => {
     vi.useFakeTimers();
     perCheckout({ "checkout:first": [{ id: "ses_one", agent: "coder", running: true }] });

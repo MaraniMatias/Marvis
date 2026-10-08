@@ -1628,7 +1628,7 @@ mod tests {
     /// The session is assembled here rather than spawned because this is the one state the spawn path
     /// cannot be asked for: a spawn whose startup thread failed to start registers no session at all,
     /// and one whose thread does start releases input when it resolves the line. This test observes the
-    /// pending gate briefly, then resolves it explicitly.
+    /// pending gate past the historical 60-second backstop, then resolves it explicitly.
     #[test]
     fn the_gate_does_not_give_up_on_a_startup_line_that_is_still_pending() {
         let pair = native_pty_system()
@@ -1642,7 +1642,10 @@ mod tests {
         // A spawn that reached its startup thread and one whose thread failed to start are both
         // accounted for in the doc comment above; what is left is the session itself, with a line
         // still owed to it and nothing yet to say so.
+        #[cfg(unix)]
         let master_fd = pair.master.as_raw_fd().unwrap();
+        #[cfg(not(unix))]
+        let master_fd = -1;
         let session = Arc::new(Session {
             master: Mutex::new(pair.master),
             master_fd,
@@ -1682,7 +1685,7 @@ mod tests {
             .recv_timeout(Duration::from_secs(5))
             .expect("writer thread did not start");
         assert!(
-            is_written.recv_timeout(Duration::from_millis(100)).is_err(),
+            is_written.recv_timeout(Duration::from_secs(62)).is_err(),
             "input was released while the startup line was still pending"
         );
         // And it is held by the line rather than by anything being wrong: the write goes through as
@@ -1707,7 +1710,10 @@ mod tests {
                 pixel_height: 0,
             })
             .unwrap();
+        #[cfg(unix)]
         let master_fd = pair.master.as_raw_fd().unwrap();
+        #[cfg(not(unix))]
+        let master_fd = -1;
         let session = Session {
             master: Mutex::new(pair.master),
             master_fd,

@@ -1046,9 +1046,12 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
           ? "blocked"
           : (identified.agent?.attention ?? (identified.running ? "busy" : "none"))
         : "none";
-      const agent = identified ? AGENT_STATE[attention] : undefined;
+      const pendingUnknown = identified?.awaitingReply === null;
+      const agent = identified && !pendingUnknown ? AGENT_STATE[attention] : undefined;
       const tint =
-        identified?.agent?.color && (attention === "busy" || attention === "none") ? identified.agent.color : null;
+        !pendingUnknown && identified?.agent?.color && (attention === "busy" || attention === "none")
+          ? identified.agent.color
+          : null;
       return {
         session,
         destinations: repo.checkouts
@@ -1111,13 +1114,15 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
         elapsed: identified ? elapsedSince(identified.updatedAt) : null,
         // The words say the same thing the glyph says, and a session that was identified and is
         // simply quiet says it is idle rather than claiming that nothing could be found.
-        note: agent
-          ? agent.text
-          : agentTerminal
-            ? match?.kind === "ambiguous"
-              ? "Several sessions share this name"
-              : "Session not identified"
-            : "",
+        note: pendingUnknown
+          ? "Session state unavailable"
+          : agent
+            ? agent.text
+            : agentTerminal
+              ? match?.kind === "ambiguous"
+                ? "Several sessions share this name"
+                : "Session not identified"
+              : "",
       };
     }),
   };

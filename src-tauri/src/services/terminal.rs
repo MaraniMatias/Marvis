@@ -198,43 +198,25 @@ fn inherited_shell_args(program: &Path) -> Vec<String> {
 
 /// The OSC 133 markers the sourced script below makes the shell print, spelled once.
 ///
-/// `D;<code>` is the shell's own `$?` after a command, and `A` when the next one starts is what tells
-/// the row to stop being red. OSC 133 is the ident every shell-integration script uses, and xterm.js
+/// `D;<code>` is the shell's own `$?` after a command, and `C` marks command execution start, which
+/// tells the row to stop being red. OSC 133 is the ident every shell-integration script uses, and xterm.js
 /// ships no handler for it, so nothing else contends for these bytes.
 ///
-/// ## What `A` means, and what it stands in for
+/// The hooks emit `C` from zsh's `preexec_functions` and bash's `PS0`, both of which fire immediately
+/// before command execution. `A`/`B` are prompt boundaries and are deliberately not emitted; this
+/// consumer needs the command start, not prompt state. This is not the full OSC 133 prompt lifecycle.
 ///
-/// In OSC 133, `A` is **prompt start** and `C` is **command execution start**. They are different
-/// points in the sequence, and the hook emits `A` from a hook that fires at the second one: zsh's
-/// `preexec_functions` runs after the prompt has been drawn and the line submitted, and bash's DEBUG
-/// trap runs immediately before each command is executed. So `A` here is a **proxy for "a command is
-/// starting"**, emitted from the point in the sequence where that is knowable.
-///
-/// What it stands in for is `C`, and `B` and `C` are **not implemented**: `B` is prompt *end*, and
-/// there is no hook for it at all — nothing runs once the line editor has finished drawing a prompt —
-/// so a correct `A`/`B`/`C` run would mean tracking prompt state this integration does not have and
-/// cannot get from a shell.
-///
-/// That is a decision about who reads these bytes, not a claim that the protocol is satisfied. The only
-/// consumer is `terminal-shell-integration.ts` in this app's own xterm.js, which asks one question —
-/// has a command started — and keeps no prompt state to correlate a `C` against, so `A` and `C` carry
-/// the same information to it. Nothing else ever sees them.
-///
-/// The reason it comes from `preexec`/DEBUG rather than from `precmd`/`PROMPT_COMMAND` is *where* it
-/// lands, not only that it fires: both hooks fire for a builtin, and measured, a prompt hook puts the
-/// marker *after* the command's output while a command-execution hook puts it before. That is the
-/// difference between saying a command started and saying the previous one is over.
-/// `the_started_marker_fires_for_builtins_and_before_their_output` is the test for both halves.
+/// `the_started_marker_fires_for_builtins_and_before_their_output` pins the timing for zsh; the bash
+/// test does the same where that bash supports `PS0`.
 ///
 /// `print -P` rather than `printf` for zsh, which takes the escapes as two characters where `printf`
 /// needs four: `\e` against `\033` and `\a` against `\007`.
 const OSC_EXIT: &str = r"\e]133;D;$?\a";
-const OSC_STARTED: &str = r"\e]133;A\a";
+const OSC_STARTED: &str = r"\e]133;C\a";
 
-/// The same two markers for bash, which has no `print` and so spells the escapes the long way. Read
-/// `OSC_STARTED` above for what `A` means and why it is the marker.
+/// The same two markers for bash, which has no `print` and so spells the escapes the long way.
 const OSC_EXIT_BASH: &str = r"\033]133;D;%s\007";
-const OSC_STARTED_BASH: &str = r"\033]133;A\007";
+const OSC_STARTED_BASH: &str = r"\033]133;C\007";
 
 /// What the sourced script does to the screen before the shell redraws its prompt.
 ///
@@ -399,7 +381,7 @@ fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
                  \x20 PROMPT_COMMAND=\"__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}\"\n\
                  fi\n\
                  __marvis_previous_ps0=${{PS0-}}\n\
-                 printf -v PS0 '{OSC_STARTED_BASH}'\"$__marvis_previous_ps0\"\n\
+                 printf -v PS0 '%s' '{OSC_STARTED_BASH}'\"$__marvis_previous_ps0\"\n\
                  printf '{CLEAR_SCREEN}'\n"
             ),
         )),
@@ -691,13 +673,11 @@ mod tests {
     /// do — `cd` changes the shell's own working directory, `[` is a conditional the shell evaluates
     /// itself — and asserts a marker is drawn for each.
     ///
-    /// The second half is what makes the marker's *position* the subject rather than its existence. `A`
-    /// is prompt start in OSC 133 and this emits it from `preexec`/`PS0`, which is command-execution
-    /// start, so it stands in for `C` and the comment on `OSC_STARTED` says so. That is only true if
-    /// the marker lands *before* the command's own output, and measured, a prompt hook
-    /// (`precmd`/`PROMPT_COMMAND`) puts it after the output instead — it fires once the next prompt is
-    /// being drawn. So the marker is required to sit between the command line being echoed and the
-    /// output that command produced, which is what tells the hook this uses from the hook it does not.
+    /// The second half is what makes the marker's *position* the subject rather than its existence.
+    /// `C` is command execution start in OSC 133, and this emits it from `preexec`/`PS0`, immediately
+    /// before the command's own output. A prompt hook (`precmd`/`PROMPT_COMMAND`) would put it after
+    /// the output instead — it fires once the next prompt is being drawn. So the marker is required to
+    /// sit between the command line being echoed and the output that command produced.
     ///
     /// Two builtins rather than one command per line, because the shells fire at different granularity —
     /// bash's `PS0` once per simple command, zsh's `preexec` once per line — and a marker wired to
@@ -733,7 +713,7 @@ mod tests {
                     let (_, after) = stream
                         .split_once("hook.")
                         .expect("the script was never sourced, so no marker is attributable to it");
-                    let started = after.matches("\x1b]133;A\x07").count();
+                    let started = after.matches("\x1b]133;C\x07").count();
                     assert!(
                         started >= 3,
                         "{shell}: three commands produced {started} started markers:\n{stream}"
@@ -747,7 +727,7 @@ mod tests {
                             .rfind("echo ")
                             .expect("the command line was never echoed"),
                         before_output
-                            .rfind("\x1b]133;A\x07")
+                            .rfind("\x1b]133;C\x07")
                             .expect("no marker came before the command's output"),
                     );
                     assert!(
@@ -1229,7 +1209,7 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
     /// on every bash the machine has and expects the honest answer where `PS0` does not exist.
     #[test]
     fn the_bash_started_marker_fires_before_the_command_it_marks() {
-        const USER_PS0: &str = "PS0='[USER_PS0]'\n";
+        const USER_PS0: &str = "PS0='[USER:%s:%d]'\n";
         for bash in bashes() {
             let expands_ps0 = bash_expands_ps0(&bash);
             // `cd` and `[ … ]` are the two that would be missed by anything watching for a process,
@@ -1258,9 +1238,9 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
                 // the trap it replaced: `cd` and `[ … ]` are builtins and `false` is the one the
                 // feature is for.
                 assert!(
-                    stream.matches("\x1b]133;A\x07").count() >= 5,
+                    stream.matches("\x1b]133;C\x07").count() >= 5,
                     "{bash}: {} markers for 5 commands, so PS0 is not firing for every command:\n{stream}",
-                    stream.matches("\x1b]133;A\x07").count()
+                    stream.matches("\x1b]133;C\x07").count()
                 );
                 // And it lands where `preexec` does in zsh: after the line that was typed, before
                 // anything the command prints. The output is searched for as `probe42` rather than as
@@ -1273,7 +1253,7 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
                     )
                 });
                 let marker = stream[echoed..]
-                    .find("\x1b]133;A\x07")
+                    .find("\x1b]133;C\x07")
                     .map(|at| echoed + at)
                     .unwrap_or_else(|| {
                         panic!("{bash}: PS0 is expanded but the probe command got no marker:\n{stream}")
@@ -1288,15 +1268,15 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
                 );
                 // And the value we prepended to is still the user's, firing after ours.
                 assert!(
-                    stream.contains("[USER_PS0]"),
-                    "{bash}: prepending the marker to PS0 cost the user their own PS0:\n{stream}"
+                    stream.contains("[USER:%s:%d]"),
+                    "{bash}: prepending the marker to PS0 altered the user's format string:\n{stream}"
                 );
             } else {
                 // A bash without `PS0` reports the end of a command and not the start of one, which is
                 // the documented cost of not taking a `DEBUG` trap it cannot chain. What must still
                 // hold is that nothing of the user's is harmed and the failure report still works.
                 assert!(
-                    !stream.contains("\x1b]133;A\x07"),
+                    !stream.contains("\x1b]133;C\x07"),
                     "{bash}: a started marker appeared although this bash does not expand PS0:\n{stream}"
                 );
                 assert!(

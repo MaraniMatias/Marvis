@@ -14,8 +14,8 @@ pub struct AgentSession {
     /// and one that is working right now. `/api/session/active` reports the latter separately;
     /// this remains the timestamp fact rather than a derived verdict.
     pub idle_at: Option<i64>,
-    /// A question or permission is waiting for a reply in OpenCode.
-    pub awaiting_reply: bool,
+    /// A pending reply; None means a candidate location could not be read. Scoped reads fail instead.
+    pub awaiting_reply: Option<bool>,
     /// The agent running this session, and therefore the mode it is in: OpenCode spells
     /// `build`/`plan` as agents, so one name answers both questions.
     pub agent: Option<String>,

@@ -62,25 +62,21 @@ describe("shell integration", () => {
     registerShellIntegration(stub.terminal, (event) => events.push(event));
 
     expect(stub.send("D;1")).toBe(true);
-    // The `A` the hook writes. In OSC 133 that marker is *prompt start*, and it is emitted from zsh's
-    // `preexec_functions` and bash's DEBUG trap because that is where "a command is starting" is
-    // knowable without tracking prompt state — so it is a proxy, not a mislabelling, and this handler
-    // reads it as `command-started`. `services/terminal.rs` documents the same from the producing side.
-    expect(stub.send("A")).toBe(true);
+    // `C` is OSC 133 command execution start; the shell hooks emit it just before executing a command.
+    expect(stub.send("C")).toBe(true);
     expect(events).toEqual([{ kind: "command-finished", exitCode: 1 }, { kind: "command-started" }]);
   });
 
-  it("leaves `C` alone, because this integration does not emit it", () => {
+  it("reports command execution start and leaves prompt markers alone", () => {
     const stub = stubTerminal();
     const onEvent = vi.fn();
     registerShellIntegration(stub.terminal, onEvent);
 
-    // `C` is *command execution start*, which is what `A` stands in for here. Nothing writes it: a
-    // correct `A`/`B`/`C` run needs prompt state this integration does not track, and `B` — prompt end
-    // — has no shell hook at all. If a `C` ever did arrive it would belong to some other producer on
-    // this ident, and reading it would be acting on a marker whose meaning was never established.
-    expect(stub.send("C")).toBe(false);
-    expect(onEvent).not.toHaveBeenCalled();
+    // `C` means command execution start; `A`/`B` describe prompt boundaries and are not our events.
+    expect(stub.send("A")).toBe(false);
+    expect(stub.send("B")).toBe(false);
+    expect(stub.send("C;pnpm test")).toBe(true);
+    expect(onEvent).toHaveBeenCalledWith({ kind: "command-started" });
   });
 
   it("leaves an exit code it cannot read to somebody else", () => {
@@ -100,13 +96,13 @@ describe("shell integration", () => {
     expect(onEvent).not.toHaveBeenCalled();
   });
 
-  it("takes a prompt marker in the fuller form, which carries the command text", () => {
+  it("takes a command marker in the fuller form, which carries the command text", () => {
     const stub = stubTerminal();
     const events: ShellIntegrationEvent[] = [];
     registerShellIntegration(stub.terminal, (event) => events.push(event));
 
     // `A;<command>` is the same event with the command line attached, and the text says nothing this needs.
-    expect(stub.send("A;pnpm test")).toBe(true);
+    expect(stub.send("C;pnpm test")).toBe(true);
     expect(events).toEqual([{ kind: "command-started" }]);
   });
 

@@ -1105,6 +1105,38 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
   });
 
+  it("does not call unreadable candidate state idle or discard its ambiguous title", async () => {
+    const checkoutId = "checkout:unknown";
+    const candidate = {
+      title: "Unknown",
+      agent: null,
+      running: false,
+      awaitingReply: null,
+      updatedAt: 1,
+    };
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [repo({ checkouts: [checkout({ id: checkoutId, sessions: [session("only", "zsh", checkoutId)] })] })],
+        activeCheckoutId: checkoutId,
+        activeSessionId: null,
+        isOpening: false,
+        agentRows: { [checkoutId]: { sessions: [candidate] } },
+        sessionRuntimeStatuses: {
+          only: { state: "running", foregroundProcess: true, foregroundApp: "opencode", terminalTitle: "OC | Unknown" },
+        },
+      },
+    });
+    const label = () => wrapper.get(".workdir-child > .workdir-select").attributes("aria-label");
+    expect(label()).toContain("Session state unavailable");
+    expect(label()).not.toContain("Idle");
+    await wrapper.setProps({
+      agentRows: { [checkoutId]: { sessions: [candidate, { ...candidate, awaitingReply: true }] } },
+    });
+    expect(label()).toContain("Several sessions share this name");
+    expect(wrapper.get(".workdir-child").classes()).not.toContain("state-waiting");
+    wrapper.unmount();
+  });
+
   it("tints idle agents but keeps waiting, failures, and other harnesses unchanged", () => {
     const checkoutId = "checkout:agent-colors";
     const sessions = [

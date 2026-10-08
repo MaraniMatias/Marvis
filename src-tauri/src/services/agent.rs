@@ -32,7 +32,10 @@ use std::{
     io::{self, BufRead, BufReader, Read, Write},
     net::{Shutdown, SocketAddr, TcpStream},
     path::{Path, PathBuf},
-    sync::{atomic::Ordering, Arc, Condvar, Mutex},
+    sync::{
+        atomic::{AtomicUsize, Ordering},
+        Arc, Condvar, Mutex,
+    },
     thread::sleep,
     time::{Duration, Instant},
 };
@@ -426,6 +429,26 @@ impl AgentBridge {
         envelope.into_scoped(directory)
     }
 
+    /// Fetches a scoped read within a shared absolute deadline, including interrupted retries.
+    fn get_json_in_directory_until<T: serde::de::DeserializeOwned>(
+        &self,
+        path: &str,
+        directory: &Path,
+        deadline: Instant,
+    ) -> Result<T, BridgeError> {
+        let url = format!("{}{path}", self.base_url());
+        let response = retry_interrupted_until(deadline, |timeout| {
+            with_timeout(self.client.get(&url), timeout)
+                .query("directory", directory.to_string_lossy().as_ref())
+                .header("authorization", self.auth_header())
+                .header(DIRECTORY_HEADER, directory.to_string_lossy().as_ref())
+                .header("accept", "application/json")
+                .call()
+        })?;
+        let envelope: ApiEnvelope<T> = send_json(response)?;
+        envelope.into_scoped(directory)
+    }
+
     /// Fetches `path` as the service answers it for every directory it knows.
     ///
     /// No directory in the query and none in the header, which is the only way `/api/session` will
@@ -503,6 +526,20 @@ impl AgentBridge {
         Ok(pending)
     }
 
+    fn awaiting_sessions_until(
+        &self,
+        directory: &Path,
+        deadline: Instant,
+    ) -> Result<HashSet<String>, BridgeError> {
+        let mut pending = HashSet::new();
+        for path in ["/api/form", "/api/permission/request"] {
+            let requests: Vec<ApiPendingRequest> =
+                self.get_json_in_directory_until(path, directory, deadline)?;
+            pending.extend(requests.into_iter().map(|request| request.session_id));
+        }
+        Ok(pending)
+    }
+
     /// Resolves a session id inside this bridge only, then hands back the raw session.
     fn session(&self, session_id: &str) -> Result<ApiSession, BridgeError> {
         validate_session_id(session_id)?;
@@ -541,7 +578,7 @@ impl AgentBridge {
                 raw.title.clone()
             },
             idle_at: raw.time.idle,
-            awaiting_reply,
+            awaiting_reply: Some(awaiting_reply),
             agent: raw.agent.clone(),
             model: raw.model.as_ref().map(ApiModel::label),
             parent_id: raw.parent_id.clone(),
@@ -1152,6 +1189,28 @@ fn retry_interrupted<T>(
     }
 }
 
+/// Repeats an interrupted read only while its shared request deadline still has budget.
+fn retry_interrupted_until<T>(
+    deadline: Instant,
+    mut read: impl FnMut(Duration) -> Result<T, ureq::Error>,
+) -> Result<Result<T, ureq::Error>, BridgeError> {
+    let mut attempts = INTERRUPTED_READ_ATTEMPTS;
+    loop {
+        let timeout = deadline
+            .saturating_duration_since(Instant::now())
+            .min(JSON_REQUEST_TIMEOUT);
+        if timeout.is_zero() {
+            return Err(BridgeError::Unavailable(
+                "the agent server request timed out".into(),
+            ));
+        }
+        match read(timeout) {
+            Err(error) if is_interrupted(&error) && attempts > 1 => attempts -= 1,
+            result => return Ok(result),
+        }
+    }
+}
+
 /// Whether a transport failure is a syscall a signal ended, which is the one error the system
 /// expects its caller to try again rather than report.
 fn is_interrupted(error: &ureq::Error) -> bool {
@@ -1481,6 +1540,69 @@ struct CandidateRead {
     sessions: Arc<Vec<ApiSession>>,
     running: Arc<HashSet<String>>,
     awaiting: Arc<HashSet<String>>,
+    unknown_pending: Arc<HashSet<PathBuf>>,
+    pending_failures: Arc<Vec<PendingReadFailure>>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum PendingReadFailure {
+    Timeout,
+    Http,
+    Scope,
+    Decode,
+    Transport,
+}
+
+impl PendingReadFailure {
+    fn classify(error: &BridgeError) -> Self {
+        match error {
+            BridgeError::Unavailable(message) if message.contains("timed out") => Self::Timeout,
+            BridgeError::Unavailable(_) => Self::Transport,
+            BridgeError::Stale(message) if message.contains("rejected Marvis's credentials") => {
+                Self::Http
+            }
+            BridgeError::Stale(_) => Self::Transport,
+            BridgeError::Foreign(_) => Self::Scope,
+            BridgeError::Failed(message)
+                if message.starts_with("unexpected agent server reply:") =>
+            {
+                Self::Decode
+            }
+            BridgeError::Failed(message) if message.starts_with("could not read the reply:") => {
+                Self::Transport
+            }
+            BridgeError::Failed(_) => Self::Http,
+        }
+    }
+
+    fn label(self) -> &'static str {
+        match self {
+            Self::Timeout => "timeout",
+            Self::Http => "http",
+            Self::Scope => "scope",
+            Self::Decode => "decode",
+            Self::Transport => "transport",
+        }
+    }
+}
+
+fn report_pending_read_failures(failures: &[PendingReadFailure]) {
+    let summary = [
+        PendingReadFailure::Timeout,
+        PendingReadFailure::Http,
+        PendingReadFailure::Scope,
+        PendingReadFailure::Decode,
+        PendingReadFailure::Transport,
+    ]
+    .into_iter()
+    .filter_map(|kind| {
+        let count = failures.iter().filter(|failure| **failure == kind).count();
+        (count > 0).then(|| format!("{}={count}", kind.label()))
+    })
+    .collect::<Vec<_>>()
+    .join(", ");
+    // Report only safe categories and counts; never the path, request, or server text.
+    log::warn!("candidate pending reads failed ({summary}); affected sessions remain unknown");
 }
 
 /// The service-wide list, and the read that is answering for it right now.
@@ -1493,6 +1615,7 @@ struct CandidateRead {
 struct CandidateSlot {
     cached: Option<Cached<CandidateRead>>,
     reading: Option<Arc<CandidateFetch>>,
+    last_pending_failures: Option<Vec<PendingReadFailure>>,
 }
 
 impl CandidateSlot {
@@ -1500,6 +1623,22 @@ impl CandidateSlot {
         Self {
             cached: None,
             reading: None,
+            last_pending_failures: None,
+        }
+    }
+
+    fn pending_failures_to_report(
+        &mut self,
+        failures: &[PendingReadFailure],
+    ) -> Option<Vec<PendingReadFailure>> {
+        if failures.is_empty() {
+            self.last_pending_failures = None;
+            None
+        } else if self.last_pending_failures.as_deref() == Some(failures) {
+            None
+        } else {
+            self.last_pending_failures = Some(failures.to_vec());
+            Some(failures.to_vec())
         }
     }
 }
@@ -1565,8 +1704,86 @@ impl CandidateFetch {
 const CANDIDATE_READ_WAIT: Duration =
     Duration::from_secs(JSON_REQUEST_TIMEOUT.as_secs() * 2 * INTERRUPTED_READ_ATTEMPTS as u64);
 
+/// How many candidate locations are asked for their pending requests at once.
+///
+/// Bounded rather than one thread per location: every read here is an open request against the
+/// person's service, and a candidate list can name every worktree they have. A handful at a time is
+/// enough for no healthy location to wait on a slow one, which is the whole point.
+const PENDING_READ_CONCURRENCY: usize = 4;
+
+/// The total deadline shared by per-location form and permission reads.
+///
+/// It starts after the service-wide session and activity reads, so it bounds neither those reads nor
+/// the complete candidate snapshot. Every pending endpoint at every candidate location uses only
+/// the time left on this one deadline. Kept under `CANDIDATE_READ_WAIT` so the owner still publishes
+/// before a coalesced caller gives up on it.
+const PENDING_READ_BUDGET: Duration = JSON_REQUEST_TIMEOUT;
+
+/// Every candidate location's pending sessions, locations that could not say, and safe failure kinds.
+///
+/// Concurrent and bounded, so one location a service is slow to answer no longer holds these reads:
+/// the healthy locations behind it are read at the same time rather than after it. Every pending
+/// endpoint shares one absolute deadline; a location that cannot answer in time remains `unknown`
+/// rather than idle — `awaiting_reply: None` draws a row with no state, where `Some(false)` could
+/// clear the sidebar's rows. Titles are never touched, because ambiguity matching needs every
+/// candidate whether or not it answered.
+fn read_pending(
+    bridge: &AgentBridge,
+    directories: &HashSet<PathBuf>,
+    budget: Duration,
+) -> (HashSet<String>, HashSet<PathBuf>, Vec<PendingReadFailure>) {
+    let queue: Vec<&Path> = directories.iter().map(PathBuf::as_path).collect();
+    // Shared rather than partitioned: a worker stuck on a slow location must not also hold the
+    // healthy ones it would otherwise have picked up after it.
+    let cursor = AtomicUsize::new(0);
+    let deadline = Instant::now() + budget;
+    let (answered, awaiting, mut failures) = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..PENDING_READ_CONCURRENCY.min(queue.len()))
+            .map(|_| {
+                let (queue, cursor) = (&queue, &cursor);
+                scope.spawn(move || {
+                    let mut answered = Vec::new();
+                    let mut awaiting = HashSet::new();
+                    let mut failures = Vec::new();
+                    while let Some(directory) = queue.get(cursor.fetch_add(1, Ordering::Relaxed)) {
+                        // Out of budget: leaving the rest on the queue is how they are marked
+                        // unknown, and asking with nothing left is not a read of anything.
+                        if deadline <= Instant::now() {
+                            break;
+                        }
+                        match bridge.awaiting_sessions_until(directory, deadline) {
+                            Ok(pending) => {
+                                awaiting.extend(pending);
+                                answered.push(directory.to_path_buf());
+                            }
+                            Err(error) => failures.push(PendingReadFailure::classify(&error)),
+                        }
+                    }
+                    (answered, awaiting, failures)
+                })
+            })
+            .collect();
+        let mut answered = HashSet::new();
+        let mut awaiting = HashSet::new();
+        let mut failures = Vec::new();
+        for worker in workers {
+            // A worker that panicked reported nothing, so its location stays unanswered and unknown.
+            let Ok((found, pending, failed)) = worker.join() else {
+                continue;
+            };
+            answered.extend(found);
+            awaiting.extend(pending);
+            failures.extend(failed);
+        }
+        (answered, awaiting, failures)
+    });
+    failures.sort_unstable();
+    let unknown = directories.difference(&answered).cloned().collect();
+    (awaiting, unknown, failures)
+}
+
 /// The service-wide candidate list, running state and pending requests at its candidate locations.
-fn read_candidates(bridge: &AgentBridge) -> Result<CandidateRead, BridgeError> {
+fn read_candidates(bridge: &AgentBridge, budget: Duration) -> Result<CandidateRead, BridgeError> {
     let sessions: Vec<ApiSession> = bridge.get_unscoped_json(
         &format!("/api/session?limit={CANDIDATE_SESSION_LIMIT}"),
         JSON_REQUEST_TIMEOUT,
@@ -1582,14 +1799,13 @@ fn read_candidates(bridge: &AgentBridge) -> Result<CandidateRead, BridgeError> {
                 .unwrap_or_else(|| bridge.directory().to_path_buf())
         })
         .collect();
-    let mut awaiting = HashSet::new();
-    for directory in directories {
-        awaiting.extend(bridge.awaiting_sessions(&directory, JSON_REQUEST_TIMEOUT)?);
-    }
+    let (awaiting, unknown_pending, pending_failures) = read_pending(bridge, &directories, budget);
     Ok(CandidateRead {
         sessions: Arc::new(sessions),
         running: Arc::new(running),
         awaiting: Arc::new(awaiting),
+        unknown_pending: Arc::new(unknown_pending),
+        pending_failures: Arc::new(pending_failures),
     })
 }
 
@@ -1613,6 +1829,10 @@ pub struct AgentService {
     slot_stopper: Arc<SlotStopper>,
     startup_stop_wait: Duration,
     startup_wait: Duration,
+    /// The shared deadline for per-location pending form/permission reads only. The service-wide
+    /// session and activity reads happen before it starts; this is not a whole-snapshot cap.
+    /// A field so a test can spend less of it than the shipped request timeout.
+    pending_read_budget: Duration,
 }
 
 impl AgentService {
@@ -1709,6 +1929,7 @@ impl AgentService {
             slot_stopper,
             startup_stop_wait,
             startup_wait: startup_stop_wait,
+            pending_read_budget: PENDING_READ_BUDGET,
         }
     }
 
@@ -1966,7 +2187,7 @@ impl AgentService {
                     checkout_id: checkout_id.to_string(),
                     title: "OpenCode prompt status is unknown".into(),
                     idle_at: None,
-                    awaiting_reply: false,
+                    awaiting_reply: Some(false),
                     agent: None,
                     model: None,
                     parent_id: None,
@@ -2282,11 +2503,20 @@ impl AgentService {
             .sessions
             .iter()
             .map(|raw| {
-                bridge.to_agent_session(
+                let mut session = bridge.to_agent_session(
                     raw,
                     read.running.contains(&raw.id),
                     read.awaiting.contains(&raw.id),
-                )
+                );
+                let directory = raw
+                    .location
+                    .as_ref()
+                    .map(|location| PathBuf::from(&location.directory))
+                    .unwrap_or_else(|| bridge.directory().to_path_buf());
+                if read.unknown_pending.contains(&directory) {
+                    session.awaiting_reply = None;
+                }
+                session
             })
             .collect())
     }
@@ -2322,7 +2552,8 @@ impl AgentService {
                 }
             }
         };
-        let outcome = read_candidates(bridge);
+        let outcome = read_candidates(bridge, self.pending_read_budget);
+        let mut report_failures = None;
         if let Ok(mut slot) = self.candidates.lock() {
             // Only the read that is still in flight publishes. One a moved service retired
             // mid-flight answered through an address that no longer serves, so it caches nothing:
@@ -2335,8 +2566,12 @@ impl AgentService {
                 slot.reading = None;
                 if let Ok(read) = &outcome {
                     slot.cached = Some(Cached::taken(Instant::now(), read.clone()));
+                    report_failures = slot.pending_failures_to_report(&read.pending_failures);
                 }
             }
+        }
+        if let Some(failures) = report_failures {
+            report_pending_read_failures(&failures);
         }
         fetch.publish(outcome.clone());
         outcome
@@ -2647,7 +2882,7 @@ pub fn map_error(error: BridgeError) -> IpcError {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::HashMap,
+        collections::{HashMap, HashSet},
         io::{self, BufRead, BufReader, Cursor, Read, Write},
         net::{Shutdown, TcpListener, TcpStream},
         path::{Path, PathBuf},
@@ -2667,12 +2902,13 @@ mod tests {
     use super::{
         event_from_payload, event_stream, generation_scoped_sink, is_interrupted, join_reader,
         read_bounded_line, read_events, read_sse_frame, ready, remove_slot_if_current,
-        report_stream_loss, retry_interrupted, same_directory, send_json, status_detail,
-        validate_session_id, AgentBridge, AgentEvent, AgentService, ApiAgent, ApiModel, ApiSession,
-        BridgeError, BridgeState, BridgeStopper, EventSink, RemovalState, ServerCredentials,
-        StreamLoss, CANDIDATE_SESSION_LIMIT, DIRECTORY_HEADER, INTERRUPTED_READ_ATTEMPTS,
-        INTERRUPTED_REQUEST, JSON_REQUEST_TIMEOUT, MAX_EVENT_HEADERS_BYTES,
-        MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES, MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES,
+        report_stream_loss, retry_interrupted, retry_interrupted_until, same_directory, send_json,
+        status_detail, validate_session_id, AgentBridge, AgentEvent, AgentService, ApiAgent,
+        ApiModel, ApiSession, BridgeError, BridgeState, BridgeStopper, CandidateSlot, EventSink,
+        PendingReadFailure, RemovalState, ServerCredentials, StreamLoss, CANDIDATE_SESSION_LIMIT,
+        DIRECTORY_HEADER, INTERRUPTED_READ_ATTEMPTS, INTERRUPTED_REQUEST, JSON_REQUEST_TIMEOUT,
+        MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES,
+        MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES, PENDING_READ_CONCURRENCY,
     };
     use crate::services::opencode::ServiceEndpoint;
 
@@ -2767,6 +3003,135 @@ mod tests {
     /// What one request looked like on the wire: its request line, its Basic auth header, its
     /// body, and every header it carried so a scope can be asserted on.
     type CapturedJsonRequest = (String, String, Vec<u8>, Vec<(String, String)>);
+
+    /// A service that answers each request from the directory its header names, so location reads
+    /// running at the same time can be told apart by something other than the order they arrive in.
+    /// A directory named in `slow` is a service busy answering a turn: its connection is held open
+    /// for `SLOW_HOLD` and nothing is answered, which is what the pending read's budget has to
+    /// survive and what proves a healthy location was read beside it rather than after it.
+    ///
+    /// Left running rather than joined, like `serving_empty_catalog`: the threads holding a slow
+    /// connection open outlive the assertions that stopped waiting for them.
+    fn serving_scoped_pending(
+        sessions: serde_json::Value,
+        pending: &HashMap<PathBuf, String>,
+        slow: &[PathBuf],
+        delayed_form: Option<(PathBuf, Duration)>,
+        stalled_form_body: Option<(PathBuf, Duration)>,
+    ) -> u16 {
+        /// Long enough that a read waiting behind a slow location takes visibly longer than the
+        /// budget these tests spend, short enough not to outlive the test binary by much.
+        const SLOW_HOLD: Duration = Duration::from_secs(5);
+        let listener = TcpListener::bind(("127.0.0.1", 0)).expect("mock service should bind");
+        let port = listener.local_addr().unwrap().port();
+        let listed = sessions.to_string();
+        let pending: HashMap<String, String> = pending
+            .iter()
+            .map(|(directory, session_id)| {
+                (directory.to_string_lossy().into_owned(), session_id.clone())
+            })
+            .collect();
+        let slow: HashSet<String> = slow
+            .iter()
+            .map(|directory| directory.to_string_lossy().into_owned())
+            .collect();
+        let delayed_form = delayed_form
+            .map(|(directory, delay)| (directory.to_string_lossy().into_owned(), delay));
+        let stalled_form_body = stalled_form_body
+            .map(|(directory, delay)| (directory.to_string_lossy().into_owned(), delay));
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let (listed, pending, slow, delayed_form, stalled_form_body) = (
+                    listed.clone(),
+                    pending.clone(),
+                    slow.clone(),
+                    delayed_form.clone(),
+                    stalled_form_body.clone(),
+                );
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().expect("clone stream"));
+                    let mut request_line = String::new();
+                    if reader.read_line(&mut request_line).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    let target = request_line.split_whitespace().nth(1).unwrap_or_default();
+                    let target = target.to_string();
+                    let mut directory = String::new();
+                    loop {
+                        let mut line = String::new();
+                        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+                            break;
+                        }
+                        if line == "\r\n" || line.is_empty() {
+                            break;
+                        }
+                        if let Some((name, value)) = line.trim_end().split_once(':') {
+                            if name.eq_ignore_ascii_case(DIRECTORY_HEADER) {
+                                directory = value.trim().to_string();
+                            }
+                        }
+                    }
+                    let delay_this_form = target.starts_with("/api/form")
+                        && delayed_form
+                            .as_ref()
+                            .is_some_and(|(path, _)| path == &directory);
+                    let stall_form_body = target.starts_with("/api/form")
+                        && stalled_form_body
+                            .as_ref()
+                            .is_some_and(|(path, _)| path == &directory);
+                    if delay_this_form {
+                        if let Some((_, delay)) = &delayed_form {
+                            sleep(*delay);
+                        }
+                    }
+                    let body = if target.starts_with("/api/session/active") {
+                        serde_json::json!({"data": {}}).to_string()
+                    } else if target.starts_with("/api/session?") {
+                        listed
+                    } else if slow.contains(&directory) && !delay_this_form {
+                        sleep(SLOW_HOLD);
+                        return;
+                    } else {
+                        let requests: Vec<serde_json::Value> = pending
+                            .get(&directory)
+                            .map(|session_id| {
+                                vec![serde_json::json!({
+                                    "id": "prm_pending", "sessionID": session_id
+                                })]
+                            })
+                            .unwrap_or_default();
+                        serde_json::json!({
+                            "location": {"directory": directory},
+                            "data": requests
+                        })
+                        .to_string()
+                    };
+                    if write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        body.len()
+                    )
+                    .is_err()
+                    {
+                        return;
+                    }
+                    if stall_form_body {
+                        let split = (body.len() / 2).max(1);
+                        if stream.write_all(&body.as_bytes()[..split]).is_ok() {
+                            if let Some((_, delay)) = &stalled_form_body {
+                                sleep(*delay);
+                            }
+                            let _ = stream.write_all(&body.as_bytes()[split..]);
+                        }
+                    } else {
+                        let _ = stream.write_all(body.as_bytes());
+                    }
+                });
+            }
+        });
+        port
+    }
 
     fn mock_json_responses(
         responses: Vec<serde_json::Value>,
@@ -3387,17 +3752,20 @@ mod tests {
             let sessions = agents
                 .candidate_sessions("local", directory.path())
                 .unwrap();
-            assert_eq!(sessions[0].awaiting_reply, pending);
+            assert_eq!(sessions[0].awaiting_reply, Some(pending));
             assert!(!sessions[0].running, "pending must not fabricate running");
         }
-        assert!(agents.sessions("local", directory.path()).unwrap()[0].awaiting_reply);
+        assert_eq!(
+            agents.sessions("local", directory.path()).unwrap()[0].awaiting_reply,
+            Some(true)
+        );
         let guarded = agents.active_worktree_agent_sessions("local").unwrap();
         assert_eq!(
             guarded.len(),
             1,
             "an untracked pending turn blocks removal even with an idle timestamp"
         );
-        assert!(guarded[0].awaiting_reply);
+        assert_eq!(guarded[0].awaiting_reply, Some(true));
         let requests = server.join().unwrap();
         assert_eq!(requests.len(), 20);
         assert!(requests
@@ -3442,6 +3810,286 @@ mod tests {
             "404 is not an empty pending list"
         );
         server.join().unwrap();
+    }
+
+    #[test]
+    fn pending_read_failures_keep_only_safe_categories() {
+        let cases = [
+            (
+                BridgeError::Unavailable("the agent server request timed out".into()),
+                PendingReadFailure::Timeout,
+            ),
+            (
+                BridgeError::Failed("the agent server answered 500".into()),
+                PendingReadFailure::Http,
+            ),
+            (
+                BridgeError::Stale("the agent server rejected Marvis's credentials".into()),
+                PendingReadFailure::Http,
+            ),
+            (
+                BridgeError::Foreign("foreign location".into()),
+                PendingReadFailure::Scope,
+            ),
+            (
+                BridgeError::Failed("unexpected agent server reply: private question text".into()),
+                PendingReadFailure::Decode,
+            ),
+            (
+                BridgeError::Stale("the agent server is not reachable: private text".into()),
+                PendingReadFailure::Transport,
+            ),
+        ];
+
+        for (error, expected) in cases {
+            assert_eq!(PendingReadFailure::classify(&error), expected);
+            assert_eq!(
+                PendingReadFailure::classify(&error).label(),
+                expected.label()
+            );
+        }
+
+        let mut slot = CandidateSlot::new();
+        let timeout = [PendingReadFailure::Timeout];
+        assert_eq!(
+            slot.pending_failures_to_report(&timeout),
+            Some(timeout.to_vec())
+        );
+        assert!(slot.pending_failures_to_report(&timeout).is_none());
+        assert!(slot.pending_failures_to_report(&[]).is_none());
+        assert!(slot.pending_failures_to_report(&timeout).is_some());
+    }
+
+    #[test]
+    fn pending_failure_keeps_scoped_reads_and_removal_guards_fail_closed() {
+        let directory = tempfile::tempdir().unwrap();
+        let listed = serde_json::json!({"data": [{
+            "id": "ses_local", "title": "Local",
+            "location": {"directory": directory.path().to_string_lossy()},
+            "time": {"created": 1, "updated": 2}
+        }]});
+        let broken = serde_json::json!({"data": [{"id": "frm_missing_session"}]});
+        let (port, server) = mock_json_responses(vec![
+            listed.clone(),
+            serde_json::json!({"data": {}}),
+            broken.clone(),
+            listed,
+            broken,
+        ]);
+        let agents = AgentService::with_test_server(port);
+        assert!(agents.sessions("local", directory.path()).is_err());
+        assert!(agents.active_worktree_agent_sessions("local").is_err());
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn candidate_pending_failure_keeps_sibling_state_and_all_ambiguous_titles() {
+        let local = tempfile::tempdir().unwrap();
+        let sibling = tempfile::tempdir().unwrap();
+        let listed = serde_json::json!({"data": [
+            {"id": "ses_local", "title": "Duplicate",
+             "location": {"directory": local.path().to_string_lossy()},
+             "time": {"created": 1, "updated": 2}},
+            {"id": "ses_sibling", "title": "Duplicate",
+             "location": {"directory": sibling.path().to_string_lossy()},
+             "time": {"created": 1, "updated": 2}}
+        ]});
+        // Every pending response belongs to the sibling: local validation fails regardless
+        // of HashSet iteration order, while the sibling completes both validated reads.
+        let pending = serde_json::json!({
+            "location": {"directory": sibling.path().to_string_lossy()},
+            "data": [{"id": "frm_one", "sessionID": "ses_sibling"}]
+        });
+        let (port, server) = mock_json_responses(vec![
+            listed,
+            serde_json::json!({"data": {}}),
+            pending.clone(),
+            pending.clone(),
+            pending,
+        ]);
+        let agents = AgentService::with_test_server(port);
+        let sessions = agents.candidate_sessions("local", local.path()).unwrap();
+        assert_eq!(
+            sessions.len(),
+            2,
+            "failed locations must retain ambiguity candidates"
+        );
+        assert_eq!(
+            sessions
+                .iter()
+                .filter(|session| session.title == "Duplicate")
+                .count(),
+            2
+        );
+        assert_eq!(sessions[0].awaiting_reply, None);
+        assert_eq!(sessions[1].awaiting_reply, Some(true));
+        assert!(!sessions[1].running, "pending must not fabricate running");
+        assert_eq!(
+            serde_json::to_value(&sessions[0]).unwrap()["awaitingReply"],
+            serde_json::Value::Null
+        );
+        server.join().unwrap();
+    }
+
+    #[test]
+    fn a_slow_location_does_not_hold_the_snapshot_or_blank_its_sibling() {
+        let healthy = tempfile::tempdir().unwrap();
+        let slow = tempfile::tempdir().unwrap();
+        let listed = serde_json::json!({"data": [
+            {"id": "ses_healthy", "title": "Healthy",
+             "location": {"directory": healthy.path().to_string_lossy()},
+             "time": {"created": 1, "updated": 2}},
+            {"id": "ses_slow", "title": "Slow",
+             "location": {"directory": slow.path().to_string_lossy()},
+             "time": {"created": 1, "updated": 2}}
+        ]});
+        let pending = HashMap::from([(healthy.path().to_path_buf(), "ses_healthy".to_string())]);
+        let port =
+            serving_scoped_pending(listed, &pending, &[slow.path().to_path_buf()], None, None);
+        let mut agents = AgentService::with_test_server(port);
+        agents.pending_read_budget = Duration::from_millis(300);
+
+        let started = Instant::now();
+        let sessions = agents.candidate_sessions("local", healthy.path()).unwrap();
+        let elapsed = started.elapsed();
+
+        let row = |id: &str| {
+            sessions
+                .iter()
+                .find(|session| session.id == id)
+                .unwrap_or_else(|| panic!("{id} is still a candidate"))
+        };
+        assert_eq!(row("ses_healthy").awaiting_reply, Some(true));
+        assert_eq!(
+            row("ses_slow").awaiting_reply,
+            None,
+            "a location that would not answer is unknown, never idle"
+        );
+        assert_eq!(row("ses_slow").title, "Slow");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the healthy location waited for the slow one to be given up on: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn pending_endpoints_share_one_deadline_and_expired_location_is_unknown() {
+        let directory = tempfile::tempdir().unwrap();
+        let listed = serde_json::json!({"data": [{
+            "id": "ses_slow", "title": "Slow",
+            "location": {"directory": directory.path().to_string_lossy()},
+            "time": {"created": 1, "updated": 2}
+        }]});
+        let path = directory.path().to_path_buf();
+        let port = serving_scoped_pending(
+            listed,
+            &HashMap::new(),
+            std::slice::from_ref(&path),
+            Some((path.clone(), Duration::from_millis(500))),
+            None,
+        );
+        let mut agents = AgentService::with_test_server(port);
+        agents.pending_read_budget = Duration::from_millis(600);
+
+        let started = Instant::now();
+        let sessions = agents
+            .candidate_sessions("local", directory.path())
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(sessions[0].awaiting_reply, None);
+        assert!(
+            elapsed >= Duration::from_millis(450),
+            "form endpoint did not consume most of the budget: {elapsed:?}"
+        );
+        assert!(
+            elapsed < Duration::from_millis(900),
+            "permission endpoint got a fresh timeout: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn pending_request_deadline_covers_a_stalled_response_body() {
+        let directory = tempfile::tempdir().unwrap();
+        let listed = serde_json::json!({"data": [{
+            "id": "ses_slow", "title": "Slow",
+            "location": {"directory": directory.path().to_string_lossy()},
+            "time": {"created": 1, "updated": 2}
+        }]});
+        let path = directory.path().to_path_buf();
+        // The mock sends headers and half a valid empty envelope promptly, then finishes the body
+        // only after the pending-read deadline has expired.
+        let port = serving_scoped_pending(
+            listed,
+            &HashMap::new(),
+            &[],
+            None,
+            Some((path, Duration::from_millis(1_500))),
+        );
+        let mut agents = AgentService::with_test_server(port);
+        agents.pending_read_budget = Duration::from_millis(400);
+
+        let started = Instant::now();
+        let sessions = agents
+            .candidate_sessions("local", directory.path())
+            .unwrap();
+        let elapsed = started.elapsed();
+
+        assert_eq!(
+            sessions[0].awaiting_reply, None,
+            "a body timeout is unknown, not idle"
+        );
+        assert!(
+            elapsed < Duration::from_millis(1_200),
+            "the body read outlived its shared deadline: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn budget_exhaustion_leaves_untouched_locations_unknown_with_their_titles() {
+        // More slow locations than there are readers, so some are never even asked: one title
+        // repeated across them, which is the ambiguity these rows exist to resolve.
+        let slow: Vec<tempfile::TempDir> = (0..PENDING_READ_CONCURRENCY + 2)
+            .map(|_| tempfile::tempdir().unwrap())
+            .collect();
+        let mut data = Vec::new();
+        for (index, directory) in slow.iter().enumerate() {
+            data.push(serde_json::json!({
+                "id": format!("ses_slow{index}"), "title": "Duplicate",
+                "location": {"directory": directory.path().to_string_lossy()},
+                "time": {"created": 1, "updated": 2}
+            }));
+        }
+        let pending = HashMap::new();
+        let slow_paths: Vec<PathBuf> = slow
+            .iter()
+            .map(|directory| directory.path().to_path_buf())
+            .collect();
+        let port = serving_scoped_pending(
+            serde_json::json!({"data": data}),
+            &pending,
+            &slow_paths,
+            None,
+            None,
+        );
+        let mut agents = AgentService::with_test_server(port);
+        agents.pending_read_budget = Duration::from_millis(300);
+
+        let sessions = agents.candidate_sessions("local", slow[0].path()).unwrap();
+
+        assert_eq!(
+            sessions.len(),
+            slow.len(),
+            "every candidate title is kept for ambiguity matching"
+        );
+        for session in &sessions {
+            assert_eq!(session.title, "Duplicate");
+            assert_eq!(
+                session.awaiting_reply, None,
+                "{} was not read inside the budget, so it is unknown rather than idle",
+                session.id
+            );
+        }
     }
 
     #[test]
@@ -3547,8 +4195,8 @@ mod tests {
         assert_eq!(asked_second[0].checkout_id, "second");
         assert_eq!(asked_second[0].id, "ses_one");
         assert!(asked_second[0].running);
-        assert!(asked_first[0].awaiting_reply);
-        assert!(asked_second[0].awaiting_reply);
+        assert_eq!(asked_first[0].awaiting_reply, Some(true));
+        assert_eq!(asked_second[0].awaiting_reply, Some(true));
         let requests = server.join().expect("mock server should finish");
         assert_eq!(requests.len(), 4);
         assert!(
@@ -5719,6 +6367,21 @@ mod tests {
 
     fn interrupted_error() -> ureq::Error {
         ureq::Error::Io(io::Error::from(io::ErrorKind::Interrupted))
+    }
+
+    #[test]
+    fn an_interrupted_read_does_not_retry_after_its_deadline() {
+        let deadline = Instant::now() + Duration::from_millis(30);
+        let mut attempts = 0;
+        let error = retry_interrupted_until(deadline, |_timeout| {
+            attempts += 1;
+            sleep(Duration::from_millis(40));
+            Err::<(), _>(interrupted_error())
+        })
+        .expect_err("the retry budget expired");
+
+        assert!(matches!(error, BridgeError::Unavailable(_)));
+        assert_eq!(attempts, 1, "no HTTP attempt starts after the deadline");
     }
 
     #[test]

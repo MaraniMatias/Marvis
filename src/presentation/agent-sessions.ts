@@ -422,8 +422,8 @@ export interface TerminalAgentSession {
   agent: AgentHeadline | null;
   /** Whether the service reports a turn running in this session right now. */
   running: boolean;
-  /** Pending requests outrank running even when the session has no agent to name. */
-  awaitingReply: boolean;
+  /** Pending requests outrank running; null means the location could not be read. */
+  awaitingReply: boolean | null;
   /**
    * When the service last touched this session, in epoch milliseconds.
    *
@@ -469,15 +469,15 @@ type RefreshScope = "all" | "busy";
  * A cheap description of what a row would draw, so an answer that draws the same row is not written.
  *
  * It covers everything a terminal row reads out of its entry — the title it matches on, the agent it
- * names, whether it is working, and the clock in its trailing slot — and nothing else, because the
- * row is only ever read and there is nothing in it that a finer comparison would settle.
+ * names, whether it is working or awaiting a reply, and the clock in its trailing slot — and nothing
+ * else, because the row is only ever read and a finer comparison would settle nothing.
  */
 function rowSignature(entry: TerminalAgentRow): string {
   return entry.sessions
     .map((session) => {
       const agent = session.agent;
       const named = agent ? `${agent.label}/${agent.color}/${agent.attention}` : "";
-      return `${session.title}|${named}|${session.running}|${session.updatedAt}`;
+      return `${session.title}|${named}|${session.running}|${session.awaitingReply}|${session.updatedAt}`;
     })
     .join("\n");
 }

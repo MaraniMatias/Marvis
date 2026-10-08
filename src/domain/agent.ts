@@ -16,8 +16,8 @@ export interface AgentSession {
   running: boolean;
   /** When the server last saw this session go idle, if ever. */
   idleAt: number | null;
-  /** A question or permission is waiting for a reply in OpenCode. */
-  awaitingReply: boolean;
+  /** A pending reply; null means a candidate location could not be read. Scoped reads fail instead. */
+  awaitingReply: boolean | null;
   /** The agent running it, which is also the mode: OpenCode spells `build`/`plan` as agents. */
   agent: string | null;
   /** The model behind it, as `provider/id#variant`. */
