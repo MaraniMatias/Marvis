@@ -3,6 +3,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { getVersion } from "@tauri-apps/api/app";
 import { getCurrentWindow } from "@tauri-apps/api/window";
+import { homeDir } from "@tauri-apps/api/path";
 import { computed, nextTick, onMounted, onUnmounted, provide, ref, watch } from "vue";
 import { SplitterGroup, SplitterPanel, SplitterResizeHandle } from "reka-ui";
 import {
@@ -17,7 +18,7 @@ import {
 import type { Checkout, Repo } from "./domain/workspace";
 import type { CheckoutFileActivity } from "./domain/git";
 import type { ReviewTarget } from "./domain/review";
-import { resolveActiveSession, sessionTitle, terminalHasProcess } from "./domain/workspace";
+import { displayCheckoutPath, resolveActiveSession, sessionTitle, terminalHasProcess } from "./domain/workspace";
 import { mainViewFromState, mainViewLabel, mainViewToState, resolveMainView } from "./domain/main-document";
 import type { DocumentMode, MainView } from "./domain/main-document";
 import type { TitlebarMenuItem, TitlebarMenuSection } from "./domain/titlebar-menu";
@@ -481,6 +482,12 @@ const terminalMenu = computed<TitlebarMenuSection[]>(() => {
 
 /** What the workdir crumb says: the repo, or the folder when there is no repo to name. */
 const workdirLabel = computed(() => activeRepo.value?.name ?? activeCheckout.value?.path.split(/[\\/]/).at(-1) ?? "");
+const homePath = ref("");
+void Promise.resolve(homeDir())
+  .then((path) => {
+    if (typeof path === "string") homePath.value = path;
+  })
+  .catch(() => undefined);
 
 /**
  * The file the last crumb names, when what is open is a file or a change.
@@ -507,7 +514,7 @@ function workdirItem(repo: Repo, checkout: Checkout, id: string, hint?: string):
     id,
     label: workdirTitle(repo, checkout),
     ...(hint !== undefined && { hint }),
-    title: checkout.path,
+    title: displayCheckoutPath(checkout.canonicalPath, homePath.value),
     checked: checkout.id === workspace.value.activeCheckoutId,
     disabled: checkout.isMissing,
     run: () => void activateCheckoutTerminal(checkout.id),
@@ -2009,10 +2016,12 @@ function reportWarning(message: string) {
               'split-inspector-closed': isSplitLayout && !splitInspectorOpen,
             }"
             :checkout="checkoutUiReady ? activeCheckout : null"
+            :home-path="homePath"
             :repo="checkoutUiReady ? activeRepo : null"
             :git-snapshot="gitSnapshot"
             :saved-state="activeCheckout ? checkoutUiStates[activeCheckout.id] : null"
             :font-scale="fontScale"
+            :tree-sticky-scroll="settings.ui.treeStickyScroll"
             @open-file="openFileDocument"
             @open-change="openChangedDocument"
             @open-all-changes="openAllChanges"

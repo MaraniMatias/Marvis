@@ -1235,6 +1235,7 @@ function onMarkdownLink(event: MouseEvent) {
   justify-content: space-between;
   height: 27px;
   padding: 0 8px;
+  padding-left: 4px;
   border-top: 1px solid var(--marvis-border);
 }
 

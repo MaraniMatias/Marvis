@@ -1008,13 +1008,16 @@ describe("App UI integration", () => {
 
     it("opens the worktrees of the repo from the branch crumb, and creates one from the root", async () => {
       const wrapper = await mountApp(
-        workspaceWith(checkout("checkout:one"), { ...checkout("checkout:two"), branch: "feature" }),
+        workspaceWith(
+          { ...checkout("checkout:one"), canonicalPath: "/Users/test/.docker" },
+          { ...checkout("checkout:two"), canonicalPath: "/Users/test/worktrees/feature", branch: "feature" },
+        ),
       );
 
       const rows = wrapper.findAll('[data-testid^="menu-item-worktree:"]');
-      // A branch names one worktree, so the rows are the branches and nothing else: the path is
-      // in each row's tooltip.
+      // Branch names stay visible while canonical checkout paths remain available in the tooltip.
       expect(rows.map((row) => row.text())).toEqual(["main", "feature"]);
+      expect(rows.map((row) => row.attributes("title"))).toEqual(["/Users/test/.docker", "/Users/test/worktrees/feature"]);
 
       await wrapper.get('[data-testid="menu-item-new-worktree"]').trigger("click");
       await flushPromises();

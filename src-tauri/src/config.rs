@@ -67,6 +67,7 @@ pub struct UiSettings {
     pub zoom: f64,
     pub theme: String,
     pub content_background: String,
+    pub tree_sticky_scroll: bool,
 }
 
 impl Default for UiSettings {
@@ -76,6 +77,7 @@ impl Default for UiSettings {
             zoom: 1.0,
             theme: "system".into(),
             content_background: CONTENT_BACKGROUND.into(),
+            tree_sticky_scroll: true,
         }
     }
 }

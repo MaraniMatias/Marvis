@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   agentSessionTitle,
   createCheckout,
+  displayCheckoutPath,
   createPlainRepo,
   createWorkspaceState,
   getActiveCheckout,
@@ -42,6 +43,11 @@ function gitRepo(): Repo {
 }
 
 describe("workspace domain", () => {
+  it("shortens only paths inside the user's home directory", () => {
+    expect(displayCheckoutPath("/Users/me/.docker/config", "/Users/me")).toBe("~/.docker/config");
+    expect(displayCheckoutPath("/Users/other/project", "/Users/me")).toBe("/Users/other/project");
+    expect(displayCheckoutPath("/Users/meet/project", "/Users/me")).toBe("/Users/meet/project");
+  });
   it("models a plain directory as one primary checkout with path-based identity", () => {
     const repo = createPlainRepo(openedFolder("/work/plain", "plain"), "2026-01-01T00:00:00Z");
 

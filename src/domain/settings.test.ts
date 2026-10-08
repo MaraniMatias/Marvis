@@ -27,7 +27,13 @@ const DEFAULT_CONTENT_BACKGROUND = "#16181c";
 describe("the settings file", () => {
   it("names the three surfaces and everything they carry", () => {
     expect(DEFAULT_SETTINGS).toEqual({
-      ui: { fontSize: 14, zoom: 1, theme: "system", contentBackground: DEFAULT_CONTENT_BACKGROUND },
+      ui: {
+        fontSize: 14,
+        zoom: 1,
+        theme: "system",
+        contentBackground: DEFAULT_CONTENT_BACKGROUND,
+        treeStickyScroll: true,
+      },
       terminal: {
         fontSize: 16,
         ligatures: true,
@@ -42,7 +48,13 @@ describe("the settings file", () => {
 
   it("reads what was written, and a file with lines missing from it", () => {
     const written = {
-      ui: { fontSize: 16, zoom: 1.2 as const, theme: "light" as const, contentBackground: "#aabbcc" },
+      ui: {
+        fontSize: 16,
+        zoom: 1.2 as const,
+        theme: "light" as const,
+        contentBackground: "#aabbcc",
+        treeStickyScroll: true,
+      },
       terminal: {
         fontSize: 18,
         ligatures: false,

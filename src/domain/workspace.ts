@@ -91,6 +91,15 @@ export function workdirTitle(repo: Repo, checkout: Checkout): string {
   return checkout.branch || (repo.kind === "plain" ? repo.name : checkout.isPrimary ? "Base" : checkout.path);
 }
 
+/** Show checkout paths relative to the user's home without abbreviating other prefixes. */
+export function displayCheckoutPath(path: string, homePath: string | undefined): string {
+  if (!homePath) return path;
+  if (path === homePath) return "~";
+  if (!path.startsWith(homePath)) return path;
+  const remainder = path.slice(homePath.length);
+  return remainder.startsWith("/") || remainder.startsWith("\\") ? `~${remainder}` : path;
+}
+
 /**
  * How a session is named wherever it is listed: the sidebar row and the titlebar crumb are the
  * same list read twice, so the rule is written once and neither of them keeps its own.

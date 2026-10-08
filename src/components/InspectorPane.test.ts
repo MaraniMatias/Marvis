@@ -104,6 +104,7 @@ function mountInspector(props: {
   gitSnapshot?: ActiveGitSnapshot;
   savedState?: CheckoutUiState | null;
   fontScale?: number;
+  homePath?: string;
 }) {
   return mount(InspectorPane, {
     props: { ...props, gitSnapshot: props.gitSnapshot ?? gitSnapshot(props.checkout?.id ?? "none") },
@@ -251,6 +252,30 @@ describe("InspectorPane", () => {
     wrapper.unmount();
   });
 
+  it("toggles a normal folder by clicking its row name", async () => {
+    mocks.listCheckoutFiles.mockImplementation(async (_id: string, path: string) => ({
+      entries:
+        path === "."
+          ? [{ name: "src", path: "src", kind: "directory" as const }]
+          : [{ name: "main.ts", path: "src/main.ts", kind: "file" as const }],
+      truncated: false,
+    }));
+    const wrapper = mountInspector({ checkout: checkout("toggle-row") });
+    await flushPromises();
+
+    const tree = wrapper.get('[aria-label="Checkout files"]');
+    const name = tree.get('.folder-name[aria-label="Expand src"]');
+    await name.trigger("click");
+    await flushPromises();
+    expect(tree.find(".folder-toggle").attributes("aria-expanded")).toBe("true");
+    expect(tree.text()).toContain("main.ts");
+
+    await tree.get('.folder-name[aria-label="Collapse src"]').trigger("click");
+    expect(tree.find(".folder-toggle").attributes("aria-expanded")).toBe("false");
+    expect(tree.text()).not.toContain("main.ts");
+    wrapper.unmount();
+  });
+
   it("keeps a folder that will not list on its own row", async () => {
     mocks.listCheckoutFiles.mockImplementation(async (_checkoutId: string, path: string) => {
       if (path === ".")
@@ -295,12 +320,12 @@ describe("InspectorPane", () => {
     const first = 100 - OVERSCAN;
     expect(rows[0]!.text()).toContain(`file-${first}.txt`);
     expect(rows.at(-1)!.text()).toContain(`file-${first + WINDOW_SIZE - 1}.txt`);
-    expect(tree.find("div[style]").attributes("style")).toContain(`padding-top: ${first * rowHeight}px`);
+    expect(tree.get(".file-tree-window").attributes("style")).toContain(`padding-top: ${first * rowHeight}px`);
 
     (tree.element as HTMLElement).scrollTop = entries.length * rowHeight;
     await tree.trigger("scroll");
     expect(tree.text()).toContain("file-499.txt");
-    expect(tree.text()).not.toContain("file-0.txt");
+    expect(tree.get(".file-tree-window").text()).not.toContain("file-0.txt");
     wrapper.unmount();
   });
 
@@ -397,7 +422,7 @@ describe("InspectorPane", () => {
     const first = 100 - OVERSCAN;
     const rows = tree.findAll("button");
     expect(rows[0]!.text()).toContain(`file-${first}.txt`);
-    expect(tree.find("div[style]").attributes("style")).toContain(`padding-top: ${first * rowHeight}px`);
+    expect(tree.get(".file-tree-window").attributes("style")).toContain(`padding-top: ${first * rowHeight}px`);
     wrapper.unmount();
   });
 
@@ -550,13 +575,13 @@ describe("InspectorPane", () => {
     const tree = wrapper.get('[aria-label="Checkout files"]');
     expect(tree.text()).toContain("main.ts");
     // The depth gutter is the sidebar's: 8px plus 14px per level.
-    expect(tree.findAll("button").map((row) => row.attributes("style"))).toEqual([
+    expect(tree.findAll(".file-row").map((row) => row.attributes("style"))).toEqual([
       "padding-left: 8px;",
       "padding-left: 22px;",
       "padding-left: 36px;",
     ]);
-    await tree.findAll("button")[0]!.trigger("click");
-    expect(wrapper.get('[aria-label="Checkout files"]').findAll("button")).toHaveLength(1);
+    await tree.findAll(".folder-toggle")[0]!.trigger("click");
+    expect(wrapper.get('[aria-label="Checkout files"]').findAll(".file-row")).toHaveLength(1);
     wrapper.unmount();
   });
 
@@ -593,6 +618,130 @@ describe("InspectorPane", () => {
     await flushPromises();
     expect(wrapper.text()).toContain("after.txt");
     expect(mocks.listCheckoutFiles).toHaveBeenCalledTimes(2);
+    wrapper.unmount();
+  });
+
+  it("keeps long file names intact with their full-path tooltip", async () => {
+    const name = "a-very-long-file-name-that-must-remain-visible-with-horizontal-scrolling.txt";
+    mocks.listCheckoutFiles.mockResolvedValue({
+      entries: [{ name, path: name, kind: "file" }],
+      truncated: false,
+    });
+    const fileCheckout = { ...checkout("long-name"), canonicalPath: "/Users/test/project" };
+    const wrapper = mountInspector({ checkout: fileCheckout, homePath: "/Users/test" });
+    await flushPromises();
+
+    const row = wrapper.get(".file-row");
+    expect(wrapper.get(".tree-width-sizer").attributes("aria-hidden")).toBe("true");
+    expect(wrapper.get(".tree-width-sizer").text()).toBe(name);
+    expect(row.get(".file-name").text()).toBe(name);
+    expect(row.attributes("title")).toBe(`~/project/${name}`);
+    wrapper.unmount();
+  });
+
+  it("sizes all expanded rows independently of the virtual window and sticky stack", async () => {
+    const name = "a-very-long-file-name-".repeat(8) + "RIGHT-END.txt";
+    mocks.listCheckoutFiles.mockImplementation(async (_id: string, path: string) => ({
+      entries:
+        path === "."
+          ? [{ name: "folder", path: "folder", kind: "directory" }]
+          : Array.from({ length: 200 }, (_, index) => ({
+              name: index === 100 ? name : `f${index}`,
+              path: `folder/${index}`,
+              kind: "file",
+            })),
+      truncated: false,
+    }));
+    const wrapper = mountInspector({
+      checkout: checkout("width"),
+      savedState: {
+        ...DEFAULT_CHECKOUT_UI_STATE,
+        expandedDirectories: ["folder"],
+      },
+    });
+    await flushPromises();
+    const tree = wrapper.get('[aria-label="Checkout files"]');
+    const sizer = tree.get(".tree-width-sizer");
+    expect(sizer.attributes("aria-hidden")).toBe("true");
+    expect(sizer.attributes("inert")).toBeDefined();
+    expect(sizer.findAll("button, svg")).toHaveLength(0);
+    expect(sizer.findAll(".tree-width-row")).toHaveLength(201);
+    const sizingMarkup = sizer.html();
+    expect(sizer.text()).toContain(name);
+    expect(tree.get(".file-tree-window").text()).not.toContain(name);
+    for (const top of [100 * ROW_HEIGHT, 180 * ROW_HEIGHT, 0]) {
+      (tree.element as HTMLElement).scrollTop = top;
+      await tree.trigger("scroll");
+      expect(sizer.html()).toBe(sizingMarkup);
+      expect(tree.get(".file-tree-window").findAll(".file-row")).toHaveLength(WINDOW_SIZE);
+      const sticky = tree.find(".sticky-folders");
+      if (sticky.exists()) {
+        expect(sticky.element.parentElement).toBe(tree.get(".file-tree-content").element);
+        expect(sticky.attributes("style")).not.toContain("width");
+      }
+    }
+    await tree.get(".folder-toggle").trigger("click");
+    await flushPromises();
+    expect(sizer.findAll(".tree-width-row")).toHaveLength(1);
+    expect(sizer.text()).not.toContain(name);
+    wrapper.unmount();
+  });
+
+  it("uses the default sticky setting and tracks ancestors through a nested branch", async () => {
+    mocks.listCheckoutFiles.mockImplementation(async (_id: string, path: string) => {
+      if (path === ".")
+        return { entries: [{ name: "src", path: "src", kind: "directory" as const }], truncated: false };
+      if (path === "src")
+        return { entries: [{ name: "nested", path: "src/nested", kind: "directory" as const }], truncated: false };
+      return {
+        entries: Array.from({ length: 80 }, (_, i) => ({
+          name: `f${i}`,
+          path: `${path}/f${i}`,
+          kind: "file" as const,
+        })),
+        truncated: false,
+      };
+    });
+    const stickyCheckout = { ...checkout("sticky"), canonicalPath: "/Users/test/sticky" };
+    const wrapper = mountInspector({ checkout: stickyCheckout, homePath: "/Users/test" });
+    await flushPromises();
+    await wrapper.get('.file-folder:has(.folder-name[aria-label="Expand src"]) .folder-toggle').trigger("click");
+    await flushPromises();
+    await wrapper.get('.file-folder:has(.folder-name[aria-label="Expand nested"]) .folder-toggle').trigger("click");
+    await flushPromises();
+    const tree = wrapper.get('[aria-label="Checkout files"]');
+    expect(tree.get('.folder-name[aria-label="Collapse src"]').attributes("title")).toBe("~/sticky/src");
+    expect(tree.get('.folder-name[aria-label="Collapse nested"]').attributes("title")).toBe("~/sticky/src/nested");
+    expect(tree.findAll("button:not(.sticky-folders button)").length).toBeGreaterThan(0);
+    expect(tree.find(".sticky-folders").exists()).toBe(false);
+    (tree.element as HTMLElement).scrollTop = 5 * ROW_HEIGHT;
+    await tree.trigger("scroll");
+    expect(tree.findAll(".sticky-folders .folder-name").map((button) => button.attributes("aria-label"))).toEqual([
+      "Show src in tree",
+      "Show nested in tree",
+    ]);
+    expect(tree.findAll(".sticky-folders [title]").map((button) => button.attributes("title"))).toEqual([
+      "~/sticky/src",
+      "~/sticky/src/nested",
+    ]);
+    expect(tree.find(".sticky-folders").attributes("style")).toContain(`-${2 * ROW_HEIGHT}px`);
+    document.body.append(tree.element.parentElement!);
+    await tree.find('.sticky-folders .folder-name[aria-label="Show src in tree"]').trigger("click");
+    await flushPromises();
+    expect((tree.element as HTMLElement).scrollTop).toBe(0);
+    const originalName = tree.find('.folder-name[aria-label="Collapse src"]');
+    await vi.waitFor(() => expect(document.activeElement).toBe(originalName.element));
+    expect(originalName.attributes("aria-current")).toBe("true");
+    expect(
+      originalName.element.closest(".file-row")?.querySelector(".folder-toggle")?.getAttribute("aria-expanded"),
+    ).toBe("true");
+
+    await originalName.element.closest(".file-row")?.querySelector<HTMLButtonElement>(".folder-toggle")?.click();
+    await flushPromises();
+    expect(
+      originalName.element.closest(".file-row")?.querySelector(".folder-toggle")?.getAttribute("aria-expanded"),
+    ).toBe("false");
+    expect(wrapper.emitted("updateUiState")?.at(-1)?.[0]).toMatchObject({ expandedDirectories: ["src/nested"] });
     wrapper.unmount();
   });
 });

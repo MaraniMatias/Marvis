@@ -33,6 +33,7 @@ export interface UiSettings {
   theme: ThemePreference;
   /** Dark-theme surface shared by the editor, diff and terminal. */
   contentBackground: string;
+  treeStickyScroll: boolean;
 }
 
 export interface TerminalSettings {
@@ -96,6 +97,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     // default in capitals is a value this app rewrites on its way in, so a window could never hold
     // the defaults it ships with, and nothing comparing the two would ever agree.
     contentBackground: "#16181c",
+    treeStickyScroll: true,
   },
   terminal: {
     fontSize: 16,
@@ -161,6 +163,7 @@ export function normalizeSettings(value: unknown): AppSettings {
         typeof ui.contentBackground === "string" && /^#[\da-fA-F]{6}$/.test(ui.contentBackground)
           ? ui.contentBackground.toLowerCase()
           : DEFAULT_SETTINGS.ui.contentBackground,
+      treeStickyScroll: flag(ui.treeStickyScroll, DEFAULT_SETTINGS.ui.treeStickyScroll),
     },
     terminal: {
       fontSize: boundedNumber(terminal.fontSize, TERMINAL_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.terminal.fontSize),
@@ -195,6 +198,7 @@ export type SettingsPath =
   | "ui.zoom"
   | "ui.theme"
   | "ui.contentBackground"
+  | "ui.treeStickyScroll"
   | "terminal.fontSize"
   | "terminal.ligatures"
   | "terminal.cursorBlink"
@@ -277,6 +281,12 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
           { value: "dark", label: "Dark" },
         ],
         parse: IDENTIFIER,
+      },
+      {
+        kind: "toggle",
+        path: "ui.treeStickyScroll",
+        label: "Sticky folder rows",
+        description: "Keep parent folders visible while scrolling the Files tree.",
       },
       {
         kind: "color",

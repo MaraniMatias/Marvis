@@ -2,8 +2,8 @@
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from "vue";
 import { ChevronRight as ChevronRightIcon, SquareArrowOutUpRight as SquareArrowOutUpRightIcon } from "@lucide/vue";
 import { isIpcError } from "../domain/ipc";
-import type { FileEntry } from "../domain/files";
-import type { Checkout, Repo } from "../domain/workspace";
+import { absoluteFilePath, type FileEntry } from "../domain/files";
+import { displayCheckoutPath, type Checkout, type Repo } from "../domain/workspace";
 import type { CheckoutUiState } from "../domain/ui-state";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { useDiffStats } from "../presentation/diff-stats";
@@ -11,14 +11,19 @@ import { listCheckoutFiles } from "../lib/ipc";
 import FileIcon from "./FileIcon.vue";
 import OverlayScrollbar from "./OverlayScrollbar.vue";
 
-const props = defineProps<{
-  checkout: Checkout | null;
-  repo?: Repo | null;
-  gitSnapshot: ActiveGitSnapshot;
-  savedState?: CheckoutUiState | null;
-  /** `ui.fontSize` as a ratio of the 14px the panel is drawn at. Defaults to 1, the design size. */
-  fontScale?: number;
-}>();
+const props = withDefaults(
+  defineProps<{
+    checkout: Checkout | null;
+    homePath?: string;
+    repo?: Repo | null;
+    gitSnapshot: ActiveGitSnapshot;
+    savedState?: CheckoutUiState | null;
+    /** `ui.fontSize` as a ratio of the 14px the panel is drawn at. Defaults to 1, the design size. */
+    fontScale?: number;
+    treeStickyScroll?: boolean;
+  }>(),
+  { treeStickyScroll: true },
+);
 
 const emit = defineEmits<{
   openFile: [value: { checkoutId: string; path: string }];
@@ -75,6 +80,7 @@ const rootError = ref("");
 const folderError = ref("");
 const selectedPaths = ref<Record<string, string | null>>({});
 const selectedChangedPaths = ref<Record<string, string | null>>({});
+const selectedFolderPath = ref<string | null>(null);
 const selectedPath = computed(() => (props.checkout ? (selectedPaths.value[props.checkout.id] ?? null) : null));
 const selectedChangedPath = computed(() =>
   props.checkout ? (selectedChangedPaths.value[props.checkout.id] ?? null) : null,
@@ -195,6 +201,7 @@ watch(
     directories.value = {};
     directoryStates.value = {};
     expanded.value = [];
+    selectedFolderPath.value = null;
     const saved = props.savedState;
     treeScrollTop.value = saved?.filesScrollTop ?? 0;
     changesScrollTop.value = saved?.changesScrollTop ?? 0;
@@ -316,6 +323,11 @@ async function refreshAfterGitChange(checkoutId: string) {
 async function toggleDirectory(entry: FileEntry) {
   if (expanded.value.includes(entry.path)) {
     expanded.value = expanded.value.filter((path) => path !== entry.path);
+    await nextTick();
+    const row = [...(treeViewport.value?.querySelectorAll<HTMLButtonElement>("[data-folder-path]") ?? [])].find(
+      (button) => button.dataset.folderPath === entry.path && !button.closest(".sticky-folders"),
+    );
+    row?.focus();
     return;
   }
   expanded.value = [...expanded.value, entry.path];
@@ -323,6 +335,20 @@ async function toggleDirectory(entry: FileEntry) {
   if (checkoutId && !Object.hasOwn(directories.value, entry.path)) {
     await loadDirectory(checkoutId, entry.path, generation);
   }
+}
+
+async function revealFolder(entry: FileEntry) {
+  selectedFolderPath.value = entry.path;
+  const index = visibleEntries.value.findIndex((row) => row.entry?.path === entry.path);
+  if (index < 0 || !treeViewport.value) return;
+  const scrollTop = Math.max(0, index - visibleEntries.value[index]!.depth) * rowHeight.value;
+  treeScrollTop.value = scrollTop;
+  treeViewport.value.scrollTop = scrollTop;
+  await nextTick();
+  const row = [...treeViewport.value.querySelectorAll<HTMLButtonElement>("[data-folder-path]")].find(
+    (button) => button.dataset.folderPath === entry.path && !button.closest(".sticky-folders"),
+  );
+  row?.focus();
 }
 
 function selectFile(entry: FileEntry) {
@@ -418,6 +444,11 @@ function rowStatus(path: string): string | undefined {
   return gitStatuses.value.get(path);
 }
 
+function entryTooltip(path: string): string {
+  if (!props.checkout) return path;
+  return displayCheckoutPath(absoluteFilePath(props.checkout.canonicalPath, path), props.homePath);
+}
+
 /** The gutter, and one 14px step per level: the sidebar's own indent, at its own 8px base. */
 function rowIndent(depth: number): string {
   return `${8 + depth * 14}px`;
@@ -438,7 +469,35 @@ function virtualWindow<T>(rows: T[], scrollTop: number, rowHeight: number) {
 /** The row height this font size draws at. See TREE_ROW_HEIGHT. */
 const rowHeight = computed(() => Math.round(TREE_ROW_HEIGHT * (props.fontScale ?? 1)));
 
-const treeWindow = computed(() => virtualWindow(visibleEntries.value, treeScrollTop.value, rowHeight.value));
+const stickyFolders = computed(() => {
+  if (!props.treeStickyScroll) return [];
+  const viewport = treeViewport.value;
+  const rowHeightPx = rowHeight.value;
+  // Account for the rows hidden beneath the sticky stack when anticipating ancestors.
+  const maxStack = Math.max(0, Math.floor(((viewport?.clientHeight ?? rowHeightPx) - 8) / rowHeightPx));
+  const ancestors: { entry: FileEntry; depth: number }[] = [];
+  const bannerOffset = directoryStates.value["."] === "truncated" ? rowHeightPx : 0;
+  let top = Math.floor(Math.max(0, treeScrollTop.value - bannerOffset) / rowHeightPx);
+  for (let pass = 0; pass <= maxStack; pass++) {
+    ancestors.length = 0;
+    for (const row of visibleEntries.value.slice(0, top)) {
+      while (ancestors.length && ancestors.at(-1)!.depth >= row.depth) ancestors.pop();
+      if (row.entry?.kind === "directory" && expanded.value.includes(row.entry.path))
+        ancestors.push({ entry: row.entry, depth: row.depth });
+    }
+    const nextTop = Math.floor(
+      Math.max(0, treeScrollTop.value + (Math.min(maxStack, ancestors.length) + 1) * rowHeightPx - bannerOffset) /
+        rowHeightPx,
+    );
+    if (nextTop <= top) break;
+    top = nextTop;
+  }
+  return ancestors.slice(-maxStack);
+});
+const treeWindow = computed(() => {
+  const window = virtualWindow(visibleEntries.value, treeScrollTop.value, rowHeight.value);
+  return window;
+});
 const changeWindow = computed(() => virtualWindow(changeRows.value, changesScrollTop.value, rowHeight.value));
 
 function onTreeScroll(event: Event) {
@@ -533,96 +592,177 @@ watch(
       class="relative flex min-h-0 flex-1 flex-col"
     >
       <div ref="treeViewport" class="details-scroll" aria-label="Checkout files" @scroll="onTreeScroll">
-        <p v-if="rootState === 'idle'" class="pane-state">Open a checkout to browse files.</p>
-        <p v-else-if="rootState === 'loading'" role="status" class="pane-state">Loading files…</p>
-        <!-- The root's own failure is the panel's whole content, so it is drawn here instead of
-             expiring in a toast over an empty tree. -->
-        <p v-else-if="rootState === 'error'" role="alert" class="pane-state">
-          {{ rootError || "Could not list this checkout." }}
-        </p>
-        <p v-else-if="rootState === 'missing'" role="status" class="pane-state">Checkout is missing.</p>
-        <p
-          v-else-if="directories['.']?.length === 0 && directoryStates['.'] !== 'truncated'"
-          role="status"
-          class="pane-state"
-        >
-          This checkout is empty.
-        </p>
-        <template v-else>
-          <p v-if="directoryStates['.'] === 'truncated'" class="file-row file-note" :style="{ paddingLeft: '8px' }">
-            Some entries omitted (folder is large).
-          </p>
-          <div
-            :style="{
-              paddingTop: `${treeWindow.paddingTop}px`,
-              paddingBottom: `${treeWindow.paddingBottom}px`,
-            }"
-          >
-            <template
-              v-for="(item, index) in treeWindow.rows"
-              :key="item.entry?.path ?? `${item.depth}-${index}-${item.message}`"
+        <div class="file-tree-content">
+          <!-- Intrinsic sizing uses every expanded row, not the changing virtual window.
+               Only text is duplicated; interactive rows and icons stay virtualized. -->
+          <div class="tree-width-sizer" aria-hidden="true" inert>
+            <div
+              v-for="(item, index) in visibleEntries"
+              :key="item.entry?.path ?? index"
+              class="tree-width-row"
+              :style="{ paddingLeft: rowIndent(item.depth) }"
             >
-              <p
-                v-if="!item.entry"
-                class="file-row file-note"
-                :style="{ paddingLeft: rowIndent(item.depth) }"
-                :title="item.message"
-              >
-                {{ item.message }}
-              </p>
-              <button
-                v-else-if="item.entry.kind === 'directory'"
-                type="button"
-                class="file-row file-folder"
-                :style="{ paddingLeft: rowIndent(item.depth) }"
-                :aria-expanded="expanded.includes(item.entry.path)"
-                :title="item.entry.path"
-                @click="toggleDirectory(item.entry)"
-              >
-                <ChevronRightIcon
-                  class="icon-xxs chevron"
-                  :class="{ expanded: expanded.includes(item.entry.path) }"
-                  aria-hidden="true"
-                />
-                <FileIcon
-                  class="file-icon"
-                  :name="item.entry.name"
-                  kind="directory"
-                  :prominence="prominenceOf(item.entry)"
-                />
-                <span class="file-name" :class="`file-name-${prominenceOf(item.entry)}`">
-                  {{ item.entry.name }}
-                </span>
-              </button>
-              <button
-                v-else
-                type="button"
-                class="file-row"
-                :class="{ 'is-selected': selectedPath === item.entry.path }"
-                :style="{ paddingLeft: rowIndent(item.depth) }"
-                :aria-current="selectedPath === item.entry.path ? 'true' : undefined"
-                :title="item.entry.path"
-                @click="selectFile(item.entry)"
-              >
-                <span class="chevron-spacer" aria-hidden="true" />
-                <FileIcon
-                  class="file-icon"
-                  :name="item.entry.name"
-                  kind="file"
-                  :prominence="prominenceOf(item.entry)"
-                />
-                <span class="file-name" :class="`file-name-${prominenceOf(item.entry)}`">
-                  {{ item.entry.name }}
-                </span>
-                <span v-if="rowStatus(item.entry.path)" class="file-status" :data-status="rowStatus(item.entry.path)">
-                  {{ rowStatus(item.entry.path) }}
-                </span>
+              <template v-if="item.entry">
+                <span class="tree-width-gutter" />
+                <span class="tree-width-name">{{ item.entry.name }}</span>
+                <span v-if="rowStatus(item.entry.path)" class="file-status">{{ rowStatus(item.entry.path) }}</span>
                 <span v-if="item.additions" class="diff-add">+{{ item.additions }}</span>
                 <span v-if="item.deletions" class="diff-del">-{{ item.deletions }}</span>
-              </button>
-            </template>
+              </template>
+              <span v-else>{{ item.message }}</span>
+            </div>
           </div>
-        </template>
+          <div
+            v-if="stickyFolders.length"
+            class="sticky-folders"
+            :style="{
+              marginBottom: `-${rowHeight * stickyFolders.length}px`,
+            }"
+            aria-label="Ancestor folders"
+          >
+            <div
+              v-for="folder in stickyFolders"
+              :key="folder.entry.path"
+              class="file-row file-folder"
+              :class="{ 'is-selected': selectedFolderPath === folder.entry.path }"
+              :style="{ paddingLeft: rowIndent(folder.depth) }"
+            >
+              <button
+                type="button"
+                class="folder-toggle"
+                :aria-label="`Collapse ${folder.entry.name}`"
+                aria-expanded="true"
+                @click="toggleDirectory(folder.entry)"
+              >
+                <ChevronRightIcon class="icon-xxs chevron expanded" aria-hidden="true" />
+              </button>
+              <FileIcon
+                class="file-icon"
+                :name="folder.entry.name"
+                kind="directory"
+                :prominence="prominenceOf(folder.entry)"
+              />
+              <button
+                type="button"
+                class="file-name folder-name"
+                :class="`file-name-${prominenceOf(folder.entry)}`"
+                :data-folder-path="folder.entry.path"
+                :title="entryTooltip(folder.entry.path)"
+                :aria-label="`Show ${folder.entry.name} in tree`"
+                :aria-current="selectedFolderPath === folder.entry.path ? 'true' : undefined"
+                @click="revealFolder(folder.entry)"
+              >
+                {{ folder.entry.name }}
+              </button>
+            </div>
+          </div>
+          <p v-if="rootState === 'idle'" class="pane-state">Open a checkout to browse files.</p>
+          <p v-else-if="rootState === 'loading'" role="status" class="pane-state">Loading files…</p>
+          <!-- The root's own failure is the panel's whole content, so it is drawn here instead of
+             expiring in a toast over an empty tree. -->
+          <p v-else-if="rootState === 'error'" role="alert" class="pane-state">
+            {{ rootError || "Could not list this checkout." }}
+          </p>
+          <p v-else-if="rootState === 'missing'" role="status" class="pane-state">Checkout is missing.</p>
+          <p
+            v-else-if="directories['.']?.length === 0 && directoryStates['.'] !== 'truncated'"
+            role="status"
+            class="pane-state"
+          >
+            This checkout is empty.
+          </p>
+          <template v-else>
+            <p v-if="directoryStates['.'] === 'truncated'" class="file-row file-note" :style="{ paddingLeft: '8px' }">
+              Some entries omitted (folder is large).
+            </p>
+            <div
+              class="file-tree-window"
+              :style="{
+                paddingTop: `${treeWindow.paddingTop}px`,
+                paddingBottom: `${treeWindow.paddingBottom}px`,
+              }"
+            >
+              <template
+                v-for="(item, index) in treeWindow.rows"
+                :key="item.entry?.path ?? `${item.depth}-${index}-${item.message}`"
+              >
+                <p
+                  v-if="!item.entry"
+                  class="file-row file-note"
+                  :style="{ paddingLeft: rowIndent(item.depth) }"
+                  :title="item.message"
+                >
+                  {{ item.message }}
+                </p>
+                <div
+                  v-else-if="item.entry.kind === 'directory'"
+                  class="file-row file-folder"
+                  :class="{ 'is-selected': selectedFolderPath === item.entry.path }"
+                  :style="{ paddingLeft: rowIndent(item.depth) }"
+                >
+                  <button
+                    type="button"
+                    class="folder-toggle"
+                    :aria-label="`${expanded.includes(item.entry.path) ? 'Collapse' : 'Expand'} ${item.entry.name}`"
+                    :aria-expanded="expanded.includes(item.entry.path)"
+                    @click="toggleDirectory(item.entry)"
+                  >
+                    <ChevronRightIcon
+                      class="icon-xxs chevron"
+                      :class="{ expanded: expanded.includes(item.entry.path) }"
+                      aria-hidden="true"
+                    />
+                  </button>
+                  <FileIcon
+                    class="file-icon"
+                    :name="item.entry.name"
+                    kind="directory"
+                    :prominence="prominenceOf(item.entry)"
+                  />
+                  <button
+                    type="button"
+                    tabindex="0"
+                    class="file-name folder-name"
+                    :class="`file-name-${prominenceOf(item.entry)}`"
+                    :data-folder-path="item.entry.path"
+                    :title="entryTooltip(item.entry.path)"
+                    :aria-label="`${expanded.includes(item.entry.path) ? 'Collapse' : 'Expand'} ${item.entry.name}`"
+                    :aria-current="selectedFolderPath === item.entry.path ? 'true' : undefined"
+                    @click="toggleDirectory(item.entry)"
+                  >
+                    {{ item.entry.name }}
+                  </button>
+                </div>
+                <button
+                  v-else
+                  type="button"
+                  class="file-row"
+                  :class="{ 'is-selected': selectedPath === item.entry.path }"
+                  :style="{ paddingLeft: rowIndent(item.depth) }"
+                  :title="entryTooltip(item.entry.path)"
+                  :aria-current="selectedPath === item.entry.path ? 'true' : undefined"
+                  @click="selectFile(item.entry)"
+                >
+                  <span class="chevron-spacer" aria-hidden="true" />
+                  <FileIcon
+                    class="file-icon"
+                    :name="item.entry.name"
+                    kind="file"
+                    :prominence="prominenceOf(item.entry)"
+                  />
+                  <span class="file-name" :class="`file-name-${prominenceOf(item.entry)}`">
+                    {{ item.entry.name }}
+                  </span>
+                  <span v-if="rowStatus(item.entry.path)" class="file-status" :data-status="rowStatus(item.entry.path)">
+                    {{ rowStatus(item.entry.path) }}
+                  </span>
+                  <span v-if="item.additions" class="diff-add">+{{ item.additions }}</span>
+                  <span v-if="item.deletions" class="diff-del">-{{ item.deletions }}</span>
+                </button>
+              </template>
+            </div>
+          </template>
+        </div>
       </div>
       <OverlayScrollbar :target="treeViewport" label="Checkout files" />
     </div>
@@ -746,10 +886,34 @@ watch(
 /* The tab strip stays put, each list scrolls on its own, and each draws its own bar over its right
    edge: the browser's is off (in `style.css`) so a row whose status letter or +/- counts end at the
    edge are not read through a scrollbar. */
+.file-tree-content {
+  width: max-content;
+  min-width: 100%;
+}
+
+.tree-width-sizer {
+  height: 0;
+  overflow: hidden;
+  visibility: hidden;
+}
+
+.tree-width-gutter {
+  width: 37px; /* 16px chevron + 14px icon + their 7px gap; the name has the next gap. */
+  flex: 0 0 37px;
+}
+
+.sticky-folders {
+  position: sticky;
+  top: -4px;
+  z-index: 2;
+  background: var(--marvis-bg-0);
+  border-bottom: 1px solid var(--marvis-control-hover);
+}
+
 .details-scroll {
   flex: 1;
   min-height: 0;
-  overflow-y: auto;
+  overflow: auto;
   padding: 4px 0;
 }
 
@@ -763,11 +927,13 @@ watch(
    the same box in the same panel type, so a file and a terminal are read as two rows of one app
    rather than as two lists that happen to sit next to each other. Nothing here is rounded, and
    nothing here moves on hover. */
-.file-row {
+.file-row,
+.tree-width-row {
   display: flex;
   align-items: center;
   gap: 7px;
-  width: 100%;
+  width: max-content;
+  min-width: 100%;
   height: var(--tree-row-height);
   padding: 3px 8px;
   border: none;
@@ -778,7 +944,6 @@ watch(
   line-height: calc(var(--tree-row-height) - 6px);
   text-align: left;
   white-space: nowrap;
-  overflow: hidden;
   cursor: pointer;
 }
 
@@ -805,12 +970,33 @@ watch(
   color: var(--marvis-text);
 }
 
-.file-name {
-  flex: 1;
-  min-width: 0;
+.folder-toggle,
+.folder-name {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+}
+
+.folder-toggle {
+  display: flex;
+  flex: 0 0 16px;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+.folder-name {
+  flex: 0 0 auto;
+  padding: 0;
+  text-align: left;
+}
+
+.file-name,
+.tree-width-name {
+  flex: 0 0 auto;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 /* The name steps with the icon, a dotfile and an ignored file both still readable rather than
