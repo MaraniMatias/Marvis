@@ -30,6 +30,16 @@ export interface FileProbe {
   path: string;
 }
 
+/**
+ * The Prettier options that govern a file, read from the nearest config above it. `null` is not
+ * a checkout with nothing to say: it is a checkout that says Prettier's defaults apply.
+ */
+export interface PrettierConfig {
+  /** File path relative to the config directory, for override matching. */
+  path: string;
+  options: Record<string, unknown>;
+}
+
 export interface CheckoutImage {
   mimeType: "image/png" | "image/jpeg" | "image/gif" | "image/webp";
   dataBase64: string;

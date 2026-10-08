@@ -1,6 +1,12 @@
 <script setup lang="ts">
 /* eslint-disable vue/html-self-closing */
-import { Check as CheckIcon, ChevronDown as ChevronDownIcon, Copy as CopyIcon, X as XIcon } from "@lucide/vue";
+import {
+  Braces as BracesIcon,
+  Check as CheckIcon,
+  ChevronDown as ChevronDownIcon,
+  Copy as CopyIcon,
+  X as XIcon,
+} from "@lucide/vue";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { PopoverContent, PopoverPortal, PopoverRoot, PopoverTrigger } from "reka-ui";
 import { computed, nextTick, onUnmounted, reactive, ref, watch } from "vue";
@@ -13,7 +19,14 @@ import { useSourceHighlight } from "../presentation/source-highlight";
 import { isIpcError } from "../domain/ipc";
 import { absoluteFilePath } from "../domain/files";
 import { mediaKind, svgBlob } from "../domain/media";
-import { getReviewRootPath, readCheckoutFile, readCheckoutMedia, writeCheckoutFile } from "../lib/ipc";
+import {
+  getReviewRootPath,
+  readCheckoutFile,
+  readCheckoutMedia,
+  readPrettierConfig,
+  writeCheckoutFile,
+} from "../lib/ipc";
+import { formatSource, formattingParser } from "../lib/prettier-format";
 import { DEFAULT_SETTINGS } from "../domain/settings";
 import type { EditorSettings } from "../domain/settings";
 import type { SourceLanguageOption } from "../lib/source-languages";
@@ -77,10 +90,19 @@ const editorScroller = ref<HTMLElement | null>(null);
 const editorLoading = ref(false);
 const editorError = ref("");
 const saving = ref(false);
+const formatting = ref(false);
 let editorView: EditorView | null = null;
 let editorIdentity: string | null = null;
 let editorLanguage: string | null = null;
 let editorGeneration = 0;
+/**
+ * Whether the text on screen is being replaced by something other than a keystroke.
+ *
+ * CodeMirror calls the change listener for every edit including the ones this component makes on
+ * purpose, and `updateDraft` has to tell the two apart or the same replacement registers itself as
+ * a reader's edit. A flag rather than an argument because the listener is CodeMirror's own and
+ * carries nothing of ours.
+ */
 let syncingEditor = false;
 let restoringEditorPosition = false;
 const { push: pushToast, pushCause: reportCause } = useToasts();
@@ -185,12 +207,21 @@ const languageSearch = ref("");
 const languageQuery = computed(() => languageSearch.value.trim().toLowerCase());
 const detectedLanguage = computed(() => (props.path === null ? null : (detectedLanguageName(props.path) ?? null)));
 const effectiveLanguage = computed(() => languageOverride.value ?? detectedLanguage.value);
+let formatRevision = 0;
+watch(
+  [content, identity, effectiveLanguage],
+  () => {
+    formatRevision += 1;
+  },
+  { flush: "sync" },
+);
 const { highlightedLines, highlighting, startHighlight, invalidateHighlight } = useSourceHighlight({
   content: () => content.value,
   language: () => effectiveLanguage.value,
   fileIdentity: () => identity.value,
   markdownPreview: () => binaryMedia.value || (props.mode === "view" && (isMarkdown.value || kind.value === "svg")),
 });
+
 const isDirty = computed(() => (identity.value === null ? false : drafts.has(identity.value)));
 const currentDraft = computed(() => (identity.value === null ? undefined : drafts.get(identity.value)));
 
@@ -207,6 +238,23 @@ const languageButtonLabel = computed(() => {
   }
   return detectedLanguage.value === null ? "Auto (no highlighting)" : languageLabel(detectedLanguage.value);
 });
+
+/** Prettier's parser for the grammar on screen, or null for one it has no parser for at all. */
+const formatParser = computed(() => (available.value ? formattingParser(effectiveLanguage.value) : null));
+const canFormat = computed(() => formatParser.value !== null && contentState.value === "ready" && !binaryMedia.value);
+
+/**
+ * What the button promises, and what it says instead when there is nothing it can do.
+ *
+ * A grammar Prettier has no parser for is refused out loud rather than hidden: the reader learns
+ * that formatting exists and why this file is not one of its subjects, which is more use than a
+ * button that is simply absent.
+ */
+const formatTitle = computed(() =>
+  formatParser.value === null
+    ? "Prettier does not format " + languageButtonLabel.value + "."
+    : "Format with Prettier. The result is a draft: Save it or Cancel it.",
+);
 
 interface LanguageRow {
   /** Null is Auto: the extension decides, and a file it says nothing about stays plain. */
@@ -470,6 +518,92 @@ function cancelDraft() {
   draftExpectedContent.delete(fileIdentity);
   content.value = originalContent.value;
   syncEditorContent(content.value);
+}
+
+/**
+ * Formats the document into a draft, exactly as a keystroke would.
+ *
+ * The result goes into the same draft map a typed edit goes into, which is what makes the save bar
+ * appear and leaves the compare-and-swap against the bytes on disk meaning what it means for every
+ * other write. Nothing is written here: formatting is a proposal until somebody saves it, and the
+ * same Cancel that throws away a typed edit throws this away.
+ *
+ * The config is read on the click rather than on the open because a click is rare and an open is
+ * not, and because a config edited while the pane sits open should be the one that counts.
+ *
+ * What the reader has on screen when the click lands is what gets formatted, and it is also what
+ * the answer has to be compared against: the worker takes seconds on a large file, and the window
+ * stays live meanwhile, so the reader can go on typing or open another file. Either way the answer
+ * belongs to a document that is no longer the one in front of them, and applying it would throw away
+ * work. So the answer is discarded and the button is free again.
+ *
+ * The install at the end is one uninterrupted run: the editor module is loaded before anything is
+ * written, the document is checked again after it lands, and from the check to the last write there
+ * is no await, so no keystroke can arrive halfway through and be overwritten by the rest of it.
+ */
+async function formatDraft() {
+  const checkoutId = props.checkout?.id;
+  const path = props.path;
+  const fileIdentity = identity.value;
+  const language = effectiveLanguage.value;
+  if (formatting.value || !checkoutId || path === null || fileIdentity === null) return;
+  if (formattingParser(language) === null) return;
+  const formattedFrom = content.value;
+  const capturedView = editorView;
+  const generation = editorGeneration;
+  const revision = formatRevision;
+  formatting.value = true;
+  try {
+    // The config first, because the format cannot start without it, and the editor module after the
+    // answer, so the only await that sits between the comparison and the write is the one that
+    // loads code. Nothing is written until every answer is in, so the text cannot change halfway
+    // through being installed.
+    const config = await readPrettierConfig(checkoutId, path, props.origin);
+    const formatted = await formatSource({
+      content: formattedFrom,
+      language,
+      path,
+      options: config?.options,
+      configPath: config?.path,
+    });
+    // The module is loaded before anything is written rather than in the middle of the install, and
+    // the document is asked again once it lands: an editor can be torn down while a chunk is in
+    // flight, and an answer for a view nobody is showing is not this document's answer.
+    const { setEditorText } = await import("../lib/code-editor");
+    const view = editorView;
+    if (
+      identity.value !== fileIdentity ||
+      props.checkout?.id !== checkoutId ||
+      props.path !== path ||
+      content.value !== formattedFrom ||
+      effectiveLanguage.value !== language ||
+      editorGeneration !== generation ||
+      formatRevision !== revision ||
+      view !== capturedView ||
+      view === null
+    ) {
+      pushToast("The file changed while Prettier was working. Format it again.", "error");
+      return;
+    }
+    // From here to the last write there is no await, so the text cannot be changed underneath the
+    // install and half of it overwritten. The flag keeps CodeMirror's own change handler from
+    // registering the draft a second time; the call below is the one that registers it, once, as a
+    // reader's edit is.
+    syncingEditor = true;
+    try {
+      content.value = formatted;
+      setEditorText(view, formatted);
+    } finally {
+      syncingEditor = false;
+    }
+    updateDraft(formatted);
+  } catch (error) {
+    // The worker already reduced this to the one line Prettier says first, which is the one that
+    // names the line and the column.
+    reportCause(error);
+  } finally {
+    formatting.value = false;
+  }
 }
 
 function unavailableText() {
@@ -1053,35 +1187,37 @@ function onMarkdownLink(event: MouseEvent) {
         </div>
       </template>
     </section>
-    <!-- The save bar is the pane's last row and not a floating box over the source: anchored to
+    <!-- The action bar is the pane's last row and not a floating box over the source: anchored to
          the scrolling viewport it sat wherever the reader had reached, and the one thing a control
          that writes the file must never do is move away from where they are looking. It cannot be
          positioned against the pane either: `relative` here outranks the `absolute inset-0` the
          main pane hands this component, and the pane would end up sized by its content: the
          editor would grow with the file instead of scrolling it. -->
-    <footer
-      v-if="isDirty && mode === 'code'"
-      class="flex shrink-0 items-center justify-end gap-2 px-3 py-2"
-      aria-label="Unsaved changes"
-    >
+    <!--
+         The row is there for every Code view and not only for a dirty one, because Format is on
+         it and formatting a file nobody has edited yet is the case that needs it most. The save
+         and cancel controls are the half that waits for something to answer to.
+    -->
+    <footer v-if="mode === 'code'" class="document-actions">
       <button
         type="button"
-        aria-label="Cancel"
-        class="marvis-button marvis-button-subtle marvis-button-sm"
-        :disabled="saving"
-        @click="cancelDraft"
+        data-testid="format-file"
+        aria-label="Format with Prettier"
+        :title="formatTitle"
+        class="document-action"
+        :disabled="!canFormat || formatting"
+        @click="formatDraft"
       >
-        Cancel
+        <BracesIcon class="icon-xs" aria-hidden="true" />
       </button>
-      <button
-        type="button"
-        aria-label="Save"
-        class="marvis-button marvis-button-tinted marvis-button-sm"
-        :disabled="saving"
-        @click="saveDraft"
-      >
-        {{ saving ? "Saving…" : "Save" }}
-      </button>
+      <div v-if="isDirty" role="group" aria-label="Unsaved changes" class="flex items-center gap-2">
+        <button type="button" aria-label="Cancel" class="document-action" :disabled="saving" @click="cancelDraft">
+          Cancel
+        </button>
+        <button type="button" aria-label="Save" class="document-action" :disabled="saving" @click="saveDraft">
+          {{ saving ? "Saving…" : "Save" }}
+        </button>
+      </div>
     </footer>
     <!-- The document's scrollbar and the editor's are drawn over the box they measure rather than
          inside it: the browser's is off in both (in `style.css`) so a long line ends flush against
@@ -1092,6 +1228,42 @@ function onMarkdownLink(event: MouseEvent) {
 </template>
 
 <style scoped>
+.document-actions {
+  display: flex;
+  flex-shrink: 0;
+  align-items: center;
+  justify-content: space-between;
+  height: 27px;
+  padding: 0 8px;
+  border-top: 1px solid var(--marvis-border);
+}
+
+.document-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  height: 26px;
+  padding: 0 8px;
+  color: var(--marvis-text-faint);
+  cursor: pointer;
+}
+
+.document-action:hover:not(:disabled),
+.document-action:focus-visible {
+  color: var(--marvis-text);
+  background: var(--marvis-el-hover);
+}
+
+.document-action[aria-label="Save"]:hover:not(:disabled),
+.document-action[aria-label="Save"]:focus-visible {
+  color: var(--marvis-accent);
+}
+
+.document-action:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
 .media-preview {
   height: 100%;
   display: flex;

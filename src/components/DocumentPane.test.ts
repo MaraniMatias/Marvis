@@ -15,17 +15,56 @@ import type { Checkout, Repo } from "../domain/workspace";
 import type { ActiveGitSnapshot } from "../presentation/active-git-snapshot";
 import { useToasts } from "../presentation/toasts";
 import DocumentPane from "./DocumentPane.vue";
+import { failureAnswer, runFormat } from "../lib/prettier-format";
+import type { FormatAnswer, FormatCommand } from "../lib/prettier-format";
 import FileDiff from "./FileDiff.vue";
 import InspectorPane from "./InspectorPane.vue";
 import MainPane from "./MainPane.vue";
 
 const { toasts, dismiss } = useToasts();
 
+/**
+ * Stands in for the Prettier worker: the same answer, on this thread.
+ *
+ * This environment has no `Worker`, and what these tests are about is what the pane does with a
+ * formatted document. The reply waits a microtask because a real worker answers on another task,
+ * and the pane must not come to depend on the answer arriving first.
+ */
+class InlinePrettierWorker {
+  private listener: ((event: { data: FormatAnswer }) => void) | null = null;
+
+  /** How long the worker takes to answer, so a test can let the reader act before it does. */
+  static delay = 0;
+
+  addEventListener(type: string, listener: (event: { data: FormatAnswer }) => void): void {
+    if (type === "message") this.listener = listener;
+  }
+
+  removeEventListener(): void {}
+
+  terminate(): void {}
+
+  postMessage(command: FormatCommand): void {
+    void new Promise((resolve) => window.setTimeout(resolve, InlinePrettierWorker.delay)).then(async () => {
+      const answer = await runFormat(command.request).then(
+        (text): FormatAnswer => ({ id: command.id, text }),
+        (error: unknown): FormatAnswer => failureAnswer(command.id, error),
+      );
+      this.listener?.({ data: answer });
+    });
+  }
+}
+
+beforeEach(() => {
+  InlinePrettierWorker.delay = 0;
+});
+
 const mocks = vi.hoisted(() => ({
   listCheckoutFiles: vi.fn(),
   readCheckoutFile: vi.fn(),
   readCheckoutMedia: vi.fn(),
   writeCheckoutFile: vi.fn(),
+  readPrettierConfig: vi.fn(),
   getReviewRootPath: vi.fn(),
   readCheckoutMarkdownImage: vi.fn(),
   getGitDiff: vi.fn(),
@@ -41,6 +80,7 @@ vi.mock("../lib/ipc", () => ({
   readCheckoutFile: mocks.readCheckoutFile,
   readCheckoutMedia: mocks.readCheckoutMedia,
   writeCheckoutFile: mocks.writeCheckoutFile,
+  readPrettierConfig: mocks.readPrettierConfig,
   getReviewRootPath: mocks.getReviewRootPath,
   readCheckoutMarkdownImage: mocks.readCheckoutMarkdownImage,
   getGitDiff: mocks.getGitDiff,
@@ -399,6 +439,7 @@ describe("media documents", () => {
     const wrapper = mount(DocumentPane, { props: documentPaneProps("icon.svg", "code") });
     await vi.waitFor(() => expect(wrapper.find(".cm-editor").exists()).toBe(true));
     expect(wrapper.get(".code-editor-host").attributes("data-language")).toBe("xml");
+    expect(wrapper.get<HTMLButtonElement>('[data-testid="format-file"]').element.disabled).toBe(false);
     const { EditorView } = await import("@codemirror/view");
     const editor = EditorView.findFromDOM(wrapper.get(".cm-editor").element as HTMLElement)!;
     const draft = source.replace('width="1"', 'width="2"');
@@ -465,6 +506,7 @@ describe("DocumentPane", () => {
       hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
     });
     mocks.getReviewRootPath.mockResolvedValue("/Users/dev/.marvis/tmp/code-reviews");
+    vi.stubGlobal("Worker", InlinePrettierWorker);
     for (const toast of [...toasts.value]) dismiss(toast.id);
   });
 
@@ -680,6 +722,195 @@ describe("DocumentPane", () => {
       "const answer = 42;",
       "checkout",
     );
+    expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("offers Prettier for a grammar it can parse and says why it cannot for the rest", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/main.rs", content: "fn main() {}" });
+    const rust = mount(DocumentPane, { props: documentPaneProps("src/main.rs") });
+    await vi.waitFor(() => expect(rust.find(".cm-content").exists()).toBe(true));
+    const refused = rust.get<HTMLButtonElement>('[data-testid="format-file"]');
+    expect(refused.element.disabled).toBe(true);
+    expect(refused.attributes("title")).toBe("Prettier does not format Rust.");
+    rust.unmount();
+
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const x=1" });
+    const typescript = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await vi.waitFor(() => expect(typescript.find(".cm-content").exists()).toBe(true));
+    const offered = typescript.get<HTMLButtonElement>('[data-testid="format-file"]');
+    expect(offered.element.disabled).toBe(false);
+    expect(offered.text()).toBe("");
+    expect(offered.attributes("aria-label")).toBe("Format with Prettier");
+    expect(offered.attributes("title")).toContain("Save it or Cancel it");
+    typescript.unmount();
+  });
+
+  it("formats the file into a draft that Save writes against the bytes it read", async () => {
+    const source = "const   answer   =   42";
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: source });
+    mocks.readPrettierConfig.mockResolvedValue({
+      path: "app.ts",
+      options: { overrides: [{ files: "*.ts", options: { printWidth: 120 } }] },
+    });
+    mocks.writeCheckoutFile.mockResolvedValue(undefined);
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+    expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(false);
+
+    await wrapper.get('[data-testid="format-file"]').trigger("click");
+    await vi.waitFor(() => expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(true));
+    const { EditorView } = await import("@codemirror/view");
+    const editor = EditorView.findFromDOM(wrapper.get(".cm-editor").element as HTMLElement)!;
+    expect(editor.state.doc.toString()).toBe("const answer = 42;\n");
+    expect(mocks.readPrettierConfig).toHaveBeenCalledWith("checkout:one", "src/app.ts", "checkout");
+    // Formatting is a proposal: nothing reaches the disk until the reader says so.
+    expect(mocks.writeCheckoutFile).not.toHaveBeenCalled();
+
+    await wrapper.get('button[aria-label="Save"]').trigger("click");
+    await flushPromises();
+    expect(mocks.writeCheckoutFile).toHaveBeenCalledWith(
+      "checkout:one",
+      "src/app.ts",
+      "const answer = 42;\n",
+      source,
+      "checkout",
+    );
+    expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(false);
+    wrapper.unmount();
+  });
+
+  it("throws a formatted document away on Cancel the way it throws away a typed one", async () => {
+    const source = "const   answer   =   42";
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: source });
+    mocks.writeCheckoutFile.mockResolvedValue(undefined);
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    await wrapper.get('[data-testid="format-file"]').trigger("click");
+    await vi.waitFor(() => expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(true));
+    await wrapper.get('button[aria-label="Cancel"]').trigger("click");
+    await flushPromises();
+
+    const { EditorView } = await import("@codemirror/view");
+    const editor = EditorView.findFromDOM(wrapper.get(".cm-editor").element as HTMLElement)!;
+    expect(editor.state.doc.toString()).toBe(source);
+    expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(false);
+    expect(mocks.writeCheckoutFile).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("throws away a formatting it could not apply to what is on screen now", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const   x=1" });
+    mocks.readPrettierConfig.mockResolvedValue(null);
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    // The worker takes seconds on a large file, and the window stays live while it works, so the
+    // reader can keep typing. Applying the answer would throw those keystrokes away.
+    InlinePrettierWorker.delay = 25;
+    const click = wrapper.get('[data-testid="format-file"]').trigger("click");
+    const { EditorView } = await import("@codemirror/view");
+    const editor = EditorView.findFromDOM(wrapper.get(".cm-editor").element as HTMLElement)!;
+    editor.dispatch({ changes: { from: editor.state.doc.length, insert: "\n// typed while it worked" } });
+    await click;
+    await vi.waitFor(() =>
+      expect(toasts.value.at(-1)?.message).toBe("The file changed while Prettier was working. Format it again."),
+    );
+
+    const text = editor.state.doc.toString();
+    expect(text).toContain("typed while it worked");
+    expect(text).toContain("const   x=1");
+    expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(true);
+    expect(wrapper.get('[data-testid="format-file"]').text()).toBe("");
+    wrapper.unmount();
+  });
+
+  it("throws away a formatting for a file the reader has navigated away from", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const   x=1" });
+    mocks.readPrettierConfig.mockResolvedValue(null);
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    // The worker takes seconds on a large file, and the window stays live while it works, so the
+    // reader can open another file before it answers. The answer belongs to a document that is no
+    // longer the one on screen, and applying it would put the old file's text in the new one's pane.
+    InlinePrettierWorker.delay = 40;
+    await wrapper.get('[data-testid="format-file"]').trigger("click");
+    await wrapper.setProps({ path: "src/other.ts" });
+    await vi.waitFor(() =>
+      expect(toasts.value.at(-1)?.message).toBe("The file changed while Prettier was working. Format it again."),
+    );
+
+    // The pane is showing the other file, and neither document was written.
+    expect(mocks.writeCheckoutFile).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it.each(["edit and undo", "language and back", "editor replacement"])(
+    "discards stale formatting after %s",
+    async (race) => {
+      const source = "const   x=1";
+      mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: source });
+      let resolveConfig!: (value: null) => void;
+      mocks.readPrettierConfig.mockReturnValue(
+        new Promise((resolve) => {
+          resolveConfig = resolve;
+        }),
+      );
+      const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+      await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+      await wrapper.get('[data-testid="format-file"]').trigger("click");
+      const { EditorView } = await import("@codemirror/view");
+      if (race === "edit and undo") {
+        const editor = EditorView.findFromDOM(wrapper.get(".cm-editor").element as HTMLElement)!;
+        editor.dispatch({ changes: { from: editor.state.doc.length, insert: " " } });
+        editor.dispatch({ changes: { from: 0, to: editor.state.doc.length, insert: source } });
+      } else if (race === "language and back") {
+        await pickLanguage(wrapper, "Plain text");
+        await pickLanguage(wrapper, "Auto");
+      } else {
+        await wrapper.setProps({ mode: "view" });
+        await flushPromises();
+        await wrapper.setProps({ mode: "code" });
+      }
+      await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+      resolveConfig(null);
+      await vi.waitFor(() =>
+        expect(toasts.value.at(-1)?.message).toBe("The file changed while Prettier was working. Format it again."),
+      );
+      const editor = EditorView.findFromDOM(wrapper.get(".cm-editor").element as HTMLElement)!;
+      expect(editor.state.doc.toString()).toBe(source);
+      expect(mocks.writeCheckoutFile).not.toHaveBeenCalled();
+      wrapper.unmount();
+    },
+  );
+
+  it("leaves the editor registering keystrokes after a failed format", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const = ;" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+    const { EditorView } = await import("@codemirror/view");
+    const editor = EditorView.findFromDOM(wrapper.get(".cm-editor").element as HTMLElement)!;
+
+    await wrapper.get('[data-testid="format-file"]').trigger("click");
+    await vi.waitFor(() => expect(toasts.value.length).toBeGreaterThan(0));
+
+    // A failure must not leave the pane holding a flag that makes every later edit look like one of
+    // its own, which is what would silently stop the draft from ever registering again.
+    editor.dispatch({ changes: { from: editor.state.doc.length, insert: "x" } });
+    await flushPromises();
+    expect(editor.state.doc.toString()).toBe("const = ;x");
+    wrapper.unmount();
+  });
+
+  it("names the place Prettier could not read the file instead of formatting it anyway", async () => {
+    mocks.readCheckoutFile.mockResolvedValue({ path: "src/app.ts", content: "const = ;" });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("src/app.ts") });
+    await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
+
+    await wrapper.get('[data-testid="format-file"]').trigger("click");
+    await vi.waitFor(() => expect(toasts.value.at(-1)?.message).toBe("Variable declaration expected. (1:7)"));
     expect(wrapper.find('[aria-label="Unsaved changes"]').exists()).toBe(false);
     wrapper.unmount();
   });

@@ -11,6 +11,11 @@ export default defineConfig({
     port: 1420,
     strictPort: true,
   },
+  // The Prettier worker code-splits, because its plugins are dynamic imports and a reader who only
+  // ever formats CSS should not download the TypeScript parser. Rollup refuses to code-split a
+  // worker bundled as an IIFE, and `es` is the format a module worker has anyway on every webview
+  // this app runs in.
+  worker: { format: "es" },
   test: {
     environment: "node",
     include: ["src/**/*.test.ts"],

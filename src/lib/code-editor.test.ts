@@ -2,13 +2,14 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { forceParsing, syntaxTree } from "@codemirror/language";
 import { redo, undo } from "@codemirror/commands";
-import { Text } from "@codemirror/state";
+import { EditorSelection, Text } from "@codemirror/state";
 import type { EditorView } from "@codemirror/view";
 import type { IndentationSettings } from "../domain/settings";
 import {
   createCodeEditor,
   setEditorChangedLines,
   setEditorIndentation,
+  setEditorText,
   CHANGED_LINE_CLASS,
   FRONT_MATTER_SCAN_LINES,
 } from "./code-editor";
@@ -431,5 +432,58 @@ describe("the lines the checkout has changed", () => {
 
   it("does nothing to a view this build did not build", () => {
     expect(() => setEditorChangedLines({} as EditorView, [{ start: 1, end: 1 }])).not.toThrow();
+  });
+});
+
+describe("setEditorText", () => {
+  it("puts the new text in and leaves the reader where they were", () => {
+    const view = mount("typescript", "const a = 1;\nconst b = 2;");
+    view.dispatch({ selection: { anchor: 21, head: 21 } });
+
+    setEditorText(view, "const a = 1;\nconst b = 2000;");
+
+    expect(view.state.doc.toString()).toBe("const a = 1;\nconst b = 2000;");
+    expect(view.state.selection.main.head).toBe(21);
+  });
+
+  it("clamps a position the shorter text no longer has", () => {
+    const view = mount("typescript", "const a = 1;\nconst b = 2;");
+    view.dispatch({ selection: { anchor: 23, head: 23 } });
+
+    setEditorText(view, "const a = 1;\n");
+
+    expect(view.state.selection.main.head).toBe(view.state.doc.length);
+  });
+
+  it("keeps every range of a multi-cursor selection", () => {
+    const view = mount("typescript", "const a = 1;\nconst b = 2;");
+    view.dispatch({ selection: EditorSelection.create([EditorSelection.cursor(6), EditorSelection.cursor(20)], 1) });
+
+    setEditorText(view, "const a = 1;\nconst b = 22;");
+
+    expect(view.state.selection.ranges.map((range) => range.head)).toEqual([6, 20]);
+    expect(view.state.selection.mainIndex).toBe(1);
+  });
+
+  it("wakes nobody when the text is what the editor already holds", () => {
+    const onChange = vi.fn();
+    const host = document.createElement("div");
+    hosts.add(host);
+    document.body.appendChild(host);
+    const view = createCodeEditor({
+      parent: host,
+      content: "const a = 1;",
+      language: "typescript",
+      readingPosition: { top: 0, left: 0 },
+      onChange,
+      onScroll: () => {},
+    });
+    views.add(view);
+    view.dispatch({ selection: { anchor: 5, head: 5 } });
+
+    setEditorText(view, "const a = 1;");
+
+    expect(onChange).not.toHaveBeenCalled();
+    expect(view.state.selection.main.head).toBe(5);
   });
 });

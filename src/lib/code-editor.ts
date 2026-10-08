@@ -23,6 +23,7 @@ import {
 } from "@codemirror/language";
 import {
   Compartment,
+  EditorSelection,
   EditorState,
   RangeSet,
   RangeSetBuilder,
@@ -310,6 +311,30 @@ export function setEditorIndentation(view: EditorView, indentation: IndentationS
   const compartment = indentationCompartments.get(view);
   if (!compartment) return;
   view.dispatch({ effects: compartment.reconfigure(indentationExtension(indentation)) });
+}
+
+/**
+ * Puts text the reader did not type into an editor that is already open.
+ *
+ * The selection is carried across by hand because the change itself would not: replacing a whole
+ * document maps every position inside it onto the start of the replacement, which is how formatting
+ * a file would otherwise put the caret on line one. The clamped ranges are the same ones the reader
+ * had, at the closest offsets the new text has to offer.
+ *
+ * Nothing is dispatched when the text is what the editor already holds, so the listener below is
+ * not woken by a no-op and the undo history gains nothing.
+ */
+export function setEditorText(view: EditorView, text: string): void {
+  if (view.state.doc.toString() === text) return;
+  const { ranges, mainIndex } = view.state.selection;
+  const end = text.length;
+  view.dispatch({
+    changes: { from: 0, to: view.state.doc.length, insert: text },
+    selection: EditorSelection.create(
+      ranges.map((range) => EditorSelection.range(Math.min(range.anchor, end), Math.min(range.head, end))),
+      mainIndex,
+    ),
+  });
 }
 
 /**

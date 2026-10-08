@@ -232,6 +232,9 @@ importers:
       '@lucide/vue':
         specifier: ^1.48.0
         version: 1.48.0(vue@3.5.43(typescript@5.9.3))
+      '@prettier/plugin-xml':
+        specifier: ^3.4.2
+        version: 3.4.2(prettier@3.9.9)
       '@tauri-apps/api':
         specifier: ^2.12.0
         version: 2.12.0
@@ -265,6 +268,12 @@ importers:
       markdown-it-task-lists:
         specifier: ^2.1.1
         version: 2.1.1
+      picomatch:
+        specifier: ^4.0.7
+        version: 4.0.7
+      prettier:
+        specifier: ^3.6.2
+        version: 3.9.9
       reka-ui:
         specifier: ^2.5.0
         version: 2.10.5(vue@3.5.43(typescript@5.9.3))
@@ -287,6 +296,9 @@ importers:
       '@types/markdown-it':
         specifier: ^14.2.0
         version: 14.2.0
+      '@types/picomatch':
+        specifier: ^4.0.3
+        version: 4.0.3
       '@vitejs/plugin-vue':
         specifier: ^6.0.1
         version: 6.0.9(vite@7.3.6(@types/node@26.6.2)(jiti@2.7.0)(lightningcss@1.32.0))(vue@3.5.43(typescript@5.9.3))
@@ -311,9 +323,6 @@ importers:
       happy-dom:
         specifier: ^20.14.5
         version: 20.14.5
-      prettier:
-        specifier: ^3.6.2
-        version: 3.9.9
       svgo:
         specifier: ^3.3.5
         version: 3.3.5
@@ -738,6 +747,11 @@ packages:
   '@one-ini/wasm@0.2.1':
     resolution: {integrity: sha512-TUqERXGNTifZ9y2g3wPxQrw3HpHv/02DsW3D90T9x0hhonrL1ZqpSmNrU2XkoIq0fP1N6gZfVQzy2Fw1ZvGBNg==}
 
+  '@prettier/plugin-xml@3.4.2':
+    resolution: {integrity: sha512-/UyNlHfkuLXG6Ed85KB0WBF283xn2yavR+UtRibBRUcvEJId2DSLdGXwJ/cDa1X++SWDPzq3+GSFniHjkNy7yg==}
+    peerDependencies:
+      prettier: ^3.0.0
+
   '@rolldown/pluginutils@1.0.1':
     resolution: {integrity: sha512-2j9bGt5Jh8hj+vPtgzPtl72j0yRxHAyumoo6TNfAjsLB04UtpSvPbPcDcBMxz7n+9CYB0c1GxQFxYRg2jimqGw==}
 
@@ -1136,6 +1150,9 @@ packages:
   '@types/node@26.6.2':
     resolution: {integrity: sha512-X1P21scMv4zGKLYqjdGjaKa7COa0RKVYYZZN/NfvLQ1JegxFhdhpZG/Lyn8AXx6CDUavKAd11v6BvfpkDByK8g==}
 
+  '@types/picomatch@4.0.3':
+    resolution: {integrity: sha512-iG0T6+nYJ9FAPmx9SsUlnwcq1ZVRuCXcVEvWnntoPlrOpwtSTKNDC9uVAxTsC3PUvJ+99n4RpAcNgBbHX3JSnQ==}
+
   '@types/trusted-types@2.0.7':
     resolution: {integrity: sha512-ScaPdn1dQczgbl0QFTeTOmVHFULt394XJgOQNoyVhZ6r2vLnMLJfBPd53SB52T/3G36VI1/g2MZaX0cwDuXsfw==}
 
@@ -1325,6 +1342,9 @@ packages:
     peerDependencies:
       vue: ^3.5.0
 
+  '@xml-tools/parser@1.0.11':
+    resolution: {integrity: sha512-aKqQ077XnR+oQtHJlrAflaZaL7qZsulWc/i/ZEooar5JiWj1eLt0+Wg28cpa+XLney107wXqneC+oG1IZvxkTA==}
+
   '@xterm/addon-clipboard@0.2.0':
     resolution: {integrity: sha512-Dl31BCtBhLaUEECUbEiVcCLvLBbaeGYdT7NofB8OJkGTD3MWgBsaLjXvfGAD4tQNHhm6mbKyYkR7XD8kiZsdNg==}
 
@@ -1425,6 +1445,9 @@ packages:
 
   character-entities-legacy@3.0.0:
     resolution: {integrity: sha512-RpPp0asT/6ufRm//AJVwpViZbGM/MkjQFxJccQRHmISF/22NBtsHqAWmL+/pmkPWoIUJdWyeVleTl1wydHATVQ==}
+
+  chevrotain@7.1.1:
+    resolution: {integrity: sha512-wy3mC1x4ye+O+QkEinVJkPf5u2vsrDIYW9G7ZuwFl6v/Yu0LwUuT2POsb+NUWApebyxfkQq6+yDfRExbnI5rcw==}
 
   color-convert@2.0.1:
     resolution: {integrity: sha512-RRECPsj7iu/xb5oKYcsFHSppFNnsj/52OVTRKb4zP5onXwVF3zVmmToNcOfGC+CRDpfK/U584fMg38ZHCaElKQ==}
@@ -2070,6 +2093,9 @@ packages:
 
   regex@6.1.0:
     resolution: {integrity: sha512-6VwtthbV4o/7+OaAF9I5L5V3llLEsoPyq9P1JVXkedTP33c7MfCG0/5NOPcSJn0TzXcG9YUrR0gQSWioew3LDg==}
+
+  regexp-to-ast@0.5.0:
+    resolution: {integrity: sha512-tlbJqcMHnPKI9zSrystikWKwHkBqu2a/Sgw01h3zFjvYrMxEDYHzzoMZnUrbIfpTFEsoRnnviOXNCzFiSc54Qw==}
 
   reka-ui@2.10.5:
     resolution: {integrity: sha512-/8o0y9BThE0hcHKFg+3770tWcJh3qKdOEFxLOPb9HIajXeFoH/J530cZH62jUJunbqwBgpSBL9v7nB8LJ5pDXA==}
@@ -2838,6 +2864,11 @@ snapshots:
 
   '@one-ini/wasm@0.2.1': {}
 
+  '@prettier/plugin-xml@3.4.2(prettier@3.9.9)':
+    dependencies:
+      '@xml-tools/parser': 1.0.11
+      prettier: 3.9.9
+
   '@rolldown/pluginutils@1.0.1': {}
 
   '@rollup/rollup-android-arm-eabi@4.63.4':
@@ -3127,6 +3158,8 @@ snapshots:
     dependencies:
       undici-types: 8.9.0
 
+  '@types/picomatch@4.0.3': {}
+
   '@types/trusted-types@2.0.7':
     optional: true
 
@@ -3394,6 +3427,10 @@ snapshots:
     dependencies:
       vue: 3.5.43(typescript@5.9.3)
 
+  '@xml-tools/parser@1.0.11':
+    dependencies:
+      chevrotain: 7.1.1
+
   '@xterm/addon-clipboard@0.2.0':
     dependencies:
       js-base64: 3.9.4
@@ -3478,6 +3515,10 @@ snapshots:
   character-entities-html4@2.1.0: {}
 
   character-entities-legacy@3.0.0: {}
+
+  chevrotain@7.1.1:
+    dependencies:
+      regexp-to-ast: 0.5.0
 
   color-convert@2.0.1:
     dependencies:
@@ -4123,6 +4164,8 @@ snapshots:
   regex@6.1.0:
     dependencies:
       regex-utilities: 2.3.0
+
+  regexp-to-ast@0.5.0: {}
 
   reka-ui@2.10.5(vue@3.5.43(typescript@5.9.3)):
     dependencies:

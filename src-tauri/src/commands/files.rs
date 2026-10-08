@@ -4,7 +4,7 @@ use tauri::State;
 
 use crate::{
     domain::{
-        files::{CheckoutImage, FileContent, FileProbe, FileTree},
+        files::{CheckoutImage, FileContent, FileProbe, FileTree, PrettierConfig},
         ipc::IpcError,
     },
     persistence::Database,
@@ -51,6 +51,26 @@ pub async fn file_read(
     let review_root = review_root.0.clone();
     tauri::async_runtime::spawn_blocking(move || {
         services::files::read(&database, &checkout_id, &origin, &path, &review_root)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+/// The Prettier options that govern a file, read from the nearest config above it. `None` is
+/// the answer for a checkout that configures nothing, which is not an error: Prettier has defaults
+/// and this is how the caller learns it may use them.
+#[tauri::command]
+pub async fn file_read_prettier_config(
+    checkout_id: String,
+    path: String,
+    origin: String,
+    database: State<'_, Database>,
+    review_root: State<'_, ReviewRoot>,
+) -> Result<Option<PrettierConfig>, IpcError> {
+    let database = database.inner().clone();
+    let review_root = review_root.0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        services::files::read_prettier_config(&database, &checkout_id, &origin, &path, &review_root)
     })
     .await
     .map_err(operation_error)?

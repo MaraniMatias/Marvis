@@ -304,6 +304,7 @@ fn main() {
             commands::files::file_read_media,
             commands::files::file_probe,
             commands::files::file_write,
+            commands::files::file_read_prettier_config,
             commands::files::review_export_markdown,
             commands::files::review_root_path,
             commands::files::file_read_markdown_image,

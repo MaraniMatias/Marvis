@@ -1,7 +1,7 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Channel } from "@tauri-apps/api/core";
 import type { OpenedFolder } from "../domain/folder";
-import type { CheckoutImage, FileContent, FileProbe, FileTree } from "../domain/files";
+import type { CheckoutImage, FileContent, FileProbe, FileTree, PrettierConfig } from "../domain/files";
 import type { GitCheckoutDiffStats, GitDiffPage, GitFileDiff, GitFileDiffStats, GitStatus } from "../domain/git";
 import type { ReviewAnchorCheck, ReviewNote, ReviewRound, ReviewSide, ReviewTarget } from "../domain/review";
 import type { RecentPath, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
@@ -68,6 +68,18 @@ export function writeCheckoutFile(
   origin: DocumentOrigin,
 ): Promise<void> {
   return invoke<void>("file_write", { checkoutId, path, content, expectedContent, origin });
+}
+
+/**
+ * The Prettier options that govern a file, resolved by walking up from its own directory to the
+ * root of the checkout. `null` is the ordinary answer for a checkout that configures nothing.
+ */
+export function readPrettierConfig(
+  checkoutId: string,
+  path: string,
+  origin: DocumentOrigin,
+): Promise<PrettierConfig | null> {
+  return invoke<PrettierConfig | null>("file_read_prettier_config", { checkoutId, path, origin });
 }
 
 export function exportReviewMarkdown(date: string, timestamp: string, markdown: string): Promise<string> {

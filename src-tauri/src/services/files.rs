@@ -13,7 +13,10 @@ use base64::{engine::general_purpose::STANDARD as BASE64, Engine};
 use crate::{
     domain::review::MAX_ROUND_PROMPT_BYTES,
     domain::{
-        files::{CheckoutImage, FileContent, FileEntry, FileEntryKind, FileProbe, FileTree},
+        files::{
+            CheckoutImage, FileContent, FileEntry, FileEntryKind, FileProbe, FileTree,
+            PrettierConfig,
+        },
         ipc::{IpcError, IpcErrorCode},
         workspace::{Checkout, Repo, RepoKind},
     },
@@ -23,6 +26,9 @@ use crate::{
 const MAX_FILE_BYTES: u64 = 1024 * 1024;
 const MAX_IMAGE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_MEDIA_HEADER_BYTES: u64 = 64 * 1024;
+/// A Prettier config is a few hundred bytes. Anything past this is not one, and reading it would
+/// mean handing the formatter a document it never asked for.
+const MAX_CONFIG_BYTES: u64 = 256 * 1024;
 const MAX_DIRECTORY_ENTRIES: usize = 2000;
 /// Git's own bookkeeping, never shown in the tree. `check-ignore` reports it ignored on every
 /// repository, which would otherwise put it in the list the moment ignores became visible.
@@ -382,6 +388,234 @@ pub fn write(
     }
 
     atomic_write(&path, content.as_bytes(), permissions)
+}
+
+/// The Prettier options that govern a file, found by walking up from the file's own
+/// directory to the root of the checkout (or of the review folder) and stopping at the first
+/// config that holds any. `None` is the answer for a checkout that configures nothing, and not a
+/// failure: Prettier has defaults, and a file with no config is formatted with them.
+///
+/// Only the spellings a document can be read as are looked for. `.prettierrc.js`,
+/// `prettier.config.mjs` and the rest are JavaScript, and there is no Node here to evaluate one.
+/// A project that keeps its options in a script is formatted with the defaults rather than not
+/// formatted at all, which is the only honest answer this process can give.
+pub fn read_prettier_config(
+    database: &Database,
+    checkout_id: &str,
+    origin: &str,
+    relative_path: &str,
+    review_root: &Path,
+) -> Result<Option<PrettierConfig>, IpcError> {
+    let (_repo, checkout) = registered_checkout(database, checkout_id)?;
+    let (root, relative) = match origin {
+        "checkout" => {
+            ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
+            (
+                canonical_root(Path::new(&checkout.canonical_path))?,
+                parse_relative_path(relative_path)?,
+            )
+        }
+        "review" => (
+            canonical_root(review_root)?,
+            parse_review_relative_path(relative_path)?,
+        ),
+        _ => return Err(invalid_origin()),
+    };
+    // The file's own directory first and the root last, so a config next to the file wins over the
+    // one in the project, exactly as Prettier resolves it. `parent()` of a bare name is empty and
+    // empty is what the root is, so the walk visits every directory once and stops there.
+    let mut directory = relative.parent().map(Path::to_path_buf).unwrap_or_default();
+    loop {
+        let candidate = root.join(&directory);
+        if let Some(options) = prettier_options_in(&candidate, &root)? {
+            return Ok(Some(PrettierConfig {
+                options,
+                path: relative
+                    .strip_prefix(&directory)
+                    .unwrap_or(&relative)
+                    .to_string_lossy()
+                    .replace(std::path::MAIN_SEPARATOR, "/"),
+            }));
+        }
+        if directory.as_os_str().is_empty() {
+            return Ok(None);
+        }
+        directory = directory
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_default();
+    }
+}
+
+/// Prettier's own search order within one directory, minus every spelling that would need a
+/// JavaScript runtime. `package.json` is in it because a project may keep its options under a
+/// `prettier` key, and one without that key is simply not a config.
+const PRETTIER_CONFIG_FILES: &[(&str, ConfigSyntax)] = &[
+    ("package.json", ConfigSyntax::Json),
+    // Prettier reads `.prettierrc` as JSON first and falls back to YAML, and so does this.
+    (".prettierrc", ConfigSyntax::JsonOrYaml),
+    (".prettierrc.json", ConfigSyntax::Json),
+    (".prettierrc.yml", ConfigSyntax::Yaml),
+    (".prettierrc.yaml", ConfigSyntax::Yaml),
+    ("prettier.config.json", ConfigSyntax::Json),
+    ("prettier.config.yaml", ConfigSyntax::Yaml),
+    ("prettier.config.yml", ConfigSyntax::Yaml),
+];
+
+#[derive(Clone, Copy)]
+enum ConfigSyntax {
+    Json,
+    Yaml,
+    /// `.prettierrc` and nothing else: the name carries no extension, so the syntax is whatever
+    /// parses. JSON first because it is the stricter of the two and the one the CLI tries.
+    JsonOrYaml,
+}
+
+/// A config's text as the options it holds.
+///
+/// Both spellings land on one error type because they do not have the same one, and the message is
+/// the only part of either that ever reaches the caller. `JsonOrYaml` reports whichever failure
+/// happened last, because a file that is neither was not going to be either of them.
+fn parse_config(text: &str, syntax: ConfigSyntax) -> Result<serde_json::Value, String> {
+    let as_json = || serde_json::from_str::<serde_json::Value>(text).map_err(|e| e.to_string());
+    let as_yaml = || serde_yaml::from_str::<serde_json::Value>(text).map_err(|e| e.to_string());
+    match syntax {
+        ConfigSyntax::Json => as_json(),
+        ConfigSyntax::Yaml => as_yaml(),
+        ConfigSyntax::JsonOrYaml => {
+            as_json().or_else(|json| as_yaml().map_err(|yaml| format!("{json}; as YAML: {yaml}")))
+        }
+    }
+}
+
+/// The root both the walk and every read are measured against, canonicalized once.
+///
+/// Containment is asked about the real directory and not about the spelling: a checkout reached
+/// through a symlink and a file named inside it are the same place, and a root left uncanonicalized
+/// would refuse its own files while accepting ones a symlink points at.
+fn canonical_root(root: &Path) -> Result<PathBuf, IpcError> {
+    fs::canonicalize(root).map_err(|error| {
+        filesystem_error("could not resolve the root of the folder being read", error)
+    })
+}
+
+/// The options in one directory, or `None` when it holds no config that counts.
+///
+/// Every path here is canonicalized and checked against `root` before it is opened. A directory
+/// reached through a symlink and a config file that is itself one are both ways out of the folder
+/// the reader asked about, and a name is not a containment check: `is_file` follows links.
+fn prettier_options_in(
+    directory: &Path,
+    root: &Path,
+) -> Result<Option<serde_json::Value>, IpcError> {
+    for (name, syntax) in PRETTIER_CONFIG_FILES {
+        let Some(path) = contained_path(&directory.join(name), root, name)? else {
+            continue;
+        };
+        if !path.is_file() {
+            continue;
+        }
+        let text = read_config_text(&path)?;
+        let parsed = parse_config(&text, *syntax);
+        if *name == "package.json" {
+            // A package.json that will not parse, or that carries no `prettier` key, says
+            // nothing about Prettier. It is not this function's error to report, and the walk
+            // goes on to the next spelling in the same directory.
+            let Ok(value) = parsed else { continue };
+            let Some(options) = value.get("prettier") else {
+                continue;
+            };
+            return checked_options(options, name);
+        }
+        return checked_options(
+            &parsed.map_err(|error| unparseable_config(name, error))?,
+            name,
+        );
+    }
+    Ok(None)
+}
+
+/// The real path behind a candidate, once it is known to be inside `root`.
+///
+/// A candidate that does not exist is not an error: most of these names are absent in most
+/// directories, and the walk is looking for the one that is there. Anything else that stops
+/// `canonicalize` from answering is an error and not an absence, because a config this process
+/// cannot open is one the reader believes it is formatting with and is not. `canonicalize` is what
+/// makes the check safe: it resolves every link on the way, so a symlink out of the folder shows up
+/// as a path that no longer starts with where it began.
+fn contained_path(candidate: &Path, root: &Path, name: &str) -> Result<Option<PathBuf>, IpcError> {
+    let resolved = match candidate.canonicalize() {
+        Ok(resolved) => resolved,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => {
+            return Err(IpcError::new(
+                IpcErrorCode::OperationFailed,
+                format!("{name} could not be resolved: {error}"),
+            ));
+        }
+    };
+    if !resolved.starts_with(root) {
+        return Err(IpcError::new(
+            IpcErrorCode::PathOutsideCheckout,
+            format!("{name} resolves outside the folder being read"),
+        ));
+    }
+    Ok(Some(resolved))
+}
+
+/// The options a config holds, with the two keys that are not the caller's to set.
+///
+/// `parser` is chosen from the file's own language, and `plugins` names modules that resolve
+/// against this process' filesystem rather than the bundles the reader loads. A config carrying
+/// either would fail every format instead of describing one, so they are dropped here rather than
+/// left to fail once per click.
+fn checked_options(
+    value: &serde_json::Value,
+    name: &str,
+) -> Result<Option<serde_json::Value>, IpcError> {
+    let Some(options) = value.as_object() else {
+        return Err(IpcError::new(
+            IpcErrorCode::OperationFailed,
+            format!("{name} must hold a mapping of Prettier options"),
+        ));
+    };
+    let mut options = options.clone();
+    options.remove("parser");
+    options.remove("plugins");
+    Ok(Some(serde_json::Value::Object(options)))
+}
+
+fn read_config_text(path: &Path) -> Result<String, IpcError> {
+    let metadata =
+        fs::metadata(path).map_err(|error| filesystem_error("could not inspect config", error))?;
+    // The read is bounded by `take` and the allocation by `min`, so a config that lies about its
+    // size on disk costs the limit and not whatever it claims.
+    let mut bytes = Vec::with_capacity(metadata.len().min(MAX_CONFIG_BYTES) as usize);
+    File::open(path)
+        .and_then(|file| file.take(MAX_CONFIG_BYTES + 1).read_to_end(&mut bytes))
+        .map_err(|error| filesystem_error("could not read config", error))?;
+    if bytes.len() as u64 > MAX_CONFIG_BYTES {
+        return Err(IpcError::new(
+            IpcErrorCode::FileTooLarge,
+            format!(
+                "config file exceeds the {} KiB limit",
+                MAX_CONFIG_BYTES / 1024
+            ),
+        ));
+    }
+    String::from_utf8(bytes).map_err(|_| {
+        IpcError::new(
+            IpcErrorCode::OperationFailed,
+            "config file is not valid UTF-8",
+        )
+    })
+}
+
+fn unparseable_config(name: &str, error: impl std::fmt::Display) -> IpcError {
+    IpcError::new(
+        IpcErrorCode::OperationFailed,
+        format!("{name} is not a readable Prettier config: {error}"),
+    )
 }
 
 pub fn export_review_markdown(
@@ -1121,8 +1355,8 @@ mod tests {
     };
 
     use super::{
-        export_review_markdown, list, probe, read, read_markdown_image, write, FileContent,
-        IpcError, MAX_ROUND_PROMPT_BYTES,
+        export_review_markdown, list, probe, read, read_markdown_image, read_prettier_config,
+        write, FileContent, IpcError, MAX_ROUND_PROMPT_BYTES,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -1375,6 +1609,327 @@ mod tests {
             ["second.txt"]
         );
         assert!(list(&database, "checkout:unregistered", ".").is_err());
+    }
+
+    fn prettier_config(
+        database: &Database,
+        checkout_id: &str,
+        origin: &str,
+        path: &str,
+        review_root: &Path,
+    ) -> Result<Option<serde_json::Value>, IpcError> {
+        read_prettier_config(database, checkout_id, origin, path, review_root)
+            .map(|config| config.map(|config| config.options))
+    }
+
+    #[test]
+    fn prettier_options_come_from_the_nearest_config_above_the_file() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join("src/nested")).unwrap();
+        fs::write(
+            root.join(".prettierrc"),
+            r#"{ "printWidth": 120, "parser": "yaml", "plugins": ["./plugin.js"] }"#,
+        )
+        .unwrap();
+        // The nearest config wins, and the two keys the reader owns are gone by the time it sees
+        // any of this: the parser is the file's own language and the plugins are the bundles the
+        // reader loads, and neither is anything a config on disk may name.
+        fs::write(root.join("src/.prettierrc.yaml"), "semi: false\n").unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+
+        let nested = prettier_config(
+            &database,
+            checkout_id,
+            "checkout",
+            "src/nested/app.ts",
+            Path::new(""),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(nested, serde_json::json!({ "semi": false }));
+
+        let at_root = prettier_config(
+            &database,
+            checkout_id,
+            "checkout",
+            "README.md",
+            Path::new(""),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(at_root, serde_json::json!({ "printWidth": 120 }));
+    }
+
+    #[test]
+    fn a_prettierrc_with_no_extension_is_read_as_yaml_when_it_is_not_json() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join("src")).unwrap();
+        // The name carries no extension, and this is the shape people actually write in it.
+        fs::write(
+            root.join(".prettierrc"),
+            "printWidth: 120\nsingleQuote: true\n",
+        )
+        .unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+
+        assert_eq!(
+            prettier_config(
+                &database,
+                checkout_id,
+                "checkout",
+                "src/app.ts",
+                Path::new("")
+            )
+            .unwrap()
+            .unwrap(),
+            serde_json::json!({ "printWidth": 120, "singleQuote": true })
+        );
+    }
+
+    #[test]
+    fn config_overrides_are_carried_to_the_worker_without_partial_matching() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join("src")).unwrap();
+        let options = serde_json::json!({ "printWidth": 120, "overrides": [
+            { "files": "*.{ts,tsx}", "options": { "semi": false, "parser": "css" } }
+        ] });
+        fs::write(root.join(".prettierrc"), options.to_string()).unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let config = read_prettier_config(
+            &database,
+            &state.repos[0].checkouts[0].id,
+            "checkout",
+            "src/école.ts",
+            Path::new(""),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.options, options);
+        assert_eq!(config.path, "src/école.ts");
+    }
+
+    #[test]
+    fn an_override_pattern_is_read_from_the_directory_of_the_config_that_holds_it() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join("packages/app/src")).unwrap();
+        fs::create_dir_all(root.join("packages/other/src")).unwrap();
+        fs::write(root.join("packages/app/src/a.ts"), "const a = 1;").unwrap();
+        fs::write(root.join("packages/other/src/a.ts"), "const a = 1;").unwrap();
+        // Both packages keep the same file name, and only the pattern written next to one of them
+        // names it. Matched against the checkout root this names neither.
+        fs::write(
+            root.join("packages/app/.prettierrc"),
+            r#"{ "printWidth": 100, "overrides": [ { "files": "src/*.ts", "options": { "semi": false } } ] }"#,
+        )
+        .unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+
+        assert_eq!(
+            prettier_config(
+                &database,
+                checkout_id,
+                "checkout",
+                "packages/app/src/a.ts",
+                Path::new(""),
+            )
+            .unwrap()
+            .unwrap(),
+            serde_json::json!({ "printWidth": 100, "overrides": [ { "files": "src/*.ts", "options": { "semi": false } } ] })
+        );
+        let config = read_prettier_config(
+            &database,
+            checkout_id,
+            "checkout",
+            "packages/app/src/a.ts",
+            Path::new(""),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(config.path, "src/a.ts");
+        // The other package has no config at all, so its file keeps Prettier's defaults.
+        assert_eq!(
+            prettier_config(
+                &database,
+                checkout_id,
+                "checkout",
+                "packages/other/src/a.ts",
+                Path::new(""),
+            )
+            .unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn a_config_this_process_cannot_open_is_an_error_and_not_an_absence() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(root.join(".prettierrc"), "{}").unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+        let config = root.join(".prettierrc");
+
+        // A config nobody may read is not a checkout that configures nothing: answering `None`
+        // would format the file with defaults and tell the reader nothing about why.
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o000)).unwrap();
+        let outcome = prettier_config(
+            &database,
+            checkout_id,
+            "checkout",
+            "src/app.ts",
+            Path::new(""),
+        );
+        fs::set_permissions(&config, fs::Permissions::from_mode(0o600)).unwrap();
+
+        assert!(
+            outcome.is_err(),
+            "an unreadable config must not read as no config"
+        );
+    }
+
+    #[test]
+    fn sec_prettier_options_never_read_through_a_symlink_out_of_the_checkout() {
+        #[cfg(unix)]
+        use std::os::unix::fs::symlink;
+
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join(".prettierrc"), r#"{ "printWidth": 1 }"#).unwrap();
+        #[cfg(unix)]
+        {
+            // A directory reached through a link, and a config that is itself one, are the two
+            // ways out of the folder the reader asked about.
+            symlink(&outside, root.join("src/linked")).unwrap();
+            symlink(outside.join(".prettierrc"), root.join(".prettierrc")).unwrap();
+        }
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+
+        #[cfg(unix)]
+        {
+            let through_a_link = prettier_config(
+                &database,
+                checkout_id,
+                "checkout",
+                "src/linked/app.ts",
+                Path::new(""),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                through_a_link.code,
+                IpcErrorCode::PathOutsideCheckout
+            ));
+
+            let config_is_a_link = prettier_config(
+                &database,
+                checkout_id,
+                "checkout",
+                "README.md",
+                Path::new(""),
+            )
+            .unwrap_err();
+            assert!(matches!(
+                config_is_a_link.code,
+                IpcErrorCode::PathOutsideCheckout
+            ));
+        }
+    }
+
+    #[test]
+    fn a_checkout_that_configures_nothing_answers_with_no_prettier_options() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join("src")).unwrap();
+        // A package.json without a `prettier` key and a config this process cannot read are both
+        // the same answer: not a config, and the walk keeps going.
+        fs::write(root.join("package.json"), "{ \"name\": \"repo\" }").unwrap();
+        fs::write(root.join("prettier.config.js"), "module.exports = {}").unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+
+        assert!(prettier_config(
+            &database,
+            checkout_id,
+            "checkout",
+            "src/app.ts",
+            Path::new("")
+        )
+        .unwrap()
+        .is_none());
+        assert!(
+            prettier_config(&database, checkout_id, "review", "review.md", Path::new("")).is_err()
+        );
+        assert!(prettier_config(
+            &database,
+            "checkout:unregistered",
+            "checkout",
+            "src/app.ts",
+            Path::new("")
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn a_package_json_prettier_key_is_a_config_and_a_broken_config_says_so() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir_all(root.join("src")).unwrap();
+        fs::write(
+            root.join("package.json"),
+            r#"{ "prettier": { "useTabs": true } }"#,
+        )
+        .unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+
+        assert_eq!(
+            prettier_config(
+                &database,
+                checkout_id,
+                "checkout",
+                "src/app.ts",
+                Path::new("")
+            )
+            .unwrap()
+            .unwrap(),
+            serde_json::json!({ "useTabs": true })
+        );
+
+        // A config that will not parse stops the walk instead of being skipped: formatting with
+        // the defaults while the project says otherwise is worse than saying the config is broken.
+        fs::create_dir_all(root.join("src/broken")).unwrap();
+        fs::write(root.join("src/broken/.prettierrc"), "{ not json").unwrap();
+        let broken = prettier_config(
+            &database,
+            checkout_id,
+            "checkout",
+            "src/broken/other.ts",
+            Path::new(""),
+        )
+        .unwrap_err();
+        assert!(matches!(broken.code, IpcErrorCode::OperationFailed));
     }
 
     #[test]
