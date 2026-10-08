@@ -7957,12 +7957,19 @@ line.txt";
         let (database, checkout_id) = git_database(temp.path(), &root);
 
         let alone = GitWatcherManager::default();
+        // Read around this one read rather than after it. Registering the checkout above starts Git
+        // of its own, and whether those calls are counted against this checkout's root is whether the
+        // temporary directory's path is a symlink: `/var` is one on macOS and `/tmp` is not on Linux,
+        // so a total taken afterwards counts the registration on one platform and not on the other.
+        // The delta is one read of the checkout on both, which is what the readers below are held to.
+        let before_alone = git_reads(&root);
         super::diff_stats(&database, &alone, &checkout_id).unwrap();
-        let one_read = git_reads(&root);
+        let one_read = git_reads(&root) - before_alone;
 
         // Every reader is released at once, so the ones that did not do the read all arrive while it
         // is still running rather than after it has cached its answer.
         let together = &GitWatcherManager::default();
+        let before_readers = git_reads(&root);
         let database = &database;
         let released = Arc::new(Barrier::new(readers));
         let watched = checkout_id.clone();
@@ -7989,10 +7996,16 @@ line.txt";
             "the readers did not all get the same reading: {answers:?}"
         );
         assert_eq!(answers[0], [Some(2)]);
-        assert_eq!(
-            git_reads(&root) - one_read,
-            one_read,
-            "{readers} readers of one checkout must cost one read, not {readers}"
+        // At most one read, and not one read exactly. The first read of a checkout discovers which
+        // ref its base is -- `show-ref`, then whether the remote has it -- and every read after it
+        // reuses that answer, so readers arriving together pay two processes less than the read that
+        // warmed it. What must not happen is each of them starting one: that costs eight times what
+        // a single read does here, which is what this bound is here to fail on.
+        let readers_cost = git_reads(&root) - before_readers;
+        assert!(
+            readers_cost <= one_read,
+            "{readers} readers of one checkout must cost one read, not {readers}: \
+             one read started {one_read} processes and the readers started {readers_cost}"
         );
     }
 
