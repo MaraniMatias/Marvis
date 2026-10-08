@@ -1393,7 +1393,7 @@ pub(crate) use tests::wait_for_output;
 #[cfg(test)]
 mod tests {
     use std::{
-        io::{self, Write},
+        io,
         path::PathBuf,
         sync::{
             atomic::{AtomicBool, AtomicUsize, Ordering},
@@ -1447,27 +1447,6 @@ mod tests {
             Box::new(move |bytes| sender.send(bytes.to_vec()).map_err(|e| e.to_string())),
             receiver,
         )
-    }
-
-    struct PausingWriter {
-        entered: Option<mpsc::Sender<()>>,
-        release: mpsc::Receiver<()>,
-    }
-
-    impl Write for PausingWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.entered.take().unwrap().send(()).map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "test writer receiver dropped")
-            })?;
-            self.release.recv().map_err(|_| {
-                io::Error::new(io::ErrorKind::BrokenPipe, "test writer release dropped")
-            })?;
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
     }
 
     // Shared with `services::terminal`, whose shell-integration test drives a real shell through the
