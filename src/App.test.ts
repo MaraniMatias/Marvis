@@ -55,8 +55,8 @@ const mocks = vi.hoisted(() => ({
   isMaximized: vi.fn(),
   onWindowResized: null as (() => void) | null,
   followAgentRelocation: null as ((relocation: unknown) => void) | null,
-  /** The session ids each worktree's OpenCode lists, as `useTerminalAgentRows` would report. */
-  agentSessionIds: {} as Record<string, string[]>,
+  /** The sessions each worktree's OpenCode lists, as `useTerminalAgentRows` would report them. */
+  agentSessionsByCheckout: {} as Record<string, { id: string; title: string }[]>,
   moveSession: vi.fn(),
   onCloseRequested: null as ((event: { preventDefault(): void }) => Promise<void>) | null,
   currentWindow: null as {
@@ -401,7 +401,7 @@ vi.mock("./presentation/agent-sessions", async () => {
       row: (checkoutId: string) => ({
         agent: null,
         running: false,
-        sessionIds: mocks.agentSessionIds[checkoutId] ?? [],
+        sessions: mocks.agentSessionsByCheckout[checkoutId] ?? [],
       }),
       reload: vi.fn(),
     }),
@@ -676,7 +676,7 @@ describe("App UI integration", () => {
     mocks.agentSessions = [];
     mocks.agentTargetId = null;
     mocks.followAgentRelocation = null;
-    mocks.agentSessionIds = {};
+    mocks.agentSessionsByCheckout = {};
     mocks.createAgentSession.mockReset();
     // A move that happened reports whether the row moved, and every test here wants a yes.
     mocks.moveSession.mockReset();
@@ -1453,10 +1453,22 @@ describe("App UI integration", () => {
   });
 
   describe("an OpenCode session that moved to another worktree", () => {
-    /** One terminal per worktree, with `name` in front of the shell in each checkout. */
+    /** The session a terminal is showing: the id a move names, and the title its TUI wrote. */
+    const agentSession = (title: string) => ({ id: `ses_${title}`, title });
+    const move = (sessionId: string, fromCheckoutId = "checkout:one", toCheckoutId = "checkout:two") =>
+      mocks.followAgentRelocation!({ sessionId, fromCheckoutId, toCheckoutId });
+
+    /**
+     * One terminal per worktree, with `name` in front of the shell in each checkout.
+     *
+     * Every OpenCode terminal is given the next title `agentTitles` holds for its worktree, and the
+     * row for that worktree lists the same session under that title: the title is the only thing
+     * that says which session a terminal has open, so a test that moves a session this terminal is
+     * not showing has to be able to say so.
+     */
     async function mountWithOpenCodeTerminals(
       sessionsByCheckout: Record<string, string[]>,
-      agentSessions: Record<string, string[]> = {},
+      agentTitles: Record<string, string[]> = {},
       options: {
         activeSessionId?: string | null;
         settings?: AppSettings;
@@ -1468,16 +1480,23 @@ describe("App UI integration", () => {
           names.map((name) => session(`session:${name}`, name, id)),
         ),
       );
-      mocks.agentSessionIds = agentSessions;
+      mocks.agentSessionsByCheckout = Object.fromEntries(
+        Object.entries(agentTitles).map(([checkoutId, titles]) => [checkoutId, titles.map(agentSession)]),
+      );
       const workspace = workspaceWith(...checkouts);
       workspace.activeSessionId = options.activeSessionId ?? workspace.activeSessionId;
-      const wrapper = await mountApp(workspace, undefined, { settings: options.settings });
-      for (const names of Object.values(sessionsByCheckout)) {
+      const wrapper = await mountApp(workspace, undefined, {
+        settings: options.settings,
+      });
+      for (const [checkoutId, names] of Object.entries(sessionsByCheckout)) {
+        let next = 0;
         for (const name of names) {
+          const isAgent = name !== "shell";
           wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", `session:${name}`, {
             state: "running",
             foregroundProcess: true,
-            foregroundApp: name === "shell" ? "zsh" : "opencode",
+            foregroundApp: isAgent ? "opencode" : "zsh",
+            terminalTitle: isAgent ? `OC | ${agentTitles[checkoutId]?.[next++] ?? name}` : null,
           });
         }
       }
@@ -1489,18 +1508,14 @@ describe("App UI integration", () => {
     it("moves the one terminal whose OpenCode went, and takes the window with it when it was on screen", async () => {
       const wrapper = await mountWithOpenCodeTerminals(
         { "checkout:one": ["shell", "agent"], "checkout:two": [] },
-        { "checkout:one": ["ses_one"] },
+        { "checkout:one": ["ship it"] },
         { activeSessionId: "session:agent" },
       );
 
       // OpenCode moved its own session; the shell behind it is still sitting in the old worktree
       // and must not be told to `cd`, because there is no prompt there to read a `cd`. This
       // terminal was the one on screen, so the window follows it rather than leaving an empty pane.
-      mocks.followAgentRelocation!({
-        sessionId: "ses_one",
-        fromCheckoutId: "checkout:one",
-        toCheckoutId: "checkout:two",
-      });
+      move("ses_ship it");
       await flushPromises();
 
       expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, true);
@@ -1512,15 +1527,11 @@ describe("App UI integration", () => {
       // the sidebar and the pane they are in stays exactly where it is.
       const wrapper = await mountWithOpenCodeTerminals(
         { "checkout:one": ["shell", "agent"], "checkout:two": [] },
-        { "checkout:one": ["ses_one"] },
+        { "checkout:one": ["ship it"] },
         { activeSessionId: "session:shell" },
       );
 
-      mocks.followAgentRelocation!({
-        sessionId: "ses_one",
-        fromCheckoutId: "checkout:one",
-        toCheckoutId: "checkout:two",
-      });
+      move("ses_ship it");
       await flushPromises();
 
       expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, false);
@@ -1532,18 +1543,71 @@ describe("App UI integration", () => {
       settings.terminal.followSelection = "always";
       const wrapper = await mountWithOpenCodeTerminals(
         { "checkout:one": ["shell", "agent"], "checkout:two": [] },
-        { "checkout:one": ["ses_one"] },
+        { "checkout:one": ["ship it"] },
         { activeSessionId: "session:shell", settings },
       );
 
-      mocks.followAgentRelocation!({
-        sessionId: "ses_one",
-        fromCheckoutId: "checkout:one",
-        toCheckoutId: "checkout:two",
-      });
+      move("ses_ship it");
       await flushPromises();
 
       expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("moves the row without taking a window that is reading something else", async () => {
+      // Being selected is not the same as being on screen: a document takes the whole panel in a
+      // single layout, and a terminal that moves behind it has nobody waiting to be taken along.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+
+      move("ses_ship it");
+      await flushPromises();
+
+      // The row moves; the pane the reader is in does not.
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, false);
+      wrapper.unmount();
+    });
+
+    it("moves nothing for a move this terminal has already taken", async () => {
+      // The service keeps a move on offer for half a minute, so the hop arrives again after the
+      // terminal took it. Asking again is the backend refusing a session that is already there,
+      // which is an error the person did nothing to earn.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell"], "checkout:two": ["agent"] },
+        { "checkout:two": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+
+      move("ses_ship it", "checkout:one", "checkout:two");
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("moves the terminal when the session takes a second hop and the first is still on offer", async () => {
+      // A session that moved twice while the first move was still owed for is reported as the hop
+      // it last took. The terminal may have taken the first one or may never have got it, and the
+      // worktree the report names is not the answer either way: the title the terminal is writing
+      // is, so the terminal is found wherever it actually is.
+      const wrapper = await mountWithOpenCodeTerminals(
+        {
+          "checkout:one": ["shell", "agent"],
+          "checkout:two": [],
+          "checkout:three": [],
+        },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+
+      move("ses_ship it", "checkout:one", "checkout:three");
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:three", 0, false, true);
       wrapper.unmount();
     });
 
@@ -1552,70 +1616,100 @@ describe("App UI integration", () => {
       settings.terminal.followAgentAcrossWorktrees = false;
       const wrapper = await mountWithOpenCodeTerminals(
         { "checkout:one": ["shell", "agent"], "checkout:two": [] },
-        { "checkout:one": ["ses_one"] },
+        { "checkout:one": ["ship it"] },
         { activeSessionId: "session:agent", settings },
       );
 
-      mocks.followAgentRelocation!({
-        sessionId: "ses_one",
-        fromCheckoutId: "checkout:one",
-        toCheckoutId: "checkout:two",
-      });
+      move("ses_ship it");
       await flushPromises();
 
       expect(mocks.moveSession).not.toHaveBeenCalled();
       wrapper.unmount();
     });
 
-    it("moves nothing when the session that went is not one this worktree lists", async () => {
-      // The session belongs to another client, or to another window, that happens to work in a
-      // directory this panel also has. This row's terminal has nothing to do with that move.
+    it("moves nothing for a session this terminal is not showing", async () => {
+      // The same service-wide list is offered to every worktree, so a session another client
+      // opened in this directory is in it too. Moving this terminal on that session's move is the
+      // mistake this cannot come back from: the terminal is still there, reading the wrong tree.
       const wrapper = await mountWithOpenCodeTerminals(
         { "checkout:one": ["shell", "agent"], "checkout:two": [] },
-        { "checkout:one": ["ses_other"] },
+        { "checkout:one": ["ship it", "theirs"] },
+        { activeSessionId: "session:agent" },
       );
 
-      mocks.followAgentRelocation!({
-        sessionId: "ses_one",
-        fromCheckoutId: "checkout:one",
-        toCheckoutId: "checkout:two",
-      });
+      move("ses_theirs");
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      // The session it does show still moves it, which is what makes the refusal above a refusal
+      // of that one move rather than of the feature.
+      move("ses_ship it");
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("moves nothing when the terminal's own title names none of the sessions", async () => {
+      // A title nothing matches is a terminal whose session this panel cannot name, which is a
+      // different thing from a session nobody moved.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+      mocks.agentSessionsByCheckout["checkout:one"] = [agentSession("something else")];
+
+      move("ses_ship it");
       await flushPromises();
 
       expect(mocks.moveSession).not.toHaveBeenCalled();
       wrapper.unmount();
     });
 
-    it("moves nothing when the worktree has more than one OpenCode in it", async () => {
-      // Nothing here can say which terminal had the session, so a worktree with two is a worktree
-      // where either choice could be wrong.
+    it("moves nothing when two sessions carry the one title this terminal shows", async () => {
+      // Two terminals in one worktree can be showing one session between them, and nothing here can
+      // tell that from two sessions that happen to share a name. An ambiguous title names neither.
       const wrapper = await mountWithOpenCodeTerminals(
-        { "checkout:one": ["agent", "other"], "checkout:two": [] },
-        { "checkout:one": ["ses_one"] },
+        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
       );
+      mocks.agentSessionsByCheckout["checkout:one"] = [
+        agentSession("ship it"),
+        { id: "ses_duplicate", title: "ship it" },
+      ];
 
-      mocks.followAgentRelocation!({
-        sessionId: "ses_one",
-        fromCheckoutId: "checkout:one",
-        toCheckoutId: "checkout:two",
-      });
+      move("ses_ship it");
       await flushPromises();
 
       expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("moves only the one of two OpenCodes that is showing the session", async () => {
+      // Two OpenCodes in one worktree are no longer a reason to give up: each wrote the title of the
+      // session it has open, so the one that moved is named rather than guessed at, and the other
+      // stays where it is.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["agent", "other"], "checkout:two": [] },
+        { "checkout:one": ["ship it", "second"] },
+      );
+
+      move("ses_ship it");
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, false);
       wrapper.unmount();
     });
 
     it("moves nothing when no OpenCode is running in the worktree the session left", async () => {
       const wrapper = await mountWithOpenCodeTerminals(
         { "checkout:one": ["shell"], "checkout:two": [] },
-        { "checkout:one": ["ses_one"] },
+        { "checkout:one": ["ship it"] },
       );
 
-      mocks.followAgentRelocation!({
-        sessionId: "ses_one",
-        fromCheckoutId: "checkout:one",
-        toCheckoutId: "checkout:two",
-      });
+      move("ses_ship it");
       await flushPromises();
 
       expect(mocks.moveSession).not.toHaveBeenCalled();
@@ -1626,7 +1720,9 @@ describe("App UI integration", () => {
       // A missing directory is not a tree a terminal can work in, so the backend would refuse
       // the move and the only honest outcome is not to ask.
       const missing = { ...checkout("checkout:two"), isMissing: true };
-      mocks.agentSessionIds = { "checkout:one": ["ses_one"] };
+      mocks.agentSessionsByCheckout = {
+        "checkout:one": [agentSession("ship it")],
+      };
       const wrapper = await mountApp(
         workspaceWith(checkout("checkout:one", [session("session:agent", "agent", "checkout:one")]), missing),
       );
@@ -1634,14 +1730,11 @@ describe("App UI integration", () => {
         state: "running",
         foregroundProcess: true,
         foregroundApp: "opencode",
+        terminalTitle: "OC | ship it",
       });
       await flushPromises();
 
-      mocks.followAgentRelocation!({
-        sessionId: "ses_one",
-        fromCheckoutId: "checkout:one",
-        toCheckoutId: "checkout:two",
-      });
+      move("ses_ship it");
       await flushPromises();
 
       expect(mocks.moveSession).not.toHaveBeenCalled();

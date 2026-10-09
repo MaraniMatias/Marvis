@@ -19,6 +19,7 @@ import type { Checkout, Repo } from "./domain/workspace";
 import type { CheckoutFileActivity } from "./domain/git";
 import type { ReviewTarget } from "./domain/review";
 import {
+  agentSessionTitle,
   checkoutForWorkingDirectory,
   displayCheckoutPath,
   resolveActiveSession,
@@ -65,7 +66,7 @@ import { useToasts } from "./presentation/toasts";
 import { WORKDIR_ICONS } from "./presentation/workdir-icons";
 import { theme } from "./presentation/theme";
 import type { Theme } from "./presentation/theme";
-import { AGENT_APP, defaultAgentSession } from "./domain/agent";
+import { AGENT_APP, defaultAgentSession, matchAgentSessionTitle } from "./domain/agent";
 import type { AgentRelocation } from "./domain/agent";
 import { DEFAULT_ZOOM, zoomKeyFor, zoomLabel, zoomStep } from "./domain/zoom";
 import type { Zoom, ZoomModifier } from "./domain/zoom";
@@ -1714,7 +1715,7 @@ function followWorkingDirectory(sessionId: string, status: TerminalSessionStatus
   // Nothing when the shell is already where its row says it is, which is also what stops this
   // from moving the row over and over after it has moved.
   const target = checkoutForWorkingDirectory(checkouts, from.id, status.workingDirectory);
-  if (!target) return;
+  if (!target || target.id === from.id) return;
   void moveTerminalToWorktree(sessionId, from.id, target.id);
 }
 
@@ -1746,16 +1747,32 @@ async function moveTerminalSession(
 }
 
 /**
+ * Whether the terminal is the one on screen, which is what `visible` asks about.
+ *
+ * Being the selected session is not the same thing as being visible: opening a document takes the
+ * whole panel in a single layout, and the terminal behind it is still selected while nothing of it
+ * is on screen. A `null` session in a terminal view means the pane is on terminals and is drawing
+ * the selected one, so that is the same answer as naming this terminal outright.
+ */
+function terminalIsOnScreen(sessionId: string): boolean {
+  if (isSplitLayout.value) return true;
+  const view = activeMainView.value;
+  return view.kind === "terminal" && (view.sessionId === null || view.sessionId === sessionId);
+}
+
+/**
  * Whether the window takes `sessionId` with it when it leaves `fromCheckoutId` on its own.
  *
  * `visible` answers for what is on screen, which is the only question that has a good answer: a
  * terminal nobody was looking at moving in the sidebar must not change the pane someone is working
- * in, and the terminal that *was* on screen must not leave an empty pane behind.
+ * in, and the terminal that *was* on screen must not leave an empty pane behind. Selecting a
+ * terminal and then opening a file over it is looking at the file, and a move that takes the window
+ * with it interrupts a reader for a terminal they had put aside.
  */
 function windowFollowsMove(sessionId: string, fromCheckoutId: string) {
   if (settings.value.terminal.followSelection === "always") return true;
   const { activeCheckoutId, activeSessionId } = workspace.value;
-  return activeCheckoutId === fromCheckoutId && activeSessionId === sessionId;
+  return activeCheckoutId === fromCheckoutId && activeSessionId === sessionId && terminalIsOnScreen(sessionId);
 }
 
 /**
@@ -1815,30 +1832,52 @@ async function moveTerminalToWorktree(sessionId: string, fromCheckoutId: string,
  * Puts the terminal an OpenCode session left behind under the worktree that session moved to.
  *
  * The service reports that a session changed directory, not which terminal was showing it, and
- * there is no route that would say: OpenCode 2.0.23 keeps no registry of TUI clients. So the
- * terminal is named by the worktree it is in, by what is in front of its shell, and by the session
- * the move names — this worktree's own OpenCode has to list that session, or the session belongs to
- * somebody else and its move says nothing about a terminal here. A worktree with more than one
- * OpenCode in it, or with none, is left alone. Guessing would put a terminal under a worktree whose
- * files it is not working in, which is the one mistake this cannot recover from: the terminal is
- * still there, reading the wrong tree.
+ * there is no route that would say: OpenCode 2.0.23 keeps no registry of TUI clients. What does say
+ * is the title the session's own TUI wrote into that terminal, matched against the sessions the
+ * service lists, which is the same identification a sidebar row is drawn from. One terminal naming
+ * the session is a move; none or several is not.
+ *
+ * The terminal is looked for across the whole repository rather than in the worktree the move says
+ * it left, because the hop that move names can already be spent: a session that moved a second
+ * time while the first move was still on offer is reported as the hop it last took, and a terminal
+ * that never got the first one is still in the worktree it started in. Naming the terminal rather
+ * than the worktree covers both, and a terminal already standing in the destination is left alone,
+ * which is also what stops a move the service re-offers from asking for a hop it already made.
+ *
+ * Which sessions the service lists is its whole list, so a session another client opened in one of
+ * these directories is in it too. That is harmless here because the title is what says the session
+ * is this terminal's: a terminal showing somebody else's session does not name this one, and one
+ * naming none or several matches nothing.
  */
-function followAgentRelocation({ sessionId, fromCheckoutId, toCheckoutId }: AgentRelocation) {
+function followAgentRelocation({ sessionId, toCheckoutId }: AgentRelocation) {
   if (!settings.value.terminal.followAgentAcrossWorktrees) return;
   const repo = workspace.value.repos.find((candidate) =>
-    candidate.checkouts.some((checkout) => checkout.id === fromCheckoutId),
+    candidate.checkouts.some((checkout) => checkout.id === toCheckoutId),
   );
-  const source = repo?.checkouts.find((checkout) => checkout.id === fromCheckoutId);
-  if (!source) return;
-  // The session that moved must be one this worktree's service lists. Nothing here can say which
-  // terminal had it open, but this much is a fact about the worktree rather than a guess about a
-  // process: a session another client opened in the same directory is not this row's session.
-  if (!terminalAgents.row(fromCheckoutId).sessionIds.includes(sessionId)) return;
-  const terminals = source.sessions.filter(
-    (session) => sessionRuntimeStatuses.value[session.id]?.foregroundApp === AGENT_APP,
+  if (!repo) return;
+  const named = repo.checkouts.flatMap((checkout) =>
+    checkout.sessions
+      .filter((session) => terminalShowsSession(checkout.id, session.id, sessionId))
+      .map((session) => ({ checkoutId: checkout.id, sessionId: session.id })),
   );
-  if (terminals.length !== 1) return;
-  void moveTerminalToWorktree(terminals[0].id, fromCheckoutId, toCheckoutId);
+  if (named.length !== 1) return;
+  const [terminal] = named;
+  if (terminal.checkoutId === toCheckoutId) return;
+  void moveTerminalToWorktree(terminal.sessionId, terminal.checkoutId, toCheckoutId);
+}
+
+/**
+ * Whether that terminal has exactly that session open, as far as anything here can tell.
+ *
+ * The foreground program confirms the terminal is an agent's at all, and the title the TUI wrote
+ * names one of the sessions the service lists: `one`, because anything else names nothing or names
+ * several, and the id, because the same title can be on that list more than once.
+ */
+function terminalShowsSession(checkoutId: string, terminalId: string, sessionId: string): boolean {
+  const status = sessionRuntimeStatuses.value[terminalId];
+  if (status?.foregroundApp !== AGENT_APP) return false;
+  const match = matchAgentSessionTitle(terminalAgents.row(checkoutId).sessions, agentSessionTitle(status));
+  return match.kind === "one" && match.session.id === sessionId;
 }
 
 /**

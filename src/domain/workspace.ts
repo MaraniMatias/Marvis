@@ -270,13 +270,18 @@ function containsDirectory(parent: string, child: string): boolean {
 }
 
 /**
- * The sibling worktree a terminal sitting in `fromCheckoutId` has changed directory into, if any.
+ * The worktree of `fromCheckoutId`'s repository that a terminal sitting there is working in.
  *
  * A sibling of the *same repository*, never another repo: two worktrees of one repo share a Git
  * directory and a terminal may be handed between them, and a session labelled with another repo's
- * tree is the one mistake a terminal cannot come back from. A directory inside no sibling answers
- * nothing, and so does the checkout the terminal is already in — which is what keeps a shell from
- * moving its own row over and over.
+ * tree is the one mistake a terminal cannot come back from. A directory inside no worktree of that
+ * repository answers nothing.
+ *
+ * The answer may be the checkout the terminal is already under, and that is not a corner case: a
+ * worktree created inside its own repository lives under the repository's directory, so the two
+ * both contain it. The most specific one is the worktree the directory is really in, and answering
+ * with the one the row already names is what stops a shell sitting still from being moved back and
+ * forth between a worktree and the repository above it on every poll.
  *
  * Both `path` and `canonicalPath` are tried because the OS reports the directory as the kernel
  * recorded it and the two are not always spelled the same way, as `/tmp` and `/private/tmp` show.
@@ -288,13 +293,14 @@ export function checkoutForWorkingDirectory(
 ): Checkout | null {
   const from = checkouts.find((checkout) => checkout.id === fromCheckoutId);
   if (!from) return null;
-  const target = checkouts.find(
-    (checkout) =>
-      checkout.id !== fromCheckoutId &&
-      checkout.repoId === from.repoId &&
-      !checkout.isMissing &&
-      (containsDirectory(checkout.canonicalPath, directory) || containsDirectory(checkout.path, directory)),
-  );
+  // The longest path is the most specific one, so a worktree nested in a worktree wins over the
+  // one holding it rather than whichever came first in the list.
+  const target = checkouts
+    .filter((checkout) => checkout.repoId === from.repoId && !checkout.isMissing)
+    .filter(
+      (checkout) => containsDirectory(checkout.canonicalPath, directory) || containsDirectory(checkout.path, directory),
+    )
+    .sort((left, right) => right.canonicalPath.length - left.canonicalPath.length)[0];
   return target ?? null;
 }
 

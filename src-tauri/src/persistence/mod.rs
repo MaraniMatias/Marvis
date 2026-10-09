@@ -361,13 +361,7 @@ impl Database {
                 .map_err(db_error)?;
             repo.checkouts[0].id.clone()
         } else {
-            let repo_position: i64 = transaction
-                .query_row(
-                    "SELECT COALESCE(MAX(position) + 1, 0) FROM repos",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(db_error)?;
+            let repo_position = read_position(&transaction, MAX_POSITION_FROM_REPOS, [])?;
             transaction
                 .execute(
                     "INSERT INTO repos (id, kind, name, root, default_branch, position, created_at, last_opened_at)
@@ -689,13 +683,7 @@ impl Database {
             return Ok(false);
         }
         let now = &repo.last_opened_at;
-        let position: i64 = transaction
-            .query_row(
-                "SELECT COALESCE((SELECT position FROM repos WHERE id = ?1), MAX(position) + 1, 0) FROM repos",
-                [&repo.id],
-                |row| row.get(0),
-            )
-            .map_err(db_error)?;
+        let position = read_repo_position(&transaction, &repo.id)?;
         transaction
             .execute(
                 "INSERT INTO repos (id, kind, name, root, default_branch, position, created_at, last_opened_at)
@@ -716,19 +704,49 @@ impl Database {
                 ],
             )
             .map_err(db_error)?;
-        let position_offset: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(position), -1) + ?2 FROM checkouts WHERE repo_id = ?1",
-                params![repo.id, repo.checkouts.len() as i64 + 1],
-                |row| row.get(0),
-            )
+        // The checkouts Git no longer lists are marked missing and moved past the ones it does,
+        // each to its own number, and they are given that number rather than having their own
+        // added to it. Adding the offset to the stored position made every sync double them,
+        // because the next offset was read back from a column the last one had already grown:
+        // sixty-odd syncs later it held a value past `i64::MAX`, SQLite stored it as a REAL, and
+        // every later read of a position failed with a type error — one removed worktree stopping
+        // any folder from being registered.
+        //
+        // The number is absolute, so syncing the same repository again writes the same one and
+        // the rows do not drift. The live checkouts are written from `repo.checkouts` immediately
+        // below and take the places 0..n back whatever they had here, and the ones that are gone
+        // keep their order among themselves by ranking on `rowid`, which `UNIQUE (repo_id,
+        // position)` would otherwise refuse.
+        // The checkouts Git no longer lists keep a number of their own, past everything that is
+        // still there, and they are given that number rather than having their own added to it.
+        // Adding the offset to the stored position made every sync double them, because the next
+        // offset was read back from a column the last one had already grown: sixty-odd syncs later
+        // it held a value past `i64::MAX`, SQLite stored it as a REAL, and every later read of a
+        // position failed with a type error — one removed worktree stopping any folder from being
+        // registered.
+        //
+        // They are written in reverse order and each takes the place the row above it just left,
+        // so no two ever hold the same number while `UNIQUE (repo_id, position)` is watching, and
+        // the run always starts above the largest position already in the repo: a repo whose
+        // checkouts were all moved out of the way earlier must not be handed the same range back.
+        let highest: i64 = read_position(&transaction, HIGHEST_CHECKOUT_POSITION, [&repo.id])?;
+        let first_absent = highest.max(repo.checkouts.len() as i64) + 1;
+        let existing = transaction
+            .prepare("SELECT rowid FROM checkouts WHERE repo_id = ?1 ORDER BY position DESC")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([&repo.id], |row| row.get::<_, i64>(0))?
+                    .collect::<Result<Vec<i64>, rusqlite::Error>>()
+            })
             .map_err(db_error)?;
-        transaction
-            .execute(
-                "UPDATE checkouts SET is_missing = 1, position = position + ?2 WHERE repo_id = ?1",
-                params![repo.id, position_offset],
-            )
-            .map_err(db_error)?;
+        for (offset, rowid) in existing.iter().enumerate() {
+            transaction
+                .execute(
+                    "UPDATE checkouts SET is_missing = 1, position = ?2 WHERE rowid = ?1",
+                    params![rowid, first_absent + offset as i64],
+                )
+                .map_err(db_error)?;
+        }
         for (checkout_position, checkout) in repo.checkouts.iter().enumerate() {
             transaction
                 .execute(
@@ -2862,6 +2880,51 @@ fn db_error(error: rusqlite::Error) -> String {
     format!("SQLite operation failed: {error}")
 }
 
+/// Where a repo that is already on the panel keeps its place among the others, or the end of the
+/// line when it is new.
+const POSITION_OF_REGISTERED_REPO: &str =
+    "SELECT COALESCE((SELECT position FROM repos WHERE id = ?1), MAX(position) + 1, 0) FROM repos";
+/// The end of the line for a repo this registration does not name.
+const MAX_POSITION_FROM_REPOS: &str = "SELECT COALESCE(MAX(position) + 1, 0) FROM repos";
+/// The largest place a checkout of one repo holds, or -1 when it holds none.
+const HIGHEST_CHECKOUT_POSITION: &str =
+    "SELECT COALESCE(MAX(position), -1) FROM checkouts WHERE repo_id = ?1";
+
+/// Reads where the repo `repo_id` stands among the others, or the end of the line when it is new.
+fn read_repo_position(
+    transaction: &rusqlite::Transaction<'_>,
+    repo_id: &str,
+) -> Result<i64, String> {
+    read_position(transaction, POSITION_OF_REGISTERED_REPO, params![repo_id])
+}
+
+/// Reads a position the way SQLite is able to store it.
+///
+/// `INTEGER` is a type of affinity, not a promise about what a row holds: a value that no 64-bit
+/// integer can represent is written as a REAL, and reading it back as `i64` is an error rather
+/// than a number. A column with one such row in it then answers `MAX()` as a REAL, and the failure
+/// names a type, not the row that caused it, several queries away from the worktree that was
+/// removed. Ordering is all this value is for, so a position that is not one is the end of the
+/// line: nothing is lost, and the next write puts the row on a number that fits.
+fn read_position<P: rusqlite::Params>(
+    transaction: &rusqlite::Transaction<'_>,
+    query: &str,
+    parameters: P,
+) -> Result<i64, String> {
+    let value: rusqlite::types::Value = transaction
+        .query_row(query, parameters, |row| row.get(0))
+        .map_err(db_error)?;
+    // A whole number that SQLite happened to store as a REAL is still a position, and reading it
+    // is what keeps an older file working. A fractional one is not, and the end of the line is
+    // where a value nothing can order correctly belongs.
+    let position = match value {
+        rusqlite::types::Value::Integer(position) => position,
+        rusqlite::types::Value::Real(position) if position.fract() == 0.0 => position as i64,
+        _ => i64::MAX,
+    };
+    Ok(position)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -4041,6 +4104,115 @@ mod tests {
         );
     }
 
+    /// Syncing the same repository again has to leave its checkouts where they were. Each sync
+    /// used to push every position up by the current maximum, so the numbers doubled every time:
+    /// past `i64::MAX` SQLite stored the column as a REAL, and the next read of any position in it
+    /// failed with a type error that named no row. Sixty-odd syncs is a few months of opening the
+    /// app, and the first thing to break was registering a folder at all.
+    #[test]
+    fn syncing_the_same_repository_again_does_not_move_its_checkouts() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("feature");
+        for folder in [&root, &worktree] {
+            fs::create_dir(folder).unwrap();
+        }
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let focus = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo.clone(), &focus).unwrap();
+
+        let positions = |database: &Database| {
+            let connection = database.connection.lock().unwrap();
+            let rows = connection
+                .prepare("SELECT id, position, typeof(position) FROM checkouts ORDER BY id")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        let first = positions(&database);
+        assert!(
+            first.iter().all(|(_, _, kind)| kind == "integer"),
+            "a position was not stored as an integer: {first:?}"
+        );
+
+        for _ in 0..80 {
+            database.register_git_repo(repo.clone(), &focus).unwrap();
+        }
+        assert_eq!(positions(&database), first, "syncing moved the checkouts");
+        // A worktree Git stopped listing is the row that used to keep growing: it keeps a number
+        // that fits, and it sorts past the ones that are still there.
+        fs::remove_dir_all(&worktree).unwrap();
+        let shrunk = Repo {
+            checkouts: vec![repo.checkouts[0].clone()],
+            ..repo.clone()
+        };
+        database.register_git_repo(shrunk, &focus).unwrap();
+        let after = positions(&database);
+        assert!(
+            after.iter().all(|(_, _, kind)| kind == "integer"),
+            "a missing checkout stored a position no integer can hold: {after:?}"
+        );
+        let live = after
+            .iter()
+            .find(|(id, _, _)| id == &focus)
+            .expect("the primary checkout is still listed");
+        let gone = after
+            .iter()
+            .find(|(id, _, _)| id == &worktree_id)
+            .expect("the removed worktree is still listed");
+        assert!(
+            gone.1 > live.1,
+            "the removed worktree sorts before the one that is left"
+        );
+    }
+
+    /// The column is typed by affinity, not by promise: a value too large for a 64-bit integer is
+    /// written as a REAL, and reading it back as `i64` is an error. One such row is enough to fail
+    /// every read of every position in the table, so a file carrying one has to still register the
+    /// folders it did not have, rather than refusing all of them with a type name.
+    #[test]
+    fn a_position_too_large_for_an_integer_does_not_stop_a_folder_from_being_registered() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("feature");
+        let other_root = temp.path().join("other");
+        for folder in [&root, &worktree, &other_root] {
+            fs::create_dir(folder).unwrap();
+        }
+        let (repo, _) = git_repo_with_worktree(&root, &worktree);
+        let focus = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo.clone(), &focus).unwrap();
+        {
+            // What a database written by the doubling above holds: past the largest integer.
+            let connection = database.connection.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE repos SET position = 1.0376293541461623e+19 WHERE id = ?1",
+                    [&repo.id],
+                )
+                .unwrap();
+        }
+
+        let other = plain_repo(&other_root, "other");
+        let registered = database
+            .register_plain_repo(other.clone())
+            .expect("a position that is not an integer must not stop a registration");
+        assert!(registered
+            .repos
+            .iter()
+            .any(|candidate| candidate.id == other.id));
+    }
     #[test]
     fn checkout_order_is_restored_from_its_persisted_position() {
         let temp = tempdir().expect("temporary directory");

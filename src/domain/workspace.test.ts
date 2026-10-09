@@ -76,14 +76,37 @@ describe("checkoutForWorkingDirectory", () => {
     expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app-feature/")?.id).toBe(sibling.id);
   });
 
-  it("names nothing when the shell is where its row already says it is", () => {
-    // This is the case that would otherwise move the row over and over: after a move the shell's
-    // directory is inside the worktree its row now names.
+  it("names the worktree the shell is already under, which is what stops a row moving again", () => {
+    // The invariant used to live here as a null: a row already under the worktree the shell sits in
+    // is answered with itself, and the caller compares ids. A shell sitting still in a worktree
+    // nested inside its own repository would otherwise be handed back and forth between the two,
+    // because both contain it and only one of them is the one it is in.
     const checkouts = [root, sibling, elsewhere];
 
-    expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app")).toBeNull();
-    expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app/src")).toBeNull();
-    expect(checkoutForWorkingDirectory(checkouts, sibling.id, "/work/app-feature/src")).toBeNull();
+    expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app")?.id).toBe(root.id);
+    expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app/src")?.id).toBe(root.id);
+    expect(checkoutForWorkingDirectory(checkouts, sibling.id, "/work/app-feature/src")?.id).toBe(sibling.id);
+  });
+
+  it("names the worktree itself rather than the repository holding it", () => {
+    // A worktree created inside its own repository — what `git worktree add ../app/.worktrees/x`
+    // makes — has both directories containing it, and only the longer one is where the shell is.
+    const nested = createCheckout({
+      repoId: root.repoId,
+      path: "/work/app/.worktrees/feature",
+      canonicalPath: "/work/app/.worktrees/feature",
+      isPrimary: false,
+      branch: "feature",
+    });
+    // The order is the one that used to answer with whichever came first.
+    for (const checkouts of [
+      [root, nested],
+      [nested, root],
+    ]) {
+      expect(checkoutForWorkingDirectory(checkouts, root.id, "/work/app/.worktrees/feature/src")?.id).toBe(nested.id);
+    }
+    // Once the row is under the worktree, the same directory answers with the worktree still.
+    expect(checkoutForWorkingDirectory([root, nested], nested.id, "/work/app/.worktrees/feature")?.id).toBe(nested.id);
   });
 
   it("names nothing for a directory in no worktree, in another repo, or in a missing one", () => {

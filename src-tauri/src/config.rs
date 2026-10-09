@@ -112,7 +112,22 @@ pub struct TerminalSettings {
     /// that failed without ending the shell.
     /// Native shell startup preserves banners and warnings; unsupported shells remain uninstrumented.
     pub shell_integration: bool,
+    /// Whether an OpenCode session that starts working in another worktree takes its terminal with
+    /// it. Mirrors `followAgentAcrossWorktrees` in `src/domain/settings.ts`.
+    pub follow_agent_across_worktrees: bool,
+    /// Whether a shell that changes directory into another worktree moves its terminal to it.
+    /// Mirrors `followDirectoryAcrossWorktrees` in `src/domain/settings.ts`.
+    pub follow_directory_across_worktrees: bool,
+    /// Which moves take the window with them: `visible` or `always`. Mirrors
+    /// `followSelection` in `src/domain/settings.ts`, and the two answers are the only ones that
+    /// name a behaviour, which is why anything else in the file is refused the same way a cursor
+    /// style is.
+    pub follow_selection: String,
 }
+
+/// The window answers for a terminal that moved on its own, and this is the whole of the choice:
+/// the terminal on screen, or every terminal whatever the pane is showing.
+const FOLLOW_SELECTIONS: [&str; 2] = ["visible", "always"];
 
 impl Default for TerminalSettings {
     fn default() -> Self {
@@ -124,6 +139,9 @@ impl Default for TerminalSettings {
             scrollbar: "hidden".into(),
             change_directory_on_move: false,
             shell_integration: true,
+            follow_agent_across_worktrees: true,
+            follow_directory_across_worktrees: false,
+            follow_selection: "visible".into(),
         }
     }
 }
@@ -196,6 +214,9 @@ impl AppSettings {
             "hidden" | "auto" | "always"
         ) {
             self.terminal.scrollbar = "hidden".into();
+        }
+        if !FOLLOW_SELECTIONS.contains(&self.terminal.follow_selection.as_str()) {
+            self.terminal.follow_selection = "visible".into();
         }
         self.editor.font_size = bounded(
             self.editor.font_size,
@@ -375,6 +396,9 @@ mod tests {
                 scrollbar: "always".into(),
                 change_directory_on_move: true,
                 shell_integration: false,
+                follow_agent_across_worktrees: false,
+                follow_directory_across_worktrees: true,
+                follow_selection: "always".into(),
             },
             editor: EditorSettings {
                 font_size: 15.0,
@@ -388,6 +412,93 @@ mod tests {
         };
         save(&path, &written).unwrap();
         assert_eq!(load(&path).unwrap(), written);
+    }
+
+    /// A preference the renderer owns crosses the bridge as JSON, lands in this struct and goes back
+    /// out to the file, and every step of that is silent about a field it does not have. This is
+    /// the test that would have caught that: it starts from the shape the dialog sends rather than
+    /// from this side of it, so a field missing here is a field the file does not carry.
+    #[test]
+    fn every_preference_the_renderer_owns_survives_a_save_and_a_load() {
+        let home = settings_dir();
+        let path = config_path_in(&home);
+        // What the Settings dialog sends: the renderer holds these as camelCase, and the file
+        // holds them as camelCase too, so both ends of this are the same words.
+        let from_the_dialog = serde_json::json!({
+            "ui": { "fontSize": 16.0, "zoom": 1.0, "theme": "dark", "contentBackground": CONTENT_BACKGROUND, "treeStickyScroll": true },
+            "terminal": {
+                "fontSize": 16.0,
+                "ligatures": true,
+                "cursorBlink": true,
+                "cursorStyle": "block",
+                "scrollbar": "hidden",
+                "changeDirectoryOnMove": false,
+                "shellIntegration": true,
+                "followAgentAcrossWorktrees": false,
+                "followDirectoryAcrossWorktrees": true,
+                "followSelection": "always"
+            },
+            "editor": {
+                "fontSize": 13.0,
+                "ligatures": true,
+                "cursorBlink": true,
+                "indentation": { "useSpaces": true, "size": 2 }
+            }
+        });
+
+        save(
+            &path,
+            &serde_yaml::from_str(&serde_yaml::to_string(&from_the_dialog).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let loaded = load(&path).unwrap();
+
+        assert!(!loaded.terminal.follow_agent_across_worktrees);
+        assert!(loaded.terminal.follow_directory_across_worktrees);
+        assert_eq!(loaded.terminal.follow_selection, "always");
+        // The same values as the answer the renderer gets back, key for key.
+        let back = serde_json::to_value(&loaded).unwrap();
+        assert_eq!(
+            back["terminal"]["followAgentAcrossWorktrees"], false,
+            "the answer the renderer reads lost a preference"
+        );
+        assert_eq!(back["terminal"]["followDirectoryAcrossWorktrees"], true);
+        assert_eq!(back["terminal"]["followSelection"], "always");
+    }
+
+    /// Touching one preference used to write out only the ones this side knew about, so changing
+    /// the zoom reset a following rule nobody was looking at. The file is what has to remember.
+    #[test]
+    fn saving_another_preference_keeps_the_following_rules() {
+        let home = settings_dir();
+        let path = config_path_in(&home);
+        let mut settings = AppSettings::default();
+        settings.terminal.follow_agent_across_worktrees = false;
+        settings.terminal.follow_directory_across_worktrees = true;
+        settings.terminal.follow_selection = "always".into();
+        save(&path, &settings).unwrap();
+
+        // A zoom step writes the same file, and it is handed the whole settings, not a patch.
+        let mut zoomed = load(&path).unwrap();
+        zoomed.ui.zoom = 1.2;
+        save(&path, &zoomed).unwrap();
+
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.ui.zoom, 1.2);
+        assert!(!loaded.terminal.follow_agent_across_worktrees);
+        assert!(loaded.terminal.follow_directory_across_worktrees);
+        assert_eq!(loaded.terminal.follow_selection, "always");
+    }
+
+    /// A word that is not one of the two answers is a hand-edited typo, and it comes back as the
+    /// answer that keeps a reader working rather than as the word.
+    #[test]
+    fn a_follow_selection_that_names_no_behaviour_comes_back_as_the_default() {
+        let home = settings_dir();
+        let path = config_path_in(&home);
+        std::fs::write(&path, "terminal:\n  followSelection: sometimes\n").unwrap();
+
+        assert_eq!(load(&path).unwrap().terminal.follow_selection, "visible");
     }
 
     #[test]

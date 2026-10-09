@@ -689,9 +689,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:titled": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_1",
                 title: "Copy ids into lists",
                 agent: { label: "coder", color: null, attention: "busy" },
                 awaitingReply: false,
@@ -699,6 +699,7 @@ describe("Sidebar workdir rows", () => {
                 updatedAt: Date.now(),
               },
               {
+                id: "ses_row_2",
                 title: "An old session from another checkout's checkout",
                 agent: null,
                 awaitingReply: false,
@@ -752,9 +753,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:cut": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_3",
                 title: long,
                 agent: { label: "plan", color: null, attention: "none" },
                 awaitingReply: false,
@@ -800,9 +801,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:loan": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_4",
                 title: "Add icon box, tinted chip, dot ring",
                 agent: { label: "coder", color: null, attention: "none" },
                 awaitingReply: false,
@@ -810,6 +811,7 @@ describe("Sidebar workdir rows", () => {
                 updatedAt: Date.now(),
               },
               {
+                id: "ses_row_5",
                 title: "Plan de implementación para la sidebar",
                 agent: { label: "plan", color: null, attention: "busy" },
                 awaitingReply: false,
@@ -868,9 +870,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:twin": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_6",
                 title: "Humanizer",
                 agent: { label: "coder", color: null, attention: "busy" },
                 awaitingReply: false,
@@ -878,6 +880,7 @@ describe("Sidebar workdir rows", () => {
                 updatedAt: Date.now(),
               },
               {
+                id: "ses_row_7",
                 title: "Humanizer",
                 agent: { label: "plan", color: null, attention: "none" },
                 awaitingReply: false,
@@ -928,9 +931,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:gone": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_8",
                 title: "Copy ids into lists",
                 agent: { label: "coder", color: null, attention: "busy" },
                 awaitingReply: false,
@@ -1046,9 +1049,9 @@ describe("Sidebar workdir rows", () => {
           isOpening: false,
           agentRows: {
             "checkout:two": {
-              sessionIds: [],
               sessions: [
                 {
+                  id: "ses_row_9",
                   title: "Copy ids into lists",
                   agent: { label: "plan", color: null, attention: "busy" },
                   awaitingReply: false,
@@ -1115,9 +1118,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:agent": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_10",
                 title: "Copy ids into lists",
                 agent: { label: "plan", color: "#FF966C", attention: "busy" },
                 awaitingReply: false,
@@ -1161,6 +1164,7 @@ describe("Sidebar workdir rows", () => {
   it("does not call unreadable candidate state idle or discard its ambiguous title", async () => {
     const checkoutId = "checkout:unknown";
     const candidate = {
+      id: "ses_row_11",
       title: "Unknown",
       agent: null,
       running: false,
@@ -1173,7 +1177,7 @@ describe("Sidebar workdir rows", () => {
         activeCheckoutId: checkoutId,
         activeSessionId: null,
         isOpening: false,
-        agentRows: { [checkoutId]: { sessions: [candidate], sessionIds: [] } },
+        agentRows: { [checkoutId]: { sessions: [candidate] } },
         sessionRuntimeStatuses: {
           only: { state: "running", foregroundProcess: true, foregroundApp: "opencode", terminalTitle: "OC | Unknown" },
         },
@@ -1183,7 +1187,7 @@ describe("Sidebar workdir rows", () => {
     expect(label()).toContain("Session state unavailable");
     expect(label()).not.toContain("Idle");
     await wrapper.setProps({
-      agentRows: { [checkoutId]: { sessions: [candidate, { ...candidate, awaitingReply: true }], sessionIds: [] } },
+      agentRows: { [checkoutId]: { sessions: [candidate, { ...candidate, awaitingReply: true }] } },
     });
     expect(label()).toContain("Several sessions share this name");
     expect(wrapper.get(".workdir-child").classes()).not.toContain("state-waiting");
@@ -1217,8 +1221,8 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           [checkoutId]: {
-            sessionIds: [],
-            sessions: sessions.map(({ title, attention }) => ({
+            sessions: sessions.map(({ id, title, attention }) => ({
+              id,
               title,
               agent: { label: "coder", color: "#4ED6BF", attention },
               awaitingReply: false,
@@ -1864,9 +1868,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:mixed": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_12",
                 title: "Copy ids",
                 agent: { label: "coder", color: null, attention: "busy" },
                 awaitingReply: false,
@@ -1914,9 +1918,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:agent": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_13",
                 title: "Copy ids",
                 agent: { label: "coder", color: null, attention: "none" },
                 awaitingReply: false,
@@ -1978,9 +1982,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:one": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_14",
                 title: "Copy ids",
                 agent: { label: "coder", color: "#4ED6BF", attention: "none" },
                 awaitingReply: false,
@@ -1990,9 +1994,9 @@ describe("Sidebar workdir rows", () => {
             ],
           },
           "checkout:two": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_15",
                 title: "Plan it",
                 agent: { label: "plan", color: "#FF966C", attention: "busy" },
                 awaitingReply: false,
@@ -2049,9 +2053,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:one": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_16",
                 title: "Copy ids",
                 agent: { label: "coder", color: "#4ED6BF", attention: "busy" },
                 awaitingReply: false,
@@ -2061,9 +2065,9 @@ describe("Sidebar workdir rows", () => {
             ],
           },
           "checkout:two": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_17",
                 title: "Plan it",
                 agent: { label: "plan", color: "#FF966C", attention: "none" },
                 awaitingReply: false,
@@ -2123,9 +2127,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:waiting": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_18",
                 title: "Copy ids into lists",
                 agent: { label: "plan", color: "#FF966C", attention: "blocked" },
                 awaitingReply: false,
@@ -2135,9 +2139,9 @@ describe("Sidebar workdir rows", () => {
             ],
           },
           "checkout:failed": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_19",
                 title: "Fix it",
                 agent: { label: "coder", color: "#4ED6BF", attention: "failed" },
                 awaitingReply: false,
@@ -2202,9 +2206,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:rows": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_20",
                 title: "Copy ids",
                 agent: { label: "coder", color: "#4ED6BF", attention: "busy" },
                 awaitingReply: false,
@@ -2362,9 +2366,9 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           "checkout:long": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_21",
                 title: long,
                 agent: { label: "plan", color: null, attention: "none" },
                 awaitingReply: false,
@@ -2454,9 +2458,9 @@ describe("Sidebar workdir rows", () => {
           ["one", "two", "three", "four"].map((id, index) => [
             `checkout:${id}`,
             {
-              sessionIds: [],
               sessions: [
                 {
+                  id: "ses_row_22",
                   title: `Session ${id}`,
                   agent: {
                     label: "coder",
@@ -3219,8 +3223,16 @@ it.each([false, true])("draws a running session with no agent, awaiting reply: %
       isOpening: false,
       agentRows: {
         "checkout:agent": {
-          sessionIds: [],
-          sessions: [{ title: "Untitled session", agent: null, awaitingReply, running: true, updatedAt: Date.now() }],
+          sessions: [
+            {
+              id: "ses_row_23",
+              title: "Untitled session",
+              agent: null,
+              awaitingReply,
+              running: true,
+              updatedAt: Date.now(),
+            },
+          ],
         },
       },
       sessionRuntimeStatuses: {
@@ -3591,9 +3603,9 @@ describe("a label is weighed against its row rather than cut between its halves"
         isOpening: false,
         agentRows: {
           "checkout:webapp": {
-            sessionIds: [],
             sessions: [
               {
+                id: "ses_row_24",
                 title: "Review the duplicated rows",
                 agent: { label: "plan", color: null, attention: "none" },
                 running: false,

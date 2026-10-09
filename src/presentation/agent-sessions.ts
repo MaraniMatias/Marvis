@@ -427,6 +427,14 @@ export function useAgentSessions(
 
 /** What one session says about itself, for a terminal to be matched against it. */
 export interface TerminalAgentSession {
+  /**
+   * The session's own id, which is what a reported move names.
+   *
+   * Carried next to the title because identity rests on the pair: the title says which session a
+   * terminal is showing and the id says which session moved, and neither answers the other without
+   * this side by side.
+   */
+  readonly id: string;
   /** The session's own title, which is what its TUI writes into the terminal title. */
   title: string;
   /** The agent running it, with the color OpenCode paints it with, absent when the session has none. */
@@ -457,15 +465,6 @@ export interface TerminalAgentRow {
    * that says nothing rather than a session that says the wrong thing.
    */
   readonly sessions: TerminalAgentSession[];
-  /**
-   * The ids of those sessions, which is what a reported move is checked against.
-   *
-   * The list above carries titles because a terminal row matches its own TUI's title against them;
-   * a relocation arrives naming a session by id and has to be refused unless this worktree's own
-   * service knows that id. Both are asked of the same read, so the ids are kept rather than read
-   * again.
-   */
-  readonly sessionIds: readonly string[];
 }
 
 export interface TerminalAgentRows {
@@ -488,16 +487,17 @@ type RefreshScope = "all" | "busy";
 /**
  * A cheap description of what a row would draw, so an answer that draws the same row is not written.
  *
- * It covers everything a terminal row reads out of its entry — the title it matches on, the agent it
- * names, whether it is working or awaiting a reply, and the clock in its trailing slot — and nothing
- * else, because the row is only ever read and a finer comparison would settle nothing.
+ * It covers everything a terminal row reads out of its entry — the id a reported move is checked
+ * against, the title it matches on, the agent it names, whether it is working or awaiting a reply,
+ * and the clock in its trailing slot — and nothing else, because the row is only ever read and a
+ * finer comparison would settle nothing.
  */
 function rowSignature(entry: TerminalAgentRow): string {
   return entry.sessions
     .map((session) => {
       const agent = session.agent;
       const named = agent ? `${agent.label}/${agent.color}/${agent.attention}` : "";
-      return `${session.title}|${named}|${session.running}|${session.awaitingReply}|${session.updatedAt}`;
+      return `${session.id}|${session.title}|${named}|${session.running}|${session.awaitingReply}|${session.updatedAt}`;
     })
     .join("\n");
 }
@@ -532,7 +532,7 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
   /** Checkouts with a turn running, so the poll knows there is something to wait for. */
   const busy = new Set<string>();
 
-  const row = (checkoutId: string): TerminalAgentRow => byCheckout[checkoutId] ?? { sessions: [], sessionIds: [] };
+  const row = (checkoutId: string): TerminalAgentRow => byCheckout[checkoutId] ?? { sessions: [] };
 
   async function read(checkoutId: string): Promise<TerminalAgentRow> {
     // The repository-wide list, not the worktree's own: a terminal's session is not necessarily
@@ -549,6 +549,7 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
       sessions: sessions.map((session) => {
         const label = agentLabel(agents, session.agent);
         return {
+          id: session.id,
           title: session.title,
           agent: label ? { label, color: agentColor(agents, session.agent), attention: agentAttention(session) } : null,
           running: session.running,
@@ -556,7 +557,6 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
           updatedAt: session.updatedAt,
         };
       }),
-      sessionIds: sessions.map((session) => session.id),
     };
   }
 
@@ -592,7 +592,7 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
         } catch {
           // A service that is not run leaves the row with no session to match, which is the state
           // to wait in rather than a failure to report.
-          return [checkoutId, { sessions: [] as TerminalAgentSession[], sessionIds: [] }] as const;
+          return [checkoutId, { sessions: [] as TerminalAgentSession[] }] as const;
         }
       }),
     );
@@ -714,22 +714,32 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
  * can tell which terminal a session is behind.
  */
 export function useAgentRelocations(onRelocated: (relocation: AgentRelocation) => void): void {
-  let generation = 0;
+  let reading = false;
   let disposed = false;
 
+  /**
+   * One read on its way at a time, and no answer is ever thrown away.
+   *
+   * The backend keeps a move on offer for half a minute because it cannot tell whether the caller
+   * kept it, which only helps while somebody is listening: a read slower than the interval used to
+   * be dropped as superseded by the next poll's, so a service that answers slower than the interval
+   * lost every answer and no move was ever reported. A read that is already in flight is simply
+   * skipped, and the next interval picks up whatever the answer was.
+   */
   async function reload() {
-    const request = ++generation;
+    if (reading) return;
+    reading = true;
     try {
       const moved = await listAgentRelocations();
-      // A read that was superseded mid-flight must not move a terminal on a stale answer, and one
-      // that answers after the scope is gone must not move a terminal at all: the timer is
-      // cleared on dispose, but a read already dispatched is still in flight and its callback
-      // would run against a window that is closing.
-      if (disposed || request !== generation) return;
+      // The timer is cleared on dispose, but a read already dispatched is still in flight and its
+      // answer would move a terminal against a window that is closing.
+      if (disposed) return;
       for (const relocation of moved) onRelocated(relocation);
     } catch {
       // A service that is not run has moved nothing, which is the state to wait in rather than
       // a failure to report.
+    } finally {
+      reading = false;
     }
   }
 

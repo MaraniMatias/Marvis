@@ -2600,12 +2600,6 @@ impl AgentService {
             .lock()
             .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
         pending.retain(|_, entry| now.duration_since(entry.since) <= PENDING_MOVES_TTL);
-        // A move already reported goes out again: handing one over is the only thing this process
-        // can do about delivery, and a caller that dropped the first copy has no other way to know.
-        let mut moved: Vec<AgentRelocation> = pending
-            .values()
-            .map(|entry| entry.relocation.clone())
-            .collect();
         for (session_id, directory) in located {
             // A session whose directory is not a checkout of this workspace is not news, and
             // naming it would be reporting on a project this app has no worktree for. It is not
@@ -2620,25 +2614,17 @@ impl AgentService {
                     entry.seen = now;
                     if let (Some(was), Some(checkout_id)) = (&entry.checkout_id, &named) {
                         if was != checkout_id {
-                            let relocation = AgentRelocation {
-                                session_id: session_id.clone(),
-                                from_checkout_id: was.clone(),
-                                to_checkout_id: checkout_id.clone(),
-                            };
-                            // A session that moved twice is only where it is now; the earlier hop
-                            // is not something to hand over again.
                             pending.insert(
                                 session_id.clone(),
                                 PendingMove {
-                                    relocation,
+                                    relocation: AgentRelocation {
+                                        session_id,
+                                        from_checkout_id: was.clone(),
+                                        to_checkout_id: checkout_id.clone(),
+                                    },
                                     since: now,
                                 },
                             );
-                            moved.push(AgentRelocation {
-                                session_id,
-                                from_checkout_id: was.clone(),
-                                to_checkout_id: checkout_id.clone(),
-                            });
                         }
                     }
                     if named.is_some() {
@@ -2656,7 +2642,16 @@ impl AgentService {
                 }
             }
         }
-        Ok(moved)
+        // Read after the loop, so what goes out is what this read settled: a move recorded above
+        // replaced the one it supersedes, so one answer never asks for the same session to travel
+        // twice — and one move per session is also what keeps a terminal from being asked for two
+        // hops it cannot take. A move already reported goes out again because handing one over is
+        // the only thing this process can do about delivery, and a caller that dropped the first
+        // copy has no other way to know.
+        Ok(pending
+            .values()
+            .map(|entry| entry.relocation.clone())
+            .collect())
     }
 
     /// Every session the checkout's server knows about, with the service's own running answer.
@@ -4989,6 +4984,68 @@ mod tests {
             )
             .unwrap()
             .is_empty());
+    }
+
+    /// Two hops while the first is still on offer. The answer carries the hop the session last
+    /// took and not the one it superseded, because an answer with both asks one terminal to
+    /// travel twice: the first hop ends where the second one starts, so whichever order they are
+    /// applied in, the second is refused or lands on a worktree the terminal has already left.
+    #[test]
+    fn a_session_that_moves_twice_is_reported_once_as_the_hop_it_last_took() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let third = tempfile::tempdir().unwrap();
+        let checkouts = vec![
+            ("first".to_string(), first.path().to_path_buf()),
+            ("second".to_string(), second.path().to_path_buf()),
+            ("third".to_string(), third.path().to_path_buf()),
+        ];
+        let located = |directory: &Path| vec![("ses_walk".to_string(), directory.to_path_buf())];
+        let agents = AgentService::with_test_server(0);
+        let start = Instant::now();
+
+        assert!(agents
+            .record_relocations(&checkouts, located(first.path()), start)
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            agents
+                .record_relocations(&checkouts, located(second.path()), start)
+                .unwrap(),
+            vec![AgentRelocation {
+                session_id: "ses_walk".to_string(),
+                from_checkout_id: "first".to_string(),
+                to_checkout_id: "second".to_string(),
+            }]
+        );
+        // The second hop arrives before anybody took the first, which is what a caller that threw
+        // the answer away looks like from here.
+        assert_eq!(
+            agents
+                .record_relocations(
+                    &checkouts,
+                    located(third.path()),
+                    start + Duration::from_secs(1)
+                )
+                .unwrap(),
+            vec![AgentRelocation {
+                session_id: "ses_walk".to_string(),
+                from_checkout_id: "second".to_string(),
+                to_checkout_id: "third".to_string(),
+            }]
+        );
+        // Still one answer for one session: the hop before it is not handed over again beside it.
+        assert_eq!(
+            agents
+                .record_relocations(
+                    &checkouts,
+                    located(third.path()),
+                    start + Duration::from_secs(2)
+                )
+                .unwrap()
+                .len(),
+            1
+        );
     }
 
     #[test]

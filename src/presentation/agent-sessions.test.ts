@@ -612,6 +612,7 @@ describe("useTerminalAgentRows", () => {
     // matches against this list itself, so anything the list drops cannot be named by anybody.
     expect(state.byCheckout["checkout:first"].sessions).toEqual([
       {
+        id: "ses_one",
         title: "review",
         agent: { label: "Coder", color: "#4ed6bf", attention: "busy" },
         running: true,
@@ -621,6 +622,7 @@ describe("useTerminalAgentRows", () => {
     ]);
     expect(state.byCheckout["checkout:second"].sessions).toEqual([
       {
+        id: "ses_two",
         title: "review",
         agent: { label: "Plan", color: null, attention: "none" },
         running: false,
@@ -666,8 +668,8 @@ describe("useTerminalAgentRows", () => {
     const state = useTerminalAgentRows(computed(() => ["checkout:first"]));
     await settle();
 
-    expect(state.byCheckout["checkout:first"]).toEqual({ sessions: [], sessionIds: [] });
-    expect(state.row("checkout:absent")).toEqual({ sessions: [], sessionIds: [] });
+    expect(state.byCheckout["checkout:first"]).toEqual({ sessions: [] });
+    expect(state.row("checkout:absent")).toEqual({ sessions: [] });
   });
 
   it.each([false, true])("offers a session with no agent, awaiting reply: %s", async (awaitingReply) => {
@@ -682,20 +684,20 @@ describe("useTerminalAgentRows", () => {
     // The clock rides along because it is the only duration a terminal row has: the elapsed time in a
     // row's trailing slot is this session's own last update, read from the service and nowhere else.
     expect(state.byCheckout["checkout:first"].sessions).toEqual([
-      { title: "review", agent: null, running: false, awaitingReply, updatedAt: 1 },
+      { id: "ses_fresh", title: "review", agent: null, running: false, awaitingReply, updatedAt: 1 },
     ]);
   });
 
   it("publishes pending transitions without an agent or any other session change", async () => {
-    perCheckout({ "checkout:first": [{ agent: null }] });
+    perCheckout({ "checkout:first": [{ id: "ses_one", agent: null }] });
     const scope = effectScope();
     const state = scope.run(() => useTerminalAgentRows(computed(() => ["checkout:first"])))!;
     await settle();
     for (const awaitingReply of [false, true, false]) {
-      perCheckout({ "checkout:first": [{ agent: null, awaitingReply }] });
+      perCheckout({ "checkout:first": [{ id: "ses_one", agent: null, awaitingReply }] });
       await state.reload();
       expect(state.row("checkout:first").sessions).toEqual([
-        { title: "review", agent: null, running: false, awaitingReply, updatedAt: 1 },
+        { id: "ses_one", title: "review", agent: null, running: false, awaitingReply, updatedAt: 1 },
       ]);
     }
     scope.stop();
@@ -965,7 +967,7 @@ describe("useTerminalAgentRows", () => {
 
     expect(drawn.slice(before).some((store) => store.includes("checkout:second"))).toBe(false);
     expect(Object.keys(state.byCheckout)).toEqual(["checkout:first"]);
-    expect(state.row("checkout:second")).toEqual({ sessions: [], sessionIds: [] });
+    expect(state.row("checkout:second")).toEqual({ sessions: [] });
     vi.useRealTimers();
   });
 
@@ -1009,7 +1011,10 @@ describe("useTerminalAgentRows", () => {
 });
 
 describe("useAgentRelocations", () => {
+  // Every test runs its hook in a scope it stops: an interval left running keeps asking for the
+  // rest of the file, and a read this test never made is indistinguishable from one it did.
   beforeEach(() => {
+    mocks.listAgentRelocations.mockClear();
     mocks.listAgentRelocations.mockResolvedValue([]);
   });
 
@@ -1019,7 +1024,10 @@ describe("useAgentRelocations", () => {
     vi.useFakeTimers();
     mocks.listAgentRelocations.mockResolvedValue([]);
     const seen: string[] = [];
-    useAgentRelocations((relocation) => seen.push(`${relocation.fromCheckoutId}->${relocation.toCheckoutId}`));
+    const scope = effectScope();
+    scope.run(() =>
+      useAgentRelocations((relocation) => seen.push(`${relocation.fromCheckoutId}->${relocation.toCheckoutId}`)),
+    );
     await vi.advanceTimersByTimeAsync(0);
     const afterFirstRead = mocks.listAgentRelocations.mock.calls.length;
     await vi.advanceTimersByTimeAsync(6000);
@@ -1030,22 +1038,24 @@ describe("useAgentRelocations", () => {
     ]);
     await vi.advanceTimersByTimeAsync(2000);
     expect(seen).toEqual(["checkout:first->checkout:second"]);
+    scope.stop();
     vi.useRealTimers();
   });
 
   it("reports nothing while the service is not run, without failing the caller", async () => {
     mocks.listAgentRelocations.mockRejectedValue(new Error("OpenCode is not running."));
     const onRelocated = vi.fn();
-    useAgentRelocations(onRelocated);
+    const scope = effectScope();
+    scope.run(() => useAgentRelocations(onRelocated));
     await settle();
     expect(onRelocated).not.toHaveBeenCalled();
+    scope.stop();
   });
 
-  it("does not report a move from a read that was superseded before it answered", async () => {
-    // A slow answer arriving after the next poll has already gone out describes where the
-    // session was a poll ago, and moving a terminal on it would move one on stale news. The
-    // backend keeps the move and offers it again, so this answer being dropped costs nothing:
-    // the next poll that answers carries it.
+  it("still reports a move from an answer that arrives after the next poll went out", async () => {
+    // A service slower than the interval used to lose every answer: each poll's answer was dropped
+    // as superseded by the next poll's, and a service that is always slower than the interval would
+    // never report a move at all. One read at a time is what makes a slow answer worth waiting for.
     vi.useFakeTimers();
     const onRelocated = vi.fn();
     let release: (() => void) | undefined;
@@ -1056,14 +1066,21 @@ describe("useAgentRelocations", () => {
             resolve([{ sessionId: "ses_one", fromCheckoutId: "checkout:first", toCheckoutId: "checkout:second" }]);
         }),
     );
-    useAgentRelocations(onRelocated);
+    const scope = effectScope();
+    scope.run(() => useAgentRelocations(onRelocated));
     await vi.advanceTimersByTimeAsync(0);
+    // Several intervals go by while that read is still out, and none of them starts a second one.
     mocks.listAgentRelocations.mockResolvedValue([]);
-    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(mocks.listAgentRelocations).toHaveBeenCalledTimes(1);
+
     release?.();
     await vi.advanceTimersByTimeAsync(0);
-
-    expect(onRelocated).not.toHaveBeenCalled();
+    expect(onRelocated).toHaveBeenCalledTimes(1);
+    // Asking again after the answer landed is what keeps the next move coming.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentRelocations).toHaveBeenCalledTimes(2);
+    scope.stop();
     vi.useRealTimers();
   });
 
