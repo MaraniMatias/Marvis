@@ -22,7 +22,7 @@ import {
 } from "../lib/ipc";
 
 /** Name of the Tauri event the bridge emits normalized agent events on. */
-export const AGENT_EVENT = "marvis://agent-event";
+export const AGENT_EVENT = "muster://agent-event";
 
 /** What a row says about the agent: which one, in OpenCode's color, and how loudly. */
 export interface AgentHeadline {

@@ -523,7 +523,7 @@ describe("DocumentPane", () => {
     });
     mocks.readCheckoutFile.mockImplementation(async (_checkoutId: string, path: string) => ({
       path,
-      content: path.endsWith(".md") ? "# Marvis\n\n[unsafe](javascript:alert(1))" : "const answer: number = 42;",
+      content: path.endsWith(".md") ? "# Muster\n\n[unsafe](javascript:alert(1))" : "const answer: number = 42;",
     }));
     const harness = defineComponent({
       components: { InspectorPane, MainPane },
@@ -557,7 +557,7 @@ describe("DocumentPane", () => {
     await flushPromises();
     await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
     await vi.waitFor(() => expect(wrapper.find('[aria-label="File contents"] article').exists()).toBe(true));
-    expect(wrapper.get('[aria-label="File contents"] article').text()).toContain("Marvis");
+    expect(wrapper.get('[aria-label="File contents"] article').text()).toContain("Muster");
     expect(wrapper.get('[aria-label="File contents"]').element.querySelector('a[href^="javascript:"]')).toBeNull();
     expect(mocks.readCheckoutFile).toHaveBeenCalledWith(currentCheckout.id, "docs/readme.md", "checkout");
 
@@ -568,7 +568,7 @@ describe("DocumentPane", () => {
       .trigger("click");
     // Code is the editor, so the Code view only has its text once CodeMirror is mounted.
     await vi.waitFor(() => expect(wrapper.find(".cm-line").exists()).toBe(true));
-    expect(wrapper.get(".cm-content").text()).toContain("# Marvis");
+    expect(wrapper.get(".cm-content").text()).toContain("# Muster");
 
     await wrapper.get('[aria-label="Inspector sections"]').findAll("button")[1].trigger("click");
     expect(wrapper.text()).toContain("docs/readme.md");
@@ -1073,7 +1073,7 @@ describe("DocumentPane", () => {
   });
 
   it("puts the close button on the toolbar, past the controls that read the file", async () => {
-    mocks.readCheckoutFile.mockResolvedValue({ path: "docs/readme.md", content: "# Marvis" });
+    mocks.readCheckoutFile.mockResolvedValue({ path: "docs/readme.md", content: "# Muster" });
     const wrapper = mount(DocumentPane, { props: documentPaneProps("docs/readme.md", "view") });
     await vi.waitFor(() => expect(wrapper.find(".markdown-preview").exists()).toBe(true));
 
@@ -1435,7 +1435,7 @@ describe("DocumentPane", () => {
   it("refreshes a figure the document references when its own text did not change", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
-      content: "![preview](images/pic.png)\n\n# Marvis",
+      content: "![preview](images/pic.png)\n\n# Muster",
     });
     mocks.readCheckoutMarkdownImage.mockResolvedValue({
       mimeType: "image/png",
@@ -1478,7 +1478,7 @@ describe("DocumentPane", () => {
   it("leaves a preview and its figures alone when the activity moved something else", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
-      content: "![preview](images/pic.png)\n\n# Marvis",
+      content: "![preview](images/pic.png)\n\n# Muster",
     });
     const wrapper = mount(DocumentPane, {
       props: {
@@ -1537,7 +1537,7 @@ describe("DocumentPane", () => {
   it("refreshes a figure the superseded read was triggered by, not only the one that replaced it", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
-      content: "![preview](images/pic.png)\n\n# Marvis",
+      content: "![preview](images/pic.png)\n\n# Muster",
     });
     mocks.readCheckoutMarkdownImage.mockResolvedValue({
       mimeType: "image/png",
@@ -1573,7 +1573,7 @@ describe("DocumentPane", () => {
       sizeBytes: 8,
     });
     await wrapper.setProps({ refreshRevision: 2, refreshPaths: ["src/app.ts"] });
-    resolveRead({ path: "docs/readme.md", content: "![preview](images/pic.png)\n\n# Marvis" });
+    resolveRead({ path: "docs/readme.md", content: "![preview](images/pic.png)\n\n# Muster" });
 
     // Both batches are spent as one, so the figure the superseded read named is asked again and the
     // batch that named nothing the page draws reads nothing itself.
@@ -1632,7 +1632,7 @@ describe("DocumentPane", () => {
   it("warns and drops a figure whose file is gone, and takes the warning back when it returns", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
-      content: "![preview](images/pic.png)\n\n# Marvis",
+      content: "![preview](images/pic.png)\n\n# Muster",
     });
     mocks.readCheckoutMarkdownImage.mockResolvedValue({
       mimeType: "image/png",
@@ -1670,7 +1670,7 @@ describe("DocumentPane", () => {
   it("publishes no figure that a newer document has already replaced", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
-      content: "![preview](images/pic.png)\n\n# Marvis",
+      content: "![preview](images/pic.png)\n\n# Muster",
     });
     mocks.readCheckoutMarkdownImage.mockResolvedValueOnce({
       mimeType: "image/png",

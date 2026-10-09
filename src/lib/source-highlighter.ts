@@ -13,16 +13,16 @@ import { detectedLanguageName } from "./source-languages";
  * `src/muster.css` instead, so the markup a render produces is the same in both palettes and the
  * browser resolves it against whichever one is in effect.
  */
-const MARVIS_SYNTAX_NAME = "marvis";
+const MUSTER_SYNTAX_NAME = "muster";
 
-const MARVIS_SYNTAX = createCssVariablesTheme({
-  name: MARVIS_SYNTAX_NAME,
+const MUSTER_SYNTAX = createCssVariablesTheme({
+  name: MUSTER_SYNTAX_NAME,
   variablePrefix: "--muster-syntax-",
 });
 
 type SourceLanguage = (typeof typescript)[number];
 type LanguageLoader = () => Promise<SourceLanguage[]>;
-/** `shikiName` is the grammar Shiki renders with, when it is not the one Marvis calls the language. */
+/** `shikiName` is the grammar Shiki renders with, when it is not the one Muster calls the language. */
 type LanguageDefinition = { name: string; load: LanguageLoader; shikiName?: string };
 
 const languageDefinitions = {
@@ -206,7 +206,7 @@ const languageDefinitions = {
 } satisfies Record<string, LanguageDefinition>;
 
 /**
- * The one door onto a grammar: the name Marvis calls it. A name no grammar answers to resolves to
+ * The one door onto a grammar: the name Muster calls it. A name no grammar answers to resolves to
  * no highlighting, which is a plain file rather than an error.
  */
 const languageByName = new Map<string, LanguageDefinition>(
@@ -458,7 +458,7 @@ function highlighterFor(language: LanguageDefinition) {
   const request = language.load().then((langs) =>
     createHighlighterCore({
       langs,
-      themes: [MARVIS_SYNTAX],
+      themes: [MUSTER_SYNTAX],
       engine: createJavaScriptRegexEngine(),
     }),
   );
@@ -519,7 +519,7 @@ export function highlightCodeBlock(language: LanguageDefinition, code: string): 
   }
   const request = highlighterFor(language)
     .then((instance) =>
-      instance.codeToHtml(code, { lang: language.shikiName ?? language.name, theme: MARVIS_SYNTAX_NAME }),
+      instance.codeToHtml(code, { lang: language.shikiName ?? language.name, theme: MUSTER_SYNTAX_NAME }),
     )
     .then((html) => sanitizeShikiFragment(html)?.innerHTML || null)
     .catch(() => null);
@@ -646,7 +646,7 @@ export function highlightSourceAs(languageName: string, source: string): Promise
     source,
     highlighterFor(language)
       .then((instance) =>
-        instance.codeToHtml(source, { lang: language.shikiName ?? language.name, theme: MARVIS_SYNTAX_NAME }),
+        instance.codeToHtml(source, { lang: language.shikiName ?? language.name, theme: MUSTER_SYNTAX_NAME }),
       )
       .then(sanitizeHighlightedHtml)
       .then((lines) => {

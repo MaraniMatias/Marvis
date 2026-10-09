@@ -76,8 +76,8 @@ function sections(): TitlebarMenuSection[] {
       kind: "group",
       label: "This Window",
       items: [
-        item("checkout:main", "main", { hint: "/Marvis", checked: true, title: "/Marvis" }),
-        item("checkout:gone", "temporary", { hint: "/Marvis/.worktrees/temporary", disabled: true }),
+        item("checkout:main", "main", { hint: "/Muster", checked: true, title: "/Muster" }),
+        item("checkout:gone", "temporary", { hint: "/Muster/.worktrees/temporary", disabled: true }),
       ],
     },
     { kind: "separator" },
@@ -87,7 +87,7 @@ function sections(): TitlebarMenuSection[] {
 
 function mountMenu(props: Record<string, unknown> = {}) {
   return mount(TitlebarMenu, {
-    props: { label: "Marvis", sections: sections(), open: true, searchPlaceholder: "Search workdirs…", ...props },
+    props: { label: "Muster", sections: sections(), open: true, searchPlaceholder: "Search workdirs…", ...props },
   });
 }
 
@@ -95,8 +95,8 @@ describe("TitlebarMenu", () => {
   it("reads as text, not as a button: the label, nothing else", () => {
     const trigger = mountMenu({ testid: "repo-crumb" }).get('[data-testid="repo-crumb"]');
 
-    expect(trigger.text()).toBe("Marvis");
-    expect(trigger.attributes("title")).toBe("Marvis");
+    expect(trigger.text()).toBe("Muster");
+    expect(trigger.attributes("title")).toBe("Muster");
     // No chip, no chevron: the crumb is a line of text that happens to open a list, and the
     // glyph that stands for what it names is a thing it is given, not one it draws.
     expect(trigger.find("svg").exists()).toBe(false);
@@ -109,7 +109,7 @@ describe("TitlebarMenu", () => {
     // The icon is the one the sidebar gives the same row, so the line is that panel sideways.
     expect(trigger.findComponent(WORKDIR_ICONS.git).exists()).toBe(true);
     // The name is still what the crumb reads as, glyph and all, so the glyph adds nothing to it.
-    expect(trigger.text()).toBe("Marvis");
+    expect(trigger.text()).toBe("Muster");
     expect(mountMenu({ testid: "repo-crumb" }).get('[data-testid="repo-crumb"]').find("svg").exists()).toBe(false);
   });
 
@@ -124,7 +124,7 @@ describe("TitlebarMenu", () => {
     const wrapper = mountMenu();
 
     expect(wrapper.text()).toContain("This Window");
-    expect(wrapper.get('[data-testid="menu-item-checkout:gone"]').text()).toContain("/Marvis/.worktrees/temporary");
+    expect(wrapper.get('[data-testid="menu-item-checkout:gone"]').text()).toContain("/Muster/.worktrees/temporary");
   });
 
   it("narrows the rows as the search is typed, and takes a group with nothing left in it", async () => {
@@ -133,7 +133,7 @@ describe("TitlebarMenu", () => {
     await wrapper.get("input").setValue("temporary");
 
     expect(wrapper.findAll('[data-testid^="menu-item-checkout:"]').map((row) => row.text())).toEqual([
-      "temporary/Marvis/.worktrees/temporary",
+      "temporary/Muster/.worktrees/temporary",
     ]);
     expect(wrapper.text()).toContain("This Window");
 

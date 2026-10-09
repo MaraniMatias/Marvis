@@ -114,7 +114,7 @@ pub fn frontend_diagnostic(
     sequence: u64,
 ) {
     log::warn!(
-        target: "marvis::frontend_diagnostic",
+        target: "muster::frontend_diagnostic",
         "{}",
         frontend_diagnostic_line(category, kind, hook, sequence)
     );

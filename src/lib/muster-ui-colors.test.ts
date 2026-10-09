@@ -231,7 +231,7 @@ describe("UI foreground tokens", () => {
 
   it("draws the editor's caret as a block in the two colors the terminal draws its own with", () => {
     // The caret is the one part of the editor the stylesheet owns rather than CodeMirror: it draws
-    // the element, Marvis decides it is a block, and it is `--muster-cursor` because that is the
+    // the element, Muster decides it is a block, and it is `--muster-cursor` because that is the
     // color xterm.js is handed for `cursor`. The width is load-bearing rather than cosmetic:
     // CodeMirror leaves a caret's width unset, and a background on a zero-width box is not drawn.
     const caret = block(".cm-focused .cm-scroller .cm-cursorLayer .cm-cursor) {", documentPaneTemplate);
@@ -252,7 +252,7 @@ describe("UI foreground tokens", () => {
   });
 
   it("paints every token the fallback grammars emit, so none is left in the plain text color", () => {
-    // A diff is highlighted by Marvis' own Shiki grammars, which arrive carrying Marvis' own tokens
+    // A diff is highlighted by Muster' own Shiki grammars, which arrive carrying Muster' own tokens
     // and need no stylesheet at all. The library falls back to its own grammars for any language
     // Shiki is not loaded for, and those arrive as `.hljs-*` classes that FileDiff.vue has to
     // recolor. A class those emit and no rule names is a token left in the library's GitHub palette,

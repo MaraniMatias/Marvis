@@ -6,7 +6,7 @@ import { syncWorkspaceRepo } from "../lib/ipc";
 /**
  * Brings a worktree somebody else created into the panel.
  *
- * More than one hand adds a worktree: Marvis's own dialog, an agent running `git worktree add`
+ * More than one hand adds a worktree: Muster's own dialog, an agent running `git worktree add`
  * in a terminal, a script. The watcher already sees Git register any of them: the write goes to
  * the Git directory the worktrees share, whichever way the worktree was made. But a watcher can
  * only refresh rows that exist, and a worktree nothing has registered yet is not one. So the

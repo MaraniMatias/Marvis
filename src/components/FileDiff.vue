@@ -104,7 +104,7 @@ const draftError = ref("");
 /**
  * The range a small diff's note covers, once its composer has moved it.
  *
- * On a large diff the note is written in Marvis' own rows and `draft` is all of it. On a small one
+ * On a large diff the note is written in Muster' own rows and `draft` is all of it. On a small one
  * the library draws the rows and holds the selection that opened the note, so until the composer
  * changes something the library's own band is already the truth and there is nothing to keep.
  */
@@ -963,7 +963,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
 /**
  * The diff library paints itself with `--diff-*` custom properties on `.diff-style-root`, one
  * pair per kind of line. That is the only seam it offers, so F.5 repaints those with the
- * marvis palette instead of replacing its renderer. The selector is deliberately longer than
+ * muster palette instead of replacing its renderer. The selector is deliberately longer than
  * the library's own `[data-theme]` rules: same-specificity rules would be settled by
  * stylesheet order, which is not something a component can rely on.
  *
@@ -1141,15 +1141,15 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
 
 /* These rules paint the library's own highlight.js tokens, which is what a diff is highlighted with
    when `diff-highlighter.ts` has no grammar for its language: the library falls back to its own
-   highlighter for those, and these are the rules that give that output Marvis' palette rather than
-   the GitHub one highlight.js ships. A diff whose grammar Marvis does have is highlighted by Shiki
+   highlighter for those, and these are the rules that give that output Muster' palette rather than
+   the GitHub one highlight.js ships. A diff whose grammar Muster does have is highlighted by Shiki
    instead and needs none of this: its tokens already name the CSS variables.
    The seven added here are the classes those grammars emit that no rule above named, and which were
    therefore being painted in whatever the library's palette said. `hljs-function` is what wraps a
    call's parentheses and its callback's arrow together, so it takes the function color the call
    above it already has; `hljs-subst` is the `${…}` of a template literal and `hljs-class` the class
    a Scala or Elixir declaration is named by, both as the editor paints them. The rest are a list
-   marker, emphasis, bold and strike-through, the last three styled as `marvisHighlightStyle` already
+   marker, emphasis, bold and strike-through, the last three styled as `musterHighlightStyle` already
    styles them. What stays plain here is what highlight.js never classifies at all (the name a line
    declares, `=`, `!`, `||`) because it hands those back as text with no class to match. That is the
    fallback's own granularity, and the reason it is the fallback. */

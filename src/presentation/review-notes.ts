@@ -93,7 +93,7 @@ export interface ReviewSender {
   send(ids: string[], queue: boolean): Promise<void>;
 }
 
-export const REVIEW_SENDER: InjectionKey<ReviewSender> = Symbol("marvis:review-sender");
+export const REVIEW_SENDER: InjectionKey<ReviewSender> = Symbol("muster:review-sender");
 
 function errorText(cause: unknown): string {
   return isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);

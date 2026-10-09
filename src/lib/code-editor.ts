@@ -98,7 +98,7 @@ const syntax = (token: string) => `var(--muster-syntax-token-${token})`;
  * nothing injects `defaultHighlightStyle` as a fallback, so a tag missing here is painted in the
  * editor's own text color rather than in a light one.
  */
-export const marvisHighlightStyle = HighlightStyle.define([
+export const musterHighlightStyle = HighlightStyle.define([
   { tag: tags.comment, color: syntax("comment") },
   {
     tag: [tags.keyword, tags.controlKeyword, tags.moduleKeyword, tags.definitionKeyword, tags.operatorKeyword],
@@ -177,7 +177,7 @@ const gitignoreLanguage = StreamLanguage.define({
  * shorter selector loses to that theme anyway. They live in `DocumentPane`'s stylesheet, which can
  * out-specify it.
  */
-const marvisTheme = EditorView.theme({
+const musterTheme = EditorView.theme({
   "&": { height: "100%" },
   ".cm-scroller": { overflow: "auto" },
 });
@@ -354,7 +354,7 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
         // none of them is a thing this editor does: it draws source and takes typed text. Two
         // consequences worth keeping in mind before adding one back: the light palette
         // `basicSetup` also injects as a fallback does not come with it (so every readable color is
-        // named in `marvisHighlightStyle`), and a package that is not in `package.json` cannot be
+        // named in `musterHighlightStyle`), and a package that is not in `package.json` cannot be
         // imported here at all.
         lineNumbers(),
         highlightActiveLineGutter(),
@@ -377,13 +377,13 @@ export function createCodeEditor(options: CodeEditorOptions): EditorView {
         // itself say so: a lavender selection and a black caret, both unreadable here. The
         // selection is drawn on its own layer, which the shell's `::selection` cannot reach.
         EditorView.darkTheme.of(true),
-        marvisTheme,
+        musterTheme,
         indentation.of(indentationExtension(options.indentation ?? { useSpaces: true, size: 2 })),
         // Empty until the pane says which lines Git has changed, which it only asks about for a
         // file the checkout actually has open.
         changedLines.of(changedLinesExtension([])),
         languageExtension(options.language),
-        syntaxHighlighting(marvisHighlightStyle),
+        syntaxHighlighting(musterHighlightStyle),
         EditorView.updateListener.of((update) => {
           if (update.docChanged) options.onChange(update.state.doc.toString());
         }),
@@ -473,7 +473,7 @@ function frontMatterDecorations(doc: Text): DecorationSet {
   const builder = new RangeSetBuilder<Decoration>();
   highlightTree(
     tree,
-    marvisHighlightStyle,
+    musterHighlightStyle,
     (from, to, classes) => {
       if (!classes) return;
       builder.add(from, to, Decoration.mark({ class: classes }));

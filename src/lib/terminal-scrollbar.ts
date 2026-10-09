@@ -1,5 +1,5 @@
 /**
- * Where the thumb of Marvis' own terminal scrollbar goes.
+ * Where the thumb of Muster' own terminal scrollbar goes.
  *
  * xterm already draws a scrollbar, and this app hides it: the scrollable element that carries it
  * sits in the middle of the pane and the fit measures the grid against that box, so a scrollbar

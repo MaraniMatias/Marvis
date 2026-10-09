@@ -574,7 +574,7 @@ impl Database {
             )
             .map_err(db_error)?;
         if path_in_use || repo_id_in_use {
-            return Err("located directory is already registered in Marvis".into());
+            return Err("located directory is already registered in Muster".into());
         }
         let next_position: i64 = transaction
             .query_row(
@@ -2965,7 +2965,7 @@ mod tests {
             checkout_id: checkout_id.into(),
             session_id: Some("session:historic".into()),
             status: status.into(),
-            marker: format!("marvis-review:{id}"),
+            marker: format!("muster-review:{id}"),
             note_ids: vec![note_id],
             created_at: "now".into(),
             updated_at: "now".into(),
@@ -2992,7 +2992,7 @@ mod tests {
         assert_eq!(round.status, status);
         assert_eq!(round.session_id.as_deref(), Some("session:historic"));
         assert_eq!(round.note_ids.as_slice(), std::slice::from_ref(&note_id));
-        assert_eq!(round.marker, format!("marvis-review:{id}"));
+        assert_eq!(round.marker, format!("muster-review:{id}"));
         assert_eq!(
             database
                 .review_round_prompt(id, checkout_id)
@@ -5316,7 +5316,7 @@ mod tests {
             registered.active_checkout_id.as_deref(),
             Some(worktree_id.as_str())
         );
-        // The worktree is deleted outside Marvis, so the stored row is only marked by its path.
+        // The worktree is deleted outside Muster, so the stored row is only marked by its path.
         fs::remove_dir(&worktree).unwrap();
 
         let closed = database.close_missing_checkout(&worktree_id).unwrap();

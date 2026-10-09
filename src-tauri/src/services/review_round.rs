@@ -1,7 +1,7 @@
 //! Review rounds: one batch of notes delivered to an agent as a single message.
 //!
 //! The round is recorded *before* the agent is called, and its marker is embedded in the
-//! prompt. That ordering is the whole point: if Marvis dies mid-send, the round is left in
+//! prompt. That ordering is the whole point: if Muster dies mid-send, the round is left in
 //! `dispatching` and reconciliation can ask the session whether the message actually
 //! landed, instead of guessing and sending the review twice.
 
@@ -35,7 +35,7 @@ fn failed(message: impl Into<String>) -> IpcError {
 
 /// Builds the prompt for a round: the fixed instructions, the round marker, and the notes.
 ///
-/// `marker` already carries the `marvis-review:` prefix (see `review_round_marker`), so it
+/// `marker` already carries the `muster-review:` prefix (see `review_round_marker`), so it
 /// is embedded verbatim: the deduplication key must be exactly what the session will hold.
 pub fn build_round_prompt(review_markdown: &str, marker: &str) -> String {
     format!("{AGENT_PROMPT_PREFIX}\n[{marker}]\n{review_markdown}")
@@ -487,7 +487,7 @@ mod tests {
         .unwrap();
         assert_eq!(round.status, "dispatching");
         assert_eq!(round.session_id.as_deref(), Some("ses_target"));
-        assert!(round.marker.starts_with("marvis-review:"));
+        assert!(round.marker.starts_with("muster-review:"));
 
         // The note is already linked and marked sent before any agent call happens.
         let stored = &database.review_notes(&checkout_id).unwrap()[0];
@@ -774,11 +774,11 @@ mod tests {
     #[test]
     fn the_prompt_is_the_instructions_then_the_marker_then_the_review() {
         // The marker is the deduplication key, so it must be inside the message the agent
-        // receives and not a side channel Marvis keeps to itself.
-        let prompt = build_round_prompt("# Code Review 2026-09-26", "marvis-review:round:1");
+        // receives and not a side channel Muster keeps to itself.
+        let prompt = build_round_prompt("# Code Review 2026-09-26", "muster-review:round:1");
         assert!(prompt.starts_with(crate::domain::review::AGENT_PROMPT_PREFIX));
         let marker_at = prompt
-            .find("[marvis-review:round:1]")
+            .find("[muster-review:round:1]")
             .expect("marker in the prompt");
         let review_at = prompt.find("# Code Review").expect("review in the prompt");
         assert!(
@@ -794,12 +794,12 @@ mod tests {
     #[ignore = "live OpenCode integration; requires a configured provider and sends a prompt"]
     #[test]
     fn a_queued_round_goes_out_when_flushed() {
-        let directory = std::env::var("MARVIS_AGENT_BRIDGE_DIR")
+        let directory = std::env::var("MUSTER_AGENT_BRIDGE_DIR")
             .ok()
             .filter(|directory| !directory.is_empty())
             .map(PathBuf::from)
             .expect(
-                "MARVIS_AGENT_BRIDGE_DIR is required for this ignored live test; set it to a dedicated temporary directory (see docs/agent-live-tests.md)",
+                "MUSTER_AGENT_BRIDGE_DIR is required for this ignored live test; set it to a dedicated temporary directory (see docs/agent-live-tests.md)",
             );
         let temp = tempdir().unwrap();
         let (database, checkout_id, _) = database_with_two_checkouts(&temp);

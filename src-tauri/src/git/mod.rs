@@ -578,9 +578,9 @@ mod tests {
             &repo,
             &[
                 "-c",
-                "user.email=marvis@example.test",
+                "user.email=muster@example.test",
                 "-c",
-                "user.name=Marvis",
+                "user.name=Muster",
                 "commit",
                 "--quiet",
                 "--allow-empty",
@@ -613,9 +613,9 @@ mod tests {
             &clone,
             &[
                 "-c",
-                "user.email=marvis@example.test",
+                "user.email=muster@example.test",
                 "-c",
-                "user.name=Marvis",
+                "user.name=Muster",
                 "commit",
                 "--quiet",
                 "--allow-empty",

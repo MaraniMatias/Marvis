@@ -99,7 +99,7 @@ const RECORDING_THE_HOME_CHECKOUT: &str = "recording the Home checkout";
 /// the schema versions the two builds speak, and repeating the database path or the user's
 /// directories here would only put the same local layout in the log a second time.
 fn startup_failure(step: &str, cause: &str) -> std::io::Error {
-    let message = format!("Marvis did not start: {step} failed: {cause}");
+    let message = format!("Muster did not start: {step} failed: {cause}");
     log::error!("{message}");
     std::io::Error::other(message)
 }
@@ -270,7 +270,7 @@ fn main() {
             agents.set_event_sink(std::sync::Arc::new(
                 move |event: services::agent::AgentEvent| {
                     // A dead window must not take the reader thread down with it.
-                    let _ = emitter.emit("marvis://agent-event", event);
+                    let _ = emitter.emit("muster://agent-event", event);
                 },
             ));
             app.manage(agents);
@@ -355,7 +355,7 @@ fn main() {
             commands::ui_state::review_target_save
         ])
         .build(tauri::generate_context!())
-        .expect("failed to build Marvis");
+        .expect("failed to build Muster");
     app.run(|handle, event| {
         // Nothing below runs on its own: the loop ends with `std::process::exit`, so a `Drop` in
         // the managed state is never reached.
@@ -611,7 +611,7 @@ mod startup_tests {
 
         assert_eq!(
             about.credits.as_deref(),
-            Some("https://github.com/MaraniMatias/Marvis"),
+            Some("https://github.com/MaraniMatias/Muster"),
             "the About panel has no repository in it"
         );
         // The two lines above the credits. The mock runtime calls itself "test" and carries the

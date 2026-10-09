@@ -291,7 +291,7 @@ function onDialogKeydown(event: KeyboardEvent) {
                written here, so it cannot be a release behind the app it is in. It is drawn only once
                it is known: a half-read version is not a version. -->
           <p class="text-sm text-(--muster-text)" data-testid="about-version">
-            {{ version ? `Marvis v${version}` : "Marvis" }}
+            {{ version ? `Muster v${version}` : "Muster" }}
           </p>
 
           <p class="mt-2 text-xs text-(--muster-text-secondary)">{{ ACKNOWLEDGEMENT }}</p>

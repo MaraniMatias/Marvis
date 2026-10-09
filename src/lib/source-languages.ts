@@ -14,7 +14,7 @@ export interface SourceLanguageOption {
 }
 
 /**
- * Marvis' own "no grammar". Shiki v4 ships no plaintext language, so this name is in no allowlist
+ * Muster' own "no grammar". Shiki v4 ships no plaintext language, so this name is in no allowlist
  * and resolves to no highlighting at all, which is how a plain file has always rendered.
  */
 export const PLAIN_TEXT = "plaintext";

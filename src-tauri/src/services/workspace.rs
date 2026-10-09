@@ -876,7 +876,7 @@ pub fn restore(
 
 /// Reads one repository's worktrees again and registers the ones Git now lists.
 ///
-/// More than one hand adds a worktree: Marvis's own dialog, an agent running `git worktree add`
+/// More than one hand adds a worktree: Muster's own dialog, an agent running `git worktree add`
 /// in a terminal, a script. The disk is what they all wrote to and what the panel has to agree
 /// with, so this asks Git for one repository's list and reconciles the answer: the same reading
 /// [`restore`] takes for every repository, asked for one because a change said this one moved.
@@ -1195,8 +1195,8 @@ mod tests {
     fn init_repo(path: &Path) {
         fs::create_dir_all(path).unwrap();
         git(path, &["init", "-b", "trunk"]);
-        git(path, &["config", "user.name", "Marvis test"]);
-        git(path, &["config", "user.email", "marvis@example.invalid"]);
+        git(path, &["config", "user.name", "Muster test"]);
+        git(path, &["config", "user.email", "muster@example.invalid"]);
         fs::write(path.join("tracked.txt"), "initial\n").unwrap();
         git(path, &["add", "tracked.txt"]);
         git(path, &["commit", "-m", "initial"]);
@@ -1575,7 +1575,7 @@ mod tests {
             checkout_id: checkout_id.clone(),
             session_id: None,
             status: "queued".into(),
-            marker: "marvis-review:review-round:temporary".into(),
+            marker: "muster-review:review-round:temporary".into(),
             note_ids: vec![note_id.clone()],
             created_at: "now".into(),
             updated_at: "now".into(),
@@ -1652,7 +1652,7 @@ mod tests {
 
     /// A worktree is created by more than one hand: an agent running `git worktree add` in a
     /// terminal, a script, this app's own dialog. Whichever one it was, the panel has to show it
-    /// while the app is open rather than at the next launch, and the registration Marvis holds is
+    /// while the app is open rather than at the next launch, and the registration Muster holds is
     /// the only place that reconciliation can happen.
     #[test]
     fn sync_repo_lists_a_worktree_created_outside_the_app_while_it_is_open() {
@@ -2235,7 +2235,7 @@ mod tests {
                 checkout_id: old_id.clone(),
                 session_id: Some("session:historical-agent".into()),
                 status: status.into(),
-                marker: format!("marvis-review:{round_id}"),
+                marker: format!("muster-review:{round_id}"),
                 note_ids: vec![note_id],
                 created_at: "now".into(),
                 updated_at: "now".into(),
@@ -2324,7 +2324,7 @@ mod tests {
                 round.session_id.as_deref(),
                 Some("session:historical-agent")
             );
-            assert_eq!(round.marker, format!("marvis-review:{round_id}"));
+            assert_eq!(round.marker, format!("muster-review:{round_id}"));
             assert_eq!(round.note_ids, [note_id.as_str()]);
             assert_eq!(
                 database
@@ -2583,7 +2583,7 @@ mod tests {
             Some(closed.repos[0].checkouts[0].id.as_str())
         );
         assert!(linked.join("work-in-progress.txt").exists());
-        // Git still knows the worktree, because Marvis only forgot it: `git worktree list` goes
+        // Git still knows the worktree, because Muster only forgot it: `git worktree list` goes
         // on naming the directory, and so does the branch.
         let listed = git_read(&primary, &["worktree", "list", "--porcelain"]);
         assert!(listed.contains(linked.to_str().unwrap()));

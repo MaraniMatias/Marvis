@@ -8,7 +8,7 @@ import {
 } from "../lib/overlay-scrollbar";
 
 /**
- * Marvis' own scrollbar, drawn over a scrolling box that keeps scrolling itself.
+ * Muster' own scrollbar, drawn over a scrolling box that keeps scrolling itself.
  *
  * The box is left alone on purpose: `overflow-y: auto` gives the wheel, the keyboard and the
  * trackpad's own momentum for free, and none of them need this element to exist. What it cannot

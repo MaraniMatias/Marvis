@@ -1014,7 +1014,7 @@ describe("Sidebar workdir rows", () => {
         activeSessionId: null,
         isOpening: false,
         sessionRuntimeStatuses: {
-          only: { state: "running", foregroundProcess: false, terminalTitle: "dev@mbp:~/Trabajo/Marvis" },
+          only: { state: "running", foregroundProcess: false, terminalTitle: "dev@mbp:~/Trabajo/Muster" },
         },
       },
     });
@@ -1478,16 +1478,16 @@ describe("Sidebar workdir rows", () => {
       props: {
         repos: [
           repo({
-            id: "repo:marvis",
+            id: "repo:muster",
             kind: "git",
-            name: "Marvis",
-            root: "/Users/dev/Marvis",
+            name: "Muster",
+            root: "/Users/dev/Muster",
             checkouts: [
               {
                 ...checkout({
                   id: "checkout:worktree",
-                  path: "/Users/dev/Marvis/.worktrees/bug/13133933180-disable-adguard",
-                  canonicalPath: "/Users/dev/Marvis/.worktrees/bug/13133933180-disable-adguard",
+                  path: "/Users/dev/Muster/.worktrees/bug/13133933180-disable-adguard",
+                  canonicalPath: "/Users/dev/Muster/.worktrees/bug/13133933180-disable-adguard",
                   isPrimary: false,
                   branch: "bug/13133933180-disable-adguard",
                 }),
@@ -2024,7 +2024,7 @@ describe("Sidebar workdir rows", () => {
   });
 
   it("gives each terminal in its own worktree its own agent and busy state", async () => {
-    // The reported case: several Marvis terminals, `opencode` run in each, independently. Both
+    // The reported case: several Muster terminals, `opencode` run in each, independently. Both
     // rows are live, and each says what its own worktree is doing.
     const wrapper = mount(Sidebar, {
       props: {
@@ -2099,7 +2099,7 @@ describe("Sidebar workdir rows", () => {
   it("paints the two states a grey idle glyph cannot be mistaken for", async () => {
     // Waiting is amber and failed is red, and neither is reachable by accident from the other, so a
     // row that needs a person cannot be drawn as a quiet one. The reference has no failed state;
-    // Marvis has one, and it stays: the danger token is the honest colour for a turn that ended badly.
+    // Muster has one, and it stays: the danger token is the honest colour for a turn that ended badly.
     const wrapper = mount(Sidebar, {
       props: {
         repos: [
@@ -2244,7 +2244,7 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
 
     // **No rounded corners anywhere in the panel.** A rounded row with a two-pixel accent edge down
-    // its left says "this one" twice, in two shapes, and the edge is the one that says it. Marvis
+    // its left says "this one" twice, in two shapes, and the edge is the one that says it. Muster
     // draws square boxes everywhere else, and a row that rounds off only here is a shape the rest of
     // the app has never had.
     expect(sidebarStyles()).not.toContain("border-radius");
@@ -3264,8 +3264,8 @@ describe("folding a repository", () => {
         repos: [
           repo({
             id: "repo:one",
-            name: "Marvis",
-            root: "/dev/Marvis",
+            name: "Muster",
+            root: "/dev/Muster",
             checkouts: [{ ...checkout({ id: "checkout:wt" }), sessions: [session("one", "zsh", "checkout:wt")] }],
           }),
           repo({
@@ -3322,7 +3322,7 @@ describe("folding a repository", () => {
 
   it("leaves the repository's own menu alone: its trigger must not fold it as well", async () => {
     const wrapper = twoRepos();
-    await wrapper.get('[aria-label="Actions for Marvis"]').trigger("click");
+    await wrapper.get('[aria-label="Actions for Muster"]').trigger("click");
     await flushPromises();
     // The menu opened and the repository is still as it was.
     expect(groupOf(wrapper, 0).findAll(".workdir-checkouts")).toHaveLength(1);
@@ -3345,11 +3345,11 @@ describe("sidebar drag and drop", () => {
           repo({
             id: "repo:test",
             kind: "git",
-            name: "Marvis",
-            root: "/dev/Marvis",
+            name: "Muster",
+            root: "/dev/Muster",
             checkouts: [
               {
-                ...checkout({ id: "checkout:wt", path: "/dev/Marvis/.worktrees/wt" }),
+                ...checkout({ id: "checkout:wt", path: "/dev/Muster/.worktrees/wt" }),
                 sessions: [
                   session("one", "zsh", "checkout:wt"),
                   session("two", "zsh", "checkout:wt"),
@@ -3427,9 +3427,9 @@ describe("sidebar drag and drop", () => {
           }),
           repo({
             id: "repo:git",
-            name: "Marvis",
-            root: "/dev/Marvis",
-            checkouts: [checkout({ id: "checkout:git", repoId: "repo:git", path: "/dev/Marvis" })],
+            name: "Muster",
+            root: "/dev/Muster",
+            checkouts: [checkout({ id: "checkout:git", repoId: "repo:git", path: "/dev/Muster" })],
           }),
         ],
         activeCheckoutId: null,
@@ -3522,10 +3522,10 @@ describe("sidebar drag and drop", () => {
           }),
           repo({
             id: "repo:git",
-            name: "Marvis",
-            root: "/dev/Marvis",
+            name: "Muster",
+            root: "/dev/Muster",
             checkouts: [
-              checkout({ id: "checkout:git", repoId: "repo:git", path: "/dev/Marvis" }),
+              checkout({ id: "checkout:git", repoId: "repo:git", path: "/dev/Muster" }),
               ...(targetKind === "missing"
                 ? [checkout({ id: "checkout:missing", repoId: "repo:git", path: "/gone", isMissing: true })]
                 : []),
@@ -3584,11 +3584,11 @@ describe("sidebar drag and drop", () => {
           repo({
             id: "repo:test",
             kind: "git",
-            name: "Marvis",
-            root: "/dev/Marvis",
+            name: "Muster",
+            root: "/dev/Muster",
             checkouts: [
               {
-                ...checkout({ id: "checkout:wt", path: "/dev/Marvis/.worktrees/wt" }),
+                ...checkout({ id: "checkout:wt", path: "/dev/Muster/.worktrees/wt" }),
                 sessions: [session("one", "zsh", "checkout:wt"), session("two", "zsh", "checkout:wt")],
               },
             ],

@@ -94,6 +94,6 @@ wave a hinted face straight through.
 
 To change the face, replace the files, keep the names, and update the
 `@font-face` blocks in `src/muster.css` and `TERMINAL_FONT_FAMILY` in
-`src/lib/marvis-terminal.ts` together — the app has one face on purpose. The
+`src/lib/muster-terminal.ts` together — the app has one face on purpose. The
 icon family has to be named in every place the text one is, or a glyph in the
 private use range falls back to a face of its own and draws at the wrong width.

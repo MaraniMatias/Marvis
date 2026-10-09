@@ -1509,14 +1509,14 @@ function openWorktreeDialog(mode: "create" | "remove", checkoutId: string) {
  *
  * A repo root (the primary checkout of a Git repository, and the only checkout of a plain
  * folder) is registered as the head of a list, so closing one takes that list with it; a
- * worktree is an entry of its own. Marvis deletes no files either way, so the confirmation
+ * worktree is an entry of its own. Muster deletes no files either way, so the confirmation
  * only has to name the scope.
  */
 async function closeMissingCheckout(checkoutId: string) {
   const checkout = allCheckouts.value.find((item) => item.id === checkoutId);
   if (!checkout) return;
   const scope = checkout.isPrimary ? " and its checkout list" : "";
-  if (!window.confirm(`Close “${checkout.path}”${scope} in Marvis? No files will be deleted.`)) return;
+  if (!window.confirm(`Close “${checkout.path}”${scope} in Muster? No files will be deleted.`)) return;
   try {
     applyWorkspace(await persistMissingCheckoutClose(checkoutId));
   } catch (cause) {
@@ -1536,7 +1536,7 @@ async function closeWorkdir(checkoutId: string) {
   const checkout = allCheckouts.value.find((item) => item.id === checkoutId);
   if (!checkout) return;
   const scope = checkout.isPrimary ? " and its checkout list" : "";
-  const question = `Remove “${checkout.path}”${scope} from Marvis? No files will be deleted, and opening the folder again brings it back.`;
+  const question = `Remove “${checkout.path}”${scope} from Muster? No files will be deleted, and opening the folder again brings it back.`;
   if (!window.confirm(question)) return;
   try {
     applyWorkspace(await persistCheckoutClose(checkoutId));

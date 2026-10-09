@@ -242,7 +242,7 @@ pub fn create(
         .ok_or_else(|| {
             IpcError::new(
                 IpcErrorCode::OperationFailed,
-                "Git created the worktree, but Marvis could not register it",
+                "Git created the worktree, but Muster could not register it",
             )
         })?;
     Ok(CreatedWorktree {
@@ -1068,8 +1068,8 @@ mod tests {
         let root = base.join("repo with spaces");
         fs::create_dir_all(&root).unwrap();
         git(&root, &["init", "-b", "main"]);
-        git(&root, &["config", "user.name", "Marvis test"]);
-        git(&root, &["config", "user.email", "marvis@example.invalid"]);
+        git(&root, &["config", "user.name", "Muster test"]);
+        git(&root, &["config", "user.email", "muster@example.invalid"]);
         fs::write(root.join("base.txt"), "base\n").unwrap();
         git(&root, &["add", "base.txt"]);
         git(&root, &["commit", "-m", "base"]);
@@ -1640,8 +1640,8 @@ mod tests {
 
         fs::create_dir_all(&root).unwrap();
         git(&root, &["init", "-b", "main"]);
-        git(&root, &["config", "user.name", "Marvis test"]);
-        git(&root, &["config", "user.email", "marvis@example.invalid"]);
+        git(&root, &["config", "user.name", "Muster test"]);
+        git(&root, &["config", "user.email", "muster@example.invalid"]);
         fs::write(root.join("base.txt"), "base\n").unwrap();
         git(&root, &["add", "base.txt"]);
         git(&root, &["commit", "-m", "base"]);

@@ -722,7 +722,7 @@ describe("FileDiff", () => {
   it("hands the library the two texts of the file, which is what its grammar reads", async () => {
     // A grammar reads a file, not a hunk of one: the lines inside `<script setup lang="ts">` of a
     // `.vue` file are markup to a grammar that was never shown the tag that opened them. So what
-    // arrives with the patch is the whole of each side, under the name Marvis calls the language.
+    // arrives with the patch is the whole of each side, under the name Muster calls the language.
     const wrapper = mountDiff({});
     await vi.waitFor(() => expect(mocks.prepared).toHaveLength(1));
     expect(mocks.prepared[0]).toEqual({
@@ -787,7 +787,7 @@ describe("FileDiff", () => {
     wrapper.unmount();
   });
 
-  it("hands the library a highlighter, which is the only way it highlights with Marvis' grammars", async () => {
+  it("hands the library a highlighter, which is the only way it highlights with Muster' grammars", async () => {
     // The diff is highlighted by the same grammars the editor reads with, and the library takes a
     // replacement only through this prop. It arrives a moment after the diff does, because a grammar
     // is a dynamic import and a file is read in one, and holding the text back for either would cost

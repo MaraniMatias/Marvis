@@ -52,7 +52,7 @@ interface SideContext {
 const BLANK: readonly Token[] = [{ content: "" }];
 
 /**
- * Loaded grammars, by the name Marvis calls the language, and the loads in flight for them.
+ * Loaded grammars, by the name Muster calls the language, and the loads in flight for them.
  *
  * The only state this module keeps. A grammar is a parser and nothing here can make it say anything
  * untrue, so one is shared by every diff that is opened; what a diff says is not shared, because two
@@ -64,7 +64,7 @@ const loading = new Map<string, Promise<boolean>>();
 /**
  * The style attribute for one token.
  *
- * The color is a CSS variable Shiki resolved against Marvis' own theme, so it is a `var(...)` by
+ * The color is a CSS variable Shiki resolved against Muster' own theme, so it is a `var(...)` by
  * construction and never anything a file could have put there. The declarations are joined by hand
  * because the library reads `style` as a string rather than a property bag.
  */
@@ -136,7 +136,7 @@ function readSide(
   if (isOverByteCap(text) || countLines(text) > MAX_SYNTAX_LINES) return undefined;
   let read: readonly (readonly Token[])[];
   try {
-    read = instance.codeToTokens(text, { lang: grammar, theme: "marvis" }).tokens;
+    read = instance.codeToTokens(text, { lang: grammar, theme: "muster" }).tokens;
   } catch {
     // A grammar that throws on this input is not read at all, which leaves the diff to the library's
     // own highlighter rather than to a file the grammar has already had its way with.
@@ -258,7 +258,7 @@ function createHighlighter(sides: { old?: SideContext; new?: SideContext }): Dif
  * so a change near the top of a large file is read as the top of that file and not as all of it.
  *
  * Resolves to nothing when there is nothing to highlight with, which is also what decides the
- * fallback: a language Marvis has no grammar for, a side the backend had no text for, and a side past
+ * fallback: a language Muster has no grammar for, a side the backend had no text for, and a side past
  * one of the limits above all leave the library to highlight the file its own way, which is what it
  * has always done with a file it has no grammar for.
  *
@@ -281,7 +281,7 @@ export async function prepareDiffHighlighting(
 /**
  * The grammar a language is highlighted with, loaded once however many diffs of it are open.
  *
- * Named by Marvis rather than by Shiki, because that is the name the library asks about: a file is
+ * Named by Muster rather than by Shiki, because that is the name the library asks about: a file is
  * read as the language its path detected, and `gitignore` is the name of a grammar Shiki calls `ini`.
  */
 async function loadGrammar(language: string): Promise<{ instance: HighlighterCore; grammar: string } | undefined> {

@@ -596,7 +596,7 @@ describe("diff highlighter", () => {
 
   it("claims a language only once its grammar is loaded", async () => {
     // A language nothing is loaded for is the library's to answer for, which is what keeps a file
-    // Marvis has no grammar for rendering the way it always has rather than rendering nothing.
+    // Muster has no grammar for rendering the way it always has rather than rendering nothing.
     expect(await prepareDiffHighlighting("no-such-language", { new: "x\n" })).toBeUndefined();
     expect(await prepareDiffHighlighting(undefined, { new: "x\n" })).toBeUndefined();
     // Plaintext is deliberately in no allowlist, so this is not ours to answer either.
@@ -607,8 +607,8 @@ describe("diff highlighter", () => {
     expect(await prepareDiffHighlighting("typescript", { new: "const a = 1;\n" })).toBeDefined();
   });
 
-  it("reads a grammar under the name Shiki knows it by, not the name Marvis calls it", async () => {
-    // `gitignore` is Marvis' own name for a file of bare globs, and Shiki has no such grammar, so it
+  it("reads a grammar under the name Shiki knows it by, not the name Muster calls it", async () => {
+    // `gitignore` is Muster' own name for a file of bare globs, and Shiki has no such grammar, so it
     // borrows `ini`. The name is only how the grammar is asked for.
     const path = ".gitignore";
     const lines = ["# a comment", "*.log", ""];

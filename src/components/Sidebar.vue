@@ -1758,7 +1758,7 @@ function rowLabel(item: WorkdirItem): string {
 }
 
 /* ---------------------------------------------------------------------------------------------
-   The row. One line, 26px, and square like everything else in Marvis: a rounded row carrying a
+   The row. One line, 26px, and square like everything else in Muster: a rounded row carrying a
    two-pixel accent edge down its left is a shape saying "this one" twice, and the edge says it once.
    Every row here — a branch, a terminal, an action — is the same square box, so which of them it is
    is said by the glyph and the name rather than by the outline.

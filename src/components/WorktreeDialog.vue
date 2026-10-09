@@ -278,7 +278,7 @@ function onDialogKeydown(event: KeyboardEvent) {
           v-if="removal.isMissing"
           class="border border-(--muster-border) bg-(--muster-bg-1) p-3 text-sm text-(--muster-text-secondary)"
         >
-          This checkout is missing. Git will prune its stale worktree metadata and remove it from Marvis.
+          This checkout is missing. Git will prune its stale worktree metadata and remove it from Muster.
         </p>
         <div v-if="removal.dirtyFiles.length" class="border border-(--muster-border) bg-(--muster-bg-1) p-3">
           <p class="text-sm text-(--muster-text)">

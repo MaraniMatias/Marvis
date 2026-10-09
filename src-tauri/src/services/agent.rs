@@ -1,6 +1,6 @@
 //! A minimal OpenCode bridge: a client of the service the person running OpenCode started.
 //!
-//! Everything Marvis needs from the agent is scoped to the checkout that owns it, so every
+//! Everything Muster needs from the agent is scoped to the checkout that owns it, so every
 //! request names that checkout's directory and every response is checked against the expected
 //! path before it is trusted. A `ses_…` id from one checkout is meaningless in another's
 //! directory, and `agent_session` is what enforces that.
@@ -146,7 +146,7 @@ struct ApiLocation {
 /// One session as `GET /api/session` and `GET /api/session/{id}` answer it.
 ///
 /// **The `#[serde(default)]`s here are tolerance of a third party's wire, not back-compat with an
-/// older Marvis.** Every one of these `Api*` types parses a response written by the OpenCode
+/// older Muster.** Every one of these `Api*` types parses a response written by the OpenCode
 /// service, which is a separate program on its own release cadence: we do not ship it, we do not
 /// bump it and `SUPPORTED_MAJOR` only refuses a different major. A field that is absent from one
 /// response is a session with no agent, no model, no parent or no timestamps yet, and reading it as
@@ -1330,7 +1330,7 @@ fn send_json<T: serde::de::DeserializeOwned>(
 fn status_detail(status: u16) -> String {
     match status {
         404 => "the agent server does not support that request in this version".to_string(),
-        401 | 403 => "the agent server rejected Marvis's credentials".to_string(),
+        401 | 403 => "the agent server rejected Muster's credentials".to_string(),
         other => format!("the agent server answered {other}"),
     }
 }
@@ -1616,7 +1616,7 @@ impl PendingReadFailure {
         match error {
             BridgeError::Unavailable(message) if message.contains("timed out") => Self::Timeout,
             BridgeError::Unavailable(_) => Self::Transport,
-            BridgeError::Stale(message) if message.contains("rejected Marvis's credentials") => {
+            BridgeError::Stale(message) if message.contains("rejected Muster's credentials") => {
                 Self::Http
             }
             BridgeError::Stale(_) => Self::Transport,
@@ -2048,7 +2048,7 @@ fn work_directory(checkouts: &[(String, PathBuf)], targets: &[PathBuf]) -> Optio
 /// The last worktree this panel could name for a session, and when it was last read.
 ///
 /// `checkout_id` is kept even while the session's directory is one this panel has no checkout for.
-/// That is the whole point: a session that walks into a worktree Marvis has not registered yet is
+/// That is the whole point: a session that walks into a worktree Muster has not registered yet is
 /// the commonest case there is, and forgetting where it was makes that worktree look like a
 /// session appearing for the first time, which is never a move.
 #[derive(Debug, Clone)]
@@ -2078,7 +2078,7 @@ pub struct AgentService {
     candidates: Mutex<CandidateSlot>,
     /// The agent catalogs, per checkout: `/api/agent` answers for one directory, so a cache wider
     /// than that would hand one project's agents to another project's row. Measured against the
-    /// real service: Marvis offers eight, a sibling repository eleven, three of them its own.
+    /// real service: Muster offers eight, a sibling repository eleven, three of them its own.
     catalogs: Mutex<HashMap<String, Cached<Arc<Vec<AgentAgent>>>>>,
     removal_state: Arc<Mutex<RemovalState>>,
     busy_turns: Arc<Mutex<HashMap<String, HashMap<String, TrackedTurn>>>>,
@@ -2243,7 +2243,7 @@ impl AgentService {
     /// removal state without talking to anything.
     #[cfg(test)]
     pub(crate) fn without_service() -> Self {
-        Self::new(PathBuf::from("/marvis-no-opencode-service"))
+        Self::new(PathBuf::from("/muster-no-opencode-service"))
     }
 
     fn checkout_operation_lock(&self, checkout_id: &str) -> Arc<Mutex<()>> {
@@ -2892,7 +2892,7 @@ impl AgentService {
                 }
             }
             // Resolve again even without new tools: the agent may have created a worktree before
-            // Marvis registered it. The original target is retained, not its parent checkout.
+            // Muster registered it. The original target is retained, not its parent checkout.
             if let Some(directory) = work_directory(checkouts, &entry.targets) {
                 entry.effective = Some(directory);
             } else if baseline && !entry.targets.is_empty() {
@@ -4411,7 +4411,7 @@ mod tests {
                 PendingReadFailure::Http,
             ),
             (
-                BridgeError::Stale("the agent server rejected Marvis's credentials".into()),
+                BridgeError::Stale("the agent server rejected Muster's credentials".into()),
                 PendingReadFailure::Http,
             ),
             (
@@ -5623,7 +5623,7 @@ mod tests {
         }
     }
 
-    /// The commonest move there is: the agent walks into a worktree Marvis has not registered yet,
+    /// The commonest move there is: the agent walks into a worktree Muster has not registered yet,
     /// and the worktree only appears on the panel afterwards. Forgetting where the session came
     /// from when it was somewhere this panel had no checkout for would leave the row behind for
     /// good, which is the one outcome the whole feature exists to prevent.
@@ -6970,7 +6970,7 @@ mod tests {
         // The reconnect loop runs forever, so a line per attempt is a log a service that is down
         // fills by itself. The backoff is the throttle: one line per tier, and no line at all for
         // the attempts in between.
-        let bridge = bridge_at("stuck-service", Path::new("/marvis-no-such-directory"), 1);
+        let bridge = bridge_at("stuck-service", Path::new("/muster-no-such-directory"), 1);
         let loss = StreamLoss::Refused(io::Error::new(
             io::ErrorKind::ConnectionRefused,
             "nothing is listening",
@@ -7125,7 +7125,7 @@ mod tests {
 
     #[test]
     fn reports_rejected_credentials_distinctly() {
-        assert!(status_detail(401).contains("rejected Marvis's credentials"));
+        assert!(status_detail(401).contains("rejected Muster's credentials"));
     }
 
     /// A service whose address a test can move, the way a restart on another port moves it.
@@ -7318,7 +7318,7 @@ mod tests {
             .prompt("checkout", directory.path(), "ses_owned", "one review")
             .expect_err("the service refused the prompt");
         assert!(
-            error_message(&refused).contains("rejected Marvis's credentials"),
+            error_message(&refused).contains("rejected Muster's credentials"),
             "{refused:?}"
         );
 
@@ -7343,7 +7343,7 @@ mod tests {
     #[ignore = "live OpenCode integration; requires a configured provider and sends a prompt"]
     #[test]
     fn a_round_marker_reaches_the_real_session() {
-        let directory = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
+        let directory = required_live_directory("MUSTER_AGENT_BRIDGE_DIR");
         let agents = live_service();
         let created = agents
             .create_session("checkout:marker", &directory, "marker probe")
@@ -7395,7 +7395,7 @@ mod tests {
     #[ignore = "live OpenCode integration; requires a configured provider and sends a prompt"]
     #[test]
     fn a_turn_is_observable_through_the_idle_time() {
-        let directory = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
+        let directory = required_live_directory("MUSTER_AGENT_BRIDGE_DIR");
         let agents = live_service();
         let created = agents
             .create_session("checkout:turn", &directory, "turn probe")
@@ -7437,7 +7437,7 @@ mod tests {
         agents.stop("checkout:turn");
     }
 
-    /// Proves that the fields Marvis renders a row from are really on the wire.
+    /// Proves that the fields Muster renders a row from are really on the wire.
     ///
     /// The agent name, the model, the parent of a subagent and the color OpenCode paints an
     /// agent with are all read off routes that exist in 2.0.18, and this is the only thing that
@@ -7447,7 +7447,7 @@ mod tests {
     #[ignore = "live OpenCode integration; requires the local OpenCode server and creates a session"]
     #[test]
     fn the_agent_catalog_is_readable_from_a_real_server() {
-        let directory = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
+        let directory = required_live_directory("MUSTER_AGENT_BRIDGE_DIR");
         let agents = live_service();
         let agents_for_catalog = agents
             .agents("checkout:catalog", &directory)
@@ -7499,8 +7499,8 @@ mod tests {
     #[ignore = "live OpenCode integration; requires a configured provider and sends a prompt"]
     #[test]
     fn bridge_talks_to_a_real_server() {
-        let first = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
-        let second = required_live_directory("MARVIS_AGENT_BRIDGE_OTHER_DIR");
+        let first = required_live_directory("MUSTER_AGENT_BRIDGE_DIR");
+        let second = required_live_directory("MUSTER_AGENT_BRIDGE_OTHER_DIR");
         let agents = live_service();
 
         // Collect normalized events so the SSE reader is exercised, not just the requests.
@@ -7584,10 +7584,10 @@ mod tests {
     #[ignore = "live OpenCode integration; requires a configured provider, sends prompts, and edits files"]
     #[test]
     fn two_checkouts_run_the_review_loop() {
-        let first = required_live_directory("MARVIS_AGENT_BRIDGE_DIR");
-        let second = required_live_directory("MARVIS_AGENT_BRIDGE_OTHER_DIR");
-        let target = first.join("marvis_loop_target.txt");
-        let second_file = first.join("marvis_second_target.txt");
+        let first = required_live_directory("MUSTER_AGENT_BRIDGE_DIR");
+        let second = required_live_directory("MUSTER_AGENT_BRIDGE_OTHER_DIR");
+        let target = first.join("muster_loop_target.txt");
+        let second_file = first.join("muster_second_target.txt");
         let original = "alpha\nbravo\n";
         std::fs::write(&target, original).expect("write the file under review");
         std::fs::write(&second_file, "one\ntwo\n").expect("write the second file under review");
@@ -7613,11 +7613,11 @@ mod tests {
         // ask, and an unanswered question is not something this server version can settle.
         let marker = review_round_marker("round:loop");
         let review = [
-            "### `marvis_loop_target.txt`".to_string(),
+            "### `muster_loop_target.txt`".to_string(),
             String::new(),
             "- line 1: replace the whole file with exactly: `done by agent`.".to_string(),
             String::new(),
-            "### `marvis_second_target.txt`".to_string(),
+            "### `muster_second_target.txt`".to_string(),
             String::new(),
             "- line 1: replace the whole file with exactly: `also done by agent`.".to_string(),
         ]
@@ -7625,8 +7625,8 @@ mod tests {
         let prompt = build_round_prompt(&review, &marker);
         assert!(prompt.contains(&marker), "the marker is not in the prompt");
         assert!(
-            prompt.contains("marvis_loop_target.txt")
-                && prompt.contains("marvis_second_target.txt"),
+            prompt.contains("muster_loop_target.txt")
+                && prompt.contains("muster_second_target.txt"),
             "the two files did not leave in the same message"
         );
         agents
