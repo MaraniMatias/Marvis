@@ -10,7 +10,7 @@ docker info >/dev/null 2>&1 || { echo "Docker is installed but its Linux daemon 
 version="$(node -p "require('./package.json').version")"
 sha="$(git rev-parse HEAD)"
 tmp_root="${TMPDIR:-/tmp}"
-if [[ "$(uname -s)" == Darwin && "$tmp_root" == /var/* ]]; then tmp_root="/private${tmp_root#/var}"; fi
+if [[ "$(uname -s)" == Darwin && "$tmp_root" == /var/* ]]; then tmp_root="/private/var${tmp_root#/var}"; fi
 out="$(mktemp -d "$tmp_root/muster-linux-release.XXXXXX")"
 trap 'rm -rf "$out"' EXIT
 
