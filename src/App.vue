@@ -1714,7 +1714,7 @@ function followWorkingDirectory(sessionId: string, status: TerminalSessionStatus
   if (!from) return;
   // Nothing when the shell is already where its row says it is, which is also what stops this
   // from moving the row over and over after it has moved.
-  const target = checkoutForWorkingDirectory(checkouts, from.id, status.workingDirectory);
+  const target = checkoutForWorkingDirectory(workspace.value.repos, from.id, status.workingDirectory);
   if (!target || target.id === from.id) return;
   void moveTerminalToWorktree(sessionId, from.id, target.id);
 }
@@ -1804,8 +1804,8 @@ async function moveTerminalToWorktree(sessionId: string, fromCheckoutId: string,
     candidate.checkouts.some((checkout) => checkout.id === toCheckoutId),
   );
   const target = targetRepo?.checkouts.find((checkout) => checkout.id === toCheckoutId);
-  const allowed = repo?.id === targetRepo?.id || (repo?.kind === "plain" && targetRepo?.kind === "git");
-  // Plain-folder terminals may enter Git; terminals already in Git cannot leave their repository.
+  const allowed = repo?.id === targetRepo?.id || repo?.kind === "plain";
+  // Plain-folder terminals may enter any checkout; Git terminals cannot leave their repository.
   // The backend enforces the same boundary for manual and automatic moves.
   if (!repo || !target || target.isMissing || !allowed) return;
   const follow = windowFollowsMove(sessionId, fromCheckoutId);

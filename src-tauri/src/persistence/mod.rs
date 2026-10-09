@@ -1555,12 +1555,12 @@ impl Database {
         if source_checkout_id == target_checkout_id {
             return Err("the terminal session is already in that worktree".into());
         }
-        let (target_repo_id, target_kind): (String, String) = transaction
+        let target_repo_id: String = transaction
             .query_row(
-                "SELECT c.repo_id, r.kind FROM checkouts c JOIN repos r ON r.id = c.repo_id
-                 WHERE c.id = ?1 AND c.is_missing = 0 AND c.is_archived = 0",
+                "SELECT repo_id FROM checkouts
+                 WHERE id = ?1 AND is_missing = 0 AND is_archived = 0",
                 [target_checkout_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .optional()
             .map_err(db_error)?
@@ -1572,9 +1572,9 @@ impl Database {
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(db_error)?;
-        // A plain-folder terminal can enter a Git checkout. Once it belongs to Git, its
-        // repository boundary applies to automatic and manual moves alike.
-        if source_repo_id != target_repo_id && !(source_kind == "plain" && target_kind == "git") {
+        // A plain-folder terminal can enter any registered checkout. Once it belongs to Git,
+        // its repository boundary applies to automatic and manual moves alike.
+        if source_repo_id != target_repo_id && source_kind != "plain" {
             return Err("a terminal session cannot leave the repository it was opened in".into());
         }
         transaction
@@ -4739,6 +4739,7 @@ mod tests {
             let plain_id = plain_repo.checkouts[0].id.clone();
             database.register_plain_repo(plain_repo).unwrap();
             let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+            let root_id = repo.checkouts[0].id.clone();
             database.register_git_repo(repo, &worktree_id).unwrap();
             let (other_repo, other_id) = git_repo_with_worktree(&other, &other_worktree);
             database.register_git_repo(other_repo, &other_id).unwrap();
@@ -4751,6 +4752,16 @@ mod tests {
                 status: SessionStatus::Active,
             };
             database.add_terminal_session(&session).unwrap();
+            database
+                .move_terminal_session(&session.id, &plain_id, false)
+                .unwrap();
+            assert_eq!(
+                database.terminal_session_checkout(&session.id).unwrap(),
+                Some(plain_id.clone())
+            );
+            database
+                .move_terminal_session(&session.id, &home_id, false)
+                .unwrap();
             database
                 .save_terminal_layout(
                     &home_id,
@@ -4767,11 +4778,9 @@ mod tests {
                 )
                 .unwrap();
             let before = database.load_workspace().unwrap();
-            for invalid in [&plain_id, &"checkout:unknown".to_string()] {
-                assert!(database
-                    .move_terminal_session(&session.id, invalid, select_target)
-                    .is_err());
-            }
+            assert!(database
+                .move_terminal_session(&session.id, "checkout:unknown", select_target)
+                .is_err());
             // Missing and archived destinations remain refused by the same public move contract.
             for column in ["is_missing", "is_archived"] {
                 let sql = format!("UPDATE checkouts SET {column} = ?1 WHERE id = ?2");
@@ -4794,6 +4803,13 @@ mod tests {
             assert_eq!(
                 database.terminal_session_checkout(&session.id).unwrap(),
                 Some(home_id.clone())
+            );
+            database
+                .move_terminal_session(&session.id, &root_id, select_target)
+                .unwrap();
+            assert_eq!(
+                database.terminal_session_checkout(&session.id).unwrap(),
+                Some(root_id.clone())
             );
             let moved = database
                 .move_terminal_session(&session.id, &worktree_id, select_target)
@@ -4839,6 +4855,13 @@ mod tests {
                     Some(worktree_id.clone())
                 );
             }
+            database
+                .move_terminal_session(&session.id, &root_id, select_target)
+                .unwrap();
+            assert_eq!(
+                database.terminal_session_checkout(&session.id).unwrap(),
+                Some(root_id)
+            );
         }
     }
 

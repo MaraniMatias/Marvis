@@ -270,12 +270,11 @@ function containsDirectory(parent: string, child: string): boolean {
 }
 
 /**
- * The worktree of `fromCheckoutId`'s repository that a terminal sitting there is working in.
+ * The registered checkout matching a terminal's working directory.
  *
- * A sibling of the *same repository*, never another repo: two worktrees of one repo share a Git
- * directory and a terminal may be handed between them, and a session labelled with another repo's
- * tree is the one mistake a terminal cannot come back from. A directory inside no worktree of that
- * repository answers nothing.
+ * A terminal filed under a plain folder may enter any repository. Once filed under Git, it may
+ * only move within that repository: a session labelled with one repo's tree must not be handed
+ * to another repo.
  *
  * The answer may be the checkout the terminal is already under, and that is not a corner case: a
  * worktree created inside its own repository lives under the repository's directory, so the two
@@ -286,17 +285,14 @@ function containsDirectory(parent: string, child: string): boolean {
  * Both `path` and `canonicalPath` are tried because the OS reports the directory as the kernel
  * recorded it and the two are not always spelled the same way, as `/tmp` and `/private/tmp` show.
  */
-export function checkoutForWorkingDirectory(
-  checkouts: Checkout[],
-  fromCheckoutId: string,
-  directory: string,
-): Checkout | null {
-  const from = checkouts.find((checkout) => checkout.id === fromCheckoutId);
-  if (!from) return null;
+export function checkoutForWorkingDirectory(repos: Repo[], fromCheckoutId: string, directory: string): Checkout | null {
+  const fromRepo = repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === fromCheckoutId));
+  if (!fromRepo) return null;
+  const checkouts = repos.flatMap((repo) => repo.checkouts);
   // The longest path is the most specific one, so a worktree nested in a worktree wins over the
   // one holding it rather than whichever came first in the list.
   const target = checkouts
-    .filter((checkout) => checkout.repoId === from.repoId && !checkout.isMissing)
+    .filter((checkout) => !checkout.isMissing && (fromRepo.kind !== "git" || checkout.repoId === fromRepo.id))
     .filter(
       (checkout) => containsDirectory(checkout.canonicalPath, directory) || containsDirectory(checkout.path, directory),
     )

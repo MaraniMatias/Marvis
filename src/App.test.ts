@@ -1839,6 +1839,83 @@ describe("App UI integration", () => {
 
     const following = () => ({ ...cloneSettings(DEFAULT_SETTINGS).terminal, followWorktree: "cd" as const });
 
+    it.each(["off", "cd", "agent", "both"] as const)(
+      "gates Home cd into Git and subsequent hops with %s",
+      async (mode) => {
+        const home = {
+          ...checkout("checkout:home", [session("session:home", "zsh", "checkout:home")]),
+          repoId: "repo:home",
+          path: "/work",
+          canonicalPath: "/work",
+        };
+        const root = { ...checkout("checkout:one"), path: "/work/app", canonicalPath: "/work/app" };
+        const worktree = {
+          ...checkout("checkout:two"),
+          path: "/work/app/.worktrees/feature",
+          canonicalPath: "/work/app/.worktrees/feature",
+        };
+        const workspace = workspaceWith(root, worktree);
+        workspace.repos.unshift({
+          ...workspace.repos[0],
+          id: home.repoId,
+          kind: "plain",
+          root: home.path,
+          checkouts: [home],
+        });
+        workspace.homeCheckoutId = home.id;
+        workspace.activeCheckoutId = home.id;
+        workspace.activeSessionId = "session:home";
+        const settings = cloneSettings(DEFAULT_SETTINGS);
+        settings.terminal.followWorktree = mode;
+        const wrapper = await mountApp(workspace, undefined, { settings });
+        mocks.moveSession.mockClear();
+        const report = async (directory: string) => {
+          wrapper
+            .getComponent({ name: "SessionPane" })
+            .vm.$emit("sessionStatusChanged", "session:home", status(directory));
+          await flushPromises();
+        };
+        await report(root.path + "/src");
+        if (mode === "off" || mode === "agent") {
+          expect(mocks.moveSession).not.toHaveBeenCalled();
+        } else {
+          expect(mocks.moveSession).toHaveBeenLastCalledWith("session:home", root.id, 0, false, true);
+          // The move stub does not return the backend's updated ownership; apply that result here.
+          const arrive = (target: Checkout) => {
+            const state = mocks.workspaceRef!.value;
+            const moved = state.repos
+              .flatMap((repo) => repo.checkouts)
+              .flatMap((checkout) => checkout.sessions)
+              .find((session) => session.id === "session:home")!;
+            mocks.workspaceRef!.value = {
+              ...state,
+              activeCheckoutId: target.id,
+              repos: state.repos.map((repo) => ({
+                ...repo,
+                checkouts: repo.checkouts.map((checkout) => ({
+                  ...checkout,
+                  sessions:
+                    checkout.id === target.id
+                      ? [{ ...moved, checkoutId: target.id }]
+                      : checkout.sessions.filter((session) => session.id !== moved.id),
+                })),
+              })),
+            };
+          };
+          arrive(root);
+          await report(worktree.path + "/src");
+          expect(mocks.moveSession).toHaveBeenLastCalledWith("session:home", worktree.id, 0, false, true);
+          arrive(worktree);
+          mocks.moveSession.mockClear();
+          await report(worktree.path + "/src");
+          expect(mocks.moveSession).not.toHaveBeenCalled();
+          await report(root.path);
+          expect(mocks.moveSession).toHaveBeenLastCalledWith("session:home", root.id, 0, false, true);
+        }
+        wrapper.unmount();
+      },
+    );
+
     it("moves the terminal to the worktree its shell is now in", async () => {
       const wrapper = await mountWithSettings(following());
 
