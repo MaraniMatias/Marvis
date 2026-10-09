@@ -26,6 +26,11 @@ export const TERMINAL_CURSOR_STYLES = ["block", "bar", "underline"] as const;
 
 export type TerminalCursorStyle = (typeof TERMINAL_CURSOR_STYLES)[number];
 
+/** Which activity moves a terminal into its matching worktree. */
+export const TERMINAL_WORKTREE_FOLLOW_MODES = ["off", "cd", "agent", "both"] as const;
+
+export type TerminalWorktreeFollowMode = (typeof TERMINAL_WORKTREE_FOLLOW_MODES)[number];
+
 export interface UiSettings {
   /** CSS pixels. The whole interface's type scale is a ratio of this one number. */
   fontSize: number;
@@ -49,14 +54,6 @@ export interface TerminalSettings {
   cursorStyle: TerminalCursorStyle;
   scrollbar: TerminalScrollbarMode;
   /**
-   * Whether moving a terminal to another worktree also makes its shell change directory.
-   *
-   * Off by default because the two answers are both defensible and only the person using the
-   * terminal knows which one they meant: a shell sitting at a prompt is happy to `cd`, and a shell
-   * with a build running is not asked to.
-   */
-  changeDirectoryOnMove: boolean;
-  /**
    * Whether a new terminal is told to report how its commands ended, which is what turns a failed
    * command's sidebar row red.
    *
@@ -67,6 +64,8 @@ export interface TerminalSettings {
    * Applies only to new terminals; terminals already open keep their hooks.
    */
   shellIntegration: boolean;
+  /** Follow shell cd, OpenCode agent work, both, or neither. Defaults to agent work only. */
+  followWorktree: TerminalWorktreeFollowMode;
 }
 
 export interface IndentationSettings {
@@ -116,8 +115,8 @@ export const DEFAULT_SETTINGS: AppSettings = {
     cursorBlink: true,
     cursorStyle: "block",
     scrollbar: "hidden",
-    changeDirectoryOnMove: false,
     shellIntegration: true,
+    followWorktree: "agent",
   },
   editor: {
     fontSize: 13,
@@ -133,6 +132,10 @@ export function isTerminalScrollbarMode(value: unknown): value is TerminalScroll
 
 export function isTerminalCursorStyle(value: unknown): value is TerminalCursorStyle {
   return TERMINAL_CURSOR_STYLES.some((style) => style === value);
+}
+
+export function isTerminalWorktreeFollowMode(value: unknown): value is TerminalWorktreeFollowMode {
+  return TERMINAL_WORKTREE_FOLLOW_MODES.some((mode) => mode === value);
 }
 
 export function isThemePreference(value: unknown): value is ThemePreference {
@@ -185,8 +188,10 @@ export function normalizeSettings(value: unknown): AppSettings {
         ? terminal.cursorStyle
         : DEFAULT_SETTINGS.terminal.cursorStyle,
       scrollbar: isTerminalScrollbarMode(terminal.scrollbar) ? terminal.scrollbar : DEFAULT_SETTINGS.terminal.scrollbar,
-      changeDirectoryOnMove: flag(terminal.changeDirectoryOnMove, DEFAULT_SETTINGS.terminal.changeDirectoryOnMove),
       shellIntegration: flag(terminal.shellIntegration, DEFAULT_SETTINGS.terminal.shellIntegration),
+      followWorktree: isTerminalWorktreeFollowMode(terminal.followWorktree)
+        ? terminal.followWorktree
+        : DEFAULT_SETTINGS.terminal.followWorktree,
     },
     editor: {
       fontSize: boundedNumber(editor.fontSize, EDITOR_FONT_SIZE_LIMITS, DEFAULT_SETTINGS.editor.fontSize),
@@ -217,8 +222,8 @@ export type SettingsPath =
   | "terminal.cursorBlink"
   | "terminal.cursorStyle"
   | "terminal.scrollbar"
-  | "terminal.changeDirectoryOnMove"
   | "terminal.shellIntegration"
+  | "terminal.followWorktree"
   | "editor.fontSize"
   | "editor.ligatures"
   | "editor.cursorBlink"
@@ -363,11 +368,13 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         parse: IDENTIFIER,
       },
       {
-        kind: "toggle",
-        path: "terminal.changeDirectoryOnMove",
-        label: "Change directory when moved",
+        kind: "select",
+        path: "terminal.followWorktree",
+        label: "Follow worktree",
         description:
-          "Moving a terminal hands the session to another worktree and leaves the process alone. Turn this on and a shell sitting at a prompt also changes directory; one with a command running is left where it is.",
+          "Move terminals to the worktree their shell enters with cd, their OpenCode agent works in, or both. Only a terminal on screen takes the window and focus with it.",
+        options: TERMINAL_WORKTREE_FOLLOW_MODES.map((value) => ({ value, label: value })),
+        parse: IDENTIFIER,
       },
       {
         kind: "toggle",

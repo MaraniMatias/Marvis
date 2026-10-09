@@ -22,6 +22,14 @@ export interface TerminalSessionStatus {
    * installed and the moment before the first command finishes.
    */
   lastCommandExit?: number;
+  /**
+   * Where the shell itself is, as the OS records it. Absent once the terminal has exited, and when
+   * the OS will not say.
+   *
+   * This is what says a plain shell changed worktree: an agent that moved itself reports where it
+   * is working, but its shell is still sitting where it was launched.
+   */
+  workingDirectory?: string;
 }
 
 export interface Repo {
@@ -246,6 +254,54 @@ export function workdirIconKind(
   if (checkout.id === homeCheckoutId) return "home";
   if (repo?.kind !== "git") return "folder";
   return checkout.isPrimary ? "git" : "worktree";
+}
+
+/**
+ * Whether `child` is `parent` or somewhere under it, compared a whole segment at a time.
+ *
+ * A trailing separator is dropped and nothing else is normalised: the string this is given comes
+ * from the OS, and `/work/repo-wt-2` is not inside `/work/repo-wt` no matter how one prefixes the
+ * other.
+ */
+function containsDirectory(parent: string, child: string): boolean {
+  const trim = (value: string) => value.replace(/\/+$/, "");
+  const root = trim(parent);
+  return child === root || child.startsWith(`${root}/`);
+}
+
+/**
+ * The registered checkout matching a terminal's working directory.
+ *
+ * The answer may be the checkout the terminal is already under, and that is not a corner case: a
+ * worktree created inside its own repository lives under the repository's directory, so the two
+ * both contain it. The most specific one is the worktree the directory is really in, and answering
+ * with the one the row already names is what stops a shell sitting still from being moved back and
+ * forth between a worktree and the repository above it on every poll.
+ *
+ * Both `path` and `canonicalPath` are tried because the OS reports the directory as the kernel
+ * recorded it and the two are not always spelled the same way, as `/tmp` and `/private/tmp` show.
+ * Equal-depth matches or duplicate canonical paths are ambiguous and name no checkout.
+ */
+export function checkoutForWorkingDirectory(repos: Repo[], fromCheckoutId: string, directory: string): Checkout | null {
+  if (!repos.some((repo) => repo.checkouts.some((checkout) => checkout.id === fromCheckoutId))) return null;
+  const checkouts = repos.flatMap((repo) => repo.checkouts.filter((checkout) => !checkout.isMissing));
+  const matches = checkouts.flatMap((checkout) => {
+    const depth = [checkout.path, checkout.canonicalPath]
+      .filter((path) => containsDirectory(path, directory))
+      .reduce((longest, path) => Math.max(longest, path.length), -1);
+    return depth < 0 ? [] : [{ checkout, depth }];
+  });
+  matches.sort((left, right) => right.depth - left.depth);
+  const target = matches[0];
+  if (
+    !target ||
+    checkouts.some(
+      (checkout) => checkout !== target.checkout && checkout.canonicalPath === target.checkout.canonicalPath,
+    ) ||
+    matches[1]?.depth === target.depth
+  )
+    return null;
+  return target.checkout;
 }
 
 export function repoIdForPath(canonicalPath: string): string {

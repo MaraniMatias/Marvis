@@ -9,7 +9,7 @@ import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemova
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { AppLayoutState, CheckoutUiState } from "../domain/ui-state";
 import type { AppSettings } from "../domain/settings";
-import type { AgentAgent, AgentSession } from "../domain/agent";
+import type { AgentAgent, AgentRelocation, AgentSession } from "../domain/agent";
 import type { DocumentOrigin } from "../domain/main-document";
 
 export interface CreatedTerminal {
@@ -251,6 +251,16 @@ export function listAgentCandidateSessions(checkoutId: string): Promise<AgentSes
   return invoke<AgentSession[]>("agent_candidate_sessions", { checkoutId });
 }
 
+/**
+ * The sessions that have moved to another worktree since the last read.
+ *
+ * Takes no checkout, because a session that moved is no longer answerable by the one it left.
+ * Both sides are worktrees this app holds, so the answer is a pair of checkout ids and never a
+ * path.
+ */
+export function listAgentRelocations(baseline = false): Promise<AgentRelocation[]> {
+  return invoke<AgentRelocation[]>("agent_relocations", { baseline });
+}
 /** Every agent the checkout's server offers, with the color OpenCode paints it with. */
 export function listAgentAgents(checkoutId: string): Promise<AgentAgent[]> {
   return invoke<AgentAgent[]>("agent_agents", { checkoutId });
@@ -364,9 +374,17 @@ export function renameTerminal(checkoutId: string, sessionId: string, name: stri
  * The process, its output and its name stay: what moves is the row the sidebar groups by, so the
  * terminal is listed under the worktree it now belongs to. A destination outside that repository
  * is refused, because two worktrees of one repo share a Git directory and another repo does not.
+ *
+ * `selectTarget` is whether the window follows the terminal. Someone dragging a row wants to be
+ * there; a session that moved on its own must not take over what the window is showing.
  */
-export function moveTerminal(checkoutId: string, sessionId: string, targetCheckoutId: string): Promise<WorkspaceState> {
-  return invoke<WorkspaceState>("terminal_move", { checkoutId, sessionId, targetCheckoutId });
+export function moveTerminal(
+  checkoutId: string,
+  sessionId: string,
+  targetCheckoutId: string,
+  selectTarget = true,
+): Promise<WorkspaceState> {
+  return invoke<WorkspaceState>("terminal_move", { checkoutId, sessionId, targetCheckoutId, selectTarget });
 }
 
 export function loadTerminalLayout(checkoutId: string): Promise<CheckoutTerminalLayout | null> {

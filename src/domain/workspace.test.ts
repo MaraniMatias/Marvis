@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   agentSessionTitle,
+  checkoutForWorkingDirectory,
   createCheckout,
   displayCheckoutPath,
   createPlainRepo,
@@ -13,6 +14,7 @@ import {
   sessionRowTitle,
   sessionTitle,
   workdirIconKind,
+  type Checkout,
   type Repo,
   type Session,
 } from "./workspace";
@@ -41,6 +43,180 @@ function gitRepo(): Repo {
     lastOpenedAt: "2026-01-01T00:00:00Z",
   };
 }
+
+describe("checkoutForWorkingDirectory", () => {
+  function reposWith(checkouts: Checkout[]): Repo[] {
+    return [...new Set(checkouts.map((checkout) => checkout.repoId))].map((id) => ({
+      ...gitRepo(),
+      id,
+      checkouts: checkouts.filter((checkout) => checkout.repoId === id),
+    }));
+  }
+  const sibling = createCheckout({
+    repoId: "repo:/work/app",
+    path: "/work/app-feature",
+    canonicalPath: "/work/app-feature",
+    isPrimary: false,
+    branch: "feature",
+  });
+  const elsewhere = createCheckout({
+    repoId: "repo:/work/other",
+    path: "/work/other",
+    canonicalPath: "/work/other",
+    isPrimary: true,
+    branch: "main",
+  });
+  const root = createCheckout({
+    repoId: "repo:/work/app",
+    path: "/work/app",
+    canonicalPath: "/work/app",
+    isPrimary: true,
+    branch: "main",
+  });
+
+  it("follows a shell into any registered checkout from Home or Git", () => {
+    const home = createPlainRepo({ path: "/work", name: "Home" }, "now");
+    const repo = gitRepo();
+    const plain = createPlainRepo({ path: "/notes", name: "Notes" }, "now");
+    const other = { ...gitRepo(), id: elsewhere.repoId, root: elsewhere.path, checkouts: [elsewhere] };
+    const repos = [home, repo, plain, other];
+    expect(checkoutForWorkingDirectory(repos, home.checkouts[0].id, root.path)?.id).toBe(root.id);
+    expect(checkoutForWorkingDirectory(repos, home.checkouts[0].id, sibling.path)?.id).toBe(sibling.id);
+    expect(checkoutForWorkingDirectory(repos, home.checkouts[0].id, plain.root)?.id).toBe(plain.checkouts[0].id);
+    expect(checkoutForWorkingDirectory(repos, root.id, sibling.path)?.id).toBe(sibling.id);
+    expect(checkoutForWorkingDirectory(repos, sibling.id, root.path)?.id).toBe(root.id);
+    expect(checkoutForWorkingDirectory(repos, root.id, plain.root)?.id).toBe(plain.checkouts[0].id);
+    expect(checkoutForWorkingDirectory(repos, root.id, elsewhere.path)?.id).toBe(elsewhere.id);
+    expect(checkoutForWorkingDirectory(repos, home.checkouts[0].id, "/work/other-folder")?.id).toBe(
+      home.checkouts[0].id,
+    );
+    expect(checkoutForWorkingDirectory(repos, root.id, root.path + "/src")?.id).toBe(root.id);
+    expect(checkoutForWorkingDirectory(repos, "checkout:unknown", root.path)).toBeNull();
+    repo.checkouts[1].isMissing = true;
+    expect(checkoutForWorkingDirectory(repos, home.checkouts[0].id, sibling.path)?.id).not.toBe(sibling.id);
+  });
+
+  it("names the sibling worktree a shell changed directory into, however deep", () => {
+    const checkouts = [root, sibling, elsewhere];
+
+    expect(checkoutForWorkingDirectory(reposWith(checkouts), root.id, "/work/app-feature")?.id).toBe(sibling.id);
+    // A directory inside the worktree is still that worktree: nobody `cd`s into its root exactly.
+    expect(checkoutForWorkingDirectory(reposWith(checkouts), root.id, "/work/app-feature/src/deep")?.id).toBe(
+      sibling.id,
+    );
+    // A trailing separator is how a shell spells the root of the same directory.
+    expect(checkoutForWorkingDirectory(reposWith(checkouts), root.id, "/work/app-feature/")?.id).toBe(sibling.id);
+  });
+
+  it("names the worktree the shell is already under, which is what stops a row moving again", () => {
+    // The invariant used to live here as a null: a row already under the worktree the shell sits in
+    // is answered with itself, and the caller compares ids. A shell sitting still in a worktree
+    // nested inside its own repository would otherwise be handed back and forth between the two,
+    // because both contain it and only one of them is the one it is in.
+    const checkouts = [root, sibling, elsewhere];
+
+    expect(checkoutForWorkingDirectory(reposWith(checkouts), root.id, "/work/app")?.id).toBe(root.id);
+    expect(checkoutForWorkingDirectory(reposWith(checkouts), root.id, "/work/app/src")?.id).toBe(root.id);
+    expect(checkoutForWorkingDirectory(reposWith(checkouts), sibling.id, "/work/app-feature/src")?.id).toBe(sibling.id);
+  });
+
+  it("names the worktree itself rather than the repository holding it", () => {
+    // A worktree created inside its own repository — what `git worktree add ../app/.worktrees/x`
+    // makes — has both directories containing it, and only the longer one is where the shell is.
+    const nested = createCheckout({
+      repoId: root.repoId,
+      path: "/work/app/.worktrees/feature",
+      canonicalPath: "/work/app/.worktrees/feature",
+      isPrimary: false,
+      branch: "feature",
+    });
+    // The order is the one that used to answer with whichever came first.
+    for (const checkouts of [
+      [root, nested],
+      [nested, root],
+    ]) {
+      expect(checkoutForWorkingDirectory(reposWith(checkouts), root.id, "/work/app/.worktrees/feature/src")?.id).toBe(
+        nested.id,
+      );
+    }
+    // Once the row is under the worktree, the same directory answers with the worktree still.
+    expect(checkoutForWorkingDirectory(reposWith([root, nested]), nested.id, "/work/app/.worktrees/feature")?.id).toBe(
+      nested.id,
+    );
+  });
+
+  it("names nothing for a directory in no checkout or a missing one", () => {
+    const missing = createCheckout({
+      repoId: "repo:/work/app",
+      path: "/work/app-gone",
+      canonicalPath: "/work/app-gone",
+      isPrimary: false,
+      branch: "gone",
+      isMissing: true,
+    });
+
+    expect(checkoutForWorkingDirectory(reposWith([root, sibling]), root.id, "/tmp")).toBeNull();
+    // A shell may cross repository boundaries when the directory names a registered checkout.
+    expect(checkoutForWorkingDirectory(reposWith([root, elsewhere]), root.id, "/work/other")?.id).toBe(elsewhere.id);
+    // A worktree whose directory is gone is not a place to work.
+    expect(checkoutForWorkingDirectory(reposWith([root, missing]), root.id, "/work/app-gone")).toBeNull();
+  });
+
+  it("refuses equally deep matches from distinct checkouts", () => {
+    const duplicate = {
+      ...createCheckout({
+        repoId: "repo:/work/other",
+        path: "/private/work/app-feature",
+        canonicalPath: sibling.canonicalPath,
+        isPrimary: true,
+        branch: "main",
+      }),
+      id: "checkout:duplicate-path",
+    };
+
+    const repos = reposWith([root, sibling, duplicate]);
+    expect(checkoutForWorkingDirectory(repos, root.id, sibling.path)).toBeNull();
+    expect(checkoutForWorkingDirectory(repos, root.id, duplicate.path + "/src")).toBeNull();
+  });
+
+  it("compares the directory the OS spells against the worktree both ways", () => {
+    // macOS records `/var/...` as `/private/var/...`, and which of the two a checkout was stored
+    // under is not something this can normalise away.
+    const stored = createCheckout({
+      repoId: "repo:/work/app",
+      path: "/var/tmp/app",
+      canonicalPath: "/var/tmp/app",
+      isPrimary: true,
+      branch: "main",
+    });
+    const linked = createCheckout({
+      repoId: "repo:/work/app",
+      path: "/private/var/tmp/app",
+      canonicalPath: "/private/var/tmp/app",
+      isPrimary: false,
+      branch: "feature",
+    });
+
+    expect(checkoutForWorkingDirectory(reposWith([stored, linked]), stored.id, "/private/var/tmp/app")?.id).toBe(
+      linked.id,
+    );
+  });
+
+  it("does not treat a longer sibling name as containing the shorter one", () => {
+    // `/work/app-feature-2` and `/work/app-feature` share a prefix and nothing else.
+    const longer = createCheckout({
+      repoId: "repo:/work/app",
+      path: "/work/app-feature-2",
+      canonicalPath: "/work/app-feature-2",
+      isPrimary: false,
+      branch: "other",
+    });
+
+    expect(checkoutForWorkingDirectory(reposWith([root, sibling, longer]), root.id, "/work/app-feature-2")?.id).toBe(
+      longer.id,
+    );
+  });
+});
 
 describe("workspace domain", () => {
   it("shortens only paths inside the user's home directory", () => {

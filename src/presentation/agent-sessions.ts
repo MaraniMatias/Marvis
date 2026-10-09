@@ -1,7 +1,7 @@
 import { listen } from "@tauri-apps/api/event";
 import { onScopeDispose, reactive, watch } from "vue";
-import type { ComputedRef } from "vue";
-import type { AgentAttention, AgentAgent, AgentEvent, AgentSession } from "../domain/agent";
+import type { ComputedRef, Ref } from "vue";
+import type { AgentAttention, AgentAgent, AgentEvent, AgentRelocation, AgentSession } from "../domain/agent";
 import {
   agentAttention,
   agentColor,
@@ -16,6 +16,7 @@ import {
   createAgentSession,
   listAgentAgents,
   listAgentCandidateSessions,
+  listAgentRelocations,
   listAgentSessions,
   stopAgent,
 } from "../lib/ipc";
@@ -70,6 +71,16 @@ const BUSY_POLL_MS = 2000;
  * receives. Named for the cadence rather than for one of its two callers.
  */
 const SLOW_POLL_MS = 5000;
+
+/**
+ * How often to ask where every session is working.
+ *
+ * The turn that moves a session also ends it, and this app hears a turn end only by reading
+ * again, so a poll that stopped while everything was idle would be the poll that was not
+ * running when the move happened. This one does not stop: it is one request to a server on the
+ * same machine, and it is the only way a change made inside someone's own TUI is ever seen.
+ */
+const RELOCATION_POLL_MS = 2000;
 
 function errorText(cause: unknown): string {
   return isIpcError(cause) ? cause.message : cause instanceof Error ? cause.message : String(cause);
@@ -416,6 +427,14 @@ export function useAgentSessions(
 
 /** What one session says about itself, for a terminal to be matched against it. */
 export interface TerminalAgentSession {
+  /**
+   * The session's own id, which is what a reported move names.
+   *
+   * Carried next to the title because identity rests on the pair: the title says which session a
+   * terminal is showing and the id says which session moved, and neither answers the other without
+   * this side by side.
+   */
+  readonly id: string;
   /** The session's own title, which is what its TUI writes into the terminal title. */
   title: string;
   /** The agent running it, with the color OpenCode paints it with, absent when the session has none. */
@@ -468,16 +487,17 @@ type RefreshScope = "all" | "busy";
 /**
  * A cheap description of what a row would draw, so an answer that draws the same row is not written.
  *
- * It covers everything a terminal row reads out of its entry — the title it matches on, the agent it
- * names, whether it is working or awaiting a reply, and the clock in its trailing slot — and nothing
- * else, because the row is only ever read and a finer comparison would settle nothing.
+ * It covers everything a terminal row reads out of its entry — the id a reported move is checked
+ * against, the title it matches on, the agent it names, whether it is working or awaiting a reply,
+ * and the clock in its trailing slot — and nothing else, because the row is only ever read and a
+ * finer comparison would settle nothing.
  */
 function rowSignature(entry: TerminalAgentRow): string {
   return entry.sessions
     .map((session) => {
       const agent = session.agent;
       const named = agent ? `${agent.label}/${agent.color}/${agent.attention}` : "";
-      return `${session.title}|${named}|${session.running}|${session.awaitingReply}|${session.updatedAt}`;
+      return `${session.id}|${session.title}|${named}|${session.running}|${session.awaitingReply}|${session.updatedAt}`;
     })
     .join("\n");
 }
@@ -529,6 +549,7 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
       sessions: sessions.map((session) => {
         const label = agentLabel(agents, session.agent);
         return {
+          id: session.id,
           title: session.title,
           agent: label ? { label, color: agentColor(agents, session.agent), attention: agentAttention(session) } : null,
           running: session.running,
@@ -676,4 +697,81 @@ export function useTerminalAgentRows(checkoutIds: ComputedRef<string[]>): Termin
   });
 
   return { byCheckout, row, reload };
+}
+
+/**
+ * Reports the OpenCode sessions that have started working in another worktree.
+ *
+ * OpenCode records the directory a session works in and changes it when an agent is sent to work
+ * somewhere else, which is what its TUI shows at the footer. That directory is the only sign of
+ * the move there is, and it can only be read across every location at once, because a session
+ * that has left stops answering for the one it left. The backend keeps the previous read, so
+ * what arrives here is a change rather than a position. Each enabled period starts with a baseline
+ * snapshot that refreshes current state without delivering disabled-time moves.
+ *
+ * It says nothing about which terminal a session belongs to, and nothing here decides: see the
+ * note at the top of `services/agent.rs`. `onRelocated` is handed the two checkouts and is the
+ * only place a row is moved, because a caller that has the terminal list is the only one that
+ * can tell which terminal a session is behind.
+ */
+export function useAgentRelocations(
+  onRelocated: (relocation: AgentRelocation) => void,
+  enabled: Readonly<Ref<boolean>>,
+): void {
+  let reading = false;
+  let disposed = false;
+  let generation = 0;
+  let baselineGeneration: number | undefined;
+  let timer: ReturnType<typeof setInterval> | undefined;
+
+  /**
+   * One read on its way at a time; interval ticks while it is in flight are skipped.
+   *
+   * The backend keeps a move on offer for half a minute because it cannot tell whether the caller
+   * kept it, which only helps while somebody is listening: a read slower than the interval used to
+   * be dropped as superseded by the next poll's, so a service that answers slower than the interval
+   * lost every answer and no move was ever reported. A read that is already in flight is simply
+   * skipped, and the next interval picks up whatever the answer was.
+   */
+  async function reload(requestGeneration: number) {
+    if (!enabled.value || disposed || reading || requestGeneration !== generation) return;
+    reading = true;
+    try {
+      const baseline = baselineGeneration === requestGeneration;
+      const moved = await listAgentRelocations(baseline);
+      // Disabling follow invalidates this read: its answer belongs to a mode that was not listening.
+      if (disposed || !enabled.value || requestGeneration !== generation) return;
+      if (baseline) baselineGeneration = undefined;
+      else for (const relocation of moved) onRelocated(relocation);
+    } catch {
+      // A missing service or incomplete baseline is retried by the next poll rather than reported.
+    } finally {
+      reading = false;
+      // If enable changed while this read was in flight, honor the new mode's immediate read without
+      // overlapping the old request. Ordinary interval ticks while reading remain skipped.
+      if (!disposed && enabled.value && requestGeneration !== generation) void reload(generation);
+    }
+  }
+
+  watch(
+    enabled,
+    (isEnabled) => {
+      generation += 1;
+      if (timer !== undefined) clearInterval(timer);
+      timer = undefined;
+      baselineGeneration = undefined;
+      if (!isEnabled) return;
+
+      const requestGeneration = generation;
+      baselineGeneration = requestGeneration;
+      void reload(requestGeneration);
+      timer = setInterval(() => void reload(requestGeneration), RELOCATION_POLL_MS);
+    },
+    { immediate: true, flush: "sync" },
+  );
+  onScopeDispose(() => {
+    disposed = true;
+    generation += 1;
+    if (timer !== undefined) clearInterval(timer);
+  });
 }

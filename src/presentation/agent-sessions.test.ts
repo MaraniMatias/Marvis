@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => ({
   listAgentSessions: vi.fn(),
   listAgentCandidateSessions: vi.fn(),
   listAgentAgents: vi.fn(),
+  listAgentRelocations: vi.fn(),
   createAgentSession: vi.fn(),
   stopAgent: vi.fn(),
   listen: vi.fn(),
@@ -18,11 +19,12 @@ vi.mock("../lib/ipc", () => ({
   listAgentSessions: mocks.listAgentSessions,
   listAgentCandidateSessions: mocks.listAgentCandidateSessions,
   listAgentAgents: mocks.listAgentAgents,
+  listAgentRelocations: mocks.listAgentRelocations,
   createAgentSession: mocks.createAgentSession,
   stopAgent: mocks.stopAgent,
 }));
 
-import { applyAgentEvent, useAgentSessions, useTerminalAgentRows } from "./agent-sessions";
+import { applyAgentEvent, useAgentRelocations, useAgentSessions, useTerminalAgentRows } from "./agent-sessions";
 
 function session(overrides: Partial<AgentSession> = {}): AgentSession {
   return {
@@ -610,6 +612,7 @@ describe("useTerminalAgentRows", () => {
     // matches against this list itself, so anything the list drops cannot be named by anybody.
     expect(state.byCheckout["checkout:first"].sessions).toEqual([
       {
+        id: "ses_one",
         title: "review",
         agent: { label: "Coder", color: "#4ed6bf", attention: "busy" },
         running: true,
@@ -619,6 +622,7 @@ describe("useTerminalAgentRows", () => {
     ]);
     expect(state.byCheckout["checkout:second"].sessions).toEqual([
       {
+        id: "ses_two",
         title: "review",
         agent: { label: "Plan", color: null, attention: "none" },
         running: false,
@@ -680,20 +684,20 @@ describe("useTerminalAgentRows", () => {
     // The clock rides along because it is the only duration a terminal row has: the elapsed time in a
     // row's trailing slot is this session's own last update, read from the service and nowhere else.
     expect(state.byCheckout["checkout:first"].sessions).toEqual([
-      { title: "review", agent: null, running: false, awaitingReply, updatedAt: 1 },
+      { id: "ses_fresh", title: "review", agent: null, running: false, awaitingReply, updatedAt: 1 },
     ]);
   });
 
   it("publishes pending transitions without an agent or any other session change", async () => {
-    perCheckout({ "checkout:first": [{ agent: null }] });
+    perCheckout({ "checkout:first": [{ id: "ses_one", agent: null }] });
     const scope = effectScope();
     const state = scope.run(() => useTerminalAgentRows(computed(() => ["checkout:first"])))!;
     await settle();
     for (const awaitingReply of [false, true, false]) {
-      perCheckout({ "checkout:first": [{ agent: null, awaitingReply }] });
+      perCheckout({ "checkout:first": [{ id: "ses_one", agent: null, awaitingReply }] });
       await state.reload();
       expect(state.row("checkout:first").sessions).toEqual([
-        { title: "review", agent: null, running: false, awaitingReply, updatedAt: 1 },
+        { id: "ses_one", title: "review", agent: null, running: false, awaitingReply, updatedAt: 1 },
       ]);
     }
     scope.stop();
@@ -1002,6 +1006,241 @@ describe("useTerminalAgentRows", () => {
     // And no interval survived the scope: advancing well past both cadences asks for nothing.
     await vi.advanceTimersByTimeAsync(30000);
     expect(mocks.listAgentCandidateSessions).toHaveBeenCalledTimes(whenReleased);
+    vi.useRealTimers();
+  });
+});
+
+describe("useAgentRelocations", () => {
+  // Every test runs its hook in a scope it stops: an interval left running keeps asking for the
+  // rest of the file, and a read this test never made is indistinguishable from one it did.
+  beforeEach(() => {
+    mocks.listAgentRelocations.mockClear();
+    mocks.listAgentRelocations.mockResolvedValue([]);
+  });
+
+  it("reports each move the service named, and keeps asking while everything is idle", async () => {
+    // The turn that moves a session also ends it, so a poll that stopped when nothing was
+    // running would be the poll that was not running when the move happened.
+    vi.useFakeTimers();
+    mocks.listAgentRelocations.mockResolvedValue([]);
+    const seen: string[] = [];
+    const scope = effectScope();
+    scope.run(() =>
+      useAgentRelocations(
+        (relocation) => seen.push(`${relocation.fromCheckoutId}->${relocation.toCheckoutId}`),
+        ref(true),
+      ),
+    );
+    await vi.advanceTimersByTimeAsync(0);
+    const afterFirstRead = mocks.listAgentRelocations.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(mocks.listAgentRelocations.mock.calls.length).toBeGreaterThan(afterFirstRead);
+
+    mocks.listAgentRelocations.mockResolvedValue([
+      { sessionId: "ses_one", fromCheckoutId: "checkout:first", toCheckoutId: "checkout:second" },
+    ]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(seen).toEqual(["checkout:first->checkout:second"]);
+    scope.stop();
+    vi.useRealTimers();
+  });
+
+  it("reports nothing while the service is not run, without failing the caller", async () => {
+    mocks.listAgentRelocations.mockRejectedValue(new Error("OpenCode is not running."));
+    const onRelocated = vi.fn();
+    const scope = effectScope();
+    scope.run(() => useAgentRelocations(onRelocated, ref(true)));
+    await settle();
+    expect(onRelocated).not.toHaveBeenCalled();
+    scope.stop();
+  });
+
+  it("still reports a move from an answer that arrives after the next poll went out", async () => {
+    // A service slower than the interval used to lose every answer: each poll's answer was dropped
+    // as superseded by the next one, and a service that is always slower than the interval would
+    // never report a move at all. One read at a time is what makes a slow answer worth waiting for.
+    vi.useFakeTimers();
+    const onRelocated = vi.fn();
+    let release: (() => void) | undefined;
+    const scope = effectScope();
+    scope.run(() => useAgentRelocations(onRelocated, ref(true)));
+    await vi.advanceTimersByTimeAsync(0);
+    mocks.listAgentRelocations.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve([{ sessionId: "ses_one", fromCheckoutId: "checkout:first", toCheckoutId: "checkout:second" }]);
+        }),
+    );
+    // Several intervals go by while that read is still out, and none of them starts a second one.
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(mocks.listAgentRelocations).toHaveBeenCalledTimes(2);
+
+    release?.();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onRelocated).toHaveBeenCalledTimes(1);
+    // Asking again after the answer landed is what keeps the next move coming.
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentRelocations).toHaveBeenCalledTimes(3);
+    scope.stop();
+    vi.useRealTimers();
+  });
+
+  it("reports nothing from a read that answers after the scope is gone", async () => {
+    // The timer is cleared on dispose, but a read already dispatched is still in flight, and its
+    // callback would otherwise run against a window that is closing.
+    vi.useFakeTimers();
+    const onRelocated = vi.fn();
+    let release: (() => void) | undefined;
+    mocks.listAgentRelocations.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve([{ sessionId: "ses_one", fromCheckoutId: "checkout:first", toCheckoutId: "checkout:second" }]);
+        }),
+    );
+    const scope = effectScope();
+    scope.run(() => useAgentRelocations(onRelocated, ref(true)));
+    await vi.advanceTimersByTimeAsync(0);
+    scope.stop();
+    release?.();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(onRelocated).not.toHaveBeenCalled();
+    vi.useRealTimers();
+  });
+
+  it("does not poll while disabled, starts immediately when enabled, and stops again when disabled", async () => {
+    vi.useFakeTimers();
+    const enabled = ref(false);
+    const onRelocated = vi.fn();
+    const scope = effectScope();
+    scope.run(() => useAgentRelocations(onRelocated, enabled));
+
+    expect(mocks.listAgentRelocations).not.toHaveBeenCalled();
+    expect(vi.getTimerCount()).toBe(0);
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(mocks.listAgentRelocations).not.toHaveBeenCalled();
+
+    enabled.value = true;
+    expect(mocks.listAgentRelocations).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(1);
+    await vi.advanceTimersByTimeAsync(0);
+    enabled.value = false;
+    expect(vi.getTimerCount()).toBe(0);
+    const stoppedAt = mocks.listAgentRelocations.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(mocks.listAgentRelocations).toHaveBeenCalledTimes(stoppedAt);
+
+    scope.stop();
+    vi.useRealTimers();
+  });
+
+  it("ignores an in-flight response that completes while disabled", async () => {
+    vi.useFakeTimers();
+    const enabled = ref(true);
+    const onRelocated = vi.fn();
+    let release!: () => void;
+    mocks.listAgentRelocations.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () =>
+            resolve([{ sessionId: "ses_one", fromCheckoutId: "checkout:first", toCheckoutId: "checkout:second" }]);
+        }),
+    );
+    const scope = effectScope();
+    scope.run(() => useAgentRelocations(onRelocated, enabled));
+    expect(mocks.listAgentRelocations).toHaveBeenCalledTimes(1);
+
+    enabled.value = false;
+    expect(vi.getTimerCount()).toBe(0);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onRelocated).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(6000);
+    expect(mocks.listAgentRelocations).toHaveBeenCalledTimes(1);
+
+    scope.stop();
+    vi.useRealTimers();
+  });
+
+  it("does not replay a pending move after re-enable and still reports fresh work", async () => {
+    vi.useFakeTimers();
+    const enabled = ref(true);
+    const onRelocated = vi.fn();
+    const stale = {
+      sessionId: "ses_one",
+      fromCheckoutId: "checkout:first",
+      toCheckoutId: "checkout:second",
+      observedAt: 10,
+    };
+    const fresh = { ...stale, toCheckoutId: "checkout:third", observedAt: 20 };
+    const scope = effectScope();
+    scope.run(() => useAgentRelocations(onRelocated, enabled));
+    await vi.advanceTimersByTimeAsync(0);
+
+    let release!: () => void;
+    mocks.listAgentRelocations.mockImplementationOnce(
+      () => new Promise((resolve) => (release = () => resolve([stale]))),
+    );
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentRelocations).toHaveBeenNthCalledWith(2, false);
+    enabled.value = false;
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(onRelocated).not.toHaveBeenCalled();
+
+    mocks.listAgentRelocations.mockResolvedValueOnce([stale]);
+    enabled.value = true;
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.listAgentRelocations).toHaveBeenNthCalledWith(3, true);
+    expect(onRelocated).not.toHaveBeenCalled();
+
+    mocks.listAgentRelocations.mockResolvedValueOnce([fresh]);
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentRelocations).toHaveBeenNthCalledWith(4, false);
+    expect(onRelocated).toHaveBeenCalledExactlyOnceWith(fresh);
+
+    scope.stop();
+    vi.useRealTimers();
+  });
+
+  it("baselines the latest enable epoch after a slow request and reports only later work", async () => {
+    vi.useFakeTimers();
+    const enabled = ref(true);
+    const onRelocated = vi.fn();
+    let release!: () => void;
+    mocks.listAgentRelocations.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve([]);
+        }),
+    );
+    const scope = effectScope();
+    scope.run(() => useAgentRelocations(onRelocated, enabled));
+    expect(mocks.listAgentRelocations).toHaveBeenNthCalledWith(1, true);
+
+    enabled.value = false;
+    enabled.value = true;
+    enabled.value = false;
+    enabled.value = true;
+    mocks.listAgentRelocations.mockResolvedValue([
+      { sessionId: "ses_one", fromCheckoutId: "checkout:first", toCheckoutId: "checkout:second" },
+    ]);
+    release();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(mocks.listAgentRelocations).toHaveBeenNthCalledWith(2, true);
+    expect(onRelocated).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(2000);
+    expect(mocks.listAgentRelocations).toHaveBeenNthCalledWith(3, false);
+    expect(onRelocated).toHaveBeenCalledWith({
+      sessionId: "ses_one",
+      fromCheckoutId: "checkout:first",
+      toCheckoutId: "checkout:second",
+    });
+
+    scope.stop();
     vi.useRealTimers();
   });
 });

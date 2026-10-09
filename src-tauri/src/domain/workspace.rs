@@ -92,6 +92,14 @@ pub struct TerminalSessionStatus {
     /// naming, and when the foreground group is gone or belongs to another user.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub foreground_app: Option<String>,
+    /// Where the shell itself is, as the OS records it.
+    ///
+    /// The shell's own directory and not the foreground group's: a shell's directory changes when
+    /// someone types `cd`, while a program's changes for all sorts of reasons of its own, and only
+    /// the first says where this terminal is working. Absent once the session has exited, and when
+    /// the OS will not say.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_directory: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]

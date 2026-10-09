@@ -20,6 +20,7 @@ import { WORKDIR_ICONS } from "./presentation/workdir-icons";
 import type { ReviewSender } from "./presentation/review-notes";
 import type { Checkout, Repo, Session, WorkspaceState } from "./domain/workspace";
 import FileIcon from "./components/FileIcon.vue";
+import SelectControl from "./components/ui/select/SelectControl.vue";
 
 const mocks = vi.hoisted(() => ({
   initialWorkspace: null as WorkspaceState | null,
@@ -54,6 +55,11 @@ const mocks = vi.hoisted(() => ({
   isDecorated: vi.fn(),
   isMaximized: vi.fn(),
   onWindowResized: null as (() => void) | null,
+  followAgentRelocation: null as ((relocation: unknown) => void) | null,
+  /** The sessions each worktree's OpenCode lists, as `useTerminalAgentRows` would report them. */
+  agentSessionsByCheckout: {} as Record<string, { id: string; title: string }[]>,
+  moveSession: vi.fn(),
+  focusActiveTerminal: vi.fn(),
   onCloseRequested: null as ((event: { preventDefault(): void }) => Promise<void>) | null,
   currentWindow: null as {
     onCloseRequested: (handler: (event: { preventDefault(): void }) => Promise<void>) => Promise<() => void>;
@@ -394,9 +400,16 @@ vi.mock("./presentation/agent-sessions", async () => {
     // of the app, and a row with no agent behind it is drawn without a chip.
     useTerminalAgentRows: () => ({
       byCheckout: {},
-      row: () => ({ agent: null, running: false }),
+      row: (checkoutId: string) => ({
+        agent: null,
+        running: false,
+        sessions: mocks.agentSessionsByCheckout[checkoutId] ?? [],
+      }),
       reload: vi.fn(),
     }),
+    useAgentRelocations: (onRelocated: (relocation: unknown) => void) => {
+      mocks.followAgentRelocation = onRelocated;
+    },
   };
 });
 
@@ -415,6 +428,7 @@ const SidebarStub = defineComponent({
     "restoreArchived",
     "renameSession",
     "newTerminal",
+    "moveSession",
   ],
   setup(props, { emit }) {
     return () =>
@@ -449,10 +463,10 @@ const SidebarStub = defineComponent({
 const SessionPaneStub = defineComponent({
   name: "SessionPane",
   props: { activeSessionId: String },
-  emits: ["sessionStatusChanged", "workspaceUpdated"],
+  emits: ["sessionStatusChanged", "workspaceUpdated", "shellCreated"],
   setup(props, { expose }) {
     onMounted(() => (mocks.sessionPaneMounts += 1));
-    expose({ focusActiveTerminal: vi.fn() });
+    expose({ focusActiveTerminal: mocks.focusActiveTerminal, moveSession: mocks.moveSession });
     return () =>
       h("div", { "data-testid": "session-pane" }, [
         h("span", { "data-testid": "pane-active-session" }, props.activeSessionId ?? "none"),
@@ -664,7 +678,12 @@ describe("App UI integration", () => {
     mocks.reviewNotes = [];
     mocks.agentSessions = [];
     mocks.agentTargetId = null;
+    mocks.followAgentRelocation = null;
+    mocks.agentSessionsByCheckout = {};
     mocks.createAgentSession.mockReset();
+    // The pane reports row movement separately from whether a manual `cd` was written.
+    mocks.moveSession.mockReset();
+    mocks.moveSession.mockResolvedValue({ moved: true, directoryChange: "not-requested" });
     mocks.dispatchReviewRound.mockReset();
     mocks.reconcileRounds.mockReset();
     mocks.flushQueuedRounds.mockReset();
@@ -1433,6 +1452,1136 @@ describe("App UI integration", () => {
       expect(mocks.closeMissingCheckout).toHaveBeenCalledWith("checkout:one");
       wrapper.unmount();
       confirm.mockRestore();
+    });
+  });
+
+  describe("an OpenCode session that moved to another worktree", () => {
+    /** The session a terminal is showing: the id a move names, and the title its TUI wrote. */
+    const agentSession = (title: string) => ({ id: `ses_${title}`, title });
+    const move = (
+      sessionId: string,
+      fromCheckoutId = "checkout:one",
+      toCheckoutId = "checkout:two",
+      observedAt = Date.now(),
+    ) => mocks.followAgentRelocation!({ sessionId, fromCheckoutId, toCheckoutId, observedAt });
+
+    /**
+     * One terminal per worktree, with `name` in front of the shell in each checkout.
+     *
+     * Every OpenCode terminal is given the next title `agentTitles` holds for its worktree, and the
+     * row for that worktree lists the same session under that title: the title is the only thing
+     * that says which session a terminal has open, so a test that moves a session this terminal is
+     * not showing has to be able to say so.
+     */
+    async function mountWithOpenCodeTerminals(
+      sessionsByCheckout: Record<string, string[]>,
+      agentTitles: Record<string, string[]> = {},
+      options: {
+        activeSessionId?: string | null;
+        settings?: AppSettings;
+        separateRepos?: Record<string, Repo["kind"]>;
+      } = {},
+    ): Promise<ReturnType<typeof mountApp> extends Promise<infer T> ? T : never> {
+      const checkouts = Object.entries(sessionsByCheckout).map(([id, names]) =>
+        checkout(
+          id,
+          names.map((name) => session(`session:${name}`, name, id)),
+        ),
+      );
+      mocks.agentSessionsByCheckout = Object.fromEntries(
+        Object.entries(agentTitles).map(([checkoutId, titles]) => [checkoutId, titles.map(agentSession)]),
+      );
+      const workspace = workspaceWith(...checkouts);
+      for (const [checkoutId, kind] of Object.entries(options.separateRepos ?? {})) {
+        const shared = workspace.repos[0];
+        const moved = shared.checkouts.find((candidate) => candidate.id === checkoutId)!;
+        shared.checkouts = shared.checkouts.filter((candidate) => candidate.id !== checkoutId);
+        moved.repoId = `repo:${checkoutId}`;
+        workspace.repos.push({ ...shared, id: moved.repoId, kind, root: moved.path, checkouts: [moved] });
+      }
+      workspace.activeSessionId = options.activeSessionId ?? workspace.activeSessionId;
+      const wrapper = await mountApp(workspace, undefined, {
+        settings: options.settings,
+      });
+      for (const [checkoutId, names] of Object.entries(sessionsByCheckout)) {
+        let next = 0;
+        for (const name of names) {
+          const isAgent = name !== "shell";
+          wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", `session:${name}`, {
+            state: "running",
+            foregroundProcess: true,
+            foregroundApp: isAgent ? "opencode" : "zsh",
+            terminalTitle: isAgent ? `OC | ${agentTitles[checkoutId]?.[next++] ?? name}` : null,
+          });
+        }
+      }
+      await flushPromises();
+      mocks.moveSession.mockClear();
+      return wrapper;
+    }
+
+    it.each(["checkout:one", "checkout:two"] as const)(
+      "keeps a new terminal in %s selected when an automatic move replies late",
+      async (shellCheckoutId) => {
+        const wrapper = await mountWithOpenCodeTerminals(
+          { "checkout:one": ["agent"], "checkout:two": [], "checkout:three": [] },
+          { "checkout:one": ["ship it"] },
+          { activeSessionId: "session:agent" },
+        );
+        let finishMove: (result: {
+          moved: boolean;
+          directoryChange: "not-requested" | "written" | "not-written";
+        }) => void = () => {};
+        mocks.moveSession.mockImplementationOnce(() => new Promise((resolve) => (finishMove = resolve)));
+
+        move("ses_ship it", "checkout:one", "checkout:three");
+        await flushPromises();
+        const oldWorkspace = mocks.workspaceRef!.value;
+        const sidebar = wrapper.getComponent({ name: "SidebarStub" });
+        sidebar.vm.$emit("newTerminal", shellCheckoutId);
+        await flushPromises();
+        const main = wrapper.getComponent({ name: "MainPane" });
+        const pane = wrapper.getComponent({ name: "SessionPane" });
+        const shellRequest = main.props("shellRequest") as { checkoutId: string; token: number };
+        const createdSession = session("session:new", "new shell", shellCheckoutId);
+        const createdWorkspace: WorkspaceState = {
+          ...oldWorkspace,
+          activeCheckoutId: shellCheckoutId,
+          activeSessionId: createdSession.id,
+          repos: oldWorkspace.repos.map((repo) => ({
+            ...repo,
+            checkouts: repo.checkouts.map((item) =>
+              item.id === shellCheckoutId ? { ...item, sessions: [...item.sessions, createdSession] } : item,
+            ),
+          })),
+        };
+        pane.vm.$emit("workspaceUpdated", createdWorkspace, shellRequest.token);
+        await flushPromises();
+        pane.vm.$emit("shellCreated", shellRequest.token, shellCheckoutId, createdSession.id);
+        await flushPromises();
+
+        // The older move snapshot has neither the new selection nor its session row.
+        main.vm.$emit("workspaceUpdated", {
+          ...oldWorkspace,
+          activeCheckoutId: "checkout:one",
+          activeSessionId: "session:agent",
+        });
+        await flushPromises();
+        finishMove({ moved: true, directoryChange: "not-requested" });
+        await flushPromises();
+
+        expect(mocks.workspaceRef!.value.activeCheckoutId).toBe(shellCheckoutId);
+        expect(mocks.workspaceRef!.value.activeSessionId).toBe(createdSession.id);
+        expect(main.props("checkout")).toMatchObject({ id: shellCheckoutId });
+        expect(main.props("activeSessionId")).toBe(createdSession.id);
+        expect(main.props("registeredSessionIds")).toContain(createdSession.id);
+        expect(mocks.focusActiveTerminal).not.toHaveBeenCalled();
+        wrapper.unmount();
+      },
+    );
+
+    it("ignores older shell persistence and creation responses", async () => {
+      const wrapper = await mountApp(workspaceWith(checkout("checkout:one"), checkout("checkout:two")));
+      let finishFirst: (workspace: WorkspaceState) => void = () => {};
+      mocks.selectCheckout.mockImplementationOnce(() => new Promise((resolve) => (finishFirst = resolve)));
+      const sidebar = wrapper.getComponent({ name: "SidebarStub" });
+      const main = wrapper.getComponent({ name: "MainPane" });
+      const pane = wrapper.getComponent({ name: "SessionPane" });
+
+      sidebar.vm.$emit("newTerminal", "checkout:one");
+      await flushPromises();
+      sidebar.vm.$emit("newTerminal", "checkout:two");
+      await flushPromises();
+      expect(main.props("shellRequest")).toEqual({ checkoutId: "checkout:two", token: 2 });
+
+      const staleSession = session("session:old-shell", "old shell");
+      const staleWorkspace = mocks.workspaceRef!.value;
+      pane.vm.$emit(
+        "workspaceUpdated",
+        {
+          ...staleWorkspace,
+          activeCheckoutId: "checkout:one",
+          activeSessionId: staleSession.id,
+          repos: staleWorkspace.repos.map((repo) => ({
+            ...repo,
+            checkouts: repo.checkouts.map((item) =>
+              item.id === "checkout:one" ? { ...item, sessions: [...item.sessions, staleSession] } : item,
+            ),
+          })),
+        },
+        1,
+      );
+      await flushPromises();
+      pane.vm.$emit("shellCreated", 1, "checkout:one", staleSession.id);
+      await flushPromises();
+      expect(mocks.workspaceRef!.value.activeCheckoutId).toBe("checkout:two");
+      expect(mocks.workspaceRef!.value.activeSessionId).toBeNull();
+
+      finishFirst({ ...mocks.workspaceRef!.value, activeCheckoutId: "checkout:one", activeSessionId: null });
+      await flushPromises();
+      expect(main.props("shellRequest")).toEqual({ checkoutId: "checkout:two", token: 2 });
+      expect(mocks.workspaceRef!.value.activeCheckoutId).toBe("checkout:two");
+
+      const createdSession = session("session:new", "new shell", "checkout:two");
+      const current = mocks.workspaceRef!.value;
+      pane.vm.$emit(
+        "workspaceUpdated",
+        {
+          ...current,
+          activeSessionId: createdSession.id,
+          repos: current.repos.map((repo) => ({
+            ...repo,
+            checkouts: repo.checkouts.map((item) =>
+              item.id === "checkout:two" ? { ...item, sessions: [...item.sessions, createdSession] } : item,
+            ),
+          })),
+        },
+        2,
+      );
+      await flushPromises();
+      pane.vm.$emit("shellCreated", 2, "checkout:two", createdSession.id);
+      await flushPromises();
+      pane.vm.$emit(
+        "workspaceUpdated",
+        {
+          ...staleWorkspace,
+          activeCheckoutId: "checkout:one",
+          activeSessionId: staleSession.id,
+          repos: staleWorkspace.repos.map((repo) => ({
+            ...repo,
+            checkouts: repo.checkouts.map((item) =>
+              item.id === "checkout:one" ? { ...item, sessions: [...item.sessions, staleSession] } : item,
+            ),
+          })),
+        },
+        1,
+      );
+      await flushPromises();
+      expect(mocks.workspaceRef!.value.activeCheckoutId).toBe("checkout:two");
+      expect(mocks.workspaceRef!.value.activeSessionId).toBe(createdSession.id);
+      expect(main.props("registeredSessionIds")).toContain(createdSession.id);
+      wrapper.unmount();
+    });
+
+    it("moves the one terminal whose OpenCode went, and takes the window with it when it was on screen", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+
+      // OpenCode moved its own session; the shell behind it is still sitting in the old worktree
+      // and must not be told to `cd`, because there is no prompt there to read a `cd`. This
+      // terminal was the one on screen, so the window follows it rather than leaving an empty pane.
+      move("ses_ship it");
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("keeps a terminal selected while a visible terminal's move is in flight", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["agent"], "checkout:two": ["two"] },
+        { "checkout:one": ["ship it"], "checkout:two": ["still working"] },
+        { activeSessionId: "session:agent" },
+      );
+      let finishMove: (result: {
+        moved: boolean;
+        directoryChange: "not-requested" | "written" | "not-written";
+      }) => void = () => {};
+      mocks.moveSession.mockImplementationOnce(() => new Promise((resolve) => (finishMove = resolve)));
+
+      move("ses_ship it");
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, true);
+
+      await wrapper.get('[data-testid="select-session-two"]').trigger("click");
+      await flushPromises();
+      expect(wrapper.get('[data-testid="sidebar-active-session"]').text()).toBe("session:two");
+
+      const beforeMoveResponse = mocks.workspaceRef!.value;
+      const movedSession = beforeMoveResponse.repos
+        .flatMap((repo) => repo.checkouts)
+        .find((checkout) => checkout.id === "checkout:one")!
+        .sessions.find((session) => session.id === "session:agent")!;
+      const moveResponse: WorkspaceState = {
+        ...beforeMoveResponse,
+        activeCheckoutId: "checkout:two",
+        activeSessionId: "session:agent",
+        repos: beforeMoveResponse.repos.map((repo) => ({
+          ...repo,
+          checkouts: repo.checkouts.map((checkout) => {
+            if (checkout.id === "checkout:one")
+              return { ...checkout, sessions: checkout.sessions.filter((session) => session.id !== "session:agent") };
+            if (checkout.id === "checkout:two")
+              return { ...checkout, sessions: [...checkout.sessions, { ...movedSession, checkoutId: checkout.id }] };
+            return checkout;
+          }),
+        })),
+      };
+      finishMove({ moved: true, directoryChange: "not-requested" });
+      wrapper.getComponent({ name: "MainPane" }).vm.$emit("workspaceUpdated", moveResponse);
+      await flushPromises();
+
+      expect(wrapper.get('[data-testid="sidebar-active-session"]').text()).toBe("session:two");
+      expect(wrapper.get('[data-testid="pane-active-session"]').text()).toBe("session:two");
+      expect(wrapper.getComponent({ name: "MainPane" }).props("view")).toMatchObject({
+        kind: "terminal",
+        sessionId: "session:two",
+      });
+      expect(mocks.focusActiveTerminal).toHaveBeenCalledTimes(1);
+      wrapper.unmount();
+    });
+
+    it("moves the row without taking the window when another terminal is on screen", async () => {
+      // The person is working in the shell, not in the agent's terminal. That terminal moves in
+      // the sidebar and the pane they are in stays exactly where it is.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:shell" },
+      );
+
+      move("ses_ship it");
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, false);
+      wrapper.unmount();
+    });
+
+    it("moves the row without taking a window that is reading something else", async () => {
+      // Being selected is not the same as being on screen: a document takes the whole panel in a
+      // single layout, and a terminal that moves behind it has nobody waiting to be taken along.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+
+      move("ses_ship it");
+      await flushPromises();
+
+      // The row moves; the pane the reader is in does not.
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, false);
+      wrapper.unmount();
+    });
+
+    it("moves nothing for a move this terminal has already taken", async () => {
+      // The service keeps a move on offer for half a minute, so the hop arrives again after the
+      // terminal took it. Asking again is the backend refusing a session that is already there,
+      // which is an error the person did nothing to earn.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell"], "checkout:two": ["agent"] },
+        { "checkout:two": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+
+      move("ses_ship it", "checkout:one", "checkout:two");
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("moves the terminal when the session takes a second hop and the first is still on offer", async () => {
+      // A session that moved twice while the first move was still owed for is reported as the hop
+      // it last took. The terminal may have taken the first one or may never have got it, and the
+      // worktree the report names is not the answer either way: the title the terminal is writing
+      // is, so the terminal is found wherever it actually is.
+      const wrapper = await mountWithOpenCodeTerminals(
+        {
+          "checkout:one": ["shell", "agent"],
+          "checkout:two": [],
+          "checkout:three": [],
+        },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+
+      move("ses_ship it", "checkout:one", "checkout:three");
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:three", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it.each(["off", "cd", "agent", "both"] as const)("gates agent moves with %s", async (mode) => {
+      const settings = cloneSettings(DEFAULT_SETTINGS);
+      settings.terminal.followWorktree = mode;
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent", settings },
+      );
+
+      move("ses_ship it");
+      await flushPromises();
+
+      if (mode === "agent" || mode === "both") {
+        expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, true);
+      } else expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("moves nothing for a session this terminal is not showing", async () => {
+      // The same service-wide list is offered to every worktree, so a session another client
+      // opened in this directory is in it too. Moving this terminal on that session's move is the
+      // mistake this cannot come back from: the terminal is still there, reading the wrong tree.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it", "theirs"] },
+        { activeSessionId: "session:agent" },
+      );
+
+      move("ses_theirs");
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      // The session it does show still moves it, which is what makes the refusal above a refusal
+      // of that one move rather than of the feature.
+      move("ses_ship it");
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("moves nothing when the terminal's own title names none of the sessions", async () => {
+      // A title nothing matches is a terminal whose session this panel cannot name, which is a
+      // different thing from a session nobody moved.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+      mocks.agentSessionsByCheckout["checkout:one"] = [agentSession("something else")];
+
+      move("ses_ship it");
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("moves nothing when two sessions carry the one title this terminal shows", async () => {
+      // Two terminals in one worktree can be showing one session between them, and nothing here can
+      // tell that from two sessions that happen to share a name. An ambiguous title names neither.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+      mocks.agentSessionsByCheckout["checkout:one"] = [
+        agentSession("ship it"),
+        { id: "ses_duplicate", title: "ship it" },
+      ];
+
+      move("ses_ship it");
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("follows attributable tool work while both OpenCode sessions and their shells remain under main", async () => {
+      const settings = cloneSettings(DEFAULT_SETTINGS);
+      settings.terminal.followWorktree = "agent";
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["writer", "other"], "checkout:two": [] },
+        { "checkout:one": ["writing in test", "still in main"] },
+        { activeSessionId: "session:writer", settings },
+      );
+      // The backend reports the writer's tool target, not a session.location.directory change.
+      // Both candidate sessions and the foreground TUIs still belong to the original directory.
+      for (const terminalId of ["session:writer", "session:other"]) {
+        wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", terminalId, {
+          state: "running",
+          foregroundProcess: true,
+          foregroundApp: "opencode",
+          terminalTitle: terminalId === "session:writer" ? "OC | writing in test" : "OC | still in main",
+          workingDirectory: "/repo/main",
+        });
+      }
+      move("ses_writing in test");
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:writer", "checkout:two", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it.each([
+      ["session:writer", true],
+      ["session:other", false],
+    ] as const)("follows the Home writer into Git with %s active", async (activeSessionId, follow) => {
+      const settings = cloneSettings(DEFAULT_SETTINGS);
+      settings.terminal.followWorktree = "agent";
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:home": ["writer", "other"], "checkout:one": [], "checkout:two": [] },
+        { "checkout:home": ["writing test", "staying home"] },
+        { activeSessionId, settings, separateRepos: { "checkout:home": "plain" } },
+      );
+      // OpenCode still lives in checkout:one; only its write.path names checkout:two.
+      move("ses_writing test");
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:writer", "checkout:two", 0, false, follow);
+      expect(mocks.focusActiveTerminal).toHaveBeenCalledTimes(follow ? 1 : 0);
+      wrapper.unmount();
+    });
+
+    it.each(["checkout:one", "checkout:plain"])("rejects a Home match also shown by %s", async (duplicate) => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:home": ["writer"], [duplicate]: ["duplicate"], "checkout:two": [] },
+        { "checkout:home": ["writing test"], [duplicate]: ["writing test"] },
+        {
+          separateRepos: {
+            "checkout:home": "plain",
+            ...(duplicate === "checkout:plain" ? { [duplicate]: "plain" as const } : {}),
+          },
+        },
+      );
+      move("ses_writing test");
+      await flushPromises();
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("never follows an OpenCode session into a plain checkout", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["writer"], "checkout:two": [] },
+        { "checkout:one": ["writing test"] },
+        { separateRepos: { "checkout:two": "plain" } },
+      );
+      move("ses_writing test");
+      await flushPromises();
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("follows a uniquely identified TUI across Git repositories", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["writer"], "checkout:two": [] },
+        { "checkout:one": ["writing test"] },
+        { activeSessionId: "session:writer", separateRepos: { "checkout:two": "git" } },
+      );
+
+      move("ses_writing test");
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:writer", "checkout:two", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("rejects the same OpenCode session shown by terminals in different repositories", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["writer"], "checkout:foreign": ["duplicate"], "checkout:two": [] },
+        { "checkout:one": ["writing test"], "checkout:foreign": ["writing test"] },
+        { separateRepos: { "checkout:foreign": "git", "checkout:two": "git" } },
+      );
+
+      move("ses_writing test");
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("moves only the one of two OpenCodes that is showing the session", async () => {
+      // Two OpenCodes in one worktree are no longer a reason to give up: each wrote the title of the
+      // session it has open, so the one that moved is named rather than guessed at, and the other
+      // stays where it is.
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["agent", "other"], "checkout:two": [] },
+        { "checkout:one": ["ship it", "second"] },
+      );
+
+      move("ses_ship it");
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, false);
+      wrapper.unmount();
+    });
+
+    it("moves nothing when no OpenCode is running in the worktree the session left", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["shell"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+      );
+
+      move("ses_ship it");
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("moves nothing when the destination is a worktree whose directory is gone", async () => {
+      // A missing directory is not a tree a terminal can work in, so the backend would refuse
+      // the move and the only honest outcome is not to ask.
+      const missing = { ...checkout("checkout:two"), isMissing: true };
+      mocks.agentSessionsByCheckout = {
+        "checkout:one": [agentSession("ship it")],
+      };
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one", [session("session:agent", "agent", "checkout:one")]), missing),
+      );
+      wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", "session:agent", {
+        state: "running",
+        foregroundProcess: true,
+        foregroundApp: "opencode",
+        terminalTitle: "OC | ship it",
+      });
+      await flushPromises();
+
+      move("ses_ship it");
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("runs a manual move after an in-flight automatic move", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["agent"], "checkout:two": [], "checkout:three": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+      let finishAutomatic: (result: {
+        moved: boolean;
+        directoryChange: "not-requested" | "written" | "not-written";
+      }) => void = () => {};
+      mocks.moveSession.mockImplementationOnce(() => new Promise((resolve) => (finishAutomatic = resolve)));
+
+      move("ses_ship it", "checkout:one", "checkout:two", Date.now());
+      await flushPromises();
+      wrapper.getComponent({ name: "SidebarStub" }).vm.$emit("moveSession", "session:agent", "checkout:three", 0);
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+      expect(mocks.moveSession).toHaveBeenLastCalledWith("session:agent", "checkout:two", 0, false, true);
+      finishAutomatic({ moved: true, directoryChange: "not-requested" });
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledTimes(2);
+      expect(mocks.moveSession).toHaveBeenLastCalledWith("session:agent", "checkout:three", 0, true, true);
+      wrapper.unmount();
+    });
+
+    it("ignores a replayed relocation after a manual move but follows a newer signal", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["agent"], "checkout:two": [], "checkout:three": [] },
+        { "checkout:one": ["ship it"] },
+      );
+      mocks.moveSession.mockResolvedValueOnce({ moved: true, directoryChange: "written" });
+      const staleObservedAt = Date.now() - 1_000;
+      wrapper.getComponent({ name: "SidebarStub" }).vm.$emit("moveSession", "session:agent", "checkout:three", 0);
+      await flushPromises();
+      wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", "session:agent", {
+        state: "running",
+        foregroundProcess: true,
+        foregroundApp: "opencode",
+        terminalTitle: "OC | ship it",
+        workingDirectory: "/checkout:three",
+      });
+      await flushPromises();
+      mocks.moveSession.mockClear();
+
+      move("ses_ship it", "checkout:one", "checkout:two", staleObservedAt);
+      await flushPromises();
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+
+      move("ses_ship it", "checkout:two", "checkout:two", Date.now() + 1_000);
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, false);
+      wrapper.unmount();
+    });
+
+    it("keeps the latest new relocation received while a move is in flight", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["agent"], "checkout:two": [], "checkout:three": [] },
+        { "checkout:one": ["ship it"] },
+        { activeSessionId: "session:agent" },
+      );
+      let finishAutomatic: (result: {
+        moved: boolean;
+        directoryChange: "not-requested" | "written" | "not-written";
+      }) => void = () => {};
+      mocks.moveSession.mockImplementationOnce(() => new Promise((resolve) => (finishAutomatic = resolve)));
+
+      move("ses_ship it", "checkout:one", "checkout:two", Date.now());
+      await flushPromises();
+      move("ses_ship it", "checkout:two", "checkout:three", Date.now() + 1_000);
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+
+      finishAutomatic({ moved: true, directoryChange: "not-requested" });
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(2);
+      expect(mocks.moveSession).toHaveBeenLastCalledWith("session:agent", "checkout:three", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("cleans up a failed automatic move and accepts a newer relocation", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["agent"], "checkout:two": [], "checkout:three": [] },
+        { "checkout:one": ["ship it"] },
+      );
+      const firstObservedAt = Date.now();
+      mocks.moveSession.mockRejectedValueOnce(new Error("move failed"));
+
+      move("ses_ship it", "checkout:one", "checkout:two", firstObservedAt);
+      await flushPromises();
+      move("ses_ship it", "checkout:one", "checkout:two", firstObservedAt);
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+
+      move("ses_ship it", "checkout:one", "checkout:three", firstObservedAt + 1_000);
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(2);
+      expect(mocks.moveSession).toHaveBeenLastCalledWith("session:agent", "checkout:three", 0, false, false);
+      wrapper.unmount();
+    });
+  });
+
+  describe("a shell that changed directory into a worktree", () => {
+    /** The status the pane emits when the OS reports where a terminal's shell is. */
+    function status(workingDirectory: string | undefined, foregroundApp = "zsh") {
+      return {
+        state: "running" as const,
+        foregroundProcess: false,
+        foregroundApp,
+        workingDirectory,
+      };
+    }
+
+    async function mountWithSettings(terminal: typeof DEFAULT_SETTINGS.terminal) {
+      const settings = cloneSettings(DEFAULT_SETTINGS);
+      settings.terminal = terminal;
+      const workspace = workspaceWith(
+        checkout("checkout:one", [session("session:one", "zsh", "checkout:one")]),
+        checkout("checkout:two"),
+      );
+      workspace.activeSessionId = "session:one";
+      const wrapper = await mountApp(workspace, undefined, { settings });
+      mocks.moveSession.mockClear();
+      return wrapper;
+    }
+
+    const following = () => ({ ...cloneSettings(DEFAULT_SETTINGS).terminal, followWorktree: "cd" as const });
+
+    it.each([
+      ["Git A to Git B", "git", "git", "/repo/b/src"],
+      ["Git to Home", "git", "plain", "/home/src"],
+      ["Home to Git", "plain", "git", "/repo/b/src"],
+    ] as const)("follows shell cd from %s", async (_label, sourceKind, targetKind, directory) => {
+      const sourceId = sourceKind === "plain" ? "checkout:home" : "checkout:source";
+      const targetId = targetKind === "plain" ? "checkout:home-target" : "checkout:foreign";
+      const sourcePath = sourceKind === "plain" ? "/home" : "/repo/a";
+      const targetPath = targetKind === "plain" ? "/home" : "/repo/b";
+      const source: Checkout = {
+        ...checkout(sourceId, [session("session:follow", "zsh", sourceId)]),
+        repoId: "repo:" + sourceId,
+        path: sourcePath,
+        canonicalPath: sourcePath,
+      };
+      const target: Checkout = {
+        ...checkout(targetId),
+        repoId: "repo:" + targetId,
+        path: targetPath,
+        canonicalPath: targetPath,
+      };
+      const makeRepo = (item: Checkout, kind: Repo["kind"]): Repo => ({
+        id: item.repoId,
+        kind,
+        name: item.id,
+        root: item.path,
+        checkouts: [item],
+        createdAt: "now",
+        lastOpenedAt: "now",
+      });
+      const workspace: WorkspaceState = {
+        repos: [makeRepo(source, sourceKind), makeRepo(target, targetKind)],
+        activeCheckoutId: sourceId,
+        activeSessionId: "session:follow",
+        homeCheckoutId: sourceKind === "plain" ? sourceId : targetKind === "plain" ? targetId : undefined,
+      };
+      const settings = cloneSettings(DEFAULT_SETTINGS);
+      settings.terminal = following();
+      const wrapper = await mountApp(workspace, undefined, { settings });
+      mocks.moveSession.mockClear();
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:follow", status(directory));
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:follow", targetId, 0, false, true);
+      wrapper.unmount();
+    });
+
+    it.each(["off", "cd", "agent", "both"] as const)(
+      "gates Home cd into Git and subsequent hops with %s",
+      async (mode) => {
+        const home = {
+          ...checkout("checkout:home", [session("session:home", "zsh", "checkout:home")]),
+          repoId: "repo:home",
+          path: "/work",
+          canonicalPath: "/work",
+        };
+        const root = { ...checkout("checkout:one"), path: "/work/app", canonicalPath: "/work/app" };
+        const worktree = {
+          ...checkout("checkout:two"),
+          path: "/work/app/.worktrees/feature",
+          canonicalPath: "/work/app/.worktrees/feature",
+        };
+        const workspace = workspaceWith(root, worktree);
+        workspace.repos.unshift({
+          ...workspace.repos[0],
+          id: home.repoId,
+          kind: "plain",
+          root: home.path,
+          checkouts: [home],
+        });
+        workspace.homeCheckoutId = home.id;
+        workspace.activeCheckoutId = home.id;
+        workspace.activeSessionId = "session:home";
+        const settings = cloneSettings(DEFAULT_SETTINGS);
+        settings.terminal.followWorktree = mode;
+        const wrapper = await mountApp(workspace, undefined, { settings });
+        mocks.moveSession.mockClear();
+        const report = async (directory: string) => {
+          wrapper
+            .getComponent({ name: "SessionPane" })
+            .vm.$emit("sessionStatusChanged", "session:home", status(directory));
+          await flushPromises();
+        };
+        await report(root.path + "/src");
+        if (mode === "off" || mode === "agent") {
+          expect(mocks.moveSession).not.toHaveBeenCalled();
+        } else {
+          expect(mocks.moveSession).toHaveBeenLastCalledWith("session:home", root.id, 0, false, true);
+          // The move stub does not return the backend's updated ownership; apply that result here.
+          const arrive = (target: Checkout) => {
+            const state = mocks.workspaceRef!.value;
+            const moved = state.repos
+              .flatMap((repo) => repo.checkouts)
+              .flatMap((checkout) => checkout.sessions)
+              .find((session) => session.id === "session:home")!;
+            mocks.workspaceRef!.value = {
+              ...state,
+              activeCheckoutId: target.id,
+              repos: state.repos.map((repo) => ({
+                ...repo,
+                checkouts: repo.checkouts.map((checkout) => ({
+                  ...checkout,
+                  sessions:
+                    checkout.id === target.id
+                      ? [{ ...moved, checkoutId: target.id }]
+                      : checkout.sessions.filter((session) => session.id !== moved.id),
+                })),
+              })),
+            };
+          };
+          arrive(root);
+          await report(worktree.path + "/src");
+          expect(mocks.moveSession).toHaveBeenLastCalledWith("session:home", worktree.id, 0, false, true);
+          arrive(worktree);
+          mocks.moveSession.mockClear();
+          await report(worktree.path + "/src");
+          expect(mocks.moveSession).not.toHaveBeenCalled();
+          await report(root.path);
+          expect(mocks.moveSession).toHaveBeenLastCalledWith("session:home", root.id, 0, false, true);
+        }
+        wrapper.unmount();
+      },
+    );
+
+    it("does not follow a stale cwd during a manual move, then follows later cd", async () => {
+      const settings = cloneSettings(DEFAULT_SETTINGS);
+      settings.terminal = following();
+      const workspace = workspaceWith(
+        checkout("checkout:one", [session("session:one", "zsh", "checkout:one")]),
+        checkout("checkout:two"),
+        checkout("checkout:three"),
+      );
+      workspace.activeSessionId = "session:one";
+      const wrapper = await mountApp(workspace, undefined, { settings });
+      let finishMove: (result: {
+        moved: boolean;
+        directoryChange: "not-requested" | "written" | "not-written";
+      }) => void = () => {};
+      mocks.moveSession.mockImplementationOnce(() => new Promise((resolve) => (finishMove = resolve)));
+
+      wrapper.getComponent({ name: "SidebarStub" }).vm.$emit("moveSession", "session:one", "checkout:two", 0);
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:one", "checkout:two", 0, true, true);
+
+      // The pane has moved ownership, but its unresolved moveSession call still represents the cd.
+      const beforeMove = mocks.workspaceRef!.value;
+      const movedSession = beforeMove.repos[0].checkouts[0].sessions[0];
+      const afterMove: WorkspaceState = {
+        ...beforeMove,
+        activeCheckoutId: "checkout:two",
+        repos: beforeMove.repos.map((repo) => ({
+          ...repo,
+          checkouts: repo.checkouts.map((item) =>
+            item.id === "checkout:one"
+              ? { ...item, sessions: item.sessions.filter((itemSession) => itemSession.id !== movedSession.id) }
+              : item.id === "checkout:two"
+                ? { ...item, sessions: [...item.sessions, { ...movedSession, checkoutId: item.id }] }
+                : item,
+          ),
+        })),
+      };
+      wrapper.getComponent({ name: "MainPane" }).vm.$emit("workspaceUpdated", afterMove);
+      await flushPromises();
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:one/src"));
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+
+      finishMove({ moved: true, directoryChange: "written" });
+      await flushPromises();
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:one/src"));
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:two/src"));
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:three/src"));
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenLastCalledWith("session:one", "checkout:three", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("releases manual follow suppression when the shell could not accept cd", async () => {
+      const settings = cloneSettings(DEFAULT_SETTINGS);
+      settings.terminal = following();
+      const workspace = workspaceWith(
+        checkout("checkout:one", [session("session:one", "zsh", "checkout:one")]),
+        checkout("checkout:two"),
+      );
+      workspace.activeSessionId = "session:one";
+      const wrapper = await mountApp(workspace, undefined, { settings });
+      mocks.moveSession.mockResolvedValueOnce({ moved: true, directoryChange: "not-written" });
+
+      wrapper.getComponent({ name: "SidebarStub" }).vm.$emit("moveSession", "session:one", "checkout:two", 0);
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:one", "checkout:two", 0, true, true);
+
+      const before = mocks.workspaceRef!.value;
+      const moved = before.repos[0]!.checkouts[0]!.sessions[0]!;
+      const after: WorkspaceState = {
+        ...before,
+        activeCheckoutId: "checkout:two",
+        repos: before.repos.map((repo) => ({
+          ...repo,
+          checkouts: repo.checkouts.map((item) =>
+            item.id === "checkout:one"
+              ? { ...item, sessions: item.sessions.filter((itemSession) => itemSession.id !== moved.id) }
+              : item.id === "checkout:two"
+                ? { ...item, sessions: [...item.sessions, { ...moved, checkoutId: item.id }] }
+                : item,
+          ),
+        })),
+      };
+      wrapper.getComponent({ name: "MainPane" }).vm.$emit("workspaceUpdated", after);
+      await flushPromises();
+      mocks.moveSession.mockClear();
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:one/src"));
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:one", "checkout:one", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("bounds manual follow suppression when cwd never acknowledges the requested cd", async () => {
+      const wrapper = await mountWithSettings(following());
+      mocks.moveSession.mockResolvedValueOnce({ moved: true, directoryChange: "written" });
+
+      wrapper.getComponent({ name: "SidebarStub" }).vm.$emit("moveSession", "session:one", "checkout:two", 0);
+      await flushPromises();
+      const before = mocks.workspaceRef!.value;
+      const moved = before.repos[0]!.checkouts[0]!.sessions[0]!;
+      const after: WorkspaceState = {
+        ...before,
+        activeCheckoutId: "checkout:two",
+        repos: before.repos.map((repo) => ({
+          ...repo,
+          checkouts: repo.checkouts.map((item) =>
+            item.id === "checkout:one"
+              ? { ...item, sessions: item.sessions.filter((itemSession) => itemSession.id !== moved.id) }
+              : item.id === "checkout:two"
+                ? { ...item, sessions: [...item.sessions, { ...moved, checkoutId: item.id }] }
+                : item,
+          ),
+        })),
+      };
+      wrapper.getComponent({ name: "MainPane" }).vm.$emit("workspaceUpdated", after);
+      await flushPromises();
+      mocks.moveSession.mockClear();
+
+      await vi.advanceTimersByTimeAsync(15_000);
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:one/src"));
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:one", "checkout:one", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("moves the terminal to the worktree its shell is now in", async () => {
+      const wrapper = await mountWithSettings(following());
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:two"));
+      await flushPromises();
+
+      // The shell did the `cd` itself, so there is nothing to type at it.
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:one", "checkout:two", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("moves it for a directory inside the worktree, not only its root", async () => {
+      // Nobody `cd`s into a worktree's root exactly; they `cd` into a directory in it.
+      const wrapper = await mountWithSettings(following());
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:two/src/deep"));
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:one", "checkout:two", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it("moves nothing when the shell is where its row already says it is", async () => {
+      // The invariant that stops a moved row from moving again lives here rather than in the poll:
+      // once the row names the worktree the shell is in, there is no other checkout to find.
+      const wrapper = await mountWithSettings(following());
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:one/src"));
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it.each(["off", "cd", "agent", "both"] as const)("gates shell moves with %s", async (mode) => {
+      const wrapper = await mountWithSettings({ ...DEFAULT_SETTINGS.terminal, followWorktree: mode });
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:two"));
+      await flushPromises();
+
+      if (mode === "cd" || mode === "both") {
+        expect(mocks.moveSession).toHaveBeenCalledWith("session:one", "checkout:two", 0, false, true);
+      } else expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("moves nothing for a terminal with an agent in front of it", async () => {
+      // An agent that moved itself reports where it is working; its shell never changed
+      // directory, so a directory here is a leftover rather than a move.
+      const wrapper = await mountWithSettings(following());
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:two", "opencode"));
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("moves nothing when the OS will not say where the shell is", async () => {
+      const wrapper = await mountWithSettings(following());
+
+      wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", "session:one", status(undefined));
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("asks once while a move is still on its way", async () => {
+      // The status poll runs every 750ms and a relocation stays on offer for half a minute, so
+      // the same move is announced over and over while the first one is in flight. Asking twice
+      // is not harmless: the second lands on a session that has already arrived and answers
+      // "already in that worktree", which reaches the user as an error toast.
+      const wrapper = await mountWithSettings(following());
+      let land: (moved: boolean) => void = () => {};
+      mocks.moveSession.mockImplementationOnce(() => new Promise<boolean>((resolve) => (land = resolve)));
+
+      const report = () =>
+        wrapper
+          .getComponent({ name: "SessionPane" })
+          .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:two"));
+      report();
+      await flushPromises();
+      report();
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+
+      land(true);
+      await flushPromises();
+
+      // The guard is about a move in flight, not about the first one a terminal ever gets.
+      mocks.moveSession.mockImplementationOnce(() => Promise.resolve(true));
+      report();
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(2);
+      wrapper.unmount();
+    });
+
+    it("leaves a split layout's preview alone when it follows", async () => {
+      // Following is what clicking the row does, and clicking the row does not take the document
+      // someone is reading in the destination away from them. Only the close button claims the
+      // whole panel back.
+      const settings = cloneSettings(DEFAULT_SETTINGS);
+      settings.terminal = following();
+      const workspace = workspaceWith(
+        checkout("checkout:one", [session("session:one", "zsh", "checkout:one")]),
+        checkout("checkout:two"),
+      );
+      workspace.activeSessionId = "session:one";
+      const wrapper = await mountApp(workspace, { ...DEFAULT_APP_LAYOUT, mode: "split" }, { settings });
+
+      // The destination is reading a file when the terminal lands in it.
+      await wrapper.get('[data-testid="select-checkout-two"]').trigger("click");
+      await wrapper.get('[data-testid="open-file"]').trigger("click");
+      await wrapper.get('[data-testid="select-session-one"]').trigger("click");
+      mocks.moveSession.mockImplementationOnce(() => Promise.resolve(true));
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:two"));
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:one", "checkout:two", 0, false, true);
+      // Asking for it again is what shows whether the destination still remembers its document.
+      await wrapper.get('[data-testid="select-checkout-two"]').trigger("click");
+      expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
+      wrapper.unmount();
     });
   });
 
@@ -3215,6 +4364,39 @@ describe("App UI integration", () => {
       expect(wrapper.get("#settings-editor-fontSize").attributes("disabled")).toBeUndefined();
       wrapper.unmount();
     });
+
+    it.each(["off", "cd", "agent", "both"] as const)(
+      "persists worktree following as %s through Apply",
+      async (mode) => {
+        const wrapper = await openSettings();
+        const controlId = "settings-terminal-followWorktree";
+        const select = wrapper
+          .findAllComponents(SelectControl)
+          .find((control) => control.props("label") === "Follow worktree")!;
+        expect(wrapper.get(`label[for="${controlId}"]`).text()).toContain("Follow worktree");
+        expect(wrapper.get(`#${controlId}`).element.tagName).toBe("BUTTON");
+        expect(select.props("modelValue")).toBe("agent");
+        expect(select.props("options")).toEqual(
+          ["off", "cd", "agent", "both"].map((value) => ({ value, label: value })),
+        );
+        await select.get(`button[data-value="${mode}"]`).trigger("click");
+        await flushPromises();
+        expect(mocks.saveSettings).not.toHaveBeenCalled();
+        await wrapper
+          .findAll("button")
+          .find((button) => button.text() === "Apply")!
+          .trigger("click");
+        await flushPromises();
+        const saved = cloneSettings(DEFAULT_SETTINGS);
+        saved.terminal.followWorktree = mode;
+        expect(mocks.saveSettings).toHaveBeenCalledWith(saved);
+        expect(wrapper.findComponent({ name: "MainPane" }).props("terminalSettings").followWorktree).toBe(mode);
+        wrapper.unmount();
+        const reopened = await openSettings(saved);
+        expect(reopened.get(`#${controlId}`).text()).toContain(mode);
+        reopened.unmount();
+      },
+    );
 
     it("writes the whole set and takes effect at once, without waiting for the file", async () => {
       const wrapper = await openSettings();

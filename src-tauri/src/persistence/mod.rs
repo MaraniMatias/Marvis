@@ -361,13 +361,7 @@ impl Database {
                 .map_err(db_error)?;
             repo.checkouts[0].id.clone()
         } else {
-            let repo_position: i64 = transaction
-                .query_row(
-                    "SELECT COALESCE(MAX(position) + 1, 0) FROM repos",
-                    [],
-                    |row| row.get(0),
-                )
-                .map_err(db_error)?;
+            let repo_position = read_position(&transaction, MAX_POSITION_FROM_REPOS, [])?;
             transaction
                 .execute(
                     "INSERT INTO repos (id, kind, name, root, default_branch, position, created_at, last_opened_at)
@@ -689,13 +683,7 @@ impl Database {
             return Ok(false);
         }
         let now = &repo.last_opened_at;
-        let position: i64 = transaction
-            .query_row(
-                "SELECT COALESCE((SELECT position FROM repos WHERE id = ?1), MAX(position) + 1, 0) FROM repos",
-                [&repo.id],
-                |row| row.get(0),
-            )
-            .map_err(db_error)?;
+        let position = read_repo_position(&transaction, &repo.id)?;
         transaction
             .execute(
                 "INSERT INTO repos (id, kind, name, root, default_branch, position, created_at, last_opened_at)
@@ -716,19 +704,49 @@ impl Database {
                 ],
             )
             .map_err(db_error)?;
-        let position_offset: i64 = transaction
-            .query_row(
-                "SELECT COALESCE(MAX(position), -1) + ?2 FROM checkouts WHERE repo_id = ?1",
-                params![repo.id, repo.checkouts.len() as i64 + 1],
-                |row| row.get(0),
-            )
+        // The checkouts Git no longer lists are marked missing and moved past the ones it does,
+        // each to its own number, and they are given that number rather than having their own
+        // added to it. Adding the offset to the stored position made every sync double them,
+        // because the next offset was read back from a column the last one had already grown:
+        // sixty-odd syncs later it held a value past `i64::MAX`, SQLite stored it as a REAL, and
+        // every later read of a position failed with a type error — one removed worktree stopping
+        // any folder from being registered.
+        //
+        // The number is absolute, so syncing the same repository again writes the same one and
+        // the rows do not drift. The live checkouts are written from `repo.checkouts` immediately
+        // below and take the places 0..n back whatever they had here, and the ones that are gone
+        // keep their order among themselves by ranking on `rowid`, which `UNIQUE (repo_id,
+        // position)` would otherwise refuse.
+        // The checkouts Git no longer lists keep a number of their own, past everything that is
+        // still there, and they are given that number rather than having their own added to it.
+        // Adding the offset to the stored position made every sync double them, because the next
+        // offset was read back from a column the last one had already grown: sixty-odd syncs later
+        // it held a value past `i64::MAX`, SQLite stored it as a REAL, and every later read of a
+        // position failed with a type error — one removed worktree stopping any folder from being
+        // registered.
+        //
+        // They are written in reverse order and each takes the place the row above it just left,
+        // so no two ever hold the same number while `UNIQUE (repo_id, position)` is watching, and
+        // the run always starts above the largest position already in the repo: a repo whose
+        // checkouts were all moved out of the way earlier must not be handed the same range back.
+        let highest: i64 = read_position(&transaction, HIGHEST_CHECKOUT_POSITION, [&repo.id])?;
+        let first_absent = highest.max(repo.checkouts.len() as i64) + 1;
+        let existing = transaction
+            .prepare("SELECT rowid FROM checkouts WHERE repo_id = ?1 ORDER BY position DESC")
+            .and_then(|mut statement| {
+                statement
+                    .query_map([&repo.id], |row| row.get::<_, i64>(0))?
+                    .collect::<Result<Vec<i64>, rusqlite::Error>>()
+            })
             .map_err(db_error)?;
-        transaction
-            .execute(
-                "UPDATE checkouts SET is_missing = 1, position = position + ?2 WHERE repo_id = ?1",
-                params![repo.id, position_offset],
-            )
-            .map_err(db_error)?;
+        for (offset, rowid) in existing.iter().enumerate() {
+            transaction
+                .execute(
+                    "UPDATE checkouts SET is_missing = 1, position = ?2 WHERE rowid = ?1",
+                    params![rowid, first_absent + offset as i64],
+                )
+                .map_err(db_error)?;
+        }
         for (checkout_position, checkout) in repo.checkouts.iter().enumerate() {
             transaction
                 .execute(
@@ -1381,6 +1399,32 @@ impl Database {
         self.load_workspace()
     }
 
+    /// Every checkout still on the panel, with the directory it lives in.
+    ///
+    /// A missing or archived checkout is left out because a session cannot be handed to one:
+    /// there is no row to put it under and the directory behind it is not there to work in.
+    /// The stored path is returned as it is, because `canonical_path` is already canonical and
+    /// resolving it again per call is work a directory comparison would do anyway.
+    pub fn checkout_directories(&self) -> Result<Vec<(String, PathBuf)>, String> {
+        let connection = self.connection.lock().map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT id, canonical_path FROM checkouts WHERE is_missing = 0 AND is_archived = 0",
+            )
+            .map_err(db_error)?;
+        let rows = statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    PathBuf::from(row.get::<_, String>(1)?),
+                ))
+            })
+            .map_err(db_error)?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(db_error)?;
+        Ok(rows)
+    }
+
     pub fn terminal_checkout_path(&self, checkout_id: &str) -> Result<PathBuf, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let stored_path = connection
@@ -1480,16 +1524,22 @@ impl Database {
         self.load_workspace()
     }
 
-    /// Moves a terminal session to another worktree of the same repository.
+    /// Moves a terminal to another registered, non-missing checkout.
     ///
-    /// The process is not touched: a session is a row, and moving it hands the row to another
-    /// checkout so the terminal belongs to the worktree it is listed under. Both layouts are
-    /// reconciled in the same transaction as the row, because a layout still naming a session its
-    /// checkout no longer holds is a layout the next read prunes and the next save refuses.
+    /// The process is not touched: a session is a row, and moving it changes only the checkout that
+    /// owns it. Both layouts are reconciled in the same transaction as the row, because a layout
+    /// still naming a session its checkout no longer holds is a layout the next read prunes and the
+    /// next save refuses.
+    ///
+    /// `select_target` says whether the window should follow. A person dragging a row to another
+    /// worktree wants to be there; a session that moved on its own does not get to decide what the
+    /// window is looking at, so the caller that noticed the move passes false and leaves the
+    /// selection alone.
     pub fn move_terminal_session(
         &self,
         session_id: &str,
         target_checkout_id: &str,
+        select_target: bool,
     ) -> Result<WorkspaceState, String> {
         let connection = self.connection.lock().map_err(|error| error.to_string())?;
         let transaction = connection.unchecked_transaction().map_err(db_error)?;
@@ -1505,27 +1555,16 @@ impl Database {
         if source_checkout_id == target_checkout_id {
             return Err("the terminal session is already in that worktree".into());
         }
-        let target_repo_id: String = transaction
+        let _target_repo_id: String = transaction
             .query_row(
-                "SELECT repo_id FROM checkouts WHERE id = ?1 AND is_missing = 0 AND is_archived = 0",
+                "SELECT repo_id FROM checkouts
+                 WHERE id = ?1 AND is_missing = 0 AND is_archived = 0",
                 [target_checkout_id],
                 |row| row.get(0),
             )
             .optional()
             .map_err(db_error)?
             .ok_or_else(|| "checkout does not exist or is missing".to_string())?;
-        let source_repo_id: String = transaction
-            .query_row(
-                "SELECT repo_id FROM checkouts WHERE id = ?1",
-                [&source_checkout_id],
-                |row| row.get(0),
-            )
-            .map_err(db_error)?;
-        // One repository is one Git directory, so its worktrees are the only checkouts a session
-        // may be handed to; anything else would be a session labelled with a tree it is not in.
-        if source_repo_id != target_repo_id {
-            return Err("a terminal session cannot leave the repository it was opened in".into());
-        }
         transaction
             .execute(
                 "UPDATE sessions SET checkout_id = ?1 WHERE id = ?2",
@@ -1534,10 +1573,12 @@ impl Database {
             .map_err(db_error)?;
         reconcile_stored_layout(&transaction, &source_checkout_id)?;
         reconcile_stored_layout(&transaction, target_checkout_id)?;
-        // The worktree the session now belongs to is the one whose files, changes and agent the
-        // window shows, so the move selects it and the session inside it.
-        set_preference(&transaction, ACTIVE_CHECKOUT, Some(target_checkout_id))?;
-        set_preference(&transaction, ACTIVE_SESSION, Some(session_id))?;
+        if select_target {
+            // The worktree the session now belongs to is the one whose files, changes and agent the
+            // window shows, so the move selects it and the session inside it.
+            set_preference(&transaction, ACTIVE_CHECKOUT, Some(target_checkout_id))?;
+            set_preference(&transaction, ACTIVE_SESSION, Some(session_id))?;
+        }
         transaction.commit().map_err(db_error)?;
         drop(connection);
         self.load_workspace()
@@ -2828,6 +2869,51 @@ fn db_error(error: rusqlite::Error) -> String {
     format!("SQLite operation failed: {error}")
 }
 
+/// Where a repo that is already on the panel keeps its place among the others, or the end of the
+/// line when it is new.
+const POSITION_OF_REGISTERED_REPO: &str =
+    "SELECT COALESCE((SELECT position FROM repos WHERE id = ?1), MAX(position) + 1, 0) FROM repos";
+/// The end of the line for a repo this registration does not name.
+const MAX_POSITION_FROM_REPOS: &str = "SELECT COALESCE(MAX(position) + 1, 0) FROM repos";
+/// The largest place a checkout of one repo holds, or -1 when it holds none.
+const HIGHEST_CHECKOUT_POSITION: &str =
+    "SELECT COALESCE(MAX(position), -1) FROM checkouts WHERE repo_id = ?1";
+
+/// Reads where the repo `repo_id` stands among the others, or the end of the line when it is new.
+fn read_repo_position(
+    transaction: &rusqlite::Transaction<'_>,
+    repo_id: &str,
+) -> Result<i64, String> {
+    read_position(transaction, POSITION_OF_REGISTERED_REPO, params![repo_id])
+}
+
+/// Reads a position the way SQLite is able to store it.
+///
+/// `INTEGER` is a type of affinity, not a promise about what a row holds: a value that no 64-bit
+/// integer can represent is written as a REAL, and reading it back as `i64` is an error rather
+/// than a number. A column with one such row in it then answers `MAX()` as a REAL, and the failure
+/// names a type, not the row that caused it, several queries away from the worktree that was
+/// removed. Ordering is all this value is for, so a position that is not one is the end of the
+/// line: nothing is lost, and the next write puts the row on a number that fits.
+fn read_position<P: rusqlite::Params>(
+    transaction: &rusqlite::Transaction<'_>,
+    query: &str,
+    parameters: P,
+) -> Result<i64, String> {
+    let value: rusqlite::types::Value = transaction
+        .query_row(query, parameters, |row| row.get(0))
+        .map_err(db_error)?;
+    // A whole number that SQLite happened to store as a REAL is still a position, and reading it
+    // is what keeps an older file working. A fractional one is not, and the end of the line is
+    // where a value nothing can order correctly belongs.
+    let position = match value {
+        rusqlite::types::Value::Integer(position) => position,
+        rusqlite::types::Value::Real(position) if position.fract() == 0.0 => position as i64,
+        _ => i64::MAX,
+    };
+    Ok(position)
+}
+
 #[cfg(test)]
 mod tests {
     use std::{fs, path::Path};
@@ -4007,6 +4093,115 @@ mod tests {
         );
     }
 
+    /// Syncing the same repository again has to leave its checkouts where they were. Each sync
+    /// used to push every position up by the current maximum, so the numbers doubled every time:
+    /// past `i64::MAX` SQLite stored the column as a REAL, and the next read of any position in it
+    /// failed with a type error that named no row. Sixty-odd syncs is a few months of opening the
+    /// app, and the first thing to break was registering a folder at all.
+    #[test]
+    fn syncing_the_same_repository_again_does_not_move_its_checkouts() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("feature");
+        for folder in [&root, &worktree] {
+            fs::create_dir(folder).unwrap();
+        }
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let focus = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo.clone(), &focus).unwrap();
+
+        let positions = |database: &Database| {
+            let connection = database.connection.lock().unwrap();
+            let rows = connection
+                .prepare("SELECT id, position, typeof(position) FROM checkouts ORDER BY id")
+                .unwrap()
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                    ))
+                })
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap();
+            rows
+        };
+        let first = positions(&database);
+        assert!(
+            first.iter().all(|(_, _, kind)| kind == "integer"),
+            "a position was not stored as an integer: {first:?}"
+        );
+
+        for _ in 0..80 {
+            database.register_git_repo(repo.clone(), &focus).unwrap();
+        }
+        assert_eq!(positions(&database), first, "syncing moved the checkouts");
+        // A worktree Git stopped listing is the row that used to keep growing: it keeps a number
+        // that fits, and it sorts past the ones that are still there.
+        fs::remove_dir_all(&worktree).unwrap();
+        let shrunk = Repo {
+            checkouts: vec![repo.checkouts[0].clone()],
+            ..repo.clone()
+        };
+        database.register_git_repo(shrunk, &focus).unwrap();
+        let after = positions(&database);
+        assert!(
+            after.iter().all(|(_, _, kind)| kind == "integer"),
+            "a missing checkout stored a position no integer can hold: {after:?}"
+        );
+        let live = after
+            .iter()
+            .find(|(id, _, _)| id == &focus)
+            .expect("the primary checkout is still listed");
+        let gone = after
+            .iter()
+            .find(|(id, _, _)| id == &worktree_id)
+            .expect("the removed worktree is still listed");
+        assert!(
+            gone.1 > live.1,
+            "the removed worktree sorts before the one that is left"
+        );
+    }
+
+    /// The column is typed by affinity, not by promise: a value too large for a 64-bit integer is
+    /// written as a REAL, and reading it back as `i64` is an error. One such row is enough to fail
+    /// every read of every position in the table, so a file carrying one has to still register the
+    /// folders it did not have, rather than refusing all of them with a type name.
+    #[test]
+    fn a_position_too_large_for_an_integer_does_not_stop_a_folder_from_being_registered() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("feature");
+        let other_root = temp.path().join("other");
+        for folder in [&root, &worktree, &other_root] {
+            fs::create_dir(folder).unwrap();
+        }
+        let (repo, _) = git_repo_with_worktree(&root, &worktree);
+        let focus = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo.clone(), &focus).unwrap();
+        {
+            // What a database written by the doubling above holds: past the largest integer.
+            let connection = database.connection.lock().unwrap();
+            connection
+                .execute(
+                    "UPDATE repos SET position = 1.0376293541461623e+19 WHERE id = ?1",
+                    [&repo.id],
+                )
+                .unwrap();
+        }
+
+        let other = plain_repo(&other_root, "other");
+        let registered = database
+            .register_plain_repo(other.clone())
+            .expect("a position that is not an integer must not stop a registration");
+        assert!(registered
+            .repos
+            .iter()
+            .any(|candidate| candidate.id == other.id));
+    }
     #[test]
     fn checkout_order_is_restored_from_its_persisted_position() {
         let temp = tempdir().expect("temporary directory");
@@ -4235,6 +4430,43 @@ mod tests {
             .is_err());
     }
 
+    /// A missing or archived worktree is not a place a session can be sent, so it is not
+    /// offered as one; the path is what makes a session's directory nameable at all.
+    #[test]
+    fn checkout_directories_lists_only_the_worktrees_a_session_can_be_handed_to() {
+        let temp = tempdir().expect("temporary directory");
+        let root = temp.path().join("root");
+        let worktree = temp.path().join("worktree");
+        let gone = temp.path().join("gone");
+        for folder in [&root, &worktree, &gone] {
+            fs::create_dir(folder).unwrap();
+        }
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let root_id = repo.checkouts[0].id.clone();
+        let database = Database::open_in_memory().expect("database");
+        database
+            .register_git_repo(repo, &worktree_id)
+            .expect("register worktrees");
+
+        let listed = database.checkout_directories().expect("list checkouts");
+        let mut listed_ids = listed.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>();
+        listed_ids.sort_unstable();
+        let mut expected = vec![root_id.as_str(), worktree_id.as_str()];
+        expected.sort_unstable();
+        assert_eq!(listed_ids, expected);
+        assert!(listed.iter().all(|(_, path)| path.is_absolute()));
+
+        // Archiving takes a worktree off the panel, so a session may no longer be handed to it.
+        database
+            .archive_checkout(&worktree_id)
+            .expect("archive worktree");
+        assert!(database
+            .checkout_directories()
+            .expect("list checkouts")
+            .iter()
+            .all(|(id, _)| id != &worktree_id));
+    }
+
     #[test]
     fn checkout_layouts_persist_and_heal_sessions_owned_by_another_checkout() {
         let temp = tempdir().expect("temporary directory");
@@ -4412,23 +4644,41 @@ mod tests {
             )
             .unwrap();
 
-        // Another repository is a different Git directory, so it is never a destination.
-        assert!(database
-            .move_terminal_session(&session.id, &other_root_id)
-            .is_err());
+        // A registered checkout in another Git repository is a valid destination.
+        let moved_elsewhere = database
+            .move_terminal_session(&session.id, &other_root_id, false)
+            .unwrap();
+        assert_eq!(
+            database.terminal_session_checkout(&session.id).unwrap(),
+            Some(other_root_id.clone())
+        );
+        let foreign_session = moved_elsewhere
+            .repos
+            .iter()
+            .flat_map(|repo| &repo.checkouts)
+            .find(|checkout| checkout.id == other_root_id)
+            .unwrap()
+            .sessions
+            .first()
+            .unwrap();
+        assert_eq!(foreign_session.name, session.name);
+        assert_eq!(foreign_session.created_at, session.created_at);
+        database
+            .move_terminal_session(&session.id, &root_id, false)
+            .unwrap();
         assert_eq!(
             database.terminal_session_checkout(&session.id).unwrap(),
             Some(root_id.clone())
         );
         assert!(database
-            .move_terminal_session(&session.id, &root_id)
+            .move_terminal_session(&session.id, &root_id, true)
             .is_err());
         assert!(database
-            .move_terminal_session("session:unknown", &worktree_id)
+            .move_terminal_session("session:unknown", &worktree_id, true)
             .is_err());
 
         let moved = database
-            .move_terminal_session(&session.id, &worktree_id)
+            .move_terminal_session(&session.id, &worktree_id, true)
             .unwrap();
 
         let moved_repo = moved
@@ -4471,6 +4721,191 @@ mod tests {
         // The destination had no stored layout, so it has none to repair: the pane its sessions
         // name is built on the next read, and the session it gained is in it.
         assert_eq!(database.load_terminal_layout(&worktree_id).unwrap(), None);
+    }
+
+    #[test]
+    fn registered_checkouts_can_take_terminal_sessions_from_any_source() {
+        for select_target in [false, true] {
+            let temp = tempdir().unwrap();
+            let home = temp.path().join("home");
+            let plain = temp.path().join("plain");
+            let root = temp.path().join("repo");
+            let worktree = temp.path().join("test");
+            let other = temp.path().join("other");
+            let other_worktree = temp.path().join("other-test");
+            for path in [&home, &plain, &root, &worktree, &other, &other_worktree] {
+                fs::create_dir_all(path).unwrap();
+            }
+            let database = Database::open_in_memory().unwrap();
+            let home_repo = plain_repo(&home, "now");
+            let home_id = home_repo.checkouts[0].id.clone();
+            database.register_plain_repo(home_repo.clone()).unwrap();
+            database.register_home_repo(&home_repo).unwrap();
+            let plain_repo = plain_repo(&plain, "now");
+            let plain_id = plain_repo.checkouts[0].id.clone();
+            database.register_plain_repo(plain_repo).unwrap();
+            let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+            let root_id = repo.checkouts[0].id.clone();
+            database.register_git_repo(repo, &worktree_id).unwrap();
+            let (other_repo, other_id) = git_repo_with_worktree(&other, &other_worktree);
+            database.register_git_repo(other_repo, &other_id).unwrap();
+            let session = Session {
+                id: "session:home-agent".into(),
+                session_type: SessionType::Shell,
+                checkout_id: home_id.clone(),
+                name: "OpenCode".into(),
+                created_at: "now".into(),
+                status: SessionStatus::Active,
+            };
+            database.add_terminal_session(&session).unwrap();
+            database
+                .move_terminal_session(&session.id, &plain_id, false)
+                .unwrap();
+            assert_eq!(
+                database.terminal_session_checkout(&session.id).unwrap(),
+                Some(plain_id.clone())
+            );
+            database
+                .move_terminal_session(&session.id, &home_id, false)
+                .unwrap();
+            database
+                .save_terminal_layout(
+                    &home_id,
+                    &CheckoutTerminalLayout {
+                        active_tab_id: Some("tab:home".into()),
+                        tabs: vec![TerminalLayoutTab {
+                            id: "tab:home".into(),
+                            root: TerminalLayoutNode::Session {
+                                session_id: session.id.clone(),
+                            },
+                        }],
+                        session_order: vec![session.id.clone()],
+                    },
+                )
+                .unwrap();
+            let before = database.load_workspace().unwrap();
+            assert!(database
+                .move_terminal_session(&session.id, "checkout:unknown", select_target)
+                .is_err());
+            // Missing and archived destinations remain refused by the same public move contract.
+            for column in ["is_missing", "is_archived"] {
+                let sql = format!("UPDATE checkouts SET {column} = ?1 WHERE id = ?2");
+                database
+                    .connection
+                    .lock()
+                    .unwrap()
+                    .execute(&sql, params![1, &worktree_id])
+                    .unwrap();
+                assert!(database
+                    .move_terminal_session(&session.id, &worktree_id, select_target)
+                    .is_err());
+                database
+                    .connection
+                    .lock()
+                    .unwrap()
+                    .execute(&sql, params![0, &worktree_id])
+                    .unwrap();
+            }
+            assert_eq!(
+                database.terminal_session_checkout(&session.id).unwrap(),
+                Some(home_id.clone())
+            );
+            database
+                .move_terminal_session(&session.id, &root_id, select_target)
+                .unwrap();
+            assert_eq!(
+                database.terminal_session_checkout(&session.id).unwrap(),
+                Some(root_id.clone())
+            );
+            let moved = database
+                .move_terminal_session(&session.id, &worktree_id, select_target)
+                .unwrap();
+            assert_eq!(
+                database.terminal_session_checkout(&session.id).unwrap(),
+                Some(worktree_id.clone())
+            );
+            let destination = moved
+                .repos
+                .iter()
+                .flat_map(|repo| &repo.checkouts)
+                .find(|checkout| checkout.id == worktree_id)
+                .unwrap();
+            assert_eq!(destination.sessions[0].id, session.id);
+            assert_eq!(destination.sessions[0].name, session.name);
+            assert_eq!(destination.sessions[0].created_at, session.created_at);
+            assert!(database
+                .load_terminal_layout(&home_id)
+                .unwrap()
+                .unwrap()
+                .tabs
+                .is_empty());
+            if select_target {
+                assert_eq!(
+                    moved.active_checkout_id.as_deref(),
+                    Some(worktree_id.as_str())
+                );
+                assert_eq!(
+                    moved.active_session_id.as_deref(),
+                    Some(session.id.as_str())
+                );
+            } else {
+                assert_eq!(moved.active_checkout_id, before.active_checkout_id);
+                assert_eq!(moved.active_session_id, before.active_session_id);
+            }
+            // The same session can move from Git B back to Home, then onward to another plain
+            // checkout and back into Git A. Each move changes the row's checkout owner only.
+            for destination in [&other_id, &home_id, &plain_id, &root_id] {
+                database
+                    .move_terminal_session(&session.id, destination, select_target)
+                    .unwrap();
+                assert_eq!(
+                    database.terminal_session_checkout(&session.id).unwrap(),
+                    Some(destination.clone())
+                );
+            }
+        }
+    }
+
+    /// A move that happened on its own moves the row and nothing else: the window stays on the
+    /// worktree the person was looking at, because a session changing directory is not a reason to
+    /// take over the screen.
+    #[test]
+    fn a_move_that_was_not_asked_for_leaves_the_window_where_it_was() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        let worktree = temp.path().join("worktree");
+        for folder in [&root, &worktree] {
+            fs::create_dir_all(folder).unwrap();
+        }
+        let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+        let root_id = repo.checkouts[0].id.clone();
+        let database = Database::open(temp.path().join("workspace.sqlite3")).unwrap();
+        database.register_git_repo(repo, &worktree_id).unwrap();
+        let session = Session {
+            id: "session:walked".into(),
+            session_type: SessionType::Shell,
+            checkout_id: root_id.clone(),
+            name: "zsh".into(),
+            created_at: "now".into(),
+            status: SessionStatus::Active,
+        };
+        database.add_terminal_session(&session).unwrap();
+
+        let moved = database
+            .move_terminal_session(&session.id, &worktree_id, false)
+            .unwrap();
+
+        // The row moved...
+        assert_eq!(
+            database.terminal_session_checkout(&session.id).unwrap(),
+            Some(worktree_id.clone())
+        );
+        // ...and the window did not.
+        assert_eq!(moved.active_checkout_id.as_deref(), Some(root_id.as_str()));
+        assert_ne!(
+            moved.active_checkout_id.as_deref(),
+            Some(worktree_id.as_str())
+        );
     }
 
     #[test]

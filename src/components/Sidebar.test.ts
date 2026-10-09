@@ -691,6 +691,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:titled": {
             sessions: [
               {
+                id: "ses_row_1",
                 title: "Copy ids into lists",
                 agent: { label: "coder", color: null, attention: "busy" },
                 awaitingReply: false,
@@ -698,6 +699,7 @@ describe("Sidebar workdir rows", () => {
                 updatedAt: Date.now(),
               },
               {
+                id: "ses_row_2",
                 title: "An old session from another checkout's checkout",
                 agent: null,
                 awaitingReply: false,
@@ -753,6 +755,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:cut": {
             sessions: [
               {
+                id: "ses_row_3",
                 title: long,
                 agent: { label: "plan", color: null, attention: "none" },
                 awaitingReply: false,
@@ -800,6 +803,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:loan": {
             sessions: [
               {
+                id: "ses_row_4",
                 title: "Add icon box, tinted chip, dot ring",
                 agent: { label: "coder", color: null, attention: "none" },
                 awaitingReply: false,
@@ -807,6 +811,7 @@ describe("Sidebar workdir rows", () => {
                 updatedAt: Date.now(),
               },
               {
+                id: "ses_row_5",
                 title: "Plan de implementación para la sidebar",
                 agent: { label: "plan", color: null, attention: "busy" },
                 awaitingReply: false,
@@ -867,6 +872,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:twin": {
             sessions: [
               {
+                id: "ses_row_6",
                 title: "Humanizer",
                 agent: { label: "coder", color: null, attention: "busy" },
                 awaitingReply: false,
@@ -874,6 +880,7 @@ describe("Sidebar workdir rows", () => {
                 updatedAt: Date.now(),
               },
               {
+                id: "ses_row_7",
                 title: "Humanizer",
                 agent: { label: "plan", color: null, attention: "none" },
                 awaitingReply: false,
@@ -926,6 +933,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:gone": {
             sessions: [
               {
+                id: "ses_row_8",
                 title: "Copy ids into lists",
                 agent: { label: "coder", color: null, attention: "busy" },
                 awaitingReply: false,
@@ -1043,6 +1051,7 @@ describe("Sidebar workdir rows", () => {
             "checkout:two": {
               sessions: [
                 {
+                  id: "ses_row_9",
                   title: "Copy ids into lists",
                   agent: { label: "plan", color: null, attention: "busy" },
                   awaitingReply: false,
@@ -1111,6 +1120,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:agent": {
             sessions: [
               {
+                id: "ses_row_10",
                 title: "Copy ids into lists",
                 agent: { label: "plan", color: "#FF966C", attention: "busy" },
                 awaitingReply: false,
@@ -1154,6 +1164,7 @@ describe("Sidebar workdir rows", () => {
   it("does not call unreadable candidate state idle or discard its ambiguous title", async () => {
     const checkoutId = "checkout:unknown";
     const candidate = {
+      id: "ses_row_11",
       title: "Unknown",
       agent: null,
       running: false,
@@ -1210,7 +1221,8 @@ describe("Sidebar workdir rows", () => {
         isOpening: false,
         agentRows: {
           [checkoutId]: {
-            sessions: sessions.map(({ title, attention }) => ({
+            sessions: sessions.map(({ id, title, attention }) => ({
+              id,
               title,
               agent: { label: "coder", color: "#4ED6BF", attention },
               awaitingReply: false,
@@ -1858,6 +1870,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:mixed": {
             sessions: [
               {
+                id: "ses_row_12",
                 title: "Copy ids",
                 agent: { label: "coder", color: null, attention: "busy" },
                 awaitingReply: false,
@@ -1907,6 +1920,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:agent": {
             sessions: [
               {
+                id: "ses_row_13",
                 title: "Copy ids",
                 agent: { label: "coder", color: null, attention: "none" },
                 awaitingReply: false,
@@ -1970,6 +1984,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:one": {
             sessions: [
               {
+                id: "ses_row_14",
                 title: "Copy ids",
                 agent: { label: "coder", color: "#4ED6BF", attention: "none" },
                 awaitingReply: false,
@@ -1981,6 +1996,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:two": {
             sessions: [
               {
+                id: "ses_row_15",
                 title: "Plan it",
                 agent: { label: "plan", color: "#FF966C", attention: "busy" },
                 awaitingReply: false,
@@ -2039,6 +2055,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:one": {
             sessions: [
               {
+                id: "ses_row_16",
                 title: "Copy ids",
                 agent: { label: "coder", color: "#4ED6BF", attention: "busy" },
                 awaitingReply: false,
@@ -2050,6 +2067,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:two": {
             sessions: [
               {
+                id: "ses_row_17",
                 title: "Plan it",
                 agent: { label: "plan", color: "#FF966C", attention: "none" },
                 awaitingReply: false,
@@ -2111,6 +2129,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:waiting": {
             sessions: [
               {
+                id: "ses_row_18",
                 title: "Copy ids into lists",
                 agent: { label: "plan", color: "#FF966C", attention: "blocked" },
                 awaitingReply: false,
@@ -2122,6 +2141,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:failed": {
             sessions: [
               {
+                id: "ses_row_19",
                 title: "Fix it",
                 agent: { label: "coder", color: "#4ED6BF", attention: "failed" },
                 awaitingReply: false,
@@ -2188,6 +2208,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:rows": {
             sessions: [
               {
+                id: "ses_row_20",
                 title: "Copy ids",
                 agent: { label: "coder", color: "#4ED6BF", attention: "busy" },
                 awaitingReply: false,
@@ -2347,6 +2368,7 @@ describe("Sidebar workdir rows", () => {
           "checkout:long": {
             sessions: [
               {
+                id: "ses_row_21",
                 title: long,
                 agent: { label: "plan", color: null, attention: "none" },
                 awaitingReply: false,
@@ -2438,6 +2460,7 @@ describe("Sidebar workdir rows", () => {
             {
               sessions: [
                 {
+                  id: "ses_row_22",
                   title: `Session ${id}`,
                   agent: {
                     label: "coder",
@@ -2690,7 +2713,7 @@ describe("Sidebar workdir rows", () => {
     }
   });
 
-  it("cancels on Escape and rejects missing worktrees and other repositories", async () => {
+  it("cancels on Escape and rejects missing worktrees", async () => {
     const valid = checkout({ id: "checkout:valid", isPrimary: false, branch: "valid" });
     const gone = checkout({ id: "checkout:gone", isPrimary: false, branch: "gone", isMissing: true });
     const elsewhere = repo({
@@ -2738,11 +2761,8 @@ describe("Sidebar workdir rows", () => {
       expect(document.body.querySelector(".terminal-drag-ghost")).toBeNull();
       expect(wrapper.emitted("moveSession")).toBeUndefined();
 
-      // Missing worktrees and another Git directory never show a drop target and cannot take it.
-      for (const [pointerId, targetId] of [
-        [2, "checkout:gone"],
-        [3, "checkout:elsewhere"],
-      ] as const) {
+      // A missing worktree never shows a drop target and cannot take it.
+      for (const [pointerId, targetId] of [[2, "checkout:gone"]] as const) {
         row.element.dispatchEvent(pointer("pointerdown", pointerId, 10));
         hitTest.mockReturnValue(checkoutRow(targetId).element);
         window.dispatchEvent(pointer("pointermove", pointerId, 20));
@@ -2775,7 +2795,7 @@ describe("Sidebar workdir rows", () => {
     }
   });
 
-  it("offers the sibling worktrees of the same repository to a keyboard, and nowhere else", async () => {
+  it("offers registered destinations to a keyboard, but not missing checkouts", async () => {
     const worktree = checkout({ id: "checkout:wt", isPrimary: false, branch: "feature/x", path: "/test-wt" });
     const otherWorktree = checkout({ id: "checkout:other-wt", isPrimary: false, branch: "y", path: "/test-other" });
     const gone = checkout({ id: "checkout:gone", isPrimary: false, branch: "gone", isMissing: true });
@@ -2791,8 +2811,13 @@ describe("Sidebar workdir rows", () => {
             root: "/elsewhere",
             checkouts: [
               {
-                ...checkout({ id: "checkout:elsewhere", repoId: "repo:elsewhere", path: "/elsewhere" }),
-                // One worktree of its own, so neither gesture has anywhere to go.
+                ...checkout({
+                  id: "checkout:elsewhere",
+                  repoId: "repo:elsewhere",
+                  path: "/elsewhere",
+                  branch: "foreign",
+                }),
+                // It has no sibling, but the other registered repo can still take its terminal.
                 sessions: [session("session:two", "fish", "checkout:elsewhere")],
               },
             ],
@@ -2808,13 +2833,13 @@ describe("Sidebar workdir rows", () => {
     const rows = wrapper.findAll('button[aria-label^="Terminal session:"]');
     // Native browser dragging is off; a row with a destination advertises the menu it opens.
     expect(rows.map((row) => row.attributes("draggable"))).toEqual([undefined, undefined]);
-    expect(rows.map((row) => row.attributes("aria-haspopup"))).toEqual(["menu", undefined]);
+    expect(rows.map((row) => row.attributes("aria-haspopup"))).toEqual(["menu", "menu"]);
 
     await rows[0].trigger("contextmenu");
     const destinations = wrapper.findAll('[role="menu"] [role="menuitem"]');
-    // The other repositories are not on the list, and a directory that is gone is nowhere to
-    // put a shell that is running.
-    expect(destinations.map((item) => item.text())).toEqual(["feature/x", "y"]);
+    // A registered foreign checkout is available; a directory that is gone is nowhere to put a
+    // shell that is running.
+    expect(destinations.map((item) => item.text())).toEqual(["feature/x", "y", "foreign"]);
 
     await destinations[1].trigger("click");
     expect(wrapper.emitted("moveSession")).toEqual([["session:one", "checkout:other-wt", 0]]);
@@ -3200,7 +3225,16 @@ it.each([false, true])("draws a running session with no agent, awaiting reply: %
       isOpening: false,
       agentRows: {
         "checkout:agent": {
-          sessions: [{ title: "Untitled session", agent: null, awaitingReply, running: true, updatedAt: Date.now() }],
+          sessions: [
+            {
+              id: "ses_row_23",
+              title: "Untitled session",
+              agent: null,
+              awaitingReply,
+              running: true,
+              updatedAt: Date.now(),
+            },
+          ],
         },
       },
       sessionRuntimeStatuses: {
@@ -3351,6 +3385,170 @@ describe("sidebar drag and drop", () => {
     wrapper.unmount();
   });
 
+  function pointer(type: string, y: number) {
+    const event = new Event(type, { bubbles: true, cancelable: true });
+    Object.assign(event, { pointerId: 1, pointerType: "mouse", isPrimary: true, button: 0, clientX: 40, clientY: y });
+    return event;
+  }
+
+  async function dragTo(source: Element, target: Element) {
+    const oldHitTest = Object.getOwnPropertyDescriptor(document, "elementFromPoint");
+    Object.defineProperty(document, "elementFromPoint", {
+      configurable: true,
+      value: vi.fn(() => target),
+    });
+    try {
+      source.dispatchEvent(pointer("pointerdown", 100));
+      window.dispatchEvent(pointer("pointermove", 140));
+      await nextTick();
+      window.dispatchEvent(pointer("pointerup", 140));
+      await flushPromises();
+    } finally {
+      if (oldHitTest) Object.defineProperty(document, "elementFromPoint", oldHitTest);
+      else Reflect.deleteProperty(document, "elementFromPoint");
+    }
+  }
+
+  it("lets a Home terminal move to a Git checkout", async () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:home",
+            kind: "plain",
+            name: "Home",
+            root: "/home",
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:home", repoId: "repo:home", path: "/home" }),
+                sessions: [session("home", "zsh", "checkout:home")],
+              },
+            ],
+          }),
+          repo({
+            id: "repo:git",
+            name: "Marvis",
+            root: "/dev/Marvis",
+            checkouts: [checkout({ id: "checkout:git", repoId: "repo:git", path: "/dev/Marvis" })],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        homeCheckoutId: "checkout:home",
+        isOpening: false,
+      },
+    });
+    const source = wrapper.get('[data-session-id="home"] .workdir-select').element;
+    const target = wrapper.get('[data-workdir-checkout="checkout:git"]').element;
+    try {
+      await wrapper.get('[data-session-id="home"] .workdir-select').trigger("contextmenu");
+      expect(wrapper.findAll(".move-menu [role=menuitem]").map((item) => item.text())).toEqual(["main"]);
+      await dragTo(source, target);
+      expect(wrapper.emitted("moveSession")).toEqual([["home", "checkout:git", 0]]);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it("lets a Git terminal move to a foreign repository", async () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:source",
+            name: "source",
+            root: "/source",
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:source", repoId: "repo:source", path: "/source" }),
+                sessions: [session("git", "zsh", "checkout:source")],
+              },
+              checkout({
+                id: "checkout:sibling",
+                repoId: "repo:source",
+                path: "/source/.worktrees/feature",
+                isPrimary: false,
+                branch: "feature",
+              }),
+            ],
+          }),
+          repo({
+            id: "repo:foreign",
+            name: "foreign",
+            root: "/foreign",
+            checkouts: [
+              checkout({ id: "checkout:foreign", repoId: "repo:foreign", path: "/foreign", branch: "other" }),
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    const source = wrapper.get('[data-session-id="git"] .workdir-select').element;
+    const foreign = wrapper.get('[data-workdir-checkout="checkout:foreign"]').element;
+    try {
+      await wrapper.get('[data-session-id="git"] .workdir-select').trigger("contextmenu");
+      const destinations = wrapper.findAll(".move-menu [role=menuitem]");
+      expect(destinations.map((item) => item.text())).toEqual(["feature", "other"]);
+      await destinations[1].trigger("click");
+      expect(wrapper.emitted("moveSession")).toEqual([["git", "checkout:foreign", 0]]);
+      await dragTo(source, foreign);
+      expect(wrapper.emitted("moveSession")).toEqual([
+        ["git", "checkout:foreign", 0],
+        ["git", "checkout:foreign", 0],
+      ]);
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
+  it.each(["missing", "unknown"] as const)("rejects a %s checkout as a move target", async (targetKind) => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:home",
+            kind: "plain",
+            name: "Home",
+            root: "/home",
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:home", repoId: "repo:home", path: "/home" }),
+                sessions: [session("home", "zsh", "checkout:home")],
+              },
+            ],
+          }),
+          repo({
+            id: "repo:git",
+            name: "Marvis",
+            root: "/dev/Marvis",
+            checkouts: [
+              checkout({ id: "checkout:git", repoId: "repo:git", path: "/dev/Marvis" }),
+              ...(targetKind === "missing"
+                ? [checkout({ id: "checkout:missing", repoId: "repo:git", path: "/gone", isMissing: true })]
+                : []),
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    const unknown = document.createElement("div");
+    unknown.dataset.workdirCheckout = "checkout:unknown";
+    const target =
+      targetKind === "missing" ? wrapper.get('[data-workdir-checkout="checkout:missing"]').element : unknown;
+    try {
+      await dragTo(wrapper.get('[data-session-id="home"] .workdir-select').element, target);
+      expect(wrapper.emitted("moveSession")).toBeUndefined();
+    } finally {
+      wrapper.unmount();
+    }
+  });
+
   it("draws the drop line in the slot the terminal lands in, not once at the end", () => {
     // The line that says where a terminal lands used to be drawn once, after the last row. A line
     // that stays at the end while the rows above it move says nothing about the position being offered,
@@ -3368,7 +3566,9 @@ describe("sidebar drag and drop", () => {
     // A terminal is a destination for its own worktree now, except the slot it already sits in:
     // dropping a row where it is would report a move that changes nothing. Its own slot is measured
     // in the order it is drawn, which is not the order the database hands out.
-    expect(styles).toContain("const current = orderedSessions(target).findIndex((item) => item.id === session.id)");
+    expect(styles).toContain(
+      "const current = orderedSessions(registeredTarget).findIndex((item) => item.id === session.id)",
+    );
     expect(styles).toContain("return current < 0 || current === index ? null : target.id;");
     // Every terminal row carries its session id, which is what the slot is measured against.
     expect(styles).toContain(':data-session-id="item.session.id"');
@@ -3573,6 +3773,7 @@ describe("a label is weighed against its row rather than cut between its halves"
           "checkout:webapp": {
             sessions: [
               {
+                id: "ses_row_24",
                 title: "Review the duplicated rows",
                 agent: { label: "plan", color: null, attention: "none" },
                 running: false,

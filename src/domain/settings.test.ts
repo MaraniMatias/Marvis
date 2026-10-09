@@ -40,8 +40,8 @@ describe("the settings file", () => {
         cursorBlink: true,
         cursorStyle: "block",
         scrollbar: "hidden",
-        changeDirectoryOnMove: false,
         shellIntegration: true,
+        followWorktree: "agent" as const,
       },
       editor: { fontSize: 13, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
     });
@@ -62,8 +62,8 @@ describe("the settings file", () => {
         cursorBlink: false,
         cursorStyle: "bar" as const,
         scrollbar: "always" as const,
-        changeDirectoryOnMove: true,
         shellIntegration: false,
+        followWorktree: "both" as const,
       },
       editor: { fontSize: 15, ligatures: false, cursorBlink: false, indentation: { useSpaces: false, size: 4 } },
     };
@@ -131,6 +131,28 @@ describe("the settings file", () => {
     expect(normalizeSettings({ terminal: { cursorStyle: "beam" } }).terminal.cursorStyle).toBe("block");
   });
 
+  it("keeps the four worktree follow modes and defaults invalid values to agent", () => {
+    expect(DEFAULT_SETTINGS.terminal.followWorktree).toBe("agent");
+    for (const mode of ["off", "cd", "agent", "both"]) {
+      expect(normalizeSettings({ terminal: { followWorktree: mode } }).terminal.followWorktree).toBe(mode);
+    }
+    for (const mode of [undefined, null, true, "always"]) {
+      expect(normalizeSettings({ terminal: { followWorktree: mode } }).terminal.followWorktree).toBe("agent");
+    }
+  });
+
+  it("does not normalize deleted terminal preferences", () => {
+    const terminal = normalizeSettings({
+      terminal: {
+        followAgentAcrossWorktrees: false,
+        followDirectoryAcrossWorktrees: true,
+        followSelection: "always",
+        changeDirectoryOnMove: false,
+      },
+    }).terminal;
+    expect(terminal).toEqual(DEFAULT_SETTINGS.terminal);
+  });
+
   it("scales the interface against the size the design is drawn at", () => {
     expect(uiFontScale(DEFAULT_SETTINGS.ui.fontSize)).toBe(1);
     expect(uiFontScale(UI_FONT_SIZE_LIMITS.max)).toBeCloseTo(UI_FONT_SIZE_LIMITS.max / 14);
@@ -147,6 +169,21 @@ describe("the form's schema", () => {
         expect(field.label.length, field.path).toBeGreaterThan(0);
       }
     }
+  });
+
+  it("places worktree following before failed command reporting", () => {
+    const terminal = SETTINGS_SECTIONS.find((section) =>
+      section.fields.some((field) => field.path === "terminal.followWorktree"),
+    )!;
+    expect(terminal.fields.map((field) => field.path)).toEqual([
+      "terminal.fontSize",
+      "terminal.ligatures",
+      "terminal.cursorStyle",
+      "terminal.cursorBlink",
+      "terminal.scrollbar",
+      "terminal.followWorktree",
+      "terminal.shellIntegration",
+    ]);
   });
 
   it("offers the window scale as the steps the keyboard walks, and nothing else", () => {

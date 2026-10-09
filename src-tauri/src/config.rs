@@ -101,8 +101,6 @@ pub struct TerminalSettings {
     /// The shape of the cursor: `block`, `bar` or `underline`.
     pub cursor_style: String,
     pub scrollbar: String,
-    /// Whether moving a terminal to another worktree also moves the shell's working directory.
-    pub change_directory_on_move: bool,
     /// Whether a new terminal is told to report how its commands ended, which is what turns a
     /// failed command's row red.
     ///
@@ -112,7 +110,11 @@ pub struct TerminalSettings {
     /// that failed without ending the shell.
     /// Native shell startup preserves banners and warnings; unsupported shells remain uninstrumented.
     pub shell_integration: bool,
+    /// Which activity moves a terminal to its matching worktree: off, cd, agent or both.
+    pub follow_worktree: String,
 }
+
+const WORKTREE_FOLLOW_MODES: [&str; 4] = ["off", "cd", "agent", "both"];
 
 impl Default for TerminalSettings {
     fn default() -> Self {
@@ -122,8 +124,8 @@ impl Default for TerminalSettings {
             cursor_blink: true,
             cursor_style: "block".into(),
             scrollbar: "hidden".into(),
-            change_directory_on_move: false,
             shell_integration: true,
+            follow_worktree: "agent".into(),
         }
     }
 }
@@ -196,6 +198,9 @@ impl AppSettings {
             "hidden" | "auto" | "always"
         ) {
             self.terminal.scrollbar = "hidden".into();
+        }
+        if !WORKTREE_FOLLOW_MODES.contains(&self.terminal.follow_worktree.as_str()) {
+            self.terminal.follow_worktree = "agent".into();
         }
         self.editor.font_size = bounded(
             self.editor.font_size,
@@ -373,8 +378,8 @@ mod tests {
                 cursor_blink: false,
                 cursor_style: "bar".into(),
                 scrollbar: "always".into(),
-                change_directory_on_move: true,
                 shell_integration: false,
+                follow_worktree: "both".into(),
             },
             editor: EditorSettings {
                 font_size: 15.0,
@@ -388,6 +393,107 @@ mod tests {
         };
         save(&path, &written).unwrap();
         assert_eq!(load(&path).unwrap(), written);
+    }
+
+    /// A preference the renderer owns crosses the bridge as JSON, lands in this struct and goes back
+    /// out to the file, and every step of that is silent about a field it does not have. This is
+    /// the test that would have caught that: it starts from the shape the dialog sends rather than
+    /// from this side of it, so a field missing here is a field the file does not carry.
+    #[test]
+    fn every_preference_the_renderer_owns_survives_a_save_and_a_load() {
+        let home = settings_dir();
+        let path = config_path_in(&home);
+        // What the Settings dialog sends: the renderer holds these as camelCase, and the file
+        // holds them as camelCase too, so both ends of this are the same words.
+        let from_the_dialog = serde_json::json!({
+            "ui": { "fontSize": 16.0, "zoom": 1.0, "theme": "dark", "contentBackground": CONTENT_BACKGROUND, "treeStickyScroll": true },
+            "terminal": {
+                "fontSize": 16.0,
+                "ligatures": true,
+                "cursorBlink": true,
+                "cursorStyle": "block",
+                "scrollbar": "hidden",
+                "shellIntegration": true,
+                "followWorktree": "cd"
+            },
+            "editor": {
+                "fontSize": 13.0,
+                "ligatures": true,
+                "cursorBlink": true,
+                "indentation": { "useSpaces": true, "size": 2 }
+            }
+        });
+
+        save(
+            &path,
+            &serde_yaml::from_str(&serde_yaml::to_string(&from_the_dialog).unwrap()).unwrap(),
+        )
+        .unwrap();
+        let loaded = load(&path).unwrap();
+
+        assert_eq!(loaded.terminal.follow_worktree, "cd");
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), from_the_dialog);
+    }
+
+    /// Touching one preference used to write out only the ones this side knew about, so changing
+    /// the zoom reset a following rule nobody was looking at. The file is what has to remember.
+    #[test]
+    fn saving_another_preference_keeps_the_following_rules() {
+        let home = settings_dir();
+        let path = config_path_in(&home);
+        let mut settings = AppSettings::default();
+        settings.terminal.follow_worktree = "off".into();
+        save(&path, &settings).unwrap();
+
+        // A zoom step writes the same file, and it is handed the whole settings, not a patch.
+        let mut zoomed = load(&path).unwrap();
+        zoomed.ui.zoom = 1.2;
+        save(&path, &zoomed).unwrap();
+
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded.ui.zoom, 1.2);
+        assert_eq!(loaded.terminal.follow_worktree, "off");
+    }
+
+    #[test]
+    fn deleted_terminal_preferences_are_not_normalized_or_saved() {
+        let home = settings_dir();
+        let path = config_path_in(&home);
+        std::fs::write(&path, "terminal:\n  followAgentAcrossWorktrees: false\n  followDirectoryAcrossWorktrees: true\n  followSelection: always\n  changeDirectoryOnMove: false\n").unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded, AppSettings::default());
+        save(&path, &loaded).unwrap();
+        let terminal = serde_json::to_value(&load(&path).unwrap()).unwrap()["terminal"].clone();
+        assert_eq!(
+            terminal,
+            serde_json::json!({
+                "fontSize": 16.0, "ligatures": true, "cursorBlink": true, "cursorStyle": "block",
+                "scrollbar": "hidden", "shellIntegration": true, "followWorktree": "agent"
+            })
+        );
+        let document = std::fs::read_to_string(&path).unwrap();
+        for key in [
+            "followAgentAcrossWorktrees",
+            "followDirectoryAcrossWorktrees",
+            "followSelection",
+            "changeDirectoryOnMove",
+        ] {
+            assert!(!document.contains(key));
+        }
+    }
+
+    #[test]
+    fn worktree_follow_modes_round_trip_and_unknown_modes_default_to_agent() {
+        let home = settings_dir();
+        let path = config_path_in(&home);
+        assert_eq!(AppSettings::default().terminal.follow_worktree, "agent");
+        for mode in ["off", "cd", "agent", "both", "sometimes"] {
+            std::fs::write(&path, format!("terminal:\n  followWorktree: {mode}\n")).unwrap();
+            assert_eq!(
+                load(&path).unwrap().terminal.follow_worktree,
+                if mode == "sometimes" { "agent" } else { mode }
+            );
+        }
     }
 
     #[test]
