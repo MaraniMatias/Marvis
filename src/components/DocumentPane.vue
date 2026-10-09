@@ -1535,7 +1535,7 @@ function onMarkdownLink(event: MouseEvent) {
 
 /* The caret is a block, in the two colors the terminal draws its own with: `--muster-cursor` for
    the cell, and the surface behind the glyph (the swap Konsole makes, and the same two tokens
-   `marvisTerminalTheme` hands xterm.js.
+   `musterTerminalTheme` hands xterm.js.
 
    CodeMirror draws this element on a layer above the text and leaves its width unset for a caret
    (its own is `null`, and it only writes a width for a selected range), so one cell of the

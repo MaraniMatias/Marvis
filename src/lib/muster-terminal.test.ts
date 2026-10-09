@@ -5,13 +5,13 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import {
   attachTerminalRenderer,
-  createMarvisTerminal,
+  createMusterTerminal,
   enableTerminalSelectionCopy,
-  marvisTerminalTheme,
+  musterTerminalTheme,
   setTerminalLigatures,
   watchTerminalRendererRecovery,
   MAX_RENDERER_RECOVERIES,
-} from "./marvis-terminal";
+} from "./muster-terminal";
 
 /**
  * The token table as it is written down. Read from disk rather than imported, because vitest hands
@@ -134,7 +134,7 @@ function fakeTerminal() {
   return new FakeTerminal({});
 }
 
-describe("createMarvisTerminal", () => {
+describe("createMusterTerminal", () => {
   beforeEach(() => {
     stubs.loaded = [];
     stubs.webglFails = false;
@@ -144,7 +144,7 @@ describe("createMarvisTerminal", () => {
 
   // B.1: the face and the colors come from the tokens; the size and the cursor are preferences.
   it("builds the terminal the panel has always drawn", () => {
-    createMarvisTerminal();
+    createMusterTerminal();
 
     expect(stubs.terminal?.options).toMatchObject({
       allowProposedApi: true,
@@ -177,7 +177,7 @@ describe("createMarvisTerminal", () => {
       // here. Two values rather than one per cell, because a cell that arrives with a color of its
       // own does not hand it to the block.
       document.documentElement.dataset.theme = "dark";
-      expect(marvisTerminalTheme()).toMatchObject({
+      expect(musterTerminalTheme()).toMatchObject({
         background: "#282c33",
         foreground: "#dce0e5",
         cursor: "#c2c9f1",
@@ -185,7 +185,7 @@ describe("createMarvisTerminal", () => {
       });
 
       document.documentElement.dataset.theme = "light";
-      expect(marvisTerminalTheme()).toMatchObject({
+      expect(musterTerminalTheme()).toMatchObject({
         background: "#fafafa",
         foreground: "#242529",
         cursor: "#242529",
@@ -197,7 +197,7 @@ describe("createMarvisTerminal", () => {
   });
 
   it("builds the terminal at the size and cursor the settings ask for", () => {
-    createMarvisTerminal(20, false, "underline", 1.2);
+    createMusterTerminal(20, false, "underline", 1.2);
 
     // The size is the preference's own, multiplied by the window's scale: the terminal's host
     // cancels the scale out so the grid is measured in screen pixels, which means the cell has to
@@ -215,7 +215,7 @@ describe("createMarvisTerminal", () => {
     style.textContent = `:root { ${names.map((name, index) => `${name}: ${colors[index]};`).join(" ")} }`;
     document.head.append(style);
     try {
-      const theme = marvisTerminalTheme();
+      const theme = musterTerminalTheme();
 
       expect(Object.keys(theme).sort()).toEqual([
         "background",
@@ -247,7 +247,7 @@ describe("createMarvisTerminal", () => {
   });
 
   it("turns on Unicode 11 and the clipboard handler before the first render", () => {
-    const terminal = createMarvisTerminal() as unknown as FakeTerminal;
+    const terminal = createMusterTerminal() as unknown as FakeTerminal;
 
     // Both are proposed API in 6.0, and both change how the terminal measures itself or answers
     // a paste, so they have to be in place before it is on the page.
@@ -258,7 +258,7 @@ describe("createMarvisTerminal", () => {
 
 describe("setTerminalLigatures", () => {
   it("registers the joiner that draws the programming ligatures", () => {
-    const terminal = createMarvisTerminal() as unknown as FakeTerminal;
+    const terminal = createMusterTerminal() as unknown as FakeTerminal;
 
     setTerminalLigatures(terminal as never, true);
 
@@ -269,7 +269,7 @@ describe("setTerminalLigatures", () => {
   });
 
   it("takes the joiner back when the preference is switched off, and puts it back", () => {
-    const terminal = createMarvisTerminal() as unknown as FakeTerminal;
+    const terminal = createMusterTerminal() as unknown as FakeTerminal;
 
     setTerminalLigatures(terminal as never, true);
     setTerminalLigatures(terminal as never, false);
@@ -284,7 +284,7 @@ describe("setTerminalLigatures", () => {
   });
 
   it("does not take the terminal down when xterm.js refuses the joiner", () => {
-    const terminal = createMarvisTerminal() as unknown as FakeTerminal;
+    const terminal = createMusterTerminal() as unknown as FakeTerminal;
     terminal.joinerFailures = true;
 
     expect(() => setTerminalLigatures(terminal as never, true)).not.toThrow();
@@ -590,7 +590,7 @@ describe("preloadTerminalFonts", () => {
       },
       configurable: true,
     });
-    const { preloadTerminalFonts } = await import("./marvis-terminal");
+    const { preloadTerminalFonts } = await import("./muster-terminal");
     return preloadTerminalFonts();
   }
 
@@ -598,7 +598,7 @@ describe("preloadTerminalFonts", () => {
   // the answer is kept. Without this, every panel re-parses 1.1MB of woff2 on its own mount.
   it("asks for every bundled face once and hands every later caller the same promise", async () => {
     await freshPreload(() => Promise.resolve([]));
-    const { preloadTerminalFonts } = await import("./marvis-terminal");
+    const { preloadTerminalFonts } = await import("./muster-terminal");
     const first = preloadTerminalFonts();
     const second = preloadTerminalFonts();
 

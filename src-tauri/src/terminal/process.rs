@@ -1,6 +1,6 @@
 //! The name of the program sitting in front of a terminal, read from the OS.
 //!
-//! Marvis only ever launches a login shell, so every other program in a terminal is one the
+//! Muster only ever launches a login shell, so every other program in a terminal is one the
 //! user typed: `opencode`, `nvim`, `vim`. The PTY knows which process group holds the
 //! foreground, and the OS knows what that group is running, so the two together name the
 //! program without reading a single byte of terminal output.
@@ -236,7 +236,7 @@ mod tests {
         // The strongest claim available without spawning anything: we can name ourselves.
         // Cargo suffixes the test binary, so the stem is the fixed part.
         let named = super::executable_name(std::process::id()).expect("this process has a name");
-        assert!(named.starts_with("marvis"), "{named}");
+        assert!(named.starts_with("muster"), "{named}");
         // u32::MAX is never a live pid, so the OS reports a failure and we say nothing.
         assert_eq!(super::executable_name(u32::MAX), None);
     }

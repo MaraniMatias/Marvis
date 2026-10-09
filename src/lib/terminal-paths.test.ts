@@ -9,7 +9,7 @@ function at(line: string, path: string) {
 
 describe("terminalPathIn", () => {
   it("takes a path out of a token and drops what framed it", () => {
-    expect(terminalPathIn("src/lib/marvis-terminal.ts:")).toBe("src/lib/marvis-terminal.ts");
+    expect(terminalPathIn("src/lib/muster-terminal.ts:")).toBe("src/lib/muster-terminal.ts");
     expect(terminalPathIn("(src/App.vue)")).toBe("src/App.vue");
     expect(terminalPathIn("`Cargo.toml`")).toBe("Cargo.toml");
     expect(terminalPathIn('"my notes.md"')).toBe("my notes.md");

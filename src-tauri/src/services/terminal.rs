@@ -229,18 +229,18 @@ fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
         Some("zsh") => Some((
             "hook.zsh",
             format!(
-                r#"# Written by Marvis.
-if [[ -z ${{__marvis_integrated-}} ]]; then
-  typeset -g __marvis_integrated=1 __marvis_pending=0
-  marvis_pc() {{
-    local __marvis_status=$?
-    (( __marvis_pending )) || __marvis_status=0
-    __marvis_pending=0
-    printf '{OSC_EXIT_BASH}' "$__marvis_status"
+                r#"# Written by Muster.
+if [[ -z ${{__muster_integrated-}} ]]; then
+  typeset -g __muster_integrated=1 __muster_pending=0
+  muster_pc() {{
+    local __muster_status=$?
+    (( __muster_pending )) || __muster_status=0
+    __muster_pending=0
+    printf '{OSC_EXIT_BASH}' "$__muster_status"
   }}
-  marvis_px() {{ __marvis_pending=1; print -Pn "{OSC_STARTED}"; }}
-  precmd_functions=(marvis_pc ${{precmd_functions:#marvis_pc}})
-  preexec_functions+=(marvis_px)
+  muster_px() {{ __muster_pending=1; print -Pn "{OSC_STARTED}"; }}
+  precmd_functions=(muster_pc ${{precmd_functions:#muster_pc}})
+  preexec_functions+=(muster_px)
 fi
 "#
             ),
@@ -248,25 +248,25 @@ fi
         Some("bash") => Some((
             "hook.bash",
             format!(
-                r#"# Written by Marvis.
-if [[ -z ${{__marvis_integrated-}} ]]; then
-  __marvis_integrated=1
-  __marvis_first_prompt=1
-  __marvis_prompt_command() {{
-    local __marvis_status=$?
-    if [[ $__marvis_first_prompt == 1 ]]; then
-      if [[ ${{__marvis_restore_posix-}} == off ]]; then set +o posix; fi
-      unset __marvis_restore_posix
-      __marvis_status=0
-      __marvis_first_prompt=0
+                r#"# Written by Muster.
+if [[ -z ${{__muster_integrated-}} ]]; then
+  __muster_integrated=1
+  __muster_first_prompt=1
+  __muster_prompt_command() {{
+    local __muster_status=$?
+    if [[ $__muster_first_prompt == 1 ]]; then
+      if [[ ${{__muster_restore_posix-}} == off ]]; then set +o posix; fi
+      unset __muster_restore_posix
+      __muster_status=0
+      __muster_first_prompt=0
     fi
-    printf '{OSC_EXIT_BASH}' "$__marvis_status"
-    return "$__marvis_status"
+    printf '{OSC_EXIT_BASH}' "$__muster_status"
+    return "$__muster_status"
   }}
   if [[ ${{BASH_VERSINFO[0]}} -gt 5 || ${{BASH_VERSINFO[0]}} -eq 5 && ${{BASH_VERSINFO[1]}} -ge 1 ]] && [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == 'declare -a'* ]]; then
-    PROMPT_COMMAND=(__marvis_prompt_command "${{PROMPT_COMMAND[@]}}")
+    PROMPT_COMMAND=(__muster_prompt_command "${{PROMPT_COMMAND[@]}}")
   else
-    PROMPT_COMMAND="__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}"
+    PROMPT_COMMAND="__muster_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}"
   fi
   printf -v PS0 '%s' '{OSC_STARTED_BASH}'"${{PS0-}}"
 fi
@@ -336,19 +336,19 @@ fn install_shell_integration(
         files.push((
             bootstrap.clone(),
             format!(
-                r#"# Written by Marvis.
+                r#"# Written by Muster.
 set +o posix
-BASH=$__MARVIS_BASH
+BASH=$__MUSTER_BASH
 if (( BASH_VERSINFO[0] >= 5 )); then BASH_ARGV0=$BASH; fi
-unset __MARVIS_BASH
-if [[ $__MARVIS_ENV_SET == 1 ]]; then export ENV=$__MARVIS_ENV; else unset ENV; fi
-unset __MARVIS_ENV_SET __MARVIS_ENV
+unset __MUSTER_BASH
+if [[ $__MUSTER_ENV_SET == 1 ]]; then export ENV=$__MUSTER_ENV; else unset ENV; fi
+unset __MUSTER_ENV_SET __MUSTER_ENV
 [[ ! -r /etc/profile ]] || . /etc/profile
 if [[ -r $HOME/.bash_profile ]]; then . "$HOME/.bash_profile"
 elif [[ -r $HOME/.bash_login ]]; then . "$HOME/.bash_login"
 elif [[ -r $HOME/.profile ]]; then . "$HOME/.profile"
 fi
-if shopt -qo posix; then __marvis_restore_posix=on; else __marvis_restore_posix=off; fi
+if shopt -qo posix; then __muster_restore_posix=on; else __muster_restore_posix=off; fi
 . {}
 "#,
                 shell_quote(&script)
@@ -356,7 +356,7 @@ if shopt -qo posix; then __marvis_restore_posix=on; else __marvis_restore_posix=
         ));
         overrides.extend([
             (
-                "__MARVIS_ENV_SET".into(),
+                "__MUSTER_ENV_SET".into(),
                 if env::var_os("ENV").is_some() {
                     "1"
                 } else {
@@ -365,10 +365,10 @@ if shopt -qo posix; then __marvis_restore_posix=on; else __marvis_restore_posix=
                 .into(),
             ),
             (
-                "__MARVIS_ENV".into(),
+                "__MUSTER_ENV".into(),
                 env::var_os("ENV").unwrap_or_default(),
             ),
-            ("__MARVIS_BASH".into(), program.as_os_str().into()),
+            ("__MUSTER_BASH".into(), program.as_os_str().into()),
             ("ENV".into(), bootstrap.into_os_string()),
         ]);
         args.insert(0, "--noprofile".into());
@@ -376,7 +376,7 @@ if shopt -qo posix; then __marvis_restore_posix=on; else __marvis_restore_posix=
         let bootstrap = dir.join("zsh");
         overrides.extend([
             (
-                "__MARVIS_ZDOTDIR_SET".into(),
+                "__MUSTER_ZDOTDIR_SET".into(),
                 if env::var_os("ZDOTDIR").is_some() {
                     "1"
                 } else {
@@ -385,30 +385,30 @@ if shopt -qo posix; then __marvis_restore_posix=on; else __marvis_restore_posix=
                 .into(),
             ),
             (
-                "__MARVIS_ZDOTDIR".into(),
+                "__MUSTER_ZDOTDIR".into(),
                 env::var_os("ZDOTDIR").unwrap_or_default(),
             ),
             ("ZDOTDIR".into(), bootstrap.clone().into_os_string()),
         ]);
         for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
-            let mut text = String::from("# Written by Marvis; forward the user's startup files.\n");
+            let mut text = String::from("# Written by Muster; forward the user's startup files.\n");
             if file == ".zshenv" {
-                text.push_str("typeset -g __marvis_bootstrap=$ZDOTDIR\n");
+                text.push_str("typeset -g __muster_bootstrap=$ZDOTDIR\n");
             }
-            text.push_str("if [[ $__MARVIS_ZDOTDIR_SET == 1 ]]; then export ZDOTDIR=$__MARVIS_ZDOTDIR; else unset ZDOTDIR; fi\n");
+            text.push_str("if [[ $__MUSTER_ZDOTDIR_SET == 1 ]]; then export ZDOTDIR=$__MUSTER_ZDOTDIR; else unset ZDOTDIR; fi\n");
             text.push_str(&format!(
                 "[[ ! -r ${{ZDOTDIR-$HOME}}/{file} ]] || source \"${{ZDOTDIR-$HOME}}/{file}\"\n"
             ));
-            text.push_str("__MARVIS_ZDOTDIR_SET=${+ZDOTDIR}\n__MARVIS_ZDOTDIR=${ZDOTDIR-}\n");
+            text.push_str("__MUSTER_ZDOTDIR_SET=${+ZDOTDIR}\n__MUSTER_ZDOTDIR=${ZDOTDIR-}\n");
             if file == ".zlogin" {
                 text.push_str(&format!(
-                    "unset __MARVIS_ZDOTDIR_SET __MARVIS_ZDOTDIR __marvis_bootstrap\nsource {}\n",
+                    "unset __MUSTER_ZDOTDIR_SET __MUSTER_ZDOTDIR __muster_bootstrap\nsource {}\n",
                     shell_quote(&script)
                 ));
             } else if file == ".zshrc" {
-                text.push_str(&format!("if [[ -o login && -o rcs ]]; then\n  export ZDOTDIR=$__marvis_bootstrap\nelse\n  unset __MARVIS_ZDOTDIR_SET __MARVIS_ZDOTDIR __marvis_bootstrap\n  source {}\nfi\n", shell_quote(&script)));
+                text.push_str(&format!("if [[ -o login && -o rcs ]]; then\n  export ZDOTDIR=$__muster_bootstrap\nelse\n  unset __MUSTER_ZDOTDIR_SET __MUSTER_ZDOTDIR __muster_bootstrap\n  source {}\nfi\n", shell_quote(&script)));
             } else {
-                text.push_str("if [[ -o rcs ]]; then\n  export ZDOTDIR=$__marvis_bootstrap\nelse\n  unset __MARVIS_ZDOTDIR_SET __MARVIS_ZDOTDIR __marvis_bootstrap\nfi\n");
+                text.push_str("if [[ -o rcs ]]; then\n  export ZDOTDIR=$__muster_bootstrap\nelse\n  unset __MUSTER_ZDOTDIR_SET __MUSTER_ZDOTDIR __muster_bootstrap\nfi\n");
             }
             files.push((bootstrap.join(file), text));
         }
@@ -513,9 +513,9 @@ mod tests {
 
         let directory = tempdir().unwrap();
         let startup_files = [
-            (".zshenv", "export MARVIS_ZSHENV=loaded\n"),
-            (".zprofile", "export MARVIS_ZPROFILE=loaded\n"),
-            (".zshrc", "export MARVIS_ZSHRC=loaded\n"),
+            (".zshenv", "export MUSTER_ZSHENV=loaded\n"),
+            (".zprofile", "export MUSTER_ZPROFILE=loaded\n"),
+            (".zshrc", "export MUSTER_ZSHRC=loaded\n"),
         ];
         for (name, contents) in startup_files {
             fs::write(directory.path().join(name), contents).unwrap();
@@ -531,7 +531,7 @@ mod tests {
             .args([
                 "-i",
                 "-c",
-                "[[ -o AUTO_MENU && $MARVIS_ZSHENV == loaded && $MARVIS_ZPROFILE == loaded && $MARVIS_ZSHRC == loaded ]]",
+                "[[ -o AUTO_MENU && $MUSTER_ZSHENV == loaded && $MUSTER_ZPROFILE == loaded && $MUSTER_ZSHRC == loaded ]]",
             ])
             .env("HOME", directory.path())
             .env("ZDOTDIR", directory.path())
@@ -581,7 +581,7 @@ mod tests {
         let home = tempdir().unwrap();
         integration.env.extend([
             ("HOME".into(), home.path().as_os_str().into()),
-            ("__MARVIS_ZDOTDIR_SET".into(), "0".into()),
+            ("__MUSTER_ZDOTDIR_SET".into(), "0".into()),
         ]);
         let backend = TerminalBackend::default();
         let (sender, receiver) = std::sync::mpsc::channel();
@@ -639,7 +639,7 @@ mod tests {
     fn the_started_marker_fires_for_builtins_and_before_their_output() {
         // What `echo` prints, chosen so that finding it means finding that command's output rather than
         // the line editor drawing the typed command back.
-        const OUTPUT: &str = "MARVIS_MARKER_ORDERING_PROBE";
+        const OUTPUT: &str = "MUSTER_MARKER_ORDERING_PROBE";
         for shell in ["/bin/zsh"] {
             if Command::new(shell).arg("--version").output().is_err() {
                 continue;
@@ -783,10 +783,10 @@ probe_two() { printf '[TWO]'; }
     }
 
     fn bash_expands_ps0(bash: &str) -> bool {
-        let run = "PS0='<MARVIS_PS0_PROBE>'\n";
+        let run = "PS0='<MUSTER_PS0_PROBE>'\n";
         // `true` is there to draw one more prompt, and the answer is on it.
         bash_session_with(bash, run, &[b"true\n"], b"\x1b]133;D;0\x07")
-            .contains("<MARVIS_PS0_PROBE>")
+            .contains("<MUSTER_PS0_PROBE>")
     }
 
     fn bash_session_after_install(
@@ -795,7 +795,7 @@ probe_two() { printf '[TWO]'; }
         commands: &[&[u8]],
         ends_with: &[u8],
     ) -> String {
-        const SENTINEL: &str = "MARVIS_AFTER_INSTALL";
+        const SENTINEL: &str = "MUSTER_AFTER_INSTALL";
         let sentinel = format!("printf '{SENTINEL}\\n'\n");
         let mut typed: Vec<&[u8]> = vec![sentinel.as_bytes()];
         typed.extend_from_slice(commands);
@@ -897,7 +897,7 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
             // asserting the wrong thing.
             if arrays_honoured {
                 assert!(
-                    stream.contains("[0]=\"__marvis_prompt_command\""),
+                    stream.contains("[0]=\"__muster_prompt_command\""),
                     "{bash}: our function was folded into element 0 rather than prepended to the array:\n{stream}"
                 );
             }
@@ -1065,9 +1065,9 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         // A marker cannot match the tty echo: this proves startup completed and input executed,
         // whether integration was enabled, disabled or preparation failed.
         backend
-            .write(&created.session.id, b"printf '\\036MARVISPROBE\\037'\n")
+            .write(&created.session.id, b"printf '\\036MUSTERPROBE\\037'\n")
             .unwrap();
-        wait_for_output(&receiver, b"\x1eMARVISPROBE\x1f", Duration::from_secs(15));
+        wait_for_output(&receiver, b"\x1eMUSTERPROBE\x1f", Duration::from_secs(15));
         assert!(backend.status(&created.session.id).is_ok());
         backend.close(&created.session.id).unwrap();
         script_dir.join("hook.zsh").is_file() || script_dir.join("hook.bash").is_file()
@@ -1092,10 +1092,10 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
     }
 
     #[test]
-    #[ignore = "regenerates committed fixtures; see MARVIS_CAPTURE_FIXTURES"]
+    #[ignore = "regenerates committed fixtures; see MUSTER_CAPTURE_FIXTURES"]
     fn captures_a_real_session_for_the_render_test() {
         let directory = PathBuf::from(
-            std::env::var_os("MARVIS_CAPTURE_FIXTURES").expect("set MARVIS_CAPTURE_FIXTURES"),
+            std::env::var_os("MUSTER_CAPTURE_FIXTURES").expect("set MUSTER_CAPTURE_FIXTURES"),
         );
         fs::create_dir_all(&directory).unwrap();
         let bash = "/bin/bash";
@@ -1106,11 +1106,11 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         ] {
             let home = tempdir().unwrap();
             let scripts = tempdir().unwrap();
-            let rc = "printf 'USER STARTUP BANNER\n'\nPS1='marvis-test> '\n";
+            let rc = "printf 'USER STARTUP BANNER\n'\nPS1='muster-test> '\n";
             if shell.ends_with("zsh") {
                 fs::write(
                     home.path().join(".zshrc"),
-                    if banner { rc } else { "PS1='marvis-test> '\n" },
+                    if banner { rc } else { "PS1='muster-test> '\n" },
                 )
                 .unwrap();
             } else {
@@ -1141,7 +1141,7 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         let mut integration = script_in(scripts, shell);
         integration.env.extend([
             ("HOME".into(), home.as_os_str().into()),
-            ("__MARVIS_ZDOTDIR_SET".into(), "0".into()),
+            ("__MUSTER_ZDOTDIR_SET".into(), "0".into()),
         ]);
         integration.env.extend_from_slice(extra_env);
         let backend = TerminalBackend::default();
@@ -1293,7 +1293,7 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         fs::write(changed.join(".zshrc"), "PS1='user> '\n").unwrap();
         fs::write(changed.join(".zlogin"), "printf 'USER LOGIN\n'\n").unwrap();
         let hook = scripts.join("hook.zsh");
-        let command = format!("source {}; source {}; [[ $ZDOTDIR == {} && -o AUTO_MENU && -o login && ${{#precmd_functions}} == 1 && ${{#preexec_functions}} == 1 && -z ${{__MARVIS_ZDOTDIR_SET+x}} ]] && printf '\\036PRESERVED\\037'\n", shell_quote(&hook), shell_quote(&hook), shell_quote(&changed));
+        let command = format!("source {}; source {}; [[ $ZDOTDIR == {} && -o AUTO_MENU && -o login && ${{#precmd_functions}} == 1 && ${{#preexec_functions}} == 1 && -z ${{__MUSTER_ZDOTDIR_SET+x}} ]] && printf '\\036PRESERVED\\037'\n", shell_quote(&hook), shell_quote(&hook), shell_quote(&changed));
         let stream = native_session(
             "/bin/zsh",
             home.path(),
@@ -1302,8 +1302,8 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
             &[command.as_bytes()],
             b"\x1ePRESERVED\x1f",
             &[
-                ("__MARVIS_ZDOTDIR_SET".into(), "1".into()),
-                ("__MARVIS_ZDOTDIR".into(), original.into_os_string()),
+                ("__MUSTER_ZDOTDIR_SET".into(), "1".into()),
+                ("__MUSTER_ZDOTDIR".into(), original.into_os_string()),
             ],
         );
         assert!(stream.contains("USER PROFILE") && stream.contains("USER LOGIN"));
@@ -1321,7 +1321,7 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
             )
             .unwrap();
             let hook = scripts.join("hook.bash");
-            let command = format!(". {}; . {}; shopt -q login_shell && ! shopt -qo posix && [[ $ENV == 'user env' && -z ${{__MARVIS_ENV_SET+x}} ]] && printf '\\036PRESERVED\\037'\n", shell_quote(&hook), shell_quote(&hook));
+            let command = format!(". {}; . {}; shopt -q login_shell && ! shopt -qo posix && [[ $ENV == 'user env' && -z ${{__MUSTER_ENV_SET+x}} ]] && printf '\\036PRESERVED\\037'\n", shell_quote(&hook), shell_quote(&hook));
             let stream = native_session(
                 &bash,
                 home.path(),
@@ -1330,8 +1330,8 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
                 &[command.as_bytes()],
                 b"\x1ePRESERVED\x1f",
                 &[
-                    ("__MARVIS_ENV_SET".into(), "1".into()),
-                    ("__MARVIS_ENV".into(), "user env".into()),
+                    ("__MUSTER_ENV_SET".into(), "1".into()),
+                    ("__MUSTER_ENV".into(), "user env".into()),
                 ],
             );
             assert!(

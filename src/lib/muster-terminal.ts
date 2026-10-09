@@ -83,7 +83,7 @@ const TERMINAL_THEME_TOKENS = {
  * repaints on `options.theme` and keeps its buffer, so the PTY behind it is never told anything and
  * no session is lost to a change of palette.
  */
-export function marvisTerminalTheme(): ITheme {
+export function musterTerminalTheme(): ITheme {
   const computed = getComputedStyle(document.documentElement);
   const theme: ITheme = {};
   for (const [name, token] of Object.entries(TERMINAL_THEME_TOKENS)) {
@@ -122,7 +122,7 @@ export type RendererLevel = "webgl" | "dom";
  * the focused shape, which says so in shape rather than in a color that has to differ from the
  * focused one.
  */
-export function createMarvisTerminal(
+export function createMusterTerminal(
   fontSize = 16,
   cursorBlink = true,
   cursorStyle: TerminalCursorStyle = "block",
@@ -137,7 +137,7 @@ export function createMarvisTerminal(
     fontSize: terminalFontSize(fontSize, zoom),
     lineHeight: 1.2,
     scrollback: 10000,
-    theme: marvisTerminalTheme(),
+    theme: musterTerminalTheme(),
   });
   // Widths and combining marks as Unicode 11 sees them, so emoji and CJK stop breaking the
   // grid that Neovim and the agent TUI draw their panels on. It has to be the active version

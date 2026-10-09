@@ -1,7 +1,7 @@
 import { createApp } from "vue";
 import App from "./App.vue";
 import { installContextMenu } from "./lib/context-menu";
-import { preloadTerminalFonts } from "./lib/marvis-terminal";
+import { preloadTerminalFonts } from "./lib/muster-terminal";
 import { installFrontendErrorHandlers } from "./lib/diagnostics";
 import "./muster.css";
 import "./style.css";

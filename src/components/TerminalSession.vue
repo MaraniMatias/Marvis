@@ -13,14 +13,14 @@ import type { TerminalCursorStyle, TerminalScrollbarMode } from "../domain/setti
 import { closeTerminal, createTerminal, getTerminalStatus, resizeTerminal, writeTerminal } from "../lib/ipc";
 import {
   attachTerminalRenderer,
-  createMarvisTerminal,
-  marvisTerminalTheme,
+  createMusterTerminal,
+  musterTerminalTheme,
   setTerminalLigatures,
   enableTerminalSelectionCopy,
   preloadTerminalFonts,
   terminalFontSize,
   watchTerminalRendererRecovery,
-} from "../lib/marvis-terminal";
+} from "../lib/muster-terminal";
 import { registerFilePathLinks } from "../lib/terminal-file-links";
 import { watchKeyboardProtocol } from "../lib/terminal-keys";
 import { createPtyOutputWriter } from "../lib/terminal-renderer";
@@ -78,12 +78,12 @@ const state = ref<TerminalSessionStatus>({ state: "running", foregroundProcess: 
 const error = ref<string | null>(null);
 const sessionUnavailable = ref(false);
 const closing = ref(false);
-const terminal = createMarvisTerminal(props.fontSize, props.cursorBlink, props.cursorStyle, props.zoom);
+const terminal = createMusterTerminal(props.fontSize, props.cursorBlink, props.cursorStyle, props.zoom);
 const fit = new FitAddon();
 terminal.loadAddon(fit);
 const { pushCause } = useToasts();
 
-/** The scrollbar is Marvis' own and only exists in the two modes that draw one. */
+/** The scrollbar is Muster' own and only exists in the two modes that draw one. */
 const scrollbarEnabled = computed(() => props.scrollbar !== "hidden");
 /** `always` has no fade to get to, so its thumb is simply there. */
 const scrollbarVisible = computed(() => props.scrollbar === "always" || scrollbarLit.value);
@@ -893,7 +893,7 @@ watch(
  * where it is, so the switch costs a repaint and not the session behind it.
  */
 watch(theme, () => {
-  terminal.options.theme = marvisTerminalTheme();
+  terminal.options.theme = musterTerminalTheme();
 });
 
 /**

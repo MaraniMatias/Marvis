@@ -194,13 +194,13 @@ for (const [property, value] of [
 // The real preload is memoized, so it would only ever load the faces once for the whole file and
 // the ordering below would be untestable. Asking for them per mount keeps the guarantee this file
 // exists to pin: xterm opens only after both bundled weights are ready.
-vi.mock("../lib/marvis-terminal", () => ({
-  createMarvisTerminal: (fontSize: number, cursorBlink: boolean, cursorStyle: string, zoom: number) => {
+vi.mock("../lib/muster-terminal", () => ({
+  createMusterTerminal: (fontSize: number, cursorBlink: boolean, cursorStyle: string, zoom: number) => {
     terminalMock.builtAt = { fontSize, cursorBlink, cursorStyle, zoom };
     return new MockTerminal();
   },
   terminalFontSize: (fontSize: number, zoom: number) => fontSize * zoom,
-  marvisTerminalTheme: () => terminalLib.theme,
+  musterTerminalTheme: () => terminalLib.theme,
   setTerminalLigatures: terminalLib.setTerminalLigatures,
   enableTerminalSelectionCopy: terminalLib.enableTerminalSelectionCopy,
   attachTerminalRenderer: terminalLib.attachTerminalRenderer,

@@ -5,7 +5,7 @@
  * can see: a command that fails the way people actually fail — `clang: error: no input files`,
  * `zsh: command not found: sd` — prints to the PTY and leaves the shell right where it was, so the
  * process never exits and there is no exit code to read. The failing command is a grandchild of the
- * process Marvis spawns, which `waitpid` cannot reach. The shell's own `$?` is the only source of
+ * process Muster spawns, which `waitpid` cannot reach. The shell's own `$?` is the only source of
  * truth, and a shell only reports it if it is asked to.
  *
  * The asking is done once per session by `services/terminal.rs`, which writes OSC 133 markers to the
