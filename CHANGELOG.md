@@ -8,6 +8,28 @@ here still gets its generated notes.
 
 ## Unreleased
 
+- **The app is called Muster.** The name changed together with everything that carries it: the
+  product, the release artifacts, the paths on disk and the data behind them. The bundle identifier
+  went from `dev.marvis.workspace` to `dev.muster.workspace`, and that is what moves the app-data
+  directory, the log directory, and the filenames of the Linux packages — `Muster_<version>_.deb`
+  and `Muster_<version>_.AppImage`.
+
+- **Preferences move by hand; the workspace does not move at all.** Settings live in
+  `~/.muster/config.yml` now and exported review rounds in `~/.muster/tmp/code-reviews/`, so copy
+  across whatever is worth keeping — nothing reads the old folders. The database is
+  `muster.sqlite3` and it starts empty: no migration runs in either direction, so the repositories
+  you registered, your review notes and your rounds stay in the old `marvis.sqlite3` on disk. That
+  file is still an ordinary SQLite database if you need anything out of it; this build only refuses
+  a schema stamped with a version it does not know, which is the rule that has always governed it.
+
+- **An old `Marvis.app` stays installed next to `Muster.app`.** Two bundle identifiers are two
+  applications to macOS: neither replaces the other, and each keeps its own dock tile and its own
+  data. Removing the old one is a manual step.
+
+- **Why it was done in one go.** The project is still `0.x`, so a change that moves paths is made in
+  place instead of being carried by a deprecation window: nothing has to read what an older build
+  wrote, and a compatibility layer kept "one release" would only be code nobody exercises.
+
 - Preview images and videos directly; switch SVGs between an editable source and a live preview.
 
 - **Settings now says what the keyboard does.** The chords the window answers were written down in

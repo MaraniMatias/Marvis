@@ -4,7 +4,7 @@ Status: specified, not implemented. Depends on phase 1 (`docs/review-export.md`)
 `ReviewTarget`; same one-shot shape as phases 2 and 3 (`docs/phase-2-codex.md`,
 `docs/phase-3-claude-code.md`).
 
-**Not parity with OpenCode.** As in every non-OpenCode phase: Marvis can name the program in front
+**Not parity with OpenCode.** As in every non-OpenCode phase: Muster can name the program in front
 of one of its terminals (`src-tauri/src/terminal/process.rs:21-34` macOS, `:55` Linux; surfaced as
 `foregroundApp`, `src-tauri/src/domain/workspace.rs:83-89`), but the name `pi` does not carry that
 process's conversation id, and there is no authorization to write into a session the user started.
@@ -77,7 +77,7 @@ skills and prompt templates supplied by the working folder are not loaded [sourc
 `docs/security.md`, `docs/cli.md`]. So pass `-a` if that project-local config matters to the user,
 and do not pass it if loading a folder's extensions automatically is a risk you would rather not
 take. **Which way is unconfirmed as a product decision**, and it is not a detail: `-a` changes
-which code runs at startup in a directory Marvis did not write.
+which code runs at startup in a directory Muster did not write.
 
 Note what project trust does _not_ do, from pi's own docs: it is not a startup boundary, it does
 not limit what tool calls can reach, and the project `sessionDir` setting is read _before_ trust
@@ -158,7 +158,7 @@ and to read `sessionId`, `sessionFile` and `messageCount` [source: `docs/rpc-com
 Session files are
 `~/.pi/agent/sessions/--<cwd with / \ : → -->  /<ISO8601>_<uuid>.jsonl`, where the directory
 encoding is `getDefaultSessionDirPath` [source: `dist/core/session-manager.js:286-295`,
-`docs/session-format.md`]. The encoding is a **derived** detail: if Marvis needs it, it should
+`docs/session-format.md`]. The encoding is a **derived** detail: if Muster needs it, it should
 call pi for the path rather than reimplementing the rule, because the rule is a private function
 that can change. A real local session file confirms the shape — a header line
 `{"type":"session","version":3,"id":"…","timestamp":"…","cwd":"…"}` followed by `model_change`,
@@ -167,7 +167,7 @@ that can change. A real local session file confirms the shape — a header line
 ## 6. Reading the marker back
 
 **Verified on a real local file: the user's exact text is stored verbatim.** So a literal substring
-search for `marvis-review:<round id>` over the session file works, and the marker
+search for `muster-review:<round id>` over the session file works, and the marker
 (`src-tauri/src/domain/review.rs:67-69`) is pure ASCII with no JSON-escapable characters — the same
 constraint as Codex, for the same reason: a marker containing a quote or a newline would not
 survive a naive search.
@@ -194,12 +194,12 @@ before a turn can start.
 1. **A model must already be selected, or pi exits 1 at startup when not interactive.** The check
    is `appMode !== "interactive" && !session.model` → print `No models available…` (or
    `No model selected…`) and `process.exit(1)` [source: `dist/main.ts`]. Credentials are therefore
-   required **eagerly, not lazily**: there is no RPC handshake Marvis can complete first. A user
+   required **eagerly, not lazily**: there is no RPC handshake Muster can complete first. A user
    with pi installed but unauthenticated gets a process that dies before the protocol starts, and
    the error is on stderr, not in the event stream. That must be surfaced as a real message and
    not as "the agent produced no output".
 2. **A missing cwd for a foreign session hard-exits 1** [source: `dist/main.ts`,
-   `MissingSessionCwdError`]. Since the cwd is the checkout and the session id is Marvis's, the
+   `MissingSessionCwdError`]. Since the cwd is the checkout and the session id is Muster's, the
    pair must always be consistent; a session id from another checkout is an error, not a fallback.
 3. **A model-catalog refresh fires in the background at RPC startup with a 15 s timeout**
    [source: `dist/main.ts`: `modelRuntime.refresh({signal: AbortSignal.timeout(15e3)})`, guarded by
@@ -209,7 +209,7 @@ before a turn can start.
    review send, `--offline` is probably the right default (nothing in the review needs a catalog
    refresh, and a review must not hang on the network) — **unconfirmed as a product decision**, and
    it interacts with credential resolution, so settle it before implementing.
-4. **Node ≥ 22.19** [source: `package.json` `engines.node`]. Marvis does not care, but the
+4. **Node ≥ 22.19** [source: `package.json` `engines.node`]. Muster does not care, but the
    installed `node` does, and a user on an older Node gets a pi that will not start.
 5. **`~/.local/bin/pi` is a POSIX shell launcher into a Node bundle, not a native binary**
    [source: local inspection: a `#!/bin/sh` script resolving a version file under

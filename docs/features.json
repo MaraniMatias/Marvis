@@ -1,0 +1,341 @@
+{
+  "$comment": "Current, source-backed catalog of implemented Muster behavior. Screenshot capture scaffolding and unsupported reconstruction claims are intentionally excluded.",
+  "app": {
+    "name": "Muster",
+    "identifier": "dev.muster.workspace",
+    "version": "0.20.0",
+    "license": "MIT",
+    "repository": "https://github.com/MaraniMatias/Muster",
+    "description": "A local workspace for repositories, worktrees, changes, review notes, agent sessions, and terminals."
+  },
+  "platforms": {
+    "shipped": [
+      {
+        "os": "macOS",
+        "architecture": "arm64 (Apple Silicon)",
+        "package": "DMG"
+      },
+      {
+        "os": "Linux",
+        "architecture": "amd64",
+        "package": "DEB and AppImage"
+      },
+      {
+        "os": "Linux",
+        "architecture": "arm64",
+        "package": "DEB and AppImage"
+      }
+    ],
+    "not_shipped": [
+      {
+        "os": "Windows",
+        "reason": "No Windows release target is configured."
+      }
+    ],
+    "evidence": [
+      "src-tauri/tauri.conf.json",
+      ".github/workflows/release.yml"
+    ]
+  },
+  "features": [
+    {
+      "id": "workspace-and-checkouts",
+      "status": "implemented",
+      "name": "Repositories and worktrees in one workspace",
+      "description": "Browse registered repositories and their checkouts in a sidebar, select the active checkout, and see change counts alongside it.",
+      "details": [
+        "Create a worktree from the repository actions menu by choosing its branch and location.",
+        "Removing a worktree is guarded by an explicit confirmation."
+      ],
+      "evidence": [
+        "src/App.vue",
+        "src/components/Sidebar.vue",
+        "src/components/WorktreeDialog.vue",
+        "src/domain/workspace.ts",
+        "src-tauri/src/commands/workspace.rs",
+        "src-tauri/src/services/worktree.rs"
+      ]
+    },
+    {
+      "id": "file-browser-and-editor",
+      "status": "implemented",
+      "name": "Browse and edit checkout files",
+      "description": "Navigate a checkout's file tree, open source files in the document pane, edit them, and save changes to disk.",
+      "details": [
+        "Source files receive automatic language detection and syntax highlighting; the language can also be selected manually.",
+        "Sticky folder rows can keep parent directories visible while scrolling."
+      ],
+      "evidence": [
+        "src/components/InspectorPane.vue",
+        "src/components/DocumentPane.vue",
+        "src/lib/code-editor.ts",
+        "src/lib/source-languages.ts",
+        "src-tauri/src/commands/files.rs"
+      ]
+    },
+    {
+      "id": "git-changes-and-diffs",
+      "status": "implemented",
+      "name": "Inspect working-tree changes",
+      "description": "See changed files with added and removed line counts, open individual diffs or a combined change set, and follow repository changes as they update.",
+      "evidence": [
+        "src/components/InspectorPane.vue",
+        "src/components/FileDiff.vue",
+        "src/presentation/active-git-snapshot.ts",
+        "src/presentation/git-watchers.ts",
+        "src-tauri/src/services/git.rs"
+      ]
+    },
+    {
+      "id": "review-notes",
+      "status": "implemented",
+      "name": "Line-anchored review notes",
+      "description": "Attach notes to lines in a diff. Notes have sent, resolved, or outdated states; outdated anchors can be reviewed and accepted, and notes can be edited or deleted.",
+      "evidence": [
+        "src/components/FileDiff.vue",
+        "src/components/ReviewNoteList.vue",
+        "src/components/ReviewComposer.vue",
+        "src/presentation/review-notes.ts",
+        "src-tauri/src/commands/review.rs"
+      ]
+    },
+    {
+      "id": "review-delivery",
+      "status": "implemented",
+      "name": "Send review rounds to OpenCode or export Markdown",
+      "description": "Collect open review notes into a review round, choose an OpenCode session, and send or queue the round; Markdown export is available for other tools.",
+      "details": [
+        "The UI reports unfinished rounds and can include outdated notes in a send or export.",
+        "OpenCode delivery is handled through Muster review-round dispatch and reconciliation, not by directly exposing the low-level agent prompt command."
+      ],
+      "evidence": [
+        "src/components/FileDiff.vue",
+        "src/presentation/review-notes.ts",
+        "src/domain/review.ts",
+        "src-tauri/src/commands/review.rs",
+        "src-tauri/src/services/review_round.rs"
+      ]
+    },
+    {
+      "id": "opencode-sessions",
+      "status": "implemented",
+      "name": "OpenCode session sidebar",
+      "description": "Connect to a locally running OpenCode service, create or select sessions, and show session activity alongside checkouts.",
+      "details": [
+        "The user must start the OpenCode service; Muster connects to its API v2 and does not launch it.",
+        "Associations between sessions and terminals are inferred from terminal titles, not from an explicit session identifier in the shell."
+      ],
+      "evidence": [
+        "src/components/Sidebar.vue",
+        "src/presentation/agent-sessions.ts",
+        "src-tauri/src/services/opencode.rs",
+        "src-tauri/src/services/agent.rs"
+      ]
+    },
+    {
+      "id": "integrated-terminals",
+      "status": "implemented",
+      "name": "Multiple terminals per checkout",
+      "description": "Open shell sessions in the selected checkout, interact with terminal output, and optionally follow worktree changes caused by shell navigation or OpenCode activity.",
+      "details": [
+        "Terminal preferences include font, ligatures, cursor, scrollbar, shell integration, and worktree-following mode.",
+        "Terminal processes are runtime state and are not restored as running sessions after application restart."
+      ],
+      "evidence": [
+        "src/components/TerminalSession.vue",
+        "src/lib/muster-terminal.ts",
+        "src-tauri/src/services/terminal.rs",
+        "src-tauri/src/persistence/mod.rs"
+      ]
+    },
+    {
+      "id": "markdown-preview",
+      "status": "implemented",
+      "name": "Rendered Markdown documents",
+      "description": "Preview Markdown with tables, task lists, fenced code highlighting, front-matter metadata, and checkout-relative images.",
+      "details": [
+        "Raw HTML is disabled; links and local image paths are restricted, and rendered output is sanitized.",
+        "Remote images and paths that escape the checkout are not loaded as preview images."
+      ],
+      "evidence": [
+        "src/components/DocumentPane.vue",
+        "src/presentation/markdown-preview.ts",
+        "src/lib/markdown-preview.ts",
+        "src-tauri/src/commands/files.rs"
+      ]
+    },
+    {
+      "id": "resizable-layout",
+      "status": "implemented",
+      "name": "Resizable, focused workspace layout",
+      "description": "Resize the navigation, main document, and inspector panes, and use the available split or focused layout modes.",
+      "evidence": [
+        "src/App.vue",
+        "src/domain/ui-state.ts",
+        "src/presentation/layout-persistence.ts"
+      ]
+    },
+    {
+      "id": "settings",
+      "status": "implemented",
+      "name": "Interface, terminal, and editor preferences",
+      "description": "Configure appearance, scale, typography, terminal behavior, and editor indentation. Preferences are stored in ~/.muster/config.yml.",
+      "evidence": [
+        "src/components/SettingsDialog.vue",
+        "src/domain/settings.ts",
+        "src-tauri/src/config.rs"
+      ]
+    },
+    {
+      "id": "local-persistence",
+      "status": "implemented",
+      "name": "Local workspace and review persistence",
+      "description": "Store workspace, checkout UI state, and review data locally; restore the workspace on launch. Settings are kept separately in the local configuration file.",
+      "details": [
+        "The SQLite schema has a strict version check and no migration ladder; a database with an unknown schema version is refused.",
+        "Terminal processes and terminal session layouts are cleared at startup."
+      ],
+      "evidence": [
+        "src-tauri/src/persistence/mod.rs",
+        "src/domain/ui-state.ts",
+        "src/presentation/layout-persistence.ts",
+        "src-tauri/src/config.rs"
+      ]
+    }
+  ],
+  "settings_defaults": {
+    "interface": {
+      "font_size_px": 14,
+      "zoom_percent": 100,
+      "theme": "system",
+      "content_background": "#16181c",
+      "sticky_folder_rows": true,
+      "font_size_range_px": [
+        11,
+        20
+      ],
+      "zoom_range_percent": [
+        80,
+        150
+      ],
+      "zoom_step_percent": 10
+    },
+    "terminal": {
+      "font_size_px": 16,
+      "ligatures": true,
+      "cursor_blink": true,
+      "cursor_style": "block",
+      "scrollbar": "hidden",
+      "shell_integration": true,
+      "follow_worktree": "agent",
+      "font_size_range_px": [
+        9,
+        32
+      ],
+      "follow_worktree_options": [
+        "off",
+        "cd",
+        "agent",
+        "both"
+      ]
+    },
+    "editor": {
+      "font_size_px": 13,
+      "ligatures": true,
+      "cursor_blink": true,
+      "indent_with_spaces": true,
+      "indent_size_columns": 2,
+      "font_size_range_px": [
+        9,
+        32
+      ],
+      "indent_size_range_columns": [
+        1,
+        8
+      ]
+    },
+    "evidence": [
+      "src/domain/settings.ts",
+      "src/domain/zoom.ts"
+    ]
+  },
+  "runtime_notes": [
+    {
+      "topic": "OpenCode prerequisite",
+      "behavior": "A local OpenCode service must already be running; Muster connects to it and does not start it.",
+      "evidence": [
+        "src-tauri/src/services/opencode.rs",
+        "src-tauri/src/services/agent.rs"
+      ]
+    },
+    {
+      "topic": "Startup",
+      "behavior": "Workspace and persisted UI/review state are restored, but running terminal processes are not.",
+      "evidence": [
+        "src-tauri/src/persistence/mod.rs",
+        "src/presentation/layout-persistence.ts"
+      ]
+    },
+    {
+      "topic": "Unclaimed recovery behavior",
+      "behavior": "Do not describe moved/missing-checkout relocation as a shipped UI feature: locate_missing_checkout is backend-only.",
+      "evidence": [
+        "src-tauri/src/main.rs"
+      ]
+    }
+  ],
+  "backend_only": [
+    {
+      "name": "git_viewed_files / git_mark_viewed",
+      "note": "Registered backend commands; not exposed as current UI actions.",
+      "evidence": [
+        "src-tauri/src/main.rs",
+        "src-tauri/src/commands/git.rs"
+      ]
+    },
+    {
+      "name": "locate_missing_checkout",
+      "note": "Backend command only; do not claim the UI automatically relocates or reattaches a moved checkout.",
+      "evidence": [
+        "src-tauri/src/main.rs",
+        "src-tauri/src/commands/workspace.rs"
+      ]
+    },
+    {
+      "name": "agent_prompt / agent_stop",
+      "note": "Direct backend commands, not current UI controls; review delivery uses the review-round flow.",
+      "evidence": [
+        "src-tauri/src/main.rs",
+        "src-tauri/src/commands/agent.rs",
+        "src-tauri/src/services/review_round.rs"
+      ]
+    }
+  ],
+  "planned_not_implemented": [
+    {
+      "name": "Codex review destination",
+      "status": "specified, not implemented",
+      "evidence": [
+        "docs/todo/phase-2-codex.md"
+      ]
+    },
+    {
+      "name": "Claude Code review destination",
+      "status": "specified, not implemented",
+      "evidence": [
+        "docs/todo/phase-3-claude-code.md"
+      ]
+    },
+    {
+      "name": "pi review destination",
+      "status": "specified, not implemented",
+      "evidence": [
+        "docs/todo/phase-4-pi.md"
+      ]
+    }
+  ],
+  "catalog_notes": [
+    "This catalog describes the current v0.20.0 implementation, not plans or commands that have no UI entry point.",
+    "Tests were inspected during the code audit but are not reported as run."
+  ]
+}

@@ -3,13 +3,13 @@
 Status: specified, not implemented. Phase 1 (`docs/review-export.md`) is the prerequisite: it adds
 `ReviewTarget` and the `preferences` key, and `"codex"` is added to that union here.
 
-**This is not parity with OpenCode.** The OpenCode integration is a bridge: Marvis runs
+**This is not parity with OpenCode.** The OpenCode integration is a bridge: Muster runs
 `opencode serve` per checkout, creates sessions through an HTTP API, streams events, and can stop a
 turn (`src-tauri/src/services/agent.rs:1-6`). Codex has no such surface. Phase 2 sends a headless,
-one-shot process per review round, which opens a **Marvis-managed review conversation**. It does
+one-shot process per review round, which opens a **Muster-managed review conversation**. It does
 not write into the session the user has open in a terminal.
 
-That is not a shortcut. Marvis _can_ read the foreground process name of its own terminals —
+That is not a shortcut. Muster _can_ read the foreground process name of its own terminals —
 `src-tauri/src/terminal/process.rs:21-34` on macOS via `proc_pidpath`, `:55` on Linux via
 `/proc/<pid>/comm`, surfaced as `foregroundApp` (`src-tauri/src/domain/workspace.rs:83-89`). What
 that name cannot give is the conversation id of a `codex` the user started themselves. There is no
@@ -21,7 +21,7 @@ and the user gets told which one it is.
 |         | OpenCode today                                                      | Codex in phase 2                                                        |
 | ------- | ------------------------------------------------------------------- | ----------------------------------------------------------------------- |
 | Process | one `opencode serve` per checkout, long-lived (`services/agent.rs`) | one `codex exec` per round, exits when the turn is done                 |
-| Session | created through an API, listed, pickable                            | Marvis mints an id, one conversation per checkout, reused across rounds |
+| Session | created through an API, listed, pickable                            | Muster mints an id, one conversation per checkout, reused across rounds |
 | Events  | HTTP + SSE from the server                                          | JSONL on stdout, parsed line by line                                    |
 | Cancel  | `stopAgent`, awaited by the UI                                      | `turn/interrupt` (app-server) or signal (exec) — see §4                 |
 | Picker  | full session list with search                                       | none: there is one conversation, and its name is shown                  |
@@ -95,7 +95,7 @@ phase 2 should treat "a `turn.completed` that is not a clean success" as failed 
 ## 4. Cancel
 
 `codex exec` has no protocol-level cancel; the honest answer is a signal to the child, which is
-what Marvis already does for terminals (`src-tauri/src/terminal/mod.rs`, `stop_with_timeout`).
+what Muster already does for terminals (`src-tauri/src/terminal/mod.rs`, `stop_with_timeout`).
 A SIGTERM to `exec` is **unconfirmed** as producing a `turn.completed` at all — it may simply exit.
 If the turn's fate matters (it does: it decides whether a round is `acked` or left `dispatching`),
 the app-server route in §6 has a real `turn/interrupt {threadId, turnId}`
@@ -121,7 +121,7 @@ requires the app-server.
 
 If it is used directly on the rollout file, the search is a naive substring over raw JSONL and it
 only works when the marker contains **no character JSON escapes** — newline, tab, CR, `"`, `\`, or
-anything non-ASCII. A marker like `marvis-review:round:1731...:4122:3` is pure ASCII with no
+anything non-ASCII. A marker like `muster-review:round:1731...:4122:3` is pure ASCII with no
 escapes and is safe. Any change to the marker format has to keep it that way, and that is a real
 constraint on `review_round_marker`, not on Codex.
 
@@ -173,7 +173,7 @@ startup, so a process can boot without credentials and fail on the first turn. `
 
 ## 7. The round lifecycle
 
-The ordering Marvis already uses, unchanged:
+The ordering Muster already uses, unchanged:
 
 1. `begin_round` records the round as `dispatching` with its marker and links the notes
    (`services/review_round.rs:54-68`). Notes go to `sent` **here**, before the agent is called, so a
@@ -243,6 +243,6 @@ arguments passes every test in the list and still ships a phase that fails on th
 something else. Nothing short of a real binary catches that.
 
 The live test follows `docs/agent-live-tests.md`: `#[ignore]`d, opt-in via `--ignored`, with
-`MARVIS_AGENT_BRIDGE_DIR`-style dedicated temporary directories, and a test that **fails with the
+`MUSTER_AGENT_BRIDGE_DIR`-style dedicated temporary directories, and a test that **fails with the
 name of the missing variable** rather than passing without running. Codex's live test additionally
 needs credentials and spends real tokens per run, so it should be one test, not six.
