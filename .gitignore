@@ -17,5 +17,4 @@ __pycache__/
 /.lean-ctx/
 
 # Mockup: repo git anidado y su zip, no forman parte de Marvis.
-docs/marvis-ui/
-docs/marvis-ui.zip
+docs/demo-video
