@@ -25,7 +25,7 @@ vi.mock("reka-ui", async () => {
     setup(props, { emit }) {
       return () =>
         h("input", {
-          class: "marvis-menu-search",
+          class: "muster-menu-search",
           placeholder: props.placeholder,
           value: props.modelValue,
           onInput: (event: Event) => emit("update:modelValue", (event.target as HTMLInputElement).value),
@@ -100,7 +100,7 @@ describe("TitlebarMenu", () => {
     // No chip, no chevron: the crumb is a line of text that happens to open a list, and the
     // glyph that stands for what it names is a thing it is given, not one it draws.
     expect(trigger.find("svg").exists()).toBe(false);
-    expect(trigger.classes()).not.toContain("marvis-control");
+    expect(trigger.classes()).not.toContain("muster-control");
   });
 
   it("wears the glyph it is given ahead of the name, and nothing when it is given none", () => {

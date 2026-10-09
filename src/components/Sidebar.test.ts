@@ -114,8 +114,8 @@ describe("Sidebar workdir rows", () => {
     // The panel's own last action, muted and brightening on hover, and separated from the list
     // above it by the hairline the reference draws there.
     expect(openDirectory.classes()).toContain("add-item");
-    expect(rule(".add-item")).toContain("color: var(--marvis-text-faint);");
-    expect(rule(".sep")).toContain("background: var(--marvis-border);");
+    expect(rule(".add-item")).toContain("color: var(--muster-text-faint);");
+    expect(rule(".sep")).toContain("background: var(--muster-border);");
     expect(rule(".sep")).toContain("margin: 0;");
     expect(rule(".sidebar-footer .workdir-row")).toContain("justify-content: center;");
     expect(rule(".sidebar-footer .lbl")).toContain("flex: none;");
@@ -1151,7 +1151,7 @@ describe("Sidebar workdir rows", () => {
     expect(row.attributes("style")).toContain("--agent-color: #FF966C");
     expect(row.get(".workdir-icon").classes()).toContain("lucide-loader-circle");
     expect(rule(".state-working.agent-tinted .workdir-icon")).toContain(
-      "color: color-mix(in srgb, var(--agent-color) 75%, var(--marvis-text-muted));",
+      "color: color-mix(in srgb, var(--agent-color) 75%, var(--muster-text-muted));",
     );
     // A colour is not something a screen reader reads, so the state is spelled out where the glyph
     // is not: the accessible name, built from the same `item.state` the colour came from.
@@ -1360,9 +1360,9 @@ describe("Sidebar workdir rows", () => {
     expect(rule(".workdir-close")).toContain("right: 8px;");
     // It paints the surface of the row it belongs to, so whatever it does land over, it lands over
     // the row rather than letting text show through it.
-    expect(rule(".workdir-close")).toContain("background: var(--marvis-bg-1);");
-    expect(rule(".workdir-row:hover > .workdir-close")).toContain("background: var(--marvis-el-hover);");
-    expect(rule(".workdir-row.selected > .workdir-close")).toContain("background: var(--marvis-el-selected);");
+    expect(rule(".workdir-close")).toContain("background: var(--muster-bg-1);");
+    expect(rule(".workdir-row:hover > .workdir-close")).toContain("background: var(--muster-el-hover);");
+    expect(rule(".workdir-row.selected > .workdir-close")).toContain("background: var(--muster-el-selected);");
     // The cross gives no hover fill of its own, so a cross on a row is a glyph and not a cell: the
     // shared `.workdir-action` rule is all it would have, and the row's own rule outranks it.
     expect(rule(".workdir-close:hover")).toBe("");
@@ -1441,9 +1441,9 @@ describe("Sidebar workdir rows", () => {
   it("draws the counts in monospace, green for additions and red for deletions", () => {
     // The counts are read down a column of rows rather than one at a time, so they are monospaced:
     // a proportional digit moves them sideways and a whole list of them reads as noise.
-    expect(rule(".workdir-diff")).toContain("font-family: var(--marvis-font);");
-    expect(rule(".ad")).toContain("color: var(--marvis-content-added);");
-    expect(rule(".rm")).toContain("color: var(--marvis-content-removed);");
+    expect(rule(".workdir-diff")).toContain("font-family: var(--muster-font);");
+    expect(rule(".ad")).toContain("color: var(--muster-content-added);");
+    expect(rule(".rm")).toContain("color: var(--muster-content-removed);");
     // Tabular figures on the slot, so the digits inside each figure keep their own width.
     expect(rule(".workdir-end")).toContain("font-variant-numeric: tabular-nums;");
     // The slot is right against the row's edge, so the figures line up down the list.
@@ -1593,7 +1593,7 @@ describe("Sidebar workdir rows", () => {
     // over the group. A guide that is always drawn is a second vertical line in a panel whose left
     // edge is already busy, and a reader cannot tell an indent from a selection.
     expect(rule(".kids")).toContain("border-left: 1px solid transparent;");
-    expect(rule(".grp:hover > .kids")).toContain("border-left-color: var(--marvis-border);");
+    expect(rule(".grp:hover > .kids")).toContain("border-left-color: var(--muster-border);");
     // It belongs to the group and to nothing else: no rule lights it from a child row or from a
     // sibling group, which is what would let one group's pointer draw another's line.
     expect(rule(".workdir-child:hover > .kids")).toBe("");
@@ -1801,9 +1801,9 @@ describe("Sidebar workdir rows", () => {
     // and paints focus nowhere near the accent: a ring in that colour would say the selection had
     // moved when it had not.
     expect(sidebarStyles()).not.toMatch(/\.workdir-select:focus-visible[^{]*\{[^}]*outline/);
-    expect(sidebarStyles()).not.toMatch(/:focus-visible[^{]*\{[^}]*var\(--marvis-accent\)/);
-    const shared = readFileSync(resolve(process.cwd(), "src/marvis.css"), "utf8");
-    expect(shared).toMatch(/:focus-visible[^{]*\{[^}]*outline: 1px solid var\(--marvis-control-focus\)/);
+    expect(sidebarStyles()).not.toMatch(/:focus-visible[^{]*\{[^}]*var\(--muster-accent\)/);
+    const shared = readFileSync(resolve(process.cwd(), "src/muster.css"), "utf8");
+    expect(shared).toMatch(/:focus-visible[^{]*\{[^}]*outline: 1px solid var\(--muster-control-focus\)/);
 
     // And it is a real, focusable button in the DOM on a resting row \u2014 not a span, not removed, not
     // given a tabindex of its own to fake it. Attached, because happy-dom only focuses what is in the
@@ -1949,7 +1949,7 @@ describe("Sidebar workdir rows", () => {
     expect(quiet.get(".workdir-child .workdir-icon").classes()).toContain("lucide-sparkles");
     // Idle has no colour of its own, so its ink is the panel's muted foreground rather than the faintest
     // token: the glyph also sits on the selected row's tint, where faint does not read.
-    expect(rule(".state-idle .workdir-icon")).toContain("color: var(--marvis-text-muted);");
+    expect(rule(".state-idle .workdir-icon")).toContain("color: var(--muster-text-muted);");
     expect(quiet.get(".workdir-child > .workdir-select").attributes("aria-label")).toBe(
       "Terminal session: Copy ids, coder \u2014 0s \u2014 Idle",
     );
@@ -2168,11 +2168,11 @@ describe("Sidebar workdir rows", () => {
     // A turn stuck on this server version is not a reply the row can ask for, so it says it is
     // waiting rather than working, and the glyph says it in amber.
     expect(waiting!.get(".workdir-child").classes()).toContain("state-waiting");
-    expect(rule(".state-waiting .workdir-icon")).toContain("color: var(--marvis-warning);");
+    expect(rule(".state-waiting .workdir-icon")).toContain("color: var(--muster-warning);");
     // A red glyph on a row that is not merely idle, and a last turn that ended badly, which is a
     // different sentence from the one a waiting turn gets.
     expect(failed!.get(".workdir-child").classes()).toContain("state-failed");
-    expect(rule(".state-failed .workdir-icon")).toContain("color: var(--marvis-danger-fg);");
+    expect(rule(".state-failed .workdir-icon")).toContain("color: var(--muster-danger-fg);");
     // A colour is not something a screen reader reads, so both states are spelled out where it is
     // not, and both words come from the same state the colour did.
     expect(waiting!.get(".workdir-select").attributes("aria-label")).toBe(
@@ -2278,16 +2278,16 @@ describe("Sidebar workdir rows", () => {
     // and a selection is a different surface plus a two-pixel accent edge down its own left \u2014 which
     // is readable at a glance and does not depend on reading the colour of any text.
     const hover = rule(".workdir-row:hover");
-    expect(hover).toContain("background: var(--marvis-el-hover);");
+    expect(hover).toContain("background: var(--muster-el-hover);");
     // A hovered row is a row being acted on, not a row being chosen: no edge and no accent on it.
     expect(hover).not.toContain("box-shadow");
     expect(hover).not.toContain("accent");
 
     const selected = rule(".workdir-row.selected");
-    expect(selected).toContain("background: var(--marvis-el-selected);");
-    expect(selected).toContain("box-shadow: inset 2px 0 0 var(--marvis-accent);");
+    expect(selected).toContain("background: var(--muster-el-selected);");
+    expect(selected).toContain("box-shadow: inset 2px 0 0 var(--muster-accent);");
     // The two surfaces are genuinely two, not one surface and an ink colour.
-    expect(selected).not.toContain("var(--marvis-el-hover)");
+    expect(selected).not.toContain("var(--muster-el-hover)");
     // The edge is an inset shadow, so it is drawn inside the row's own box and cannot spill onto the
     // group guide hanging 14px to its left.
     expect(selected).toMatch(/box-shadow: inset /);
@@ -2302,13 +2302,13 @@ describe("Sidebar workdir rows", () => {
     expect(sidebarStyles()).not.toMatch(/\.workdir-parent\.active[^{]*\{[^}]*box-shadow/);
     // The edge rides on `selected` and on nothing else, so exactly the rows that are selected and no
     // others can carry it.
-    expect(rule(".workdir-row.selected")).toContain("box-shadow: inset 2px 0 0 var(--marvis-accent);");
+    expect(rule(".workdir-row.selected")).toContain("box-shadow: inset 2px 0 0 var(--muster-accent);");
     // One vocabulary for the whole panel, so the repo header hovers like a row as well.
-    expect(rule(".group-heading:hover")).toContain("background: var(--marvis-el-hover);");
+    expect(rule(".group-heading:hover")).toContain("background: var(--muster-el-hover);");
     // And a group that merely holds the terminal being read takes no surface of its own: two tinted
     // rows in one list would put two claims about "where you are" side by side.
     expect(rule(".workdir-checkouts.has-active .workdir-parent .workdir-icon")).toContain(
-      "color: var(--marvis-text-secondary);",
+      "color: var(--muster-text-secondary);",
     );
     expect(sidebarStyles()).not.toMatch(/has-active[^{]*\{[^}]*background/);
   });
@@ -2537,7 +2537,7 @@ describe("Sidebar workdir rows", () => {
 
     // Each state is a colour of its own, or a row that needs a person could be drawn as a quiet one.
     const colours = states.map((state) => rule(`.state-${state} .workdir-icon`));
-    expect(colours.every((colour) => colour.includes("color: var(--marvis-"))).toBe(true);
+    expect(colours.every((colour) => colour.includes("color: var(--muster-"))).toBe(true);
     expect(new Set(colours).size).toBe(states.length);
     // And only the one that is working moves, and only while the reader has not asked it not to.
     expect(rule(".state-working .workdir-icon")).toContain("animation: row-spin 1.1s linear infinite;");
@@ -3658,10 +3658,10 @@ describe("a row's glyph keeps its state when the row is selected", () => {
     const styles = sidebarStyles();
     expect(styles).not.toMatch(/\.workdir-row\.selected[^{]*\.workdir-icon[^{]*\{[^}]*color/);
     // And each state still names its own colour.
-    expect(rule(".state-working .workdir-icon")).toContain("color: var(--marvis-accent);");
-    expect(rule(".state-waiting .workdir-icon")).toContain("color: var(--marvis-warning);");
-    expect(rule(".state-failed .workdir-icon")).toContain("color: var(--marvis-danger-fg);");
-    expect(rule(".state-running .workdir-icon")).toContain("color: var(--marvis-success);");
+    expect(rule(".state-working .workdir-icon")).toContain("color: var(--muster-accent);");
+    expect(rule(".state-waiting .workdir-icon")).toContain("color: var(--muster-warning);");
+    expect(rule(".state-failed .workdir-icon")).toContain("color: var(--muster-danger-fg);");
+    expect(rule(".state-running .workdir-icon")).toContain("color: var(--muster-success);");
   });
 });
 

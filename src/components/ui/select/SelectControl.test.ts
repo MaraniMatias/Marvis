@@ -31,7 +31,7 @@ describe("SelectControl", () => {
     // the whole point of this one is that the trigger and the list both come from the app.
     const trigger = wrapper.get('[aria-label="Local branch"]');
     expect(trigger.text()).toContain("Keep branch (recommended)");
-    expect(trigger.classes()).toContain("marvis-select");
+    expect(trigger.classes()).toContain("muster-select");
     wrapper.unmount();
   });
 
@@ -72,7 +72,7 @@ describe("SelectControl", () => {
   it("carries the class its caller passed to the trigger it draws", () => {
     const wrapper = select({ variant: "field" });
 
-    expect(wrapper.get('[aria-label="Local branch"]').classes()).toContain("marvis-select-field");
+    expect(wrapper.get('[aria-label="Local branch"]').classes()).toContain("muster-select-field");
     wrapper.unmount();
   });
 });

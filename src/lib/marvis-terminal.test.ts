@@ -18,7 +18,7 @@ import {
  * back an empty string for a stylesheet it does not run, and an empty table would make every
  * assertion below pass for the wrong reason.
  */
-const stylesheet = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "marvis.css"), "utf8");
+const stylesheet = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "muster.css"), "utf8");
 
 const stubs = vi.hoisted(() => ({
   loaded: [] as string[],
@@ -155,7 +155,7 @@ describe("createMarvisTerminal", () => {
       cursorInactiveStyle: "outline",
       // Icons behind the text face: the atlas is rasterized per glyph from this string, so a
       // family that is not in it draws a statusline's separators as tofu.
-      fontFamily: '"Marvis Nerd Mono", "Marvis Nerd Icons", monospace',
+      fontFamily: '"Muster Nerd Mono", "Muster Nerd Icons", monospace',
       fontSize: 16,
       lineHeight: 1.2,
       scrollback: 10000,
@@ -163,16 +163,16 @@ describe("createMarvisTerminal", () => {
   });
 
   it("paints itself out of the stylesheet rather than out of a palette of its own", () => {
-    // Every color is a `--marvis-*` token, so which one arrives is the theme's answer rather than
+    // Every color is a `--muster-*` token, so which one arrives is the theme's answer rather than
     // this file's: a terminal opened in the light palette gets the light one without a second copy
     // of the values anywhere.
     const style = document.createElement("style");
-    style.textContent = `:root { --marvis-content-bg-0: #282c33; --marvis-content-text: #dce0e5; --marvis-cursor: #c2c9f1; }
-      :root[data-theme="light"] { --marvis-content-bg-0: #fafafa; --marvis-content-text: #242529; --marvis-cursor: #242529; }`;
+    style.textContent = `:root { --muster-content-bg-0: #282c33; --muster-content-text: #dce0e5; --muster-cursor: #c2c9f1; }
+      :root[data-theme="light"] { --muster-content-bg-0: #fafafa; --muster-content-text: #242529; --muster-cursor: #242529; }`;
     document.head.append(style);
     try {
       // The cursor pair is the requirement rather than a detail of the palette: the cursor is the
-      // theme's own `--marvis-cursor` and the glyph under a block is the theme's background, so a
+      // theme's own `--muster-cursor` and the glyph under a block is the theme's background, so a
       // cell with default colors under the cursor is drawn inverted and neither value is written
       // here. Two values rather than one per cell, because a cell that arrives with a color of its
       // own does not hand it to the block.
@@ -207,9 +207,9 @@ describe("createMarvisTerminal", () => {
 
   it("hands xterm.js a full ANSI palette, and every color of it out of the stylesheet", () => {
     // The names are read out of the real stylesheet rather than listed here, because the list that
-    // matters is the one `marvis.css` carries: a token renamed there has to take this down with it,
+    // matters is the one `muster.css` carries: a token renamed there has to take this down with it,
     // and xterm.js' own palette — which is not this window's — is what a missing one falls back to.
-    const names = [...new Set([...stylesheet.matchAll(/(--marvis-[a-z0-9-]+):/g)].map(([, name]) => name))];
+    const names = [...new Set([...stylesheet.matchAll(/(--muster-[a-z0-9-]+):/g)].map(([, name]) => name))];
     const colors = names.map((_, index) => `#${(index + 1).toString(16).padStart(6, "0")}`);
     const style = document.createElement("style");
     style.textContent = `:root { ${names.map((name, index) => `${name}: ${colors[index]};`).join(" ")} }`;
@@ -606,9 +606,9 @@ describe("preloadTerminalFonts", () => {
     // The icon face is asked for by name and with a character it has, because a family list is
     // where to look rather than a request, and a face holding only icons covers no space.
     expect(stubs.fontLoads).toEqual([
-      ['16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace', undefined],
-      ['700 16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace', undefined],
-      ['16px "Marvis Nerd Icons"', "\uE0B0"],
+      ['16px "Muster Nerd Mono", "Muster Nerd Icons", monospace', undefined],
+      ['700 16px "Muster Nerd Mono", "Muster Nerd Icons", monospace', undefined],
+      ['16px "Muster Nerd Icons"', "\uE0B0"],
     ]);
     await expect(first).resolves.toHaveLength(3);
   });

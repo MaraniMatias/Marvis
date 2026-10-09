@@ -10,14 +10,14 @@ import { detectedLanguageName } from "./source-languages";
  *
  * A bundled theme would mean one highlighter per palette and a second render on every switch, and
  * its colors would be a copy of the ones the rest of the app is painted in. This names the tokens in
- * `src/marvis.css` instead, so the markup a render produces is the same in both palettes and the
+ * `src/muster.css` instead, so the markup a render produces is the same in both palettes and the
  * browser resolves it against whichever one is in effect.
  */
 const MARVIS_SYNTAX_NAME = "marvis";
 
 const MARVIS_SYNTAX = createCssVariablesTheme({
   name: MARVIS_SYNTAX_NAME,
-  variablePrefix: "--marvis-syntax-",
+  variablePrefix: "--muster-syntax-",
 });
 
 type SourceLanguage = (typeof typescript)[number];

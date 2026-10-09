@@ -207,9 +207,9 @@ vi.mock("../lib/marvis-terminal", () => ({
   watchTerminalRendererRecovery: terminalLib.watchTerminalRendererRecovery,
   preloadTerminalFonts: () =>
     Promise.allSettled([
-      document.fonts.load('16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace'),
-      document.fonts.load('700 16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace'),
-      document.fonts.load('16px "Marvis Nerd Icons"', "\uE0B0"),
+      document.fonts.load('16px "Muster Nerd Mono", "Muster Nerd Icons", monospace'),
+      document.fonts.load('700 16px "Muster Nerd Mono", "Muster Nerd Icons", monospace'),
+      document.fonts.load('16px "Muster Nerd Icons"', "\uE0B0"),
     ]),
 }));
 
@@ -454,9 +454,9 @@ describe("TerminalSession UI", () => {
     await flushPromises();
 
     expect(terminalMock.fontLoads).toEqual([
-      '16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace',
-      '700 16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace',
-      '16px "Marvis Nerd Icons"',
+      '16px "Muster Nerd Mono", "Muster Nerd Icons", monospace',
+      '700 16px "Muster Nerd Mono", "Muster Nerd Icons", monospace',
+      '16px "Muster Nerd Icons"',
     ]);
     expect(terminalMock.openCalls).toBe(0);
     releaseFonts();
@@ -465,7 +465,7 @@ describe("TerminalSession UI", () => {
     // The icon face is waited on as well: opening before it lands measures the grid without it,
     // and the icon glyphs are the ones the atlas is about.
     expect(terminalMock.events.indexOf("open")).toBeGreaterThan(
-      terminalMock.events.indexOf('font:16px "Marvis Nerd Icons"'),
+      terminalMock.events.indexOf('font:16px "Muster Nerd Icons"'),
     );
     expect(terminalMock.clearTextureAtlasCalls).toBe(0);
     wrapper.unmount();

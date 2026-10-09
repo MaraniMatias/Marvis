@@ -3,7 +3,7 @@ import App from "./App.vue";
 import { installContextMenu } from "./lib/context-menu";
 import { preloadTerminalFonts } from "./lib/marvis-terminal";
 import { installFrontendErrorHandlers } from "./lib/diagnostics";
-import "./marvis.css";
+import "./muster.css";
 import "./style.css";
 
 installContextMenu();

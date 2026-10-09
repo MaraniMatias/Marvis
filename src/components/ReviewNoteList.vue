@@ -51,18 +51,18 @@ function canResolve(note: ReviewNote): boolean {
     <li
       v-for="note in props.notes"
       :key="note.id"
-      class="border border-(--marvis-border) bg-(--marvis-bg-1) px-2 py-1 text-xs"
+      class="border border-(--muster-border) bg-(--muster-bg-1) px-2 py-1 text-xs"
     >
-      <p class="flex items-center gap-2 font-mono text-[0.625rem] text-(--marvis-text-faint)">
+      <p class="flex items-center gap-2 font-mono text-[0.625rem] text-(--muster-text-faint)">
         <span>{{ note.side }}:{{ reviewLineRange(note) }}</span>
-        <span v-if="note.status === 'sent'" class="text-(--marvis-text-secondary)">sent</span>
-        <span v-if="note.status === 'resolved'" class="text-(--marvis-success-fg)">resolved</span>
-        <span v-if="note.outdated" class="text-(--marvis-warning-fg)">outdated</span>
+        <span v-if="note.status === 'sent'" class="text-(--muster-text-secondary)">sent</span>
+        <span v-if="note.status === 'resolved'" class="text-(--muster-success-fg)">resolved</span>
+        <span v-if="note.outdated" class="text-(--muster-warning-fg)">outdated</span>
         <span class="ml-auto flex gap-2">
           <button
             v-if="note.status === 'sent' && !note.outdated && canResolve(note)"
             type="button"
-            class="marvis-button marvis-button-ghost marvis-button-xs"
+            class="muster-button muster-button-ghost muster-button-xs"
             :aria-label="`Mark note on line ${note.lineStart} as resolved`"
             @click="$emit('resolveNote', note.id)"
           >
@@ -71,7 +71,7 @@ function canResolve(note: ReviewNote): boolean {
           <button
             v-if="note.outdated"
             type="button"
-            class="marvis-button marvis-button-ghost marvis-button-xs"
+            class="muster-button muster-button-ghost muster-button-xs"
             :aria-label="`Accept note on line ${note.lineStart} even though the line changed`"
             @click="$emit('clearOutdated', note.id)"
           >
@@ -79,7 +79,7 @@ function canResolve(note: ReviewNote): boolean {
           </button>
           <button
             type="button"
-            class="marvis-button marvis-button-ghost marvis-button-xs"
+            class="muster-button muster-button-ghost muster-button-xs"
             :aria-label="`Edit note on line ${note.lineStart}`"
             @click="startEditing(note)"
           >
@@ -87,7 +87,7 @@ function canResolve(note: ReviewNote): boolean {
           </button>
           <button
             type="button"
-            class="marvis-button marvis-button-ghost marvis-button-xs review-note-delete"
+            class="muster-button muster-button-ghost muster-button-xs review-note-delete"
             :aria-label="`Delete note on line ${note.lineStart}`"
             @click="$emit('deleteNote', note.id)"
           >
@@ -100,24 +100,24 @@ function canResolve(note: ReviewNote): boolean {
           v-model="draft"
           rows="2"
           aria-label="Review note"
-          class="review-note-input mt-1 w-full resize-y border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none"
+          class="review-note-input mt-1 w-full resize-y border border-(--muster-border) bg-(--muster-bg-0) px-2 py-1 font-mono text-xs text-(--muster-text) outline-none"
           @keydown.esc.stop.prevent="editingId = null"
         />
         <div class="mt-1 flex gap-2">
-          <button type="submit" class="marvis-button marvis-button-tinted marvis-button-xs">Save</button>
-          <button type="button" class="marvis-button marvis-button-ghost marvis-button-xs" @click="editingId = null">
+          <button type="submit" class="muster-button muster-button-tinted muster-button-xs">Save</button>
+          <button type="button" class="muster-button muster-button-ghost muster-button-xs" @click="editingId = null">
             Cancel
           </button>
         </div>
       </form>
-      <p v-else class="mt-0.5 whitespace-pre-wrap text-(--marvis-text)">{{ note.content }}</p>
-      <p v-if="note.outdated" class="mt-0.5 text-[0.625rem] text-(--marvis-warning-fg)">
+      <p v-else class="mt-0.5 whitespace-pre-wrap text-(--muster-text)">{{ note.content }}</p>
+      <p v-if="note.outdated" class="mt-0.5 text-[0.625rem] text-(--muster-warning-fg)">
         The line this note points at changed. It is kept out of the review sent to the agent.
       </p>
       <p
         v-else-if="note.status === 'sent' && verdictFor(note)"
         class="mt-0.5 text-[0.625rem]"
-        :class="verdictFor(note)!.resolvable ? 'text-(--marvis-text-dim)' : 'text-(--marvis-text-faint)'"
+        :class="verdictFor(note)!.resolvable ? 'text-(--muster-text-dim)' : 'text-(--muster-text-faint)'"
       >
         {{ verdictFor(note)!.message }}
       </p>
@@ -128,6 +128,6 @@ function canResolve(note: ReviewNote): boolean {
 <style scoped>
 .review-note-delete:hover:not(:disabled),
 .review-note-delete:focus-visible {
-  color: var(--marvis-danger-fg);
+  color: var(--muster-danger-fg);
 }
 </style>

@@ -620,7 +620,7 @@ describe("FileDiff", () => {
     // The row height is handed to the stylesheet and the arithmetic from the same number, so a row
     // cannot end up taller than the padding that stands in for the rows that are not on screen.
     expect(wrapper.get('[aria-label="Diff contents"]').attributes("style")).toContain(
-      `--marvis-diff-row-height: ${row}px`,
+      `--muster-diff-row-height: ${row}px`,
     );
     expect(wrapper.get('[data-testid="diff-font-size"]').text()).toBe("20");
     wrapper.unmount();
@@ -1017,8 +1017,8 @@ describe("FileDiff", () => {
     const wrapper = mountDiff({ review: reviewApi([note()]) }, many.sender);
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="send-review"]').classes()).toContain("marvis-button-md");
-    expect(wrapper.get('[data-testid="send-target"]').classes()).toContain("marvis-select");
+    expect(wrapper.get('[data-testid="send-review"]').classes()).toContain("muster-button-md");
+    expect(wrapper.get('[data-testid="send-target"]').classes()).toContain("muster-select");
     expect(wrapper.find(".session-target-menu").exists()).toBe(true);
     expect(wrapper.get('[data-testid="send-target"]').attributes("title")).toBe(longTitle);
     const options = wrapper.findAll(SESSION_OPTION);

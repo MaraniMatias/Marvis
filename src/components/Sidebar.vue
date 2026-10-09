@@ -1258,7 +1258,7 @@ function rowLabel(item: WorkdirItem): string {
                  absolutely positioned, so the pane under them paints over anything left in place. -->
             <DropdownMenuPortal>
               <DropdownMenuContent
-                class="surface-popover marvis-menu group-menu"
+                class="surface-popover muster-menu group-menu"
                 side="bottom"
                 align="end"
                 :side-offset="4"
@@ -1499,7 +1499,7 @@ function rowLabel(item: WorkdirItem): string {
                    read from. -->
                 <ul
                   v-if="item.destinations.length && moveMenuFor === item.session.id"
-                  class="marvis-menu move-menu"
+                  class="muster-menu move-menu"
                   role="menu"
                   :aria-label="`Move ${item.title} to`"
                   @keydown.esc.prevent="moveMenuFor = null"
@@ -1663,7 +1663,7 @@ function rowLabel(item: WorkdirItem): string {
 .group-name {
   overflow: hidden;
   flex-shrink: 1;
-  color: var(--marvis-text);
+  color: var(--muster-text);
   font-size: 0.875rem;
   font-weight: 500;
   text-overflow: ellipsis;
@@ -1673,7 +1673,7 @@ function rowLabel(item: WorkdirItem): string {
 .group-path {
   overflow: hidden;
   flex: 0 1 auto;
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
   font-size: 0.6875rem;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -1717,8 +1717,8 @@ function rowLabel(item: WorkdirItem): string {
 
 /* The button stays lit while its menu is open, so the menu reads as belonging to it. */
 .group-heading.menu-open .group-more {
-  background: var(--marvis-control-hover);
-  color: var(--marvis-text);
+  background: var(--muster-control-hover);
+  color: var(--muster-text);
 }
 
 /* Nothing here positions the menu: reka hangs it below the button and portals it to the body, the
@@ -1736,11 +1736,11 @@ function rowLabel(item: WorkdirItem): string {
 
 .group-menu .menu-item .icon-xs {
   flex-shrink: 0;
-  color: var(--marvis-text-secondary);
+  color: var(--muster-text-secondary);
 }
 
 .group-menu-count {
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
   font-size: 0.6875rem;
 }
 
@@ -1749,12 +1749,12 @@ function rowLabel(item: WorkdirItem): string {
    arrows are on, which a CSS `:focus-visible` cannot see, because the menu moves that focus itself. */
 .group-menu .group-menu-danger {
   margin-top: 6px;
-  border-top: 1px solid var(--marvis-control-hover);
+  border-top: 1px solid var(--muster-control-hover);
 }
 
 .group-menu .group-menu-danger[data-highlighted]:not([data-disabled]),
 .group-menu .group-menu-danger:hover {
-  color: var(--marvis-danger-fg);
+  color: var(--muster-danger-fg);
 }
 
 /* ---------------------------------------------------------------------------------------------
@@ -1779,7 +1779,7 @@ function rowLabel(item: WorkdirItem): string {
    checkout and the selected one the selection has to win: this is context, and context never
    outranks a choice. */
 .workdir-checkouts.has-active .workdir-parent .workdir-icon {
-  color: var(--marvis-text-secondary);
+  color: var(--muster-text-secondary);
 }
 
 /* Hover and selection are told apart, and this is the whole of the panel's vocabulary for them.
@@ -1789,7 +1789,7 @@ function rowLabel(item: WorkdirItem): string {
    without reading the ink. The edge is an inset shadow, so it is drawn inside the row's box and
    cannot spill onto the group guide beside it. */
 .workdir-row:hover {
-  background: var(--marvis-el-hover);
+  background: var(--muster-el-hover);
 }
 
 /* Selection is one row in the whole panel, and it is whichever row carries `selected`: the terminal
@@ -1797,9 +1797,9 @@ function rowLabel(item: WorkdirItem): string {
    selected terminal is context, and it used to wear the same tint and the same blue edge, so the
    panel showed two rows claiming the selection at once. */
 .workdir-row.selected {
-  background: var(--marvis-el-selected);
-  color: var(--marvis-text);
-  box-shadow: inset 2px 0 0 var(--marvis-accent);
+  background: var(--muster-el-selected);
+  color: var(--muster-text);
+  box-shadow: inset 2px 0 0 var(--muster-accent);
 }
 
 /* There is deliberately NO rule here for the selected row's glyph. A rule would outrank every
@@ -1814,7 +1814,7 @@ function rowLabel(item: WorkdirItem): string {
    the empty stretch past the name is part of the click that folds the repository. It has no selected
    state, because what is selected is a checkout and that is the row underneath it. */
 .group-heading:hover {
-  background: var(--marvis-el-hover);
+  background: var(--muster-el-hover);
 }
 
 /* The panel's own type: the reference's 13px, which is a step under the interface's 14px because
@@ -1846,12 +1846,12 @@ function rowLabel(item: WorkdirItem): string {
   padding: 0;
   background: transparent;
   border: none;
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
   cursor: pointer;
 }
 
 .workdir-fold:hover {
-  color: var(--marvis-text);
+  color: var(--muster-text);
 }
 
 /* One turn, and the only motion in the panel. */
@@ -1885,7 +1885,7 @@ function rowLabel(item: WorkdirItem): string {
 }
 
 .grp:hover > .kids {
-  border-left-color: var(--marvis-border);
+  border-left-color: var(--muster-border);
 }
 
 .kids .workdir-row {
@@ -1927,7 +1927,7 @@ function rowLabel(item: WorkdirItem): string {
   flex: 0 1 auto;
   min-width: 0;
   overflow: hidden;
-  color: var(--marvis-text);
+  color: var(--muster-text);
   text-overflow: ellipsis;
 }
 
@@ -1953,7 +1953,7 @@ function rowLabel(item: WorkdirItem): string {
   flex: 0 2 auto;
   min-width: 6ch;
   overflow: hidden;
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
   font-size: 0.75rem;
   text-overflow: ellipsis;
 }
@@ -1964,7 +1964,7 @@ function rowLabel(item: WorkdirItem): string {
   width: 14px;
   height: 14px;
   flex-shrink: 0;
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
 }
 
 /* The whole branch row is one click, so the whole of it says so: the pointer belongs to the row
@@ -1981,17 +1981,17 @@ function rowLabel(item: WorkdirItem): string {
    unavailable: nothing behind it can be selected, and the single action beside it is the only
    thing the row still does. */
 .workdir-parent.missing .workdir-select {
-  color: var(--marvis-text-disabled);
+  color: var(--muster-text-disabled);
   cursor: not-allowed;
 }
 
 .workdir-parent.missing .workdir-icon,
 .workdir-parent.missing .nm {
-  color: var(--marvis-text-disabled);
+  color: var(--muster-text-disabled);
 }
 
 .workdir-select[aria-disabled="true"] {
-  color: var(--marvis-text-disabled);
+  color: var(--muster-text-disabled);
   cursor: not-allowed;
 }
 
@@ -2005,7 +2005,7 @@ function rowLabel(item: WorkdirItem): string {
   align-items: center;
   justify-content: flex-end;
   min-width: 20px;
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
   font-size: 0.6875rem;
   font-variant-numeric: tabular-nums;
 }
@@ -2017,7 +2017,7 @@ function rowLabel(item: WorkdirItem): string {
 }
 
 .workdir-end-error {
-  color: var(--marvis-danger-fg);
+  color: var(--muster-danger-fg);
 }
 
 /* The counts: monospaced, because they are read down a column of rows rather than one at a time,
@@ -2043,7 +2043,7 @@ function rowLabel(item: WorkdirItem): string {
 .workdir-diff {
   display: grid;
   grid-template-columns: 1fr 0px;
-  font-family: var(--marvis-font);
+  font-family: var(--muster-font);
   /* The cross's strip — 8px of row padding plus its own 20px — spent out of the figures' box so
      the name does not have to move for the cross to have somewhere to stand. */
   margin-right: 0;
@@ -2084,11 +2084,11 @@ function rowLabel(item: WorkdirItem): string {
 }
 
 .ad {
-  color: var(--marvis-content-added);
+  color: var(--muster-content-added);
 }
 
 .rm {
-  color: var(--marvis-content-removed);
+  color: var(--muster-content-removed);
 }
 
 /* The cross, out of flow at the trailing slot's own width so the row never reflows and the name
@@ -2116,7 +2116,7 @@ function rowLabel(item: WorkdirItem): string {
      DOM order anyway, and the cross is last, but stacking is stated rather than inferred so moving a
      child in the template cannot silently put the figures on top of the glyph. */
   z-index: 1;
-  background: var(--marvis-bg-1);
+  background: var(--muster-bg-1);
   opacity: 0;
   /* The same 0.18s the figures take to arrive, so the strip opens as one gesture rather than as a
      cross fading in over figures that are still growing. */
@@ -2129,11 +2129,11 @@ function rowLabel(item: WorkdirItem): string {
    through it, and the glyph is never left under the figures it is covering. The two rules are one
    selector apart and the selected one comes second, so a hovered selected row wears its own tint. */
 .workdir-row:hover > .workdir-close {
-  background: var(--marvis-el-hover);
+  background: var(--muster-el-hover);
 }
 
 .workdir-row.selected > .workdir-close {
-  background: var(--marvis-el-selected);
+  background: var(--muster-el-selected);
 }
 
 /* Visible whenever it is pointed at or focused — three ways, and no fourth. */
@@ -2154,31 +2154,31 @@ function rowLabel(item: WorkdirItem): string {
    The state, in the icon's colour. Five answers, and the words are in the row's accessible name.
    --------------------------------------------------------------------------------------------- */
 .state-working .workdir-icon {
-  color: var(--marvis-accent);
+  color: var(--muster-accent);
   animation: row-spin 1.1s linear infinite;
 }
 
 .state-waiting .workdir-icon {
-  color: var(--marvis-warning);
+  color: var(--muster-warning);
 }
 
 .state-failed .workdir-icon {
-  color: var(--marvis-danger-fg);
+  color: var(--muster-danger-fg);
 }
 
 .state-running .workdir-icon {
-  color: var(--marvis-success);
+  color: var(--muster-success);
 }
 
 /* An idle row without an OpenCode agent colour uses the panel's muted foreground — lifted one step
    from the faintest token, because this glyph also has to read on the selected row's tint. */
 .state-idle .workdir-icon {
-  color: var(--marvis-text-muted);
+  color: var(--muster-text-muted);
 }
 
 .state-idle.agent-tinted .workdir-icon,
 .state-working.agent-tinted .workdir-icon {
-  color: color-mix(in srgb, var(--agent-color) 75%, var(--marvis-text-muted));
+  color: color-mix(in srgb, var(--agent-color) 75%, var(--muster-text-muted));
 }
 
 @keyframes row-spin {
@@ -2206,7 +2206,7 @@ function rowLabel(item: WorkdirItem): string {
    --------------------------------------------------------------------------------------------- */
 .add-item,
 .new-item {
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
 }
 
 /* The panel's own last action is a button, and it is the one row that does not lead with a text
@@ -2232,7 +2232,7 @@ function rowLabel(item: WorkdirItem): string {
 .new-item:hover,
 .add-item:focus-visible,
 .new-item:focus-visible {
-  color: var(--marvis-text);
+  color: var(--muster-text);
 }
 
 /* The hairline the reference draws between the list and the panel's own last action. It runs the
@@ -2241,7 +2241,7 @@ function rowLabel(item: WorkdirItem): string {
 .sep {
   height: 1px;
   margin: 0;
-  background: var(--marvis-border);
+  background: var(--muster-border);
 }
 
 .sidebar-footer {
@@ -2271,12 +2271,12 @@ function rowLabel(item: WorkdirItem): string {
   padding: 0;
   background: transparent;
   border: none;
-  color: var(--marvis-text);
+  color: var(--muster-text);
   font: inherit;
 }
 
 .workdir-rename:focus-visible {
-  outline: 1px solid var(--marvis-control-focus);
+  outline: 1px solid var(--muster-control-focus);
   outline-offset: -1px;
 }
 
@@ -2294,18 +2294,18 @@ function rowLabel(item: WorkdirItem): string {
   padding: 0;
   background: transparent;
   border: none;
-  color: var(--marvis-text-secondary);
+  color: var(--muster-text-secondary);
   cursor: pointer;
 }
 
 .workdir-action:hover {
-  background: var(--marvis-control-hover);
-  color: var(--marvis-text);
+  background: var(--muster-control-hover);
+  color: var(--muster-text);
 }
 
 /* The drop target, and the row under a drag that is being held over the panel. */
 .workdir-checkouts.is-drop-target > .workdir-parent {
-  box-shadow: inset 2px 0 0 var(--marvis-accent);
+  box-shadow: inset 2px 0 0 var(--muster-accent);
 }
 
 .app-sidebar.is-terminal-dragging,
@@ -2337,9 +2337,9 @@ function rowLabel(item: WorkdirItem): string {
   /* An outline rather than a border, for one measurable reason: a border takes a pixel of the row's
      own content box, so the line's glyph would sit one pixel right of every terminal's — the exact
      misalignment the row classes were brought in to remove. Drawn inside the box, it costs nothing. */
-  outline: 1px dashed var(--marvis-accent);
+  outline: 1px dashed var(--muster-accent);
   outline-offset: -1px;
-  color: var(--marvis-accent);
+  color: var(--muster-accent);
   font-size: 0.6875rem;
 }
 
@@ -2365,9 +2365,9 @@ function rowLabel(item: WorkdirItem): string {
      than a banner drawn across it — and so it is never wider than the row it is a copy of. */
   max-width: 240px;
   overflow: hidden;
-  border: 1px solid var(--marvis-accent);
-  background: var(--marvis-control-bg);
-  color: var(--marvis-text);
+  border: 1px solid var(--muster-accent);
+  background: var(--muster-control-bg);
+  color: var(--muster-text);
   box-shadow: 0 4px 14px rgb(0 0 0 / 30%);
   pointer-events: none;
   white-space: nowrap;

@@ -313,9 +313,9 @@ watch(
     ] as const,
   ([host, fontSize, ligatures, cursorBlink]) => {
     if (!host) return;
-    host.style.setProperty("--marvis-editor-font-size", `${fontSize}px`);
-    host.style.setProperty("--marvis-editor-ligatures", ligatures ? "normal" : "none");
-    host.style.setProperty("--marvis-editor-cursor-blink", cursorBlink ? "running" : "paused");
+    host.style.setProperty("--muster-editor-font-size", `${fontSize}px`);
+    host.style.setProperty("--muster-editor-ligatures", ligatures ? "normal" : "none");
+    host.style.setProperty("--muster-editor-cursor-blink", cursorBlink ? "running" : "paused");
   },
   { immediate: true },
 );
@@ -956,7 +956,7 @@ function onMarkdownLink(event: MouseEvent) {
   <main class="document-pane relative flex min-h-0 flex-1 flex-col">
     <header class="document-toolbar flex h-10 shrink-0 items-center justify-between gap-3 border-b px-3">
       <div class="flex min-w-0 items-center gap-1.5">
-        <span class="min-w-0 truncate text-[0.6875rem] text-(--marvis-text-dim)" :title="path ?? undefined">{{
+        <span class="min-w-0 truncate text-[0.6875rem] text-(--muster-text-dim)" :title="path ?? undefined">{{
           path ?? ""
         }}</span>
         <button
@@ -986,7 +986,7 @@ function onMarkdownLink(event: MouseEvent) {
               class="text-menu-control gap-1 whitespace-nowrap"
             >
               {{ languageButtonLabel }}
-              <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
+              <ChevronDownIcon class="icon-xs shrink-0 text-(--muster-text-faint)" aria-hidden="true" />
             </PopoverTrigger>
             <!-- The list is portalled out of the pane for the same reason the crumb menus are: it
                  is absolutely positioned, and the Code view underneath it (CodeMirror's scroller
@@ -997,7 +997,7 @@ function onMarkdownLink(event: MouseEvent) {
                 side="bottom"
                 align="end"
                 :side-offset="4"
-                class="surface-popover marvis-menu language-menu w-56"
+                class="surface-popover muster-menu language-menu w-56"
               >
                 <input
                   v-model="languageSearch"
@@ -1008,11 +1008,11 @@ function onMarkdownLink(event: MouseEvent) {
                   aria-controls="language-options"
                   :aria-expanded="languageOpen"
                   placeholder="Search…"
-                  class="marvis-menu-search min-w-0 appearance-none"
+                  class="muster-menu-search min-w-0 appearance-none"
                 />
                 <!-- The rows scroll under the search rather than with it: there are grammars enough
                      to fill any reasonable column, and a filter that scrolls away is no filter. -->
-                <div id="language-options" role="listbox" aria-label="Grammar" class="marvis-menu-scroll flex flex-col">
+                <div id="language-options" role="listbox" aria-label="Grammar" class="muster-menu-scroll flex flex-col">
                   <button
                     v-for="row in languageRows"
                     :key="row.name ?? 'auto'"
@@ -1128,11 +1128,11 @@ function onMarkdownLink(event: MouseEvent) {
           <p
             v-if="markdownPreviewState === 'loading'"
             role="status"
-            class="px-3 pt-3 text-xs text-(--marvis-text-faint)"
+            class="px-3 pt-3 text-xs text-(--muster-text-faint)"
           >
             Rendering preview…
           </p>
-          <p v-if="markdownImageWarning" role="status" class="px-3 pt-3 text-xs text-(--marvis-warning-fg)">
+          <p v-if="markdownImageWarning" role="status" class="px-3 pt-3 text-xs text-(--muster-warning-fg)">
             Some Markdown images were missing, unsupported, or over the preview limits.
           </p>
           <!-- eslint-disable vue/no-v-html -- Content is generated and DOMPurify-sanitized in markdown-preview.ts. -->
@@ -1156,7 +1156,7 @@ function onMarkdownLink(event: MouseEvent) {
         </div>
         <div
           v-else-if="compactSource"
-          class="source-read flex py-2 font-mono text-[0.8125rem] leading-5 text-(--marvis-content-text)"
+          class="source-read flex py-2 font-mono text-[0.8125rem] leading-5 text-(--muster-content-text)"
           aria-label="Source code"
         >
           <pre class="source-line-number" aria-hidden="true">{{ sourceLineNumbers }}</pre>
@@ -1169,14 +1169,14 @@ function onMarkdownLink(event: MouseEvent) {
         </div>
         <div
           v-else
-          class="source-read min-w-max py-2 font-mono text-[0.8125rem] leading-5 text-(--marvis-content-text)"
+          class="source-read min-w-max py-2 font-mono text-[0.8125rem] leading-5 text-(--muster-content-text)"
           aria-label="Source code"
         >
           <div
             v-for="(line, index) in sourceLines"
             :key="index"
             class="flex min-h-5 whitespace-pre"
-            :class="{ 'marvis-changed-line': changedLineNumbers.has(index + 1) }"
+            :class="{ 'muster-changed-line': changedLineNumbers.has(index + 1) }"
           >
             <span class="source-line-number">{{ index + 1 }}</span>
             <!-- eslint-disable vue/no-v-html -- Line fragments come from one sanitized Shiki render. -->
@@ -1236,7 +1236,7 @@ function onMarkdownLink(event: MouseEvent) {
   height: 27px;
   padding: 0 8px;
   padding-left: 4px;
-  border-top: 1px solid var(--marvis-border);
+  border-top: 1px solid var(--muster-border);
 }
 
 .document-action {
@@ -1245,19 +1245,19 @@ function onMarkdownLink(event: MouseEvent) {
   justify-content: center;
   height: 26px;
   padding: 0 8px;
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
   cursor: pointer;
 }
 
 .document-action:hover:not(:disabled),
 .document-action:focus-visible {
-  color: var(--marvis-text);
-  background: var(--marvis-el-hover);
+  color: var(--muster-text);
+  background: var(--muster-el-hover);
 }
 
 .document-action[aria-label="Save"]:hover:not(:disabled),
 .document-action[aria-label="Save"]:focus-visible {
-  color: var(--marvis-accent);
+  color: var(--muster-accent);
 }
 
 .document-action:disabled {
@@ -1284,18 +1284,18 @@ function onMarkdownLink(event: MouseEvent) {
   max-width: 78ch;
   margin: 0 auto;
   padding: 2rem 1.5rem 3rem;
-  color: var(--marvis-content-text);
+  color: var(--muster-content-text);
   font-size: 0.875rem;
   line-height: 1.75;
 }
 
 .markdown-preview :deep(.markdown-front-matter) {
   margin: 0 0 2rem;
-  border: 1px solid var(--marvis-content-border);
-  border-radius: var(--marvis-radius);
-  background: var(--marvis-content-bg-1);
-  color: var(--marvis-content-text-muted);
-  font-family: var(--marvis-font);
+  border: 1px solid var(--muster-content-border);
+  border-radius: var(--muster-radius);
+  background: var(--muster-content-bg-1);
+  color: var(--muster-content-text-muted);
+  font-family: var(--muster-font);
   font-size: 0.75rem;
   line-height: 1.6;
 }
@@ -1311,7 +1311,7 @@ function onMarkdownLink(event: MouseEvent) {
 
 .markdown-preview :deep(.markdown-front-matter > summary) {
   padding: 0.55rem 0.75rem;
-  color: var(--marvis-content-text);
+  color: var(--muster-content-text);
   font-weight: 600;
 }
 
@@ -1339,18 +1339,18 @@ function onMarkdownLink(event: MouseEvent) {
 
 .markdown-preview :deep(.markdown-yaml-tree) {
   padding: 0.25rem 0.75rem 0.65rem;
-  border-top: 1px solid var(--marvis-content-border);
+  border-top: 1px solid var(--muster-content-border);
 }
 
 .markdown-preview :deep(.markdown-yaml-branch > summary) {
   padding: 0.2rem 0;
-  color: var(--marvis-content-text);
+  color: var(--muster-content-text);
 }
 
 .markdown-preview :deep(.markdown-yaml-children) {
   margin-left: 0.45rem;
   padding-left: 0.95rem;
-  border-left: 1px solid var(--marvis-content-border);
+  border-left: 1px solid var(--muster-content-border);
 }
 
 .markdown-preview :deep(.markdown-yaml-leaf) {
@@ -1362,29 +1362,29 @@ function onMarkdownLink(event: MouseEvent) {
 }
 
 .markdown-preview :deep(.markdown-yaml-key) {
-  color: var(--marvis-content-accent);
+  color: var(--muster-content-accent);
 }
 
 .markdown-preview :deep(.markdown-yaml-separator) {
-  color: var(--marvis-content-text-faint);
+  color: var(--muster-content-text-faint);
 }
 
 .markdown-preview :deep(.markdown-yaml-value) {
-  color: var(--marvis-content-text-muted);
+  color: var(--muster-content-text-muted);
   white-space: pre-wrap;
 }
 
 .markdown-preview :deep(.markdown-yaml-empty) {
   margin: 0;
   padding: 0.35rem 0;
-  color: var(--marvis-content-text-faint);
+  color: var(--muster-content-text-faint);
 }
 
 .markdown-preview :deep(h1),
 .markdown-preview :deep(h2),
 .markdown-preview :deep(h3) {
   margin: 2rem 0 0.65rem;
-  color: var(--marvis-content-text);
+  color: var(--muster-content-text);
   font-weight: 650;
   line-height: 1.3;
 }
@@ -1403,7 +1403,7 @@ function onMarkdownLink(event: MouseEvent) {
 .markdown-preview :deep(ol),
 .markdown-preview :deep(blockquote) {
   margin: 0.9rem 0;
-  color: var(--marvis-content-text);
+  color: var(--muster-content-text);
 }
 
 .markdown-preview :deep(ul),
@@ -1413,14 +1413,14 @@ function onMarkdownLink(event: MouseEvent) {
 }
 
 .markdown-preview :deep(a) {
-  color: var(--marvis-content-accent);
+  color: var(--muster-content-accent);
   text-decoration: underline;
 }
 
 .markdown-preview :deep(blockquote) {
-  border-left: 2px solid var(--marvis-content-border);
+  border-left: 2px solid var(--muster-content-border);
   padding-left: 0.75rem;
-  color: var(--marvis-content-text-muted);
+  color: var(--muster-content-text-muted);
 }
 
 .markdown-preview :deep(table) {
@@ -1432,7 +1432,7 @@ function onMarkdownLink(event: MouseEvent) {
 
 .markdown-preview :deep(th),
 .markdown-preview :deep(td) {
-  border: 1px solid var(--marvis-content-border);
+  border: 1px solid var(--muster-content-border);
   padding: 0.45rem 0.65rem;
   text-align: left;
 }
@@ -1440,9 +1440,9 @@ function onMarkdownLink(event: MouseEvent) {
 .markdown-preview :deep(pre) {
   overflow: auto;
   margin: 1.1rem 0;
-  border: 1px solid var(--marvis-content-border);
-  border-radius: var(--marvis-radius);
-  background: var(--marvis-content-bg-1);
+  border: 1px solid var(--muster-content-border);
+  border-radius: var(--muster-radius);
+  background: var(--muster-content-bg-1);
   padding: 0.85rem 1rem;
   font-size: 0.75rem;
   line-height: 1.65;
@@ -1450,9 +1450,9 @@ function onMarkdownLink(event: MouseEvent) {
 
 .markdown-preview :deep(code:not(pre code)) {
   border-radius: 0;
-  background: var(--marvis-content-bg-2);
+  background: var(--muster-content-bg-2);
   padding: 0.1rem 0.25rem;
-  font-family: var(--marvis-font);
+  font-family: var(--muster-font);
   font-size: 0.85em;
 }
 
@@ -1460,8 +1460,8 @@ function onMarkdownLink(event: MouseEvent) {
    color it carried. Unstyled runs of a code block have no span of their own, so the text color
    has to come from here or those runs fall back to the dimmer document color. */
 .markdown-preview :deep(pre code) {
-  color: var(--marvis-syntax-foreground);
-  font-family: var(--marvis-font);
+  color: var(--muster-syntax-foreground);
+  font-family: var(--muster-font);
 }
 
 .markdown-preview :deep(img) {
@@ -1476,10 +1476,10 @@ function onMarkdownLink(event: MouseEvent) {
   width: 3rem;
   flex-shrink: 0;
   user-select: none;
-  background: var(--marvis-content-bg-0);
-  border-right: 1px solid var(--marvis-content-border);
+  background: var(--muster-content-bg-0);
+  border-right: 1px solid var(--muster-content-border);
   padding-right: 0.75rem;
-  color: var(--marvis-content-text-faint);
+  color: var(--muster-content-text-faint);
   text-align: right;
   white-space: pre;
 }
@@ -1501,13 +1501,13 @@ function onMarkdownLink(event: MouseEvent) {
 .code-editor-host :deep(.cm-editor) {
   min-height: 100%;
   height: 100%;
-  background: var(--marvis-content-bg-0);
-  color: var(--marvis-content-text);
-  font-family: var(--marvis-font);
+  background: var(--muster-content-bg-0);
+  color: var(--muster-content-text);
+  font-family: var(--muster-font);
   /* The two preferences the shell cannot own: CodeMirror paints its own text, so the size and the
      ligatures come from the settings rather than from the type scale the rest of the app follows. */
-  font-size: var(--marvis-editor-font-size, 13px);
-  font-variant-ligatures: var(--marvis-editor-ligatures, normal);
+  font-size: var(--muster-editor-font-size, 13px);
+  font-variant-ligatures: var(--muster-editor-ligatures, normal);
 }
 
 /* CodeMirror's own focus ring, which is not ours to keep: its base theme draws a dotted outline
@@ -1526,14 +1526,14 @@ function onMarkdownLink(event: MouseEvent) {
    renames that layer. */
 .code-editor-host :deep(.cm-selectionBackground),
 .code-editor-host :deep(.cm-focused .cm-scroller .cm-selectionLayer .cm-selectionBackground) {
-  background-color: var(--marvis-selection);
+  background-color: var(--muster-selection);
 }
 
 .code-editor-host :deep(.cm-dropCursor) {
-  border-left-color: var(--marvis-content-accent);
+  border-left-color: var(--muster-content-accent);
 }
 
-/* The caret is a block, in the two colors the terminal draws its own with: `--marvis-cursor` for
+/* The caret is a block, in the two colors the terminal draws its own with: `--muster-cursor` for
    the cell, and the surface behind the glyph (the swap Konsole makes, and the same two tokens
    `marvisTerminalTheme` hands xterm.js.
 
@@ -1545,24 +1545,24 @@ function onMarkdownLink(event: MouseEvent) {
   border-left: none;
   margin-left: 0;
   width: 1ch;
-  background: var(--marvis-cursor);
+  background: var(--muster-cursor);
 }
 
 /* Blinking is CodeMirror's, on the whole layer, so the preference is not a second animation to
    write and keep in step with the first: it is the one that decides whether CodeMirror's runs. */
 .code-editor-host :deep(.cm-focused .cm-scroller .cm-cursorLayer) {
-  animation-play-state: var(--marvis-editor-cursor-blink, running);
+  animation-play-state: var(--muster-editor-cursor-blink, running);
 }
 
 .code-editor-host :deep(.cm-scroller) {
-  font-family: var(--marvis-font);
+  font-family: var(--muster-font);
   line-height: 1.55;
 }
 
 .code-editor-host :deep(.cm-gutters) {
-  background: var(--marvis-content-bg-0);
-  border-right: 1px solid var(--marvis-content-border);
-  color: var(--marvis-content-text-faint);
+  background: var(--muster-content-bg-0);
+  border-right: 1px solid var(--muster-content-border);
+  color: var(--muster-content-text-faint);
 }
 
 /* The right padding is the vertical scrollbar's and the bottom one is the horizontal's: macOS draws
@@ -1576,6 +1576,6 @@ function onMarkdownLink(event: MouseEvent) {
 
 .code-editor-host :deep(.cm-activeLineGutter),
 .code-editor-host :deep(.cm-activeLine) {
-  background: color-mix(in srgb, var(--marvis-content-border) 35%, transparent);
+  background: color-mix(in srgb, var(--muster-content-border) 35%, transparent);
 }
 </style>

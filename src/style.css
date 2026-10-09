@@ -1,11 +1,11 @@
 @import "tailwindcss";
 
 :root {
-  font-family: var(--marvis-font);
+  font-family: var(--muster-font);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
-  color: var(--marvis-text);
-  background: var(--marvis-bg-0);
+  color: var(--muster-text);
+  background: var(--muster-bg-0);
 }
 
 * {
@@ -24,7 +24,7 @@ body {
   min-width: 900px;
   min-height: 600px;
   overflow: hidden;
-  background: var(--marvis-bg-0);
+  background: var(--muster-bg-0);
 }
 
 /*
@@ -50,23 +50,23 @@ body {
 }
 
 :root {
-  font-size: calc(16px * var(--marvis-ui-font-scale, 1));
+  font-size: calc(16px * var(--muster-ui-font-scale, 1));
 }
 
 /* The mockup's shell is 14px. Without this the body inherits the browser's 16px, and every
    element that does not set its own size reads at a size the mockup never has. */
 .app-shell {
-  background: var(--marvis-bg-0);
+  background: var(--muster-bg-0);
   font-size: 0.875rem;
 }
 
 .window-header {
-  background: var(--marvis-bg-1);
-  border-color: var(--marvis-border);
+  background: var(--muster-bg-1);
+  border-color: var(--muster-border);
 }
 
 .window-breadcrumb {
-  color: var(--marvis-text-secondary);
+  color: var(--muster-text-secondary);
 }
 
 /* The controls a window without a frame of its own has to draw. They are full-height and
@@ -83,7 +83,7 @@ body {
   padding: 0;
   background: transparent;
   border: none;
-  color: var(--marvis-text-secondary);
+  color: var(--muster-text-secondary);
   cursor: pointer;
   transition:
     background-color 120ms ease,
@@ -91,24 +91,24 @@ body {
 }
 
 .window-control:hover {
-  background: var(--marvis-control-hover);
-  color: var(--marvis-text);
+  background: var(--muster-control-hover);
+  color: var(--muster-text);
 }
 
 .window-control-close:hover {
-  background: var(--marvis-danger);
-  color: var(--marvis-bg-1);
+  background: var(--muster-danger);
+  color: var(--muster-bg-1);
 }
 .app-sidebar,
 .app-inspector {
-  background: var(--marvis-bg-1);
+  background: var(--muster-bg-1);
 }
 
 .surface-popover {
-  background: var(--marvis-bg-2);
-  border: 1px solid var(--marvis-border-strong);
+  background: var(--muster-bg-2);
+  border: 1px solid var(--muster-border-strong);
   border-radius: 0;
-  box-shadow: var(--marvis-shadow);
+  box-shadow: var(--muster-shadow);
 }
 
 .app-splitter {
@@ -119,7 +119,7 @@ body {
   display: flex;
   flex-direction: column;
   overflow: hidden;
-  background: var(--marvis-bg-0);
+  background: var(--muster-bg-0);
 }
 
 /* The divider between two panels is not drawn at all.
@@ -173,7 +173,7 @@ body {
 .splitter-handle:hover::after,
 .splitter-handle:focus-visible::after,
 .splitter-handle[data-resize-handle-active]::after {
-  background: var(--marvis-accent);
+  background: var(--muster-accent);
 }
 
 /* A drag is the one moment the edge has to be followable rather than merely there. */
@@ -193,9 +193,9 @@ body {
   right: 0;
   bottom: 0;
   width: min(var(--inspector-width, 320px), calc(100vw - 80px)) !important;
-  border-left: 1px solid var(--marvis-border-strong);
-  background: var(--marvis-bg-2);
-  box-shadow: var(--marvis-shadow);
+  border-left: 1px solid var(--muster-border-strong);
+  background: var(--muster-bg-2);
+  box-shadow: var(--muster-shadow);
 }
 
 .split-inspector-drawer {
@@ -236,7 +236,7 @@ body {
   right: 0;
   bottom: 0;
   width: 2px;
-  background: var(--marvis-accent);
+  background: var(--muster-accent);
   content: "";
 }
 
@@ -245,20 +245,20 @@ body {
 }
 
 .diff-viewport {
-  background: var(--marvis-content-bg-0);
+  background: var(--muster-content-bg-0);
 }
 
 .document-toolbar {
-  border-color: var(--marvis-border);
+  border-color: var(--muster-border);
 }
 
 /* The mode group — View and Code — is a segmented control: one surface around its segments.
    The grammar picker beside it is a crumb that opens a list, not a segment of this, and
    carries none of it. */
 .document-mode-control {
-  border: 1px solid var(--marvis-border);
+  border: 1px solid var(--muster-border);
   border-radius: 0;
-  background: var(--marvis-control-bg);
+  background: var(--muster-control-bg);
   padding: 0.125rem;
 }
 
@@ -271,16 +271,16 @@ body {
 }
 
 .document-mode-button:hover:not([aria-pressed="true"]) {
-  background: var(--marvis-control-hover);
+  background: var(--muster-control-hover);
 }
 
 .document-mode-button:active {
-  background: var(--marvis-control-pressed);
+  background: var(--muster-control-pressed);
 }
 
 .document-mode-button[aria-pressed="true"] {
-  background: var(--marvis-control-pressed);
-  color: var(--marvis-text);
+  background: var(--muster-control-pressed);
+  color: var(--muster-text);
 }
 
 .pane-state {
@@ -288,12 +288,12 @@ body {
   min-height: 100%;
   place-items: center;
   padding: 1.5rem;
-  color: var(--marvis-text-dim);
+  color: var(--muster-text-dim);
   text-align: center;
 }
 
 .terminal-surface {
-  background: var(--marvis-content-bg-0);
+  background: var(--muster-content-bg-0);
 }
 
 .terminal-region {
@@ -306,7 +306,7 @@ body {
      and its own border against the last column, and every pixel of padding here is a row and a
      half-column the grid never gets. */
   padding: 0;
-  background: var(--marvis-content-bg-0);
+  background: var(--muster-content-bg-0);
 }
 
 /* Share the sub-cell space left by the fitted grid between opposite edges. The viewport still
@@ -323,7 +323,7 @@ body {
 /* xterm.js paints its own background inline, so the viewport and canvas both read the terminal's
    content background token instead of carrying a second color value. */
 .terminal-host .xterm-viewport {
-  background: var(--marvis-content-bg-0) !important;
+  background: var(--muster-content-bg-0) !important;
   overflow-y: auto;
 }
 
@@ -379,7 +379,7 @@ body {
 }
 
 .terminal-scrollbar:focus-visible {
-  outline: 1px solid var(--marvis-control-focus);
+  outline: 1px solid var(--muster-control-focus);
   outline-offset: -1px;
 }
 
@@ -388,7 +388,7 @@ body {
   right: 2px;
   width: 6px;
   border-radius: 0;
-  background: var(--marvis-scrollbar);
+  background: var(--muster-scrollbar);
   transition:
     width 120ms ease-out,
     right 120ms ease-out;
@@ -437,7 +437,7 @@ body {
 }
 
 .overlay-scrollbar:focus-visible {
-  outline: 1px solid var(--marvis-control-focus);
+  outline: 1px solid var(--muster-control-focus);
   outline-offset: -1px;
 }
 
@@ -446,7 +446,7 @@ body {
   right: 0;
   width: 3px;
   border-radius: 0;
-  background: var(--marvis-scrollbar);
+  background: var(--muster-scrollbar);
   transition: width 120ms ease-out;
 }
 
@@ -499,7 +499,7 @@ textarea {
 /* The window is opaque (B.4): no tauri transparency and no blur filters. */
 
 ::selection {
-  background: var(--marvis-selection);
+  background: var(--muster-selection);
 }
 
 /* Every scrollbar the browser draws is that one grey, which is the same grey the terminal's own
@@ -511,7 +511,7 @@ textarea {
    inert while the system draws its own overlay scrollbars and takes effect the moment it does not:
    System Settings > Appearance > Show scroll bars: Always. */
 * {
-  scrollbar-color: var(--marvis-scrollbar) transparent;
+  scrollbar-color: var(--muster-scrollbar) transparent;
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -46,8 +46,8 @@ describe("ConfirmDialog", () => {
   });
 
   it("paints the confirming button in the failure colour only when the answer is one", () => {
-    expect(dialog({ destructive: true }).get("button:last-of-type").classes()).toContain("marvis-button-danger");
-    expect(dialog().get("button:last-of-type").classes()).not.toContain("marvis-button-danger");
+    expect(dialog({ destructive: true }).get("button:last-of-type").classes()).toContain("muster-button-danger");
+    expect(dialog().get("button:last-of-type").classes()).not.toContain("muster-button-danger");
   });
 
   it("opens on the answer that does nothing, and Escape backs out", async () => {

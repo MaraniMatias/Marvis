@@ -532,8 +532,8 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
     <header v-if="!embedded" class="document-toolbar shrink-0 border-b px-3 py-1.5">
       <div class="flex items-start justify-between gap-3">
         <div class="min-w-0">
-          <p class="truncate text-[0.6875rem] text-(--marvis-text-dim)" :title="title">{{ title }}</p>
-          <p v-if="!path && branch" class="truncate text-[0.6875rem] text-(--marvis-text-faint)" :title="branch">
+          <p class="truncate text-[0.6875rem] text-(--muster-text-dim)" :title="title">{{ title }}</p>
+          <p v-if="!path && branch" class="truncate text-[0.6875rem] text-(--muster-text-faint)" :title="branch">
             {{ branch }}
           </p>
         </div>
@@ -557,7 +557,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
             data-testid="send-review"
             :disabled="!canSend"
             :aria-label="sender.target === 'markdown' ? 'Export as Markdown' : 'Send to opencode'"
-            class="marvis-button marvis-button-tinted marvis-button-md"
+            class="muster-button muster-button-tinted muster-button-md"
             @click="requestSend"
           >
             {{ sender.target === "markdown" ? "Export as Markdown" : "Send to opencode" }}
@@ -577,10 +577,10 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
               data-testid="send-target"
               aria-label="Send review to"
               :title="targetSession?.title"
-              class="marvis-select max-w-64"
+              class="muster-select max-w-64"
             >
               <span class="min-w-0 truncate">{{ targetSession?.title ?? "Choose a session" }}</span>
-              <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
+              <ChevronDownIcon class="icon-xs shrink-0 text-(--muster-text-faint)" aria-hidden="true" />
             </PopoverTrigger>
             <!-- Portalled for the same reason the document toolbar portals its own: the list is
                  absolutely positioned and the diff under it paints over anything left in place. -->
@@ -591,7 +591,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
                 side="bottom"
                 align="end"
                 :side-offset="4"
-                class="surface-popover marvis-menu session-target-menu"
+                class="surface-popover muster-menu session-target-menu"
               >
                 <input
                   v-if="searchesTargets"
@@ -599,9 +599,9 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
                   type="search"
                   aria-label="Search sessions"
                   placeholder="Search…"
-                  class="marvis-menu-search min-w-0 appearance-none"
+                  class="muster-menu-search min-w-0 appearance-none"
                 />
-                <div role="listbox" aria-label="Send review to" class="marvis-menu-scroll flex flex-col">
+                <div role="listbox" aria-label="Send review to" class="muster-menu-scroll flex flex-col">
                   <button
                     v-for="(row, index) in targetRows"
                     :key="row.id"
@@ -621,13 +621,13 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
               </PopoverContent>
             </PopoverPortal>
           </PopoverRoot>
-          <span v-if="canSend" data-testid="send-count" class="text-[0.6875rem] text-(--marvis-text-faint)">
+          <span v-if="canSend" data-testid="send-count" class="text-[0.6875rem] text-(--muster-text-faint)">
             {{ sendableNotes.length }} {{ sendableNotes.length === 1 ? "note" : "notes" }}
             <template v-if="draftCount">· {{ draftCount }} {{ draftCount === 1 ? "draft" : "drafts" }}</template>
           </span>
         </div>
         <div v-if="showBusyChoice" data-testid="send-busy" class="flex flex-col items-end gap-1">
-          <p class="max-w-prose text-right text-[0.6875rem] text-(--marvis-text-secondary)">
+          <p class="max-w-prose text-right text-[0.6875rem] text-(--muster-text-secondary)">
             “{{ targetSession?.title }}” is mid-task. Sending now lands inside its current turn; queueing waits for it
             to finish. This OpenCode version cannot cancel a turn.
           </p>
@@ -635,7 +635,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
             <button
               type="button"
               data-testid="send-now"
-              class="marvis-button marvis-button-tinted marvis-button-xs"
+              class="muster-button muster-button-tinted muster-button-xs"
               @click="sendNow(false)"
             >
               Send now
@@ -643,7 +643,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
             <button
               type="button"
               data-testid="send-queue"
-              class="marvis-button marvis-button-subtle marvis-button-xs"
+              class="muster-button muster-button-subtle muster-button-xs"
               @click="sendNow(true)"
             >
               Queue
@@ -651,7 +651,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
             <button
               type="button"
               data-testid="send-not-now"
-              class="marvis-button marvis-button-ghost marvis-button-xs"
+              class="muster-button muster-button-ghost muster-button-xs"
               @click="busyChoiceOpen = false"
             >
               Not now
@@ -661,12 +661,12 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
         <p
           v-if="sender.target === 'opencode' && sender.unfinishedRounds > 0"
           data-testid="unfinished-rounds"
-          class="text-[0.6875rem] text-(--marvis-text-faint)"
+          class="text-[0.6875rem] text-(--muster-text-faint)"
         >
           {{ sender.unfinishedRounds }} {{ sender.unfinishedRounds === 1 ? "round" : "rounds" }} not finished
         </p>
-        <label v-if="outdatedCount > 0" class="flex items-center gap-1.5 text-[0.6875rem] text-(--marvis-text-faint)">
-          <input v-model="includeOutdated" type="checkbox" class="marvis-check" data-testid="include-outdated" />
+        <label v-if="outdatedCount > 0" class="flex items-center gap-1.5 text-[0.6875rem] text-(--muster-text-faint)">
+          <input v-model="includeOutdated" type="checkbox" class="muster-check" data-testid="include-outdated" />
           Include {{ outdatedCount }} outdated {{ outdatedCount === 1 ? "note" : "notes" }}
         </label>
       </div>
@@ -720,7 +720,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
            so it stays drawn here rather than expiring in a toast. Same for the three below. -->
       <p v-else-if="diff?.isBinary" role="status" class="pane-state text-sm">Binary file; text diff is unavailable.</p>
       <p v-else-if="diff?.symlinkTarget !== undefined" role="status" class="pane-state text-sm">
-        Symlink target: <code class="break-all text-(--marvis-text)">{{ diff.symlinkTarget }}</code>
+        Symlink target: <code class="break-all text-(--muster-text)">{{ diff.symlinkTarget }}</code>
       </p>
       <p v-else-if="diff?.tooLarge" role="status" class="pane-state text-sm">
         This diff exceeds safe preview limits (100,000 lines, 10,000 hunks, 32 MiB, 4 KiB hunk headers, or 64 KiB per
@@ -730,13 +730,13 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
         No text hunks are available for this change.
       </p>
       <template v-else-if="(diffState === 'ready' || diffState === 'loading') && diff">
-        <p v-if="diff.large" class="shrink-0 px-3 py-1 text-[0.625rem] text-(--marvis-text-faint)">
+        <p v-if="diff.large" class="shrink-0 px-3 py-1 text-[0.625rem] text-(--muster-text-faint)">
           {{ diff.totalLines.toLocaleString() }} diff rows · virtualized view · click + note on two lines to comment on
           a range
         </p>
         <!-- How a range is picked is a fact about the diff, not about the file it is of, so the
              change-set stack is told once by the diff it is showing and not once per file in it. -->
-        <p v-else-if="!embedded" class="shrink-0 px-3 py-1 text-[0.625rem] text-(--marvis-text-faint)">
+        <p v-else-if="!embedded" class="shrink-0 px-3 py-1 text-[0.625rem] text-(--muster-text-faint)">
           Drag across line numbers to select a range, then click + note on its last line.
         </p>
         <div
@@ -744,8 +744,8 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
           class="diff-viewport min-h-0 flex-1 overflow-auto font-mono"
           :class="{ 'diff-viewport-windowed': diff.large && !diff.tooLarge }"
           :style="{
-            '--marvis-diff-row-height': `${diffRowPx}px`,
-            '--marvis-diff-font-size': `${diffFontSize}px`,
+            '--muster-diff-row-height': `${diffRowPx}px`,
+            '--muster-diff-font-size': `${diffFontSize}px`,
           }"
           aria-label="Diff contents"
           @scroll="onDiffScroll"
@@ -764,13 +764,13 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
                 <div
                   data-testid="large-diff-row"
                   class="group flex min-w-max items-center overflow-hidden whitespace-pre"
-                  :style="{ height: `${diffRowPx}px`, fontSize: 'var(--marvis-diff-font-size)' }"
+                  :style="{ height: `${diffRowPx}px`, fontSize: 'var(--muster-diff-font-size)' }"
                   :class="{ 'review-range-selected': isDraftSelection(row.line) }"
                 >
                   <button
                     v-if="row.line?.kind === 'hunk'"
                     type="button"
-                    class="diff-hunk h-full w-full truncate px-2 text-left text-(--marvis-content-accent)"
+                    class="diff-hunk h-full w-full truncate px-2 text-left text-(--muster-content-accent)"
                     :aria-expanded="!row.collapsed"
                     :title="row.line.text"
                     @click="toggleHunk(row.hunkIndex)"
@@ -778,20 +778,20 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
                     {{ row.collapsed ? "▸" : "▾" }} {{ row.line.text }}
                   </button>
                   <template v-else-if="row.line">
-                    <span class="w-12 shrink-0 select-none pr-2 text-right text-(--marvis-content-text-faint)">{{
+                    <span class="w-12 shrink-0 select-none pr-2 text-right text-(--muster-content-text-faint)">{{
                       row.line.oldLineNumber ?? ""
                     }}</span>
-                    <span class="w-12 shrink-0 select-none pr-2 text-right text-(--marvis-content-text-faint)">{{
+                    <span class="w-12 shrink-0 select-none pr-2 text-right text-(--muster-content-text-faint)">{{
                       row.line.newLineNumber ?? ""
                     }}</span>
                     <span
                       class="w-4 shrink-0 text-center"
                       :class="
                         row.line.kind === 'added'
-                          ? 'text-(--marvis-content-added)'
+                          ? 'text-(--muster-content-added)'
                           : row.line.kind === 'removed'
-                            ? 'text-(--marvis-content-removed)'
-                            : 'text-(--marvis-content-text-faint)'
+                            ? 'text-(--muster-content-removed)'
+                            : 'text-(--muster-content-text-faint)'
                       "
                       >{{ row.line.text[0] }}</span
                     >
@@ -799,24 +799,24 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
                       class="pr-4"
                       :class="
                         row.line.kind === 'added'
-                          ? 'text-(--marvis-content-added)'
+                          ? 'text-(--muster-content-added)'
                           : row.line.kind === 'removed'
-                            ? 'text-(--marvis-content-removed)'
-                            : 'text-(--marvis-content-text-muted)'
+                            ? 'text-(--muster-content-removed)'
+                            : 'text-(--muster-content-text-muted)'
                       "
                       >{{ row.line.text.slice(1) }}</code
                     >
                     <button
                       v-if="rowAnchor(row.line)"
                       type="button"
-                      class="marvis-button marvis-button-ghost marvis-button-xs ml-auto shrink-0 opacity-0 group-hover:opacity-100"
+                      class="muster-button muster-button-ghost muster-button-xs ml-auto shrink-0 opacity-0 group-hover:opacity-100"
                       :aria-label="`Add review note on line ${rowAnchor(row.line)!.line}`"
                       @click="openDraft(rowAnchor(row.line)!.side, rowAnchor(row.line)!.line)"
                     >
                       + note
                     </button>
                   </template>
-                  <span v-else class="px-2 text-(--marvis-content-text-muted)">{{
+                  <span v-else class="px-2 text-(--muster-content-text-muted)">{{
                     row.error || "Loading diff page…"
                   }}</span>
                 </div>
@@ -860,7 +860,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
                 class="diff-hunk diff-hunk-toggle"
                 :class="
                   isHunkCollapsed(index)
-                    ? 'w-full truncate border-b border-(--marvis-content-border) px-2 py-1 text-left font-mono text-[0.625rem]'
+                    ? 'w-full truncate border-b border-(--muster-content-border) px-2 py-1 text-left font-mono text-[0.625rem]'
                     : 'sr-only'
                 "
                 :aria-expanded="!isHunkCollapsed(index)"
@@ -919,8 +919,8 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
             </section>
           </div>
         </div>
-        <div v-if="notesWithoutLine.length > 0" class="shrink-0 border-t border-(--marvis-border)">
-          <p class="px-2 py-1 text-[0.625rem] text-(--marvis-text-faint)">
+        <div v-if="notesWithoutLine.length > 0" class="shrink-0 border-t border-(--muster-border)">
+          <p class="px-2 py-1 text-[0.625rem] text-(--muster-text-faint)">
             {{ notesWithoutLine.length }}
             {{ notesWithoutLine.length === 1 ? "note points" : "notes point" }} at a line that is no longer in this diff
           </p>
@@ -975,29 +975,29 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
   :deep(
     :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"]) .diff-style-root
   ) {
-  --diff-border--: var(--marvis-content-border);
-  --diff-plain-content--: var(--marvis-content-bg-0);
-  --diff-plain-lineNumber--: var(--marvis-content-bg-0);
-  --diff-expand-content--: var(--marvis-content-bg-1);
-  --diff-expand-lineNumber--: var(--marvis-content-bg-1);
-  --diff-empty-content--: var(--marvis-content-bg-0);
-  --diff-plain-lineNumber-color--: var(--marvis-content-text-faint);
-  --diff-expand-lineNumber-color--: var(--marvis-content-text-faint);
+  --diff-border--: var(--muster-content-border);
+  --diff-plain-content--: var(--muster-content-bg-0);
+  --diff-plain-lineNumber--: var(--muster-content-bg-0);
+  --diff-expand-content--: var(--muster-content-bg-1);
+  --diff-expand-lineNumber--: var(--muster-content-bg-1);
+  --diff-empty-content--: var(--muster-content-bg-0);
+  --diff-plain-lineNumber-color--: var(--muster-content-text-faint);
+  --diff-expand-lineNumber-color--: var(--muster-content-text-faint);
   /* An added or removed line is the diff's green and red, the same ones the stats use. */
-  --diff-add-content--: color-mix(in srgb, var(--marvis-content-added) 14%, var(--marvis-content-bg-0));
-  --diff-del-content--: color-mix(in srgb, var(--marvis-content-removed) 14%, var(--marvis-content-bg-0));
-  --diff-add-lineNumber--: color-mix(in srgb, var(--marvis-content-added) 22%, var(--marvis-content-bg-0));
-  --diff-del-lineNumber--: color-mix(in srgb, var(--marvis-content-removed) 22%, var(--marvis-content-bg-0));
-  --diff-add-content-highlight--: color-mix(in srgb, var(--marvis-content-added) 24%, var(--marvis-content-bg-0));
-  --diff-del-content-highlight--: color-mix(in srgb, var(--marvis-content-removed) 24%, var(--marvis-content-bg-0));
-  --diff-hunk-content--: var(--marvis-content-bg-1);
-  --diff-hunk-lineNumber--: var(--marvis-content-bg-1);
-  --diff-hunk-lineNumber-hover--: var(--marvis-content-accent);
-  --diff-hunk-content-color--: var(--marvis-content-text-muted);
-  --diff-add-widget--: var(--marvis-accent);
-  --diff-add-widget-color--: var(--marvis-accent-fg);
-  --diff-multi-select-bg: var(--marvis-accent);
-  --diff-multi-select-border: var(--marvis-accent);
+  --diff-add-content--: color-mix(in srgb, var(--muster-content-added) 14%, var(--muster-content-bg-0));
+  --diff-del-content--: color-mix(in srgb, var(--muster-content-removed) 14%, var(--muster-content-bg-0));
+  --diff-add-lineNumber--: color-mix(in srgb, var(--muster-content-added) 22%, var(--muster-content-bg-0));
+  --diff-del-lineNumber--: color-mix(in srgb, var(--muster-content-removed) 22%, var(--muster-content-bg-0));
+  --diff-add-content-highlight--: color-mix(in srgb, var(--muster-content-added) 24%, var(--muster-content-bg-0));
+  --diff-del-content-highlight--: color-mix(in srgb, var(--muster-content-removed) 24%, var(--muster-content-bg-0));
+  --diff-hunk-content--: var(--muster-content-bg-1);
+  --diff-hunk-lineNumber--: var(--muster-content-bg-1);
+  --diff-hunk-lineNumber-hover--: var(--muster-content-accent);
+  --diff-hunk-content-color--: var(--muster-content-text-muted);
+  --diff-add-widget--: var(--muster-accent);
+  --diff-add-widget-color--: var(--muster-accent-fg);
+  --diff-multi-select-bg: var(--muster-accent);
+  --diff-multi-select-border: var(--muster-accent);
 }
 
 .diff-viewport :deep(.diff-add-widget),
@@ -1019,7 +1019,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
   :deep(
     :is(.diff-tailwindcss-wrapper[data-theme="dark"], .diff-tailwindcss-wrapper[data-theme="light"]) [data-state="hunk"]
   ) {
-  color: var(--marvis-content-text);
+  color: var(--muster-content-text);
 }
 
 /* The syntax inside a diff is highlighted by the library's own highlight.js, which ships a GitHub
@@ -1032,7 +1032,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       .hljs
   ) {
-  color: var(--marvis-syntax-foreground);
+  color: var(--muster-syntax-foreground);
   background: transparent;
 }
 
@@ -1049,7 +1049,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
         .hljs-variable.language_
       )
   ) {
-  color: var(--marvis-syntax-token-keyword);
+  color: var(--muster-syntax-token-keyword);
 }
 
 .diff-viewport
@@ -1058,7 +1058,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       :is(.hljs-title, .hljs-title.class_, .hljs-title.class_.inherited__, .hljs-title.function_, .hljs-section)
   ) {
-  color: var(--marvis-syntax-token-function);
+  color: var(--muster-syntax-token-function);
 }
 
 .diff-viewport
@@ -1080,7 +1080,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
         .hljs-symbol
       )
   ) {
-  color: var(--marvis-syntax-token-constant);
+  color: var(--muster-syntax-token-constant);
 }
 
 .diff-viewport
@@ -1089,7 +1089,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       :is(.hljs-regexp, .hljs-string, .hljs-meta .hljs-string)
   ) {
-  color: var(--marvis-syntax-token-string);
+  color: var(--muster-syntax-token-string);
 }
 
 .diff-viewport
@@ -1098,7 +1098,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       :is(.hljs-comment, .hljs-code, .hljs-formula)
   ) {
-  color: var(--marvis-syntax-token-comment);
+  color: var(--muster-syntax-token-comment);
 }
 
 .diff-viewport
@@ -1107,7 +1107,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       :is(.hljs-name, .hljs-selector-tag, .hljs-selector-pseudo)
   ) {
-  color: var(--marvis-syntax-token-string-expression);
+  color: var(--muster-syntax-token-string-expression);
 }
 
 .diff-viewport
@@ -1116,7 +1116,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       :is(.hljs-char.escape_, .hljs-link, .hljs-params, .hljs-property, .hljs-punctuation, .hljs-tag, .hljs-quote)
   ) {
-  color: var(--marvis-syntax-token-punctuation);
+  color: var(--muster-syntax-token-punctuation);
 }
 
 .diff-viewport
@@ -1125,7 +1125,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       .hljs-addition
   ) {
-  color: var(--marvis-syntax-token-inserted);
+  color: var(--muster-syntax-token-inserted);
   background-color: transparent;
 }
 
@@ -1135,7 +1135,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       .hljs-deletion
   ) {
-  color: var(--marvis-syntax-token-deleted);
+  color: var(--muster-syntax-token-deleted);
   background-color: transparent;
 }
 
@@ -1159,7 +1159,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       :is(.hljs-function, .hljs-title.function_)
   ) {
-  color: var(--marvis-syntax-token-function);
+  color: var(--muster-syntax-token-function);
 }
 
 .diff-viewport
@@ -1168,7 +1168,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       .hljs-class
   ) {
-  color: var(--marvis-syntax-token-string-expression);
+  color: var(--muster-syntax-token-string-expression);
 }
 
 .diff-viewport
@@ -1177,7 +1177,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       .hljs-subst
   ) {
-  color: var(--marvis-syntax-token-string);
+  color: var(--muster-syntax-token-string);
 }
 
 .diff-viewport
@@ -1186,7 +1186,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
       .diff-line-syntax-raw
       .hljs-bullet
   ) {
-  color: var(--marvis-syntax-token-punctuation);
+  color: var(--muster-syntax-token-punctuation);
 }
 
 .diff-viewport
@@ -1218,13 +1218,13 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
 
 /* Hunk headers sit on the change's own surface, as the mockup's group rows do. */
 .diff-hunk {
-  background: var(--marvis-content-bg-1);
-  color: var(--marvis-content-text-muted);
+  background: var(--muster-content-bg-1);
+  color: var(--muster-content-text-muted);
 }
 
 .diff-hunk:hover {
-  background: var(--marvis-content-bg-2);
-  color: var(--marvis-content-text);
+  background: var(--muster-content-bg-2);
+  color: var(--muster-content-text);
 }
 
 /**
@@ -1247,7 +1247,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
   right: 4px;
   z-index: 1;
   width: auto;
-  height: var(--marvis-diff-row-height);
+  height: var(--muster-diff-row-height);
   padding: 0 6px;
   margin: 0;
   overflow: visible;
@@ -1255,17 +1255,17 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
   clip-path: none;
   white-space: nowrap;
   pointer-events: auto;
-  border: 1px solid var(--marvis-content-border);
+  border: 1px solid var(--muster-content-border);
   border-radius: 3px;
-  background: var(--marvis-content-bg-2);
-  color: var(--marvis-text);
+  background: var(--muster-content-bg-2);
+  color: var(--muster-text);
   font-family: inherit;
   font-size: 0.625rem;
 }
 
 /* One row per changed file in the whole change set, and its diff under it. */
 .diff-file + .diff-file {
-  border-top: 1px solid var(--marvis-content-border);
+  border-top: 1px solid var(--muster-content-border);
 }
 
 .diff-file-header {
@@ -1277,7 +1277,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
   padding: 2px 6px;
   border: none;
   background: transparent;
-  color: var(--marvis-text);
+  color: var(--muster-text);
   font-family: inherit;
   font-size: 0.6875rem;
   text-align: left;
@@ -1287,7 +1287,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
 }
 
 .diff-file-header:hover {
-  background: var(--marvis-control-hover);
+  background: var(--muster-control-hover);
 }
 
 /**
@@ -1297,30 +1297,30 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
  */
 .review-range-selected {
   position: relative;
-  background: color-mix(in srgb, var(--marvis-content-accent) 12%, var(--marvis-content-bg-0));
-  box-shadow: inset 3px 0 0 var(--marvis-content-accent);
+  background: color-mix(in srgb, var(--muster-content-accent) 12%, var(--muster-content-bg-0));
+  box-shadow: inset 3px 0 0 var(--muster-content-accent);
 }
 
 .diff-status {
   flex-shrink: 0;
   font-size: 0.625rem;
-  color: var(--marvis-text-secondary);
+  color: var(--muster-text-secondary);
 }
 
 .diff-status[data-status="A"] {
-  color: var(--marvis-success-fg);
+  color: var(--muster-success-fg);
 }
 
 .diff-status[data-status="D"] {
-  color: var(--marvis-danger-fg);
+  color: var(--muster-danger-fg);
 }
 
 .diff-status[data-status="U"] {
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
 }
 
 .diff-file-header:hover .diff-status[data-status="U"] {
-  color: var(--marvis-text);
+  color: var(--muster-text);
 }
 
 /* A file inside the change-set stack scrolls on its own, so the virtual window of a large diff has
@@ -1330,7 +1330,7 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
    has nothing to do with how tall the window is, and `vh` made the same file twice as tall on a
    large display as on a small one. */
 .diff-file :deep(.diff-viewport-windowed) {
-  max-height: calc(var(--marvis-diff-row-height) * 24);
+  max-height: calc(var(--muster-diff-row-height) * 24);
 }
 
 /* The row height the virtual window's arithmetic is in, which is the whole reason the library's own
@@ -1338,6 +1338,6 @@ function toggleHunkFromLibrary(event: MouseEvent, index: number) {
    counts, so a virtualized diff drifts away from the line the user is looking at as they scroll.
    The selector is one class longer than the library's for the reason the rules above explain. */
 .diff-viewport :deep(.diff-tailwindcss-wrapper .diff-table-body) {
-  line-height: var(--marvis-diff-row-height);
+  line-height: var(--muster-diff-row-height);
 }
 </style>

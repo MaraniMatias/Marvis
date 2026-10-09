@@ -78,14 +78,14 @@ function submit() {
 
 <template>
   <form
-    class="m-1 border border-(--marvis-border) bg-(--marvis-bg-1) p-2 text-xs"
+    class="m-1 border border-(--muster-border) bg-(--muster-bg-1) p-2 text-xs"
     aria-label="New review note"
     @submit.prevent="submit"
     @keydown.esc.stop.prevent="$emit('cancel')"
   >
     <!-- Where the note ends was decided by the +; where it starts is decided here, and it is
          offered from the moment the note opens rather than after a range exists. -->
-    <p class="mb-1 flex items-center gap-1.5 font-mono text-[0.625rem] text-(--marvis-text-faint)">
+    <p class="mb-1 flex items-center gap-1.5 font-mono text-[0.625rem] text-(--muster-text-faint)">
       <span class="shrink-0">{{ label }}</span>
       <SelectControl
         :model-value="String(start)"
@@ -102,17 +102,17 @@ function submit() {
       rows="2"
       aria-label="Review note"
       placeholder="What should change here?"
-      class="review-note-input w-full resize-y border border-(--marvis-border) bg-(--marvis-bg-0) px-2 py-1 font-mono text-xs text-(--marvis-text) outline-none"
+      class="review-note-input w-full resize-y border border-(--muster-border) bg-(--muster-bg-0) px-2 py-1 font-mono text-xs text-(--muster-text) outline-none"
     />
-    <p v-if="isRange" class="mt-1 text-[0.625rem] text-(--marvis-text-faint)">
+    <p v-if="isRange" class="mt-1 text-[0.625rem] text-(--muster-text-faint)">
       This note covers the selected lines. Cancel to start over.
     </p>
-    <p v-if="error" role="alert" class="mt-1 text-[0.625rem] text-(--marvis-danger-fg)">{{ error }}</p>
+    <p v-if="error" role="alert" class="mt-1 text-[0.625rem] text-(--muster-danger-fg)">{{ error }}</p>
     <div class="mt-1 flex items-center gap-2">
-      <button type="submit" class="marvis-button marvis-button-tinted marvis-button-xs" :disabled="!content.trim()">
+      <button type="submit" class="muster-button muster-button-tinted muster-button-xs" :disabled="!content.trim()">
         Save note
       </button>
-      <button type="button" class="marvis-button marvis-button-ghost marvis-button-xs" @click="$emit('cancel')">
+      <button type="button" class="muster-button muster-button-ghost muster-button-xs" @click="$emit('cancel')">
         Cancel
       </button>
     </div>
@@ -128,7 +128,7 @@ function submit() {
 .review-range-start {
   min-height: 20px;
   max-width: 22ch;
-  border-color: var(--marvis-control-border-strong);
+  border-color: var(--muster-control-border-strong);
   padding: 0 6px;
   font-family: inherit;
   font-size: 0.625rem;

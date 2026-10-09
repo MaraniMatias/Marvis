@@ -17,7 +17,7 @@ describe("source highlighter", () => {
     // palette of its own: it is what would stop a file from repainting when the theme changes.
     const lines = await highlightSource("src/tokens.ts", "const answer: number = 42;\n// note");
 
-    expect(lines?.join("")).toContain("var(--marvis-syntax-token-keyword)");
+    expect(lines?.join("")).toContain("var(--muster-syntax-token-keyword)");
     expect(lines?.join("")).not.toMatch(/#[0-9a-f]{6}\b/i);
   });
 
@@ -57,9 +57,9 @@ describe("source highlighter", () => {
     // If the indirection ever drops that name, this is the file that goes back to plain.
     const lines = await highlightSource(".gitignore", "# deps\nnode_modules\n!.env.example");
     expect(lines).toHaveLength(3);
-    expect(lines?.[0]).toContain("var(--marvis-syntax-token-comment)");
+    expect(lines?.[0]).toContain("var(--muster-syntax-token-comment)");
     // `!.env.example` re-includes a pattern, so it must not be painted as the `#` comment above.
-    expect(lines?.[2]).not.toContain("var(--marvis-syntax-token-comment)");
+    expect(lines?.[2]).not.toContain("var(--muster-syntax-token-comment)");
 
     const env = await highlightSource(".env.local", "# local\nNODE_ENV=development");
     expect(env).toHaveLength(2);
@@ -73,7 +73,7 @@ describe("source highlighter", () => {
     // that goes back to plain if the name table loses an entry.
     const lines = await highlightSource(".zshrc", "# prompt\nexport EDITOR=nvim");
     expect(lines).toHaveLength(2);
-    expect(lines?.[0]).toContain("var(--marvis-syntax-token-comment)");
+    expect(lines?.[0]).toContain("var(--muster-syntax-token-comment)");
     expect(lines?.[1]).toContain("color:");
   });
 
@@ -236,7 +236,7 @@ describe("source highlighter", () => {
     const lines = await highlightSourceAs("rust", source);
     expect(lines).toHaveLength(3);
     expect(lines?.[0]).toContain('class="line"');
-    expect(lines?.[0]).toContain("var(--marvis-syntax-token-keyword)");
+    expect(lines?.[0]).toContain("var(--muster-syntax-token-keyword)");
   });
 
   it("keeps the sanitizer a barrier against script, handlers and url(javascript:)", () => {

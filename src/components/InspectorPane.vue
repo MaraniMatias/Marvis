@@ -836,7 +836,7 @@ watch(
   display: flex;
   align-items: stretch;
   flex-shrink: 0;
-  border-bottom: 1px solid var(--marvis-border);
+  border-bottom: 1px solid var(--muster-border);
 }
 
 .details-tab {
@@ -848,7 +848,7 @@ watch(
   border: none;
   border-bottom: 1px solid transparent;
   background: transparent;
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
   font-family: inherit;
   font-size: 0.6875rem;
   letter-spacing: 0.02em;
@@ -860,26 +860,26 @@ watch(
    transparent rest and accent underline, and takes the hover and pressed states on top. A
    resting surface here would break the strip into separate blocks. */
 .details-tab:hover {
-  color: var(--marvis-text);
+  color: var(--muster-text);
   background: transparent;
 }
 
 .details-tab:active {
-  background: var(--marvis-control-pressed);
-  color: var(--marvis-text);
+  background: var(--muster-control-pressed);
+  color: var(--muster-text);
 }
 
 .details-tab:active .details-tab-count {
-  color: var(--marvis-text);
+  color: var(--muster-text);
 }
 
 .details-tab[aria-selected="true"] {
-  color: var(--marvis-text);
-  border-bottom-color: var(--marvis-accent);
+  color: var(--muster-text);
+  border-bottom-color: var(--muster-accent);
 }
 
 .details-tab-count {
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
   font-size: 0.625rem;
 }
 
@@ -906,7 +906,7 @@ watch(
   position: sticky;
   top: -4px;
   z-index: 2;
-  background: var(--marvis-bg-0);
+  background: var(--muster-bg-0);
 }
 
 .details-scroll {
@@ -937,7 +937,7 @@ watch(
   padding: 3px 8px;
   border: none;
   background: transparent;
-  color: var(--marvis-text-secondary);
+  color: var(--muster-text-secondary);
   font-family: inherit;
   font-size: 13px;
   line-height: calc(var(--tree-row-height) - 6px);
@@ -950,8 +950,8 @@ watch(
    again: the subtle surface for the row being acted on, a different one plus a two-pixel accent
    edge for the row being chosen. */
 .file-row:hover {
-  background: var(--marvis-el-hover);
-  color: var(--marvis-text);
+  background: var(--muster-el-hover);
+  color: var(--muster-text);
 }
 
 /* What is open, or the change under review, is the one row with a surface (E.3).
@@ -960,13 +960,13 @@ watch(
    cannot spill onto the gutter a row is indented into, so a deep row's accent still starts at the
    panel's own edge instead of one level in. */
 .file-row.is-selected {
-  background: var(--marvis-el-selected);
-  color: var(--marvis-text);
-  box-shadow: inset 2px 0 0 var(--marvis-accent);
+  background: var(--muster-el-selected);
+  color: var(--muster-text);
+  box-shadow: inset 2px 0 0 var(--muster-accent);
 }
 
 .file-folder {
-  color: var(--marvis-text);
+  color: var(--muster-text);
 }
 
 .folder-toggle,
@@ -1013,7 +1013,7 @@ watch(
 .file-icon,
 .chevron {
   flex-shrink: 0;
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
 }
 
 /* The fold, in a fixed 16px slot, so a folder's glyph and a file's icon land on one column the way
@@ -1038,7 +1038,7 @@ watch(
 
 /* Folder states and watch errors, one line tall like any other row */
 .file-note {
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
   cursor: default;
 }
 
@@ -1049,28 +1049,28 @@ watch(
 .file-status {
   flex-shrink: 0;
   font-size: 0.625rem;
-  color: var(--marvis-text-secondary);
+  color: var(--muster-text-secondary);
 }
 
 .file-status[data-status="M"] {
-  color: var(--marvis-text);
+  color: var(--muster-text);
 }
 
 .file-status[data-status="A"] {
-  color: var(--marvis-success-fg);
+  color: var(--muster-success-fg);
 }
 
 .file-status[data-status="D"] {
-  color: var(--marvis-danger-fg);
+  color: var(--muster-danger-fg);
 }
 
 .file-status[data-status="U"] {
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
 }
 
 .file-row:hover .file-status[data-status="U"],
 .file-row.is-selected .file-status[data-status="U"] {
-  color: var(--marvis-text);
+  color: var(--muster-text);
 }
 
 .details-all-changes {
@@ -1079,11 +1079,11 @@ watch(
 }
 
 .file-row.new-item {
-  color: var(--marvis-text-dim);
+  color: var(--muster-text-dim);
 }
 
 .file-row.new-item:hover {
-  color: var(--marvis-text);
+  color: var(--muster-text);
 }
 
 /* The group header is a heading and not a row, and says so by not taking one: no surface at rest, no
@@ -1095,7 +1095,7 @@ watch(
   align-items: center;
   height: var(--tree-row-height);
   padding: 0 8px;
-  color: var(--marvis-text-faint);
+  color: var(--muster-text-faint);
   font-size: 13px;
   line-height: var(--tree-row-height);
   letter-spacing: 0.02em;

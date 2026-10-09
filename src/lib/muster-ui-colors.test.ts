@@ -5,7 +5,7 @@ import { highlighter } from "@git-diff-view/vue";
 import type { DiffAST } from "@git-diff-view/vue";
 import { describe, expect, it } from "vitest";
 
-const stylesheet = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "marvis.css"), "utf8");
+const stylesheet = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "muster.css"), "utf8");
 const sidebarStyles = readFileSync(
   join(dirname(fileURLToPath(import.meta.url)), "..", "components", "Sidebar.vue"),
   "utf8",
@@ -91,74 +91,74 @@ const themes = {
 };
 const referenceSwatches = {
   dark: {
-    "--marvis-bg-0": "#16181d",
-    "--marvis-bg-1": "#1c1f26",
-    "--marvis-bg-2": "#242830",
-    "--marvis-border": "#2c313b",
-    "--marvis-border-strong": "#3a404c",
-    "--marvis-text": "#d7dae0",
-    "--marvis-text-muted": "#8b909c",
-    "--marvis-text-disabled": "#565b67",
-    "--marvis-el": "#242830",
-    "--marvis-el-hover": "#2d323c",
-    "--marvis-el-active": "#363c48",
-    "--marvis-el-selected": "#2c3b57",
-    "--marvis-accent": "#5b97ff",
-    "--marvis-accent-fg": "#0d1626",
-    "--marvis-accent-tint": "#1f2f4d",
-    "--marvis-danger": "#f07178",
-    "--marvis-success": "#5fc98a",
-    "--marvis-warning": "#e3b341",
-    "--marvis-focus": "#5b97ff",
+    "--muster-bg-0": "#16181d",
+    "--muster-bg-1": "#1c1f26",
+    "--muster-bg-2": "#242830",
+    "--muster-border": "#2c313b",
+    "--muster-border-strong": "#3a404c",
+    "--muster-text": "#d7dae0",
+    "--muster-text-muted": "#8b909c",
+    "--muster-text-disabled": "#565b67",
+    "--muster-el": "#242830",
+    "--muster-el-hover": "#2d323c",
+    "--muster-el-active": "#363c48",
+    "--muster-el-selected": "#2c3b57",
+    "--muster-accent": "#5b97ff",
+    "--muster-accent-fg": "#0d1626",
+    "--muster-accent-tint": "#1f2f4d",
+    "--muster-danger": "#f07178",
+    "--muster-success": "#5fc98a",
+    "--muster-warning": "#e3b341",
+    "--muster-focus": "#5b97ff",
   },
   light: {
-    "--marvis-bg-0": "#f6f6f7",
-    "--marvis-bg-1": "#ffffff",
-    "--marvis-bg-2": "#ffffff",
-    "--marvis-border": "#e1e2e5",
-    "--marvis-border-strong": "#c9cbd0",
-    "--marvis-text": "#1c1e23",
-    "--marvis-text-muted": "#6b7080",
-    "--marvis-text-disabled": "#a9adb8",
-    "--marvis-el": "#eef0f2",
-    "--marvis-el-hover": "#e4e6ea",
-    "--marvis-el-active": "#d9dce2",
-    "--marvis-el-selected": "#d6e4ff",
-    "--marvis-accent": "#2f6fed",
-    "--marvis-accent-fg": "#ffffff",
-    "--marvis-accent-tint": "#e3ecff",
-    "--marvis-danger": "#d63b3b",
-    "--marvis-success": "#1f9d55",
-    "--marvis-warning": "#c98a0a",
-    "--marvis-focus": "#2f6fed",
+    "--muster-bg-0": "#f6f6f7",
+    "--muster-bg-1": "#ffffff",
+    "--muster-bg-2": "#ffffff",
+    "--muster-border": "#e1e2e5",
+    "--muster-border-strong": "#c9cbd0",
+    "--muster-text": "#1c1e23",
+    "--muster-text-muted": "#6b7080",
+    "--muster-text-disabled": "#a9adb8",
+    "--muster-el": "#eef0f2",
+    "--muster-el-hover": "#e4e6ea",
+    "--muster-el-active": "#d9dce2",
+    "--muster-el-selected": "#d6e4ff",
+    "--muster-accent": "#2f6fed",
+    "--muster-accent-fg": "#ffffff",
+    "--muster-accent-tint": "#e3ecff",
+    "--muster-danger": "#d63b3b",
+    "--muster-success": "#1f9d55",
+    "--muster-warning": "#c98a0a",
+    "--muster-focus": "#2f6fed",
   },
 };
 const referenceContentSwatches = {
   dark: {
-    "--marvis-content-bg-0": "#222436",
-    "--marvis-content-bg-1": "#2f343e",
-    "--marvis-content-bg-2": "#363c46",
-    "--marvis-content-border": "#464b57",
-    "--marvis-content-text": "#dce0e5",
-    "--marvis-content-text-muted": "#a9afbc",
-    "--marvis-content-text-faint": "#767d8d",
-    "--marvis-content-accent": "#74ade8",
-    "--marvis-content-added": "#a1c181",
-    "--marvis-content-removed": "#d97f84",
-    "--marvis-selection": "#74ade83d",
+    "--muster-content-bg-0": "#222436",
+    "--muster-content-bg-1": "#2f343e",
+    "--muster-content-bg-2": "#363c46",
+    "--muster-content-border": "#464b57",
+    "--muster-content-text": "#dce0e5",
+    "--muster-content-text-muted": "#a9afbc",
+    "--muster-content-text-faint": "#767d8d",
+    "--muster-content-accent": "#74ade8",
+    "--muster-content-added": "#a1c181",
+    "--muster-content-removed": "#d97f84",
+    "--muster-selection": "#74ade83d",
   },
   light: {
-    "--marvis-content-bg-0": "#fafafa",
-    "--marvis-content-bg-1": "#ebebec",
-    "--marvis-content-bg-2": "#dfdfe0",
-    "--marvis-content-border": "#c9c9ca",
-    "--marvis-content-text": "#242529",
-    "--marvis-content-text-muted": "#58585a",
-    "--marvis-content-text-faint": "#8a8b8f",
-    "--marvis-content-accent": "#455fd0",
-    "--marvis-content-added": "#3f7a35",
-    "--marvis-content-removed": "#b8453a",
-    "--marvis-selection": "#455fd03d",
+    "--muster-content-bg-0": "#fafafa",
+    "--muster-content-bg-1": "#ebebec",
+    "--muster-content-bg-2": "#dfdfe0",
+    "--muster-content-border": "#c9c9ca",
+    "--muster-content-text": "#242529",
+    "--muster-content-text-muted": "#58585a",
+    "--muster-content-text-faint": "#8a8b8f",
+    "--muster-content-accent": "#455fd0",
+    "--muster-content-added": "#3f7a35",
+    "--muster-content-removed": "#b8453a",
+    "--muster-selection": "#455fd03d",
   },
 };
 
@@ -231,23 +231,23 @@ describe("UI foreground tokens", () => {
 
   it("draws the editor's caret as a block in the two colors the terminal draws its own with", () => {
     // The caret is the one part of the editor the stylesheet owns rather than CodeMirror: it draws
-    // the element, Marvis decides it is a block, and it is `--marvis-cursor` because that is the
+    // the element, Marvis decides it is a block, and it is `--muster-cursor` because that is the
     // color xterm.js is handed for `cursor`. The width is load-bearing rather than cosmetic:
     // CodeMirror leaves a caret's width unset, and a background on a zero-width box is not drawn.
     const caret = block(".cm-focused .cm-scroller .cm-cursorLayer .cm-cursor) {", documentPaneTemplate);
     expect(caret).toContain("border-left: none;");
     expect(caret).toContain("width: 1ch;");
-    expect(caret).toContain("background: var(--marvis-cursor);");
+    expect(caret).toContain("background: var(--muster-cursor);");
     // The preference is a declaration and not a second animation: CodeMirror blinks the layer
     // itself, so the property is what the toggle in the settings dialog has to reach the caret by.
     expect(block(".cm-focused .cm-scroller .cm-cursorLayer) {", documentPaneTemplate)).toContain(
-      "animation-play-state: var(--marvis-editor-cursor-blink, running);",
+      "animation-play-state: var(--muster-editor-cursor-blink, running);",
     );
     // A block nobody can see is the failure, so the cell it fills has to stand off the surface in
     // both palettes rather than only the dark one — which is why the light answer to the dark
     // palette's lavender is ink rather than the same lavender at a lower alpha.
     for (const theme of Object.values(themes)) {
-      expectReadable(token(theme, "--marvis-cursor"), token(theme, "--marvis-content-bg-0"));
+      expectReadable(token(theme, "--muster-cursor"), token(theme, "--muster-content-bg-0"));
     }
   });
 
@@ -269,17 +269,17 @@ describe("UI foreground tokens", () => {
     // selection has its own — the selected tint. The primary ink has to be readable on each in both
     // palettes, and the close cross paints whichever of the two its row is on, so it never reads as
     // a hole in the row.
-    expect(block(".workdir-row:hover {", sidebarStyles)).toContain("background: var(--marvis-el-hover);");
-    expect(block(".workdir-row.selected {", sidebarStyles)).toContain("background: var(--marvis-el-selected);");
-    expect(block(".workdir-row.selected {", sidebarStyles)).toContain("color: var(--marvis-text);");
-    expect(block(".workdir-close {", sidebarStyles)).toContain("background: var(--marvis-bg-1);");
+    expect(block(".workdir-row:hover {", sidebarStyles)).toContain("background: var(--muster-el-hover);");
+    expect(block(".workdir-row.selected {", sidebarStyles)).toContain("background: var(--muster-el-selected);");
+    expect(block(".workdir-row.selected {", sidebarStyles)).toContain("color: var(--muster-text);");
+    expect(block(".workdir-close {", sidebarStyles)).toContain("background: var(--muster-bg-1);");
     for (const theme of Object.values(themes)) {
-      const foreground = token(theme, "--marvis-text");
-      expectReadable(foreground, token(theme, "--marvis-el-hover"));
-      expectReadable(foreground, token(theme, "--marvis-el-selected"));
+      const foreground = token(theme, "--muster-text");
+      expectReadable(foreground, token(theme, "--muster-el-hover"));
+      expectReadable(foreground, token(theme, "--muster-el-selected"));
       // The selected row's glyph is primary ink rather than the secondary one a context glyph wears,
       // because on the selected tint the secondary ink is under the contrast floor.
-      expectReadable(foreground, token(theme, "--marvis-el-selected"));
+      expectReadable(foreground, token(theme, "--muster-el-selected"));
     }
   });
 
@@ -289,9 +289,9 @@ describe("UI foreground tokens", () => {
       fileDiffTemplate.lastIndexOf("<span", message),
       fileDiffTemplate.indexOf("</span>", message),
     );
-    expect(element).toContain("--marvis-content-text-muted");
+    expect(element).toContain("--muster-content-text-muted");
     for (const theme of Object.values(themes)) {
-      expectReadable(token(theme, "--marvis-content-text-muted"), token(theme, "--marvis-content-bg-0"));
+      expectReadable(token(theme, "--muster-content-text-muted"), token(theme, "--muster-content-bg-0"));
     }
   });
 
@@ -299,13 +299,13 @@ describe("UI foreground tokens", () => {
     for (const [mode, theme] of Object.entries(themes)) {
       const get = (name: string) => token(theme, name);
       const surfaces = [
-        "--marvis-bg-0",
-        "--marvis-bg-1",
-        "--marvis-bg-2",
-        "--marvis-el",
-        "--marvis-el-hover",
-        "--marvis-el-active",
-        "--marvis-el-selected",
+        "--muster-bg-0",
+        "--muster-bg-1",
+        "--muster-bg-2",
+        "--muster-el",
+        "--muster-el-hover",
+        "--muster-el-active",
+        "--muster-el-selected",
       ];
 
       for (const [role, alphas] of [
@@ -313,36 +313,36 @@ describe("UI foreground tokens", () => {
         ["success", []],
         ["warning", []],
       ] as const) {
-        const foreground = get(`--marvis-${role}-fg`);
+        const foreground = get(`--muster-${role}-fg`);
         for (const surface of surfaces) {
           const background = get(surface);
           expectReadable(foreground, background);
           for (const alpha of alphas) {
-            expectReadable(foreground, composite(get(`--marvis-${role}`), background, alpha));
+            expectReadable(foreground, composite(get(`--muster-${role}`), background, alpha));
           }
         }
       }
 
-      const tint = get("--marvis-accent-tint");
-      const tintForeground = get("--marvis-accent-tint-fg");
+      const tint = get("--muster-accent-tint");
+      const tintForeground = get("--muster-accent-tint-fg");
       expectReadable(tintForeground, tint);
       expectReadable(brightness(tintForeground, 0.96), brightness(tint, 0.96));
-      expectReadable(tintForeground, mix(tint, get("--marvis-accent"), 0.82));
+      expectReadable(tintForeground, mix(tint, get("--muster-accent"), 0.82));
 
-      const accent = get("--marvis-accent");
-      const accentForeground = get("--marvis-accent-fg");
+      const accent = get("--muster-accent");
+      const accentForeground = get("--muster-accent-fg");
       expectReadable(accentForeground, accent);
       if (mode === "light") {
-        expectReadable(accentForeground, mix(accent, get("--marvis-text"), 0.88));
-        expectReadable(accentForeground, mix(accent, get("--marvis-text"), 0.84));
+        expectReadable(accentForeground, mix(accent, get("--muster-text"), 0.88));
+        expectReadable(accentForeground, mix(accent, get("--muster-text"), 0.84));
       } else {
         for (const factor of [1.08, 0.94]) {
           expectReadable(brightness(accentForeground, factor), brightness(accent, factor));
         }
       }
 
-      const placeholder = get("--marvis-placeholder-fg");
-      for (const surface of ["--marvis-bg-0", "--marvis-bg-1", "--marvis-bg-2"]) {
+      const placeholder = get("--muster-placeholder-fg");
+      for (const surface of ["--muster-bg-0", "--muster-bg-1", "--muster-bg-2"]) {
         expectReadable(placeholder, get(surface));
       }
     }

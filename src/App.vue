@@ -916,7 +916,7 @@ const fontScale = computed(() => uiFontScale(settings.value.ui.fontSize));
 watch(
   fontScale,
   (scale) => {
-    document.documentElement.style.setProperty("--marvis-ui-font-scale", String(scale));
+    document.documentElement.style.setProperty("--muster-ui-font-scale", String(scale));
   },
   { immediate: true },
 );
@@ -925,7 +925,7 @@ watch(
  * The palette the window is drawn in, which is the preference resolved: `system` asks the operating
  * system, and the answer changes while the window is open, so this follows it rather than asking
  * once. The attribute is the whole of it for everything a stylesheet paints (the two palettes in
- * `src/marvis.css` are keyed off it) and `theme` carries the answer to the two things CSS cannot
+ * `src/muster.css` are keyed off it) and `theme` carries the answer to the two things CSS cannot
  * reach, the terminal and the diff view.
  *
  * It is asked for and applied while `settings` still holds the defaults, because a first paint in
@@ -937,9 +937,9 @@ function applyTheme() {
   theme.value = resolved;
   document.documentElement.dataset.theme = resolved;
   if (resolved === "dark") {
-    document.documentElement.style.setProperty("--marvis-content-bg-0", settings.value.ui.contentBackground);
+    document.documentElement.style.setProperty("--muster-content-bg-0", settings.value.ui.contentBackground);
   } else {
-    document.documentElement.style.removeProperty("--marvis-content-bg-0");
+    document.documentElement.style.removeProperty("--muster-content-bg-0");
   }
 }
 
@@ -2239,7 +2239,7 @@ function reportWarning(message: string) {
             @update:open="setCrumbOpen('workdir', $event)"
           />
           <template v-if="activeRepo?.kind === 'git'">
-            <span aria-hidden="true" class="text-(--marvis-text-faint)">/</span>
+            <span aria-hidden="true" class="text-(--muster-text-faint)">/</span>
             <TitlebarMenu
               testid="worktree-crumb"
               crumb="branch"
@@ -2255,7 +2255,7 @@ function reportWarning(message: string) {
                none to name. A file or a change set is picked from the details panel, so it is
                plain text there: a session menu over a diff would name what is not on screen. -->
           <template v-if="hasItemCrumb">
-            <span aria-hidden="true" class="text-(--marvis-text-faint)">/</span>
+            <span aria-hidden="true" class="text-(--muster-text-faint)">/</span>
             <TitlebarMenu
               v-if="activeMainView.kind === 'terminal'"
               testid="item-crumb"
@@ -2316,7 +2316,7 @@ function reportWarning(message: string) {
         :aria-label="appLayout.mode === 'split' ? 'Switch to focus layout' : 'Switch to split layout'"
         :aria-pressed="appLayout.mode === 'split'"
         data-testid="layout-toggle"
-        class="icon-button shrink-0 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+        class="icon-button shrink-0 text-(--muster-text-secondary) hover:text-(--muster-text)"
         @click="toggleLayoutMode"
       >
         <Columns2Icon v-if="appLayout.mode === 'split'" class="icon-xs" aria-hidden="true" />
@@ -2327,7 +2327,7 @@ function reportWarning(message: string) {
         type="button"
         aria-label="Settings"
         data-testid="settings-button"
-        class="icon-button shrink-0 text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+        class="icon-button shrink-0 text-(--muster-text-secondary) hover:text-(--muster-text)"
         @click="settingsOpen = true"
       >
         <SettingsIcon class="icon-xs" aria-hidden="true" />

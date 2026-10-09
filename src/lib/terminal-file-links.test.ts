@@ -63,7 +63,7 @@ beforeEach(async () => {
   terminal = new Headless({ allowProposedApi: true, cols: 80, rows: 40 });
   probe.mockReset();
   probe.mockResolvedValue(null);
-  document.documentElement.style.setProperty("--marvis-accent", "#74ade8");
+  document.documentElement.style.setProperty("--muster-accent", "#74ade8");
   // An empty write is still a write: it is what flushes xterm's parser, so the rows a test writes
   // after it start at row 1 rather than after whatever the last one left on the screen.
   await write("");

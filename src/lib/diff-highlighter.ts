@@ -38,7 +38,7 @@ const MAX_SYNTAX_BYTES = 512 * 1024;
 const MAX_SYNTAX_LINES = 8_000;
 
 /** What a diff is told its highlighter is called, which is also what the browser is told. */
-const HIGHLIGHTER_NAME = "marvis-shiki";
+const HIGHLIGHTER_NAME = "muster-shiki";
 
 /** One side of a file, read into the lines a diff window is cut out of. */
 interface SideContext {

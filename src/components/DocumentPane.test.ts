@@ -971,10 +971,10 @@ describe("DocumentPane", () => {
     expect(trigger.classes()).not.toContain("document-mode-button");
     expect(language.classes()).not.toContain("document-mode-control");
     // And the list behind it is the menu the titlebar opens, the same one the worktree menu is.
-    expect(wrapper.find(".marvis-menu").exists()).toBe(true);
+    expect(wrapper.find(".muster-menu").exists()).toBe(true);
     // The rows scroll, not the field that filters them.
-    expect(wrapper.get('[role="listbox"]').classes()).toContain("marvis-menu-scroll");
-    expect(wrapper.find(".marvis-menu-search").exists()).toBe(true);
+    expect(wrapper.get('[role="listbox"]').classes()).toContain("muster-menu-scroll");
+    expect(wrapper.find(".muster-menu-search").exists()).toBe(true);
     expect(wrapper.get('[role="option"]').classes()).toContain("menu-item");
     expect(mode.findAll("button").map((button) => button.text())).toEqual(["View", "Code"]);
 
@@ -1117,9 +1117,9 @@ describe("DocumentPane", () => {
     await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
 
     await vi.waitFor(() =>
-      expect(wrapper.findAll(".marvis-changed-line").map((line) => line.text())).toEqual(["const b = 2;"]),
+      expect(wrapper.findAll(".muster-changed-line").map((line) => line.text())).toEqual(["const b = 2;"]),
     );
-    expect(wrapper.find(".marvis-changed-line-marker").exists()).toBe(true);
+    expect(wrapper.find(".muster-changed-line-marker").exists()).toBe(true);
     wrapper.unmount();
   });
 
@@ -1130,7 +1130,7 @@ describe("DocumentPane", () => {
     await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
 
     expect(mocks.getGitDiff).not.toHaveBeenCalled();
-    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    expect(wrapper.find(".muster-changed-line").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1149,7 +1149,7 @@ describe("DocumentPane", () => {
     // Every line of a new file is an added line, so the marks would cover all of it and say nothing
     // the path in the toolbar does not.
     expect(mocks.getGitDiff).not.toHaveBeenCalled();
-    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    expect(wrapper.find(".muster-changed-line").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1185,7 +1185,7 @@ describe("DocumentPane", () => {
     await vi.waitFor(() => expect(wrapper.findAll(".shiki .line").length).toBeGreaterThan(0));
 
     await vi.waitFor(() =>
-      expect(wrapper.findAll(".marvis-changed-line").map((row) => row.text().replace(/^\d+/, ""))).toEqual([
+      expect(wrapper.findAll(".muster-changed-line").map((row) => row.text().replace(/^\d+/, ""))).toEqual([
         "const c = 3;",
       ]),
     );
@@ -1208,7 +1208,7 @@ describe("DocumentPane", () => {
     // The marks are an addition to a file that reads perfectly well without them, so a failure to
     // get them is not a failure to open the file.
     expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
-    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    expect(wrapper.find(".muster-changed-line").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1228,7 +1228,7 @@ describe("DocumentPane", () => {
 
     // The one refusal that is an answer rather than a fault, so it is not worth a toast either.
     expect(toasts.value).toHaveLength(0);
-    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    expect(wrapper.find(".muster-changed-line").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1285,14 +1285,14 @@ describe("DocumentPane", () => {
     // once the host is there. Reading it off the host rather than the editor is the whole point:
     // CodeMirror builds its theme once and nothing reconfigures it for a preference.
     const host = wrapper.get<HTMLElement>(".code-editor-host").element;
-    expect(host.style.getPropertyValue("--marvis-editor-font-size")).toBe("17px");
-    expect(host.style.getPropertyValue("--marvis-editor-ligatures")).toBe("none");
+    expect(host.style.getPropertyValue("--muster-editor-font-size")).toBe("17px");
+    expect(host.style.getPropertyValue("--muster-editor-ligatures")).toBe("none");
 
     await wrapper.setProps({
       editorSettings: { fontSize: 20, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
     });
-    expect(host.style.getPropertyValue("--marvis-editor-font-size")).toBe("20px");
-    expect(host.style.getPropertyValue("--marvis-editor-ligatures")).toBe("normal");
+    expect(host.style.getPropertyValue("--muster-editor-font-size")).toBe("20px");
+    expect(host.style.getPropertyValue("--muster-editor-ligatures")).toBe("normal");
     wrapper.unmount();
   });
 
@@ -1315,13 +1315,13 @@ describe("DocumentPane", () => {
     // setting reconfigured into the editor: a preference that rebuilt the editor would take the
     // document, the undo history and the caret with it to stop a light blinking.
     const host = wrapper.get<HTMLElement>(".code-editor-host").element;
-    expect(host.style.getPropertyValue("--marvis-editor-cursor-blink")).toBe("paused");
+    expect(host.style.getPropertyValue("--muster-editor-cursor-blink")).toBe("paused");
     expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
 
     await wrapper.setProps({
       editorSettings: { fontSize: 13, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
     });
-    expect(host.style.getPropertyValue("--marvis-editor-cursor-blink")).toBe("running");
+    expect(host.style.getPropertyValue("--muster-editor-cursor-blink")).toBe("running");
     // The same editor, still: `cm-content` is not rebuilt, so the text it holds is the one above.
     expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
     wrapper.unmount();

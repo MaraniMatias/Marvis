@@ -11,7 +11,7 @@ grid shows: uneven stem weight between glyphs, and under fontconfig's default
 drifts from the macOS one.
 
 Removing the bytecode leaves both platforms rasterizing the same unhinted
-outlines -- which is what macOS already drew, and what `src/marvis.css` says
+outlines -- which is what macOS already drew, and what `src/muster.css` says
 bundling these faces is for. Outlines, advance widths and the GSUB/GPOS
 features Fira Code's ligatures depend on are left untouched.
 

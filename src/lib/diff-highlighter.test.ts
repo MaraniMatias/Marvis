@@ -178,10 +178,10 @@ function colorOf(markup: string | undefined, needle: string): string | undefined
   return undefined;
 }
 
-const KEYWORD = "var(--marvis-syntax-token-keyword)";
-const FUNCTION = "var(--marvis-syntax-token-function)";
-const CONSTANT = "var(--marvis-syntax-token-constant)";
-const FOREGROUND = "var(--marvis-syntax-foreground)";
+const KEYWORD = "var(--muster-syntax-token-keyword)";
+const FUNCTION = "var(--muster-syntax-token-function)";
+const CONSTANT = "var(--muster-syntax-token-constant)";
+const FOREGROUND = "var(--muster-syntax-foreground)";
 
 /** The markup a diff draws for one line, which is the whole chain this module is responsible for. */
 function drawn(file: DiffFile, side: "old" | "new", line: number): string | undefined {
@@ -533,7 +533,7 @@ describe("diff highlighter", () => {
 
     // The line is still the patch's line, drawn; it is only that none of it is ours to color.
     expect(lineOf(drawn(files[0], "new", 1))).toBe(next[0]);
-    expect(drawn(files[0], "new", 1)).not.toContain("marvis-syntax");
+    expect(drawn(files[0], "new", 1)).not.toContain("muster-syntax");
   });
 
   it("leaves a file with no text of its own to the library, which is what the diff falls back to", async () => {
@@ -545,7 +545,7 @@ describe("diff highlighter", () => {
     expect(highlighter).toBeUndefined();
     const markup = drawn(files[0], "new", 1) ?? "";
     expect(markup).toContain("hljs-");
-    expect(markup).not.toContain("marvis-syntax");
+    expect(markup).not.toContain("muster-syntax");
   });
 
   it("reads nothing past the limits it reads a file under", async () => {

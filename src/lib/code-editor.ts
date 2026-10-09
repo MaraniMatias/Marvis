@@ -82,11 +82,11 @@ export interface CodeEditorOptions {
 }
 
 /**
- * The syntax tokens from `src/marvis.css`, named the way Shiki's own theme names them so the same
+ * The syntax tokens from `src/muster.css`, named the way Shiki's own theme names them so the same
  * declaration paints a read-only file and an editable one, and the way `HighlightStyle` takes them:
  * a custom property rather than a color, which is the whole of how this follows the theme.
  */
-const syntax = (token: string) => `var(--marvis-syntax-token-${token})`;
+const syntax = (token: string) => `var(--muster-syntax-token-${token})`;
 
 /**
  * `defaultHighlightStyle` is a light palette (dark red keywords, mid-blue strings) laid over
@@ -129,7 +129,7 @@ export const marvisHighlightStyle = HighlightStyle.define([
       tags.local(tags.variableName),
       tags.special(tags.variableName),
     ],
-    color: "var(--marvis-syntax-foreground)",
+    color: "var(--muster-syntax-foreground)",
   },
   { tag: [tags.contentSeparator, tags.meta, tags.namespace], color: syntax("punctuation") },
   { tag: [tags.url, tags.link], color: syntax("link") },
@@ -225,7 +225,7 @@ const changedLineCompartments = new WeakMap<EditorView, Compartment>();
 class ChangedLineMarker extends GutterMarker {
   override toDOM(): HTMLElement {
     const dot = document.createElement("span");
-    dot.className = "marvis-changed-line-marker";
+    dot.className = "muster-changed-line-marker";
     return dot;
   }
 }
@@ -236,7 +236,7 @@ const changedLineMarker = new ChangedLineMarker();
  * The class a changed line wears, named in one place because the stylesheet, the editor and the
  * read-only renderer all have to agree on it — and a test has to ask for it by name.
  */
-export const CHANGED_LINE_CLASS = "marvis-changed-line";
+export const CHANGED_LINE_CLASS = "muster-changed-line";
 
 /**
  * One set of marks, drawn two ways: as the gutter dot and as the line's tint.
@@ -258,7 +258,7 @@ function changedLinesExtension(ranges: readonly LineRange[]): Extension {
   });
   return [
     marks,
-    gutter({ class: "marvis-changed-gutter", markers: (view) => view.state.field(marks) }),
+    gutter({ class: "muster-changed-gutter", markers: (view) => view.state.field(marks) }),
     EditorView.decorations.of((view) => changedLineTint(view.state.doc, view.state.field(marks))),
   ];
 }

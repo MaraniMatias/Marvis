@@ -1028,7 +1028,7 @@ onUnmounted(() => {
     <p
       v-if="error || sessionUnavailable"
       role="alert"
-      class="m-0 border-t border-(--marvis-border) px-3 py-2 text-xs text-(--marvis-danger-fg)"
+      class="m-0 border-t border-(--muster-border) px-3 py-2 text-xs text-(--muster-danger-fg)"
     >
       <span v-if="sessionUnavailable">Terminal session is unavailable. </span>{{ error }}
       <button v-if="sessionUnavailable" type="button" class="ml-2 underline" @click="pollStatus">Retry</button>

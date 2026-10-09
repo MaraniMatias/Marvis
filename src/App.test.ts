@@ -733,7 +733,7 @@ describe("App UI integration", () => {
     // The scale is written to the document rather than to the app, so it outlives the component
     // that set it and would be the next test's starting point.
     document.documentElement.style.removeProperty("zoom");
-    document.documentElement.style.removeProperty("--marvis-ui-font-scale");
+    document.documentElement.style.removeProperty("--muster-ui-font-scale");
     delete document.documentElement.dataset.theme;
     vi.useRealTimers();
   });
@@ -1353,7 +1353,7 @@ describe("App UI integration", () => {
       for (const testid of ["repo-crumb", "worktree-crumb", "item-crumb"]) {
         const crumb = wrapper.get(`[data-testid="${testid}"]`);
         expect(crumb.classes()).toContain("text-menu-control");
-        expect(crumb.classes()).not.toContain("marvis-control");
+        expect(crumb.classes()).not.toContain("muster-control");
       }
       // The workdir is the one that says where you are, so it is the only crumb set forward, and
       // each crumb carries its own place in the line, which is what says what it gives up.
@@ -4143,7 +4143,7 @@ describe("App UI integration", () => {
       });
       await flushPromises();
       expect(wrapper.find('[data-testid="settings-button"]').exists()).toBe(true);
-      expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe(String(18 / 14));
+      expect(document.documentElement.style.getPropertyValue("--muster-ui-font-scale")).toBe(String(18 / 14));
       wrapper.unmount();
     });
 
@@ -4261,7 +4261,7 @@ describe("App UI integration", () => {
       };
       vi.spyOn(window, "matchMedia").mockReturnValue(system as unknown as MediaQueryList);
 
-      // The attribute is the whole of it: the two palettes in `marvis.css` are keyed off it, and a
+      // The attribute is the whole of it: the two palettes in `muster.css` are keyed off it, and a
       // palette the preference names outright is followed rather than argued with.
       const light = await mountApp(
         workspaceWith(checkout("checkout:one")),
@@ -4405,7 +4405,7 @@ describe("App UI integration", () => {
       await fontSize.trigger("change");
 
       // The draft is the dialog's own until Apply, so nothing on screen has moved yet.
-      expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe("1");
+      expect(document.documentElement.style.getPropertyValue("--muster-ui-font-scale")).toBe("1");
 
       await wrapper
         .findAll("button")
@@ -4414,7 +4414,7 @@ describe("App UI integration", () => {
       await flushPromises();
       // Applied, the whole type scale on the document moves: the window is redrawn at 18/14 of
       // the size it was drawn at, with no reload and without waiting for the file to be written.
-      expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe(String(18 / 14));
+      expect(document.documentElement.style.getPropertyValue("--muster-ui-font-scale")).toBe(String(18 / 14));
       expect(mocks.saveSettings).toHaveBeenCalledWith({
         ...DEFAULT_SETTINGS,
         ui: { ...DEFAULT_SETTINGS.ui, fontSize: 18 },
@@ -4436,7 +4436,7 @@ describe("App UI integration", () => {
         .trigger("click");
       await flushPromises();
 
-      expect(document.documentElement.style.getPropertyValue("--marvis-content-bg-0")).toBe("#334455");
+      expect(document.documentElement.style.getPropertyValue("--muster-content-bg-0")).toBe("#334455");
       expect(mocks.saveSettings).toHaveBeenCalledWith({
         ...DEFAULT_SETTINGS,
         ui: { ...DEFAULT_SETTINGS.ui, theme: "dark", contentBackground: "#334455" },
@@ -4453,7 +4453,7 @@ describe("App UI integration", () => {
           },
         },
       );
-      expect(document.documentElement.style.getPropertyValue("--marvis-content-bg-0")).toBe("");
+      expect(document.documentElement.style.getPropertyValue("--muster-content-bg-0")).toBe("");
       light.unmount();
     });
 
@@ -4485,7 +4485,7 @@ describe("App UI integration", () => {
         ...DEFAULT_SETTINGS,
         ui: { ...DEFAULT_SETTINGS.ui, theme: "dark" },
       });
-      expect(document.documentElement.style.getPropertyValue("--marvis-content-bg-0")).toBe(
+      expect(document.documentElement.style.getPropertyValue("--muster-content-bg-0")).toBe(
         DEFAULT_SETTINGS.ui.contentBackground,
       );
       wrapper.unmount();

@@ -148,7 +148,7 @@ function onDialogKeydown(event: KeyboardEvent) {
 <template>
   <div
     v-if="open"
-    class="fixed inset-0 z-50 grid place-items-center bg-(--marvis-bg-0)/80 p-4"
+    class="fixed inset-0 z-50 grid place-items-center bg-(--muster-bg-0)/80 p-4"
     @click.self="requestClose"
   >
     <section
@@ -163,17 +163,17 @@ function onDialogKeydown(event: KeyboardEvent) {
     >
       <header class="flex items-start justify-between gap-4 px-5 pt-5">
         <div>
-          <h2 id="settings-title" class="text-base font-semibold text-(--marvis-text)">Settings</h2>
-          <p class="mt-1 text-xs text-(--marvis-text-faint)">Saved to ~/.marvis/config.yml</p>
+          <h2 id="settings-title" class="text-base font-semibold text-(--muster-text)">Settings</h2>
+          <p class="mt-1 text-xs text-(--muster-text-faint)">Saved to ~/.marvis/config.yml</p>
         </div>
-        <button type="button" aria-label="Close" :disabled="saving" class="marvis-icon-control" @click="requestClose">
+        <button type="button" aria-label="Close" :disabled="saving" class="muster-icon-control" @click="requestClose">
           ×
         </button>
       </header>
 
       <div class="min-h-0 flex-1 overflow-y-auto px-5 py-4">
         <section v-for="section in SETTINGS_SECTIONS" :key="section.id" class="mb-5 last:mb-0">
-          <h3 class="mb-2 text-[0.6875rem] font-semibold tracking-wide text-(--marvis-text-faint) uppercase">
+          <h3 class="mb-2 text-[0.6875rem] font-semibold tracking-wide text-(--muster-text-faint) uppercase">
             {{ section.title }}
           </h3>
           <div class="grid grid-cols-[1fr_8.5rem] items-center gap-x-4 gap-y-3">
@@ -181,8 +181,8 @@ function onDialogKeydown(event: KeyboardEvent) {
                  column of labels beside a column of controls that have to be matched by eye. -->
             <template v-for="field in section.fields" :key="field.path">
               <label :for="controlId(field.path)">
-                <span class="block text-xs text-(--marvis-text)">{{ field.label }}</span>
-                <span v-if="field.description" class="mt-0.5 block text-[0.6875rem] text-(--marvis-text-faint)">
+                <span class="block text-xs text-(--muster-text)">{{ field.label }}</span>
+                <span v-if="field.description" class="mt-0.5 block text-[0.6875rem] text-(--muster-text-faint)">
                   {{ field.description }}
                 </span>
               </label>
@@ -193,7 +193,7 @@ function onDialogKeydown(event: KeyboardEvent) {
                   :id="controlId(field.path)"
                   type="checkbox"
                   :disabled="saving"
-                  class="marvis-check"
+                  class="muster-check"
                   :checked="valueAt(draft, field.path) === true"
                   @change="change(field.path, !valueAt(draft, field.path))"
                 />
@@ -204,14 +204,14 @@ function onDialogKeydown(event: KeyboardEvent) {
                     type="number"
                     :disabled="saving"
                     inputmode="numeric"
-                    class="marvis-input w-full"
+                    class="muster-input w-full"
                     :min="field.limits.min"
                     :max="field.limits.max"
                     :step="field.step ?? 1"
                     :value="valueAt(draft, field.path)"
                     @change="changeNumber(field, $event.target as HTMLInputElement)"
                   />
-                  <span v-if="field.unit" class="w-6 shrink-0 text-[0.6875rem] text-(--marvis-text-faint)">
+                  <span v-if="field.unit" class="w-6 shrink-0 text-[0.6875rem] text-(--muster-text-faint)">
                     {{ field.unit }}
                   </span>
                 </div>
@@ -221,7 +221,7 @@ function onDialogKeydown(event: KeyboardEvent) {
                     :id="controlId(field.path)"
                     type="color"
                     :disabled="saving"
-                    class="marvis-input h-8 min-w-0 flex-1 cursor-pointer p-1"
+                    class="muster-input h-8 min-w-0 flex-1 cursor-pointer p-1"
                     :value="String(valueAt(draft, field.path))"
                     @input="change(field.path, ($event.target as HTMLInputElement).value)"
                   />
@@ -258,12 +258,12 @@ function onDialogKeydown(event: KeyboardEvent) {
              it is drawn rather than generated from the schema: a chord has no value to write, and a
              control beside it would be a control that cannot do anything. `App.test.ts` reads this
              list and checks the window answers every chord in it. -->
-        <section data-testid="shortcuts-section" class="border-t border-(--marvis-border) pt-5">
-          <h3 class="mb-2 text-[0.6875rem] font-semibold tracking-wide text-(--marvis-text-faint) uppercase">
+        <section data-testid="shortcuts-section" class="border-t border-(--muster-border) pt-5">
+          <h3 class="mb-2 text-[0.6875rem] font-semibold tracking-wide text-(--muster-text-faint) uppercase">
             Shortcuts
           </h3>
           <div v-for="group in SHORTCUT_GROUPS" :key="group.title" class="mb-3 last:mb-0">
-            <p class="mb-1 text-[0.6875rem] text-(--marvis-text-faint)">{{ group.title }}</p>
+            <p class="mb-1 text-[0.6875rem] text-(--muster-text-faint)">{{ group.title }}</p>
             <!-- One pair per chord, the way a field is one pair per preference: the keys on the left
                  and what they do on the right, so a chord is never read against another chord's
                  meaning. The chord is drawn as this platform presses it, because `⌘/` and `Ctrl+/` are
@@ -271,9 +271,9 @@ function onDialogKeydown(event: KeyboardEvent) {
             <dl class="grid grid-cols-[5.5rem_1fr] items-baseline gap-x-4 gap-y-1.5">
               <template v-for="shortcut in group.shortcuts" :key="shortcut.description">
                 <dt>
-                  <kbd class="marvis-key">{{ shortcutChord(shortcut.keys) }}</kbd>
+                  <kbd class="muster-key">{{ shortcutChord(shortcut.keys) }}</kbd>
                 </dt>
-                <dd class="text-xs text-(--marvis-text-secondary)">{{ shortcut.description }}</dd>
+                <dd class="text-xs text-(--muster-text-secondary)">{{ shortcut.description }}</dd>
               </template>
             </dl>
           </div>
@@ -283,29 +283,29 @@ function onDialogKeydown(event: KeyboardEvent) {
              here is written to the config file, and nothing about it is applied by the footer. The
              rule above it is what says so, because until then the whole dialog was about changing
              something and this is the one part of it that is only reading. -->
-        <section data-testid="about-section" class="border-t border-(--marvis-border) pt-5">
-          <h3 class="mb-2 text-[0.6875rem] font-semibold tracking-wide text-(--marvis-text-faint) uppercase">About</h3>
+        <section data-testid="about-section" class="border-t border-(--muster-border) pt-5">
+          <h3 class="mb-2 text-[0.6875rem] font-semibold tracking-wide text-(--muster-text-faint) uppercase">About</h3>
 
           <!-- What this build is. The version is the one fact a person opens this section for that
                nothing else on screen can tell them, and it is read from the binary rather than
                written here, so it cannot be a release behind the app it is in. It is drawn only once
                it is known: a half-read version is not a version. -->
-          <p class="text-sm text-(--marvis-text)" data-testid="about-version">
+          <p class="text-sm text-(--muster-text)" data-testid="about-version">
             {{ version ? `Marvis v${version}` : "Marvis" }}
           </p>
 
-          <p class="mt-2 text-xs text-(--marvis-text-secondary)">{{ ACKNOWLEDGEMENT }}</p>
+          <p class="mt-2 text-xs text-(--muster-text-secondary)">{{ ACKNOWLEDGEMENT }}</p>
 
           <!-- An `<a>`, not a button dressed as one: the address is text a person may want to
                select and copy, and this window's right-click menu is denied everywhere, so a link
                whose only way out is a click has no way out at all. `href` is here for that copy and
                for the focus ring; the navigation is prevented, because the webview is not a browser
                and following one would replace the window that has the drafts in it. -->
-          <p class="mt-3 text-xs text-(--marvis-text-faint)">
+          <p class="mt-3 text-xs text-(--muster-text-faint)">
             Source and releases:
             <a
               :href="REPOSITORY"
-              class="marvis-link"
+              class="muster-link"
               data-testid="about-repository"
               @click.prevent="emit('openExternalUrl', REPOSITORY)"
             >
@@ -321,7 +321,7 @@ function onDialogKeydown(event: KeyboardEvent) {
                notice has to travel to count as one. -->
           <details data-testid="about-credits" class="group mt-4">
             <summary
-              class="flex cursor-pointer list-none items-center gap-1.5 text-xs text-(--marvis-text-secondary) hover:text-(--marvis-text)"
+              class="flex cursor-pointer list-none items-center gap-1.5 text-xs text-(--muster-text-secondary) hover:text-(--muster-text)"
             >
               <ChevronRightIcon class="icon-xs transition-transform group-open:rotate-90" aria-hidden="true" />
               {{ CREDITS_TITLE }}
@@ -329,11 +329,11 @@ function onDialogKeydown(event: KeyboardEvent) {
 
             <dl class="mt-3 space-y-3">
               <div v-for="group in CREDITS" :key="group.title">
-                <dt class="text-[0.6875rem] text-(--marvis-text-faint)">{{ group.title }}</dt>
+                <dt class="text-[0.6875rem] text-(--muster-text-faint)">{{ group.title }}</dt>
                 <dd class="mt-1 space-y-1">
                   <p v-for="entry in group.entries" :key="entry.name">
-                    <span class="text-xs text-(--marvis-text)">{{ entry.name }}</span>
-                    <span class="text-(--marvis-text-faint)"> — {{ entry.role }}, {{ entry.license }}</span>
+                    <span class="text-xs text-(--muster-text)">{{ entry.name }}</span>
+                    <span class="text-(--muster-text-faint)"> — {{ entry.role }}, {{ entry.license }}</span>
                   </p>
                 </dd>
               </div>
@@ -342,7 +342,7 @@ function onDialogKeydown(event: KeyboardEvent) {
         </section>
       </div>
 
-      <footer class="flex items-center gap-2 border-t border-(--marvis-border) px-5 py-4">
+      <footer class="flex items-center gap-2 border-t border-(--muster-border) px-5 py-4">
         <Button variant="ghost" :disabled="isDefault || saving" @click="resetDraft"> Reset to defaults </Button>
         <span class="flex-1" />
         <button
@@ -350,7 +350,7 @@ function onDialogKeydown(event: KeyboardEvent) {
           type="button"
           autofocus
           :disabled="saving"
-          class="marvis-button marvis-button-subtle"
+          class="muster-button muster-button-subtle"
           @click="requestClose"
         >
           Cancel
@@ -364,7 +364,7 @@ function onDialogKeydown(event: KeyboardEvent) {
 </template>
 
 <style scoped>
-.marvis-check {
+.muster-check {
   margin-left: auto;
 }
 
@@ -373,14 +373,14 @@ function onDialogKeydown(event: KeyboardEvent) {
  * the rest of the dialog reads at, and a rule around it so `⌘` is not read as text. Two chords on one
  * row would wrap into each other, so the column they sit in is wide enough for the longest one.
  */
-.marvis-key {
+.muster-key {
   display: inline-block;
-  border: 1px solid var(--marvis-border);
+  border: 1px solid var(--muster-border);
   border-radius: 0.25rem;
-  background: var(--marvis-el);
+  background: var(--muster-el);
   padding: 0.0625rem 0.375rem;
-  color: var(--marvis-text);
-  font-family: var(--marvis-font);
+  color: var(--muster-text);
+  font-family: var(--muster-font);
   font-size: 0.6875rem;
   line-height: 1.5;
   white-space: nowrap;
@@ -394,11 +394,11 @@ function onDialogKeydown(event: KeyboardEvent) {
  *
  * The focus ring is the stylesheet's, which already covers `a`.
  */
-.marvis-link {
-  color: var(--marvis-text-secondary);
+.muster-link {
+  color: var(--muster-text-secondary);
   text-decoration: underline;
 }
-.marvis-link:hover {
-  color: var(--marvis-text);
+.muster-link:hover {
+  color: var(--muster-text);
 }
 </style>

@@ -43,19 +43,19 @@ const model = defineModel<string>({ required: true });
   <SelectRoot v-model="model">
     <SelectTrigger
       v-bind="$attrs"
-      class="marvis-select"
-      :class="{ 'marvis-select-field': variant === 'field' }"
+      class="muster-select"
+      :class="{ 'muster-select-field': variant === 'field' }"
       :aria-label="label"
       :data-testid="testid"
     >
       <SelectValue />
-      <ChevronDownIcon class="icon-xs shrink-0 text-(--marvis-text-faint)" aria-hidden="true" />
+      <ChevronDownIcon class="icon-xs shrink-0 text-(--muster-text-faint)" aria-hidden="true" />
     </SelectTrigger>
     <!-- Portalled like every other list in the app: the rows are absolutely positioned and the
          pane under them paints over anything left in place. -->
     <SelectPortal>
       <SelectContent
-        class="surface-popover marvis-menu marvis-select-content"
+        class="surface-popover muster-menu muster-select-content"
         :aria-label="label"
         :side-offset="4"
         position="popper"
