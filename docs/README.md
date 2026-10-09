@@ -92,7 +92,7 @@ xattr -dr com.apple.quarantine /Applications/Muster.app
 ### Debian / Ubuntu
 
 ```sh
-sudo apt install ./Muster_<version>_amd64.deb   # or _arm64.deb
+sudo apt install ./muster_<version>_amd64.deb   # or _arm64.deb
 ```
 
 ### Other Linux

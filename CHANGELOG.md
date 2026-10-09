@@ -11,7 +11,7 @@ here still gets its generated notes.
 - **The app is called Muster.** The name changed together with everything that carries it: the
   product, the release artifacts, the paths on disk and the data behind them. The bundle identifier
   went from `dev.marvis.workspace` to `dev.muster.workspace`, and that is what moves the app-data
-  directory, the log directory, and the filenames of the Linux packages — `Muster_<version>_.deb`
+  directory, the log directory, and the filenames of the Linux packages — `muster_<version>_.deb`
   and `Muster_<version>_.AppImage`.
 
 - **Preferences move by hand; the workspace does not move at all.** Settings live in
