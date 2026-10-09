@@ -1,11 +1,11 @@
 [package]
-name = "marvis"
+name = "muster"
 version = "0.20.0"
 description = "A focused workspace for repositories and checkouts"
 authors = ["Marani Matias Ezequiel"]
 license = "MIT"
-homepage = "https://github.com/MaraniMatias/Marvis"
-repository = "https://github.com/MaraniMatias/Marvis"
+homepage = "https://github.com/MaraniMatias/Muster"
+repository = "https://github.com/MaraniMatias/Muster"
 edition = "2021"
 
 [build-dependencies]

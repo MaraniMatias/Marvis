@@ -1,7 +1,7 @@
 {
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
-  "description": "Marvis domain access plus folder selection, the window controls, and title-bar dragging.",
+  "description": "Muster domain access plus folder selection, the window controls, and title-bar dragging.",
   "windows": ["main"],
   "permissions": [
     "core:default",
