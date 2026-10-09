@@ -1017,7 +1017,10 @@ describe("App UI integration", () => {
       const rows = wrapper.findAll('[data-testid^="menu-item-worktree:"]');
       // Branch names stay visible while canonical checkout paths remain available in the tooltip.
       expect(rows.map((row) => row.text())).toEqual(["main", "feature"]);
-      expect(rows.map((row) => row.attributes("title"))).toEqual(["/Users/test/.docker", "/Users/test/worktrees/feature"]);
+      expect(rows.map((row) => row.attributes("title"))).toEqual([
+        "/Users/test/.docker",
+        "/Users/test/worktrees/feature",
+      ]);
 
       await wrapper.get('[data-testid="menu-item-new-worktree"]').trigger("click");
       await flushPromises();
