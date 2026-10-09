@@ -44,8 +44,9 @@ const isVisible = computed(() => props.visible ?? true);
 
 const emit = defineEmits<{
   openFolder: [];
-  workspaceUpdated: [workspace: WorkspaceState];
+  workspaceUpdated: [workspace: WorkspaceState, shellRequestToken?: number];
   sessionStatusChanged: [sessionId: string, status: TerminalSessionStatus | null];
+  shellCreated: [token: number, checkoutId: string, sessionId: string];
   /**
    * The order this checkout's terminals are now listed in, published on every save.
    *
@@ -63,7 +64,12 @@ interface TerminalView {
   key: string;
   checkoutId: string;
   session: Session | null;
+  shellRequestToken?: number;
 }
+type SessionMoveResult = {
+  moved: boolean;
+  directoryChange: "not-requested" | "written" | "not-written";
+};
 interface TerminalSessionHandle {
   requestClose(): Promise<boolean>;
   changeDirectory(path: string): Promise<boolean>;
@@ -166,7 +172,7 @@ function initializeLayout(target: Checkout) {
   return pending;
 }
 
-async function createTerminalSession(additional = false) {
+async function createTerminalSession(additional = false, shellRequestToken?: number) {
   const target = props.checkout;
   if (!target || target.isMissing || (!additional && views.value.some((view) => view.checkoutId === target.id))) return;
   if (startingCheckoutIds.value.has(target.id)) return;
@@ -176,7 +182,7 @@ async function createTerminalSession(additional = false) {
     if (props.checkout?.id !== target.id || target.isMissing) return;
     const key = `pending-${nextViewId.value++}`;
     pendingViewKey.value = key;
-    views.value.push({ key, checkoutId: target.id, session: null });
+    views.value.push({ key, checkoutId: target.id, session: null, shellRequestToken });
   } finally {
     const pending = new Set(startingCheckoutIds.value);
     pending.delete(target.id);
@@ -217,9 +223,8 @@ async function requestClose(sessionId: string) {
  * `selectTarget` is the same distinction one level up: a move someone asked for takes the window
  * with it, and a move that happened on its own does not get to change what is on screen.
  *
- * Whether the row actually moved is returned rather than assumed. A terminal with no live view
- * cannot move, and a caller that then pointed the window at the destination would leave the pane on
- * screen empty without saying why.
+ * Whether the row moved and whether the requested `cd` was written are returned separately: the
+ * PTY write only confirms bytes were accepted, not that the shell executed the command.
  */
 async function moveSession(
   sessionId: string,
@@ -227,7 +232,7 @@ async function moveSession(
   index: number,
   changeDirectory = true,
   selectTarget = true,
-): Promise<boolean> {
+): Promise<SessionMoveResult> {
   const view = views.value.find((item) => item.session?.id === sessionId);
   const target = (props.checkouts ?? []).find((checkout) => checkout.id === targetCheckoutId);
   // A drop in the terminal's own worktree is a reorder, which is not a move at all: nothing about the
@@ -239,16 +244,18 @@ async function moveSession(
       ...layout,
       sessionOrder: moveSessionId(currentOrder(view.checkoutId), sessionId, index),
     });
-    return true;
+    return { moved: true, directoryChange: "not-requested" };
   }
-  if (!view || !view.session || !target || target.isMissing) return false;
+  if (!view || !view.session || !target || target.isMissing) {
+    return { moved: false, directoryChange: "not-requested" };
+  }
   const source = view.checkoutId;
   let workspace: WorkspaceState;
   try {
     workspace = await moveTerminal(source, sessionId, targetCheckoutId, selectTarget);
   } catch (cause) {
     reportTerminalError(cause);
-    return false;
+    return { moved: false, directoryChange: "not-requested" };
   }
   view.checkoutId = targetCheckoutId;
   const moved = { ...view.session, checkoutId: targetCheckoutId };
@@ -265,17 +272,17 @@ async function moveSession(
     sessionOrder: moveSessionId(orderedSessionIds(target.sessions, targetLayout), moved.id, index),
   });
   emit("workspaceUpdated", workspace);
-  if (!changeDirectory) return true;
+  if (!changeDirectory) return { moved: true, directoryChange: "not-requested" };
   // The pane's own checkout prop is what the session is written under, and the new one only
   // reaches the terminal on the next tick. Writing before that would address the `cd` to the
   // worktree the session just left, which the backend refuses.
   await nextTick();
   const changed = await terminalRefs.get(view.key)?.changeDirectory(target.path);
-  if (changed === false) {
+  if (!changed) {
     // False also covers a rejected PTY write, whose actual error remains in the terminal alert.
     pushToast(`${target.path}: the terminal moved, but its directory was not changed.`);
   }
-  return true;
+  return { moved: true, directoryChange: changed ? "written" : "not-written" };
 }
 
 defineExpose({ focusActiveTerminal, requestClose, moveSession });
@@ -286,7 +293,10 @@ function onCreated(key: string, result: { session: Session; workspace: Workspace
   view.session = result.session;
   const layout = layouts.value[view.checkoutId] ?? createTerminalLayout([]);
   void saveLayout(view.checkoutId, addSessionToLayout(layout, result.session));
-  emit("workspaceUpdated", result.workspace);
+  emit("workspaceUpdated", result.workspace, view.shellRequestToken);
+  if (view.shellRequestToken !== undefined) {
+    emit("shellCreated", view.shellRequestToken, view.checkoutId, result.session.id);
+  }
 }
 
 function onStatusChanged(sessionId: string, status: TerminalSessionStatus) {
@@ -344,7 +354,7 @@ watch(
   ([token, checkoutId]) => {
     if (!token || token === answeredShellToken || props.shellRequest?.checkoutId !== checkoutId) return;
     answeredShellToken = token;
-    void createTerminalSession(true);
+    void createTerminalSession(true, token);
   },
 );
 

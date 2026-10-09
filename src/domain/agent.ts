@@ -53,6 +53,8 @@ export interface AgentRelocation {
   sessionId: string;
   fromCheckoutId: string;
   toCheckoutId: string;
+  /** Unix milliseconds when first observed; stable across backend replay. */
+  observedAt: number;
 }
 
 export interface AgentEvent {

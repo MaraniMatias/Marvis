@@ -524,8 +524,8 @@ impl AgentBridge {
     ///
     /// Nothing here is addressed by the answer: the caller matches each directory against the
     /// checkouts it already knows and drops the rest, so no directory this app has no checkout
-    /// for crosses into the UI. Subagent sessions are left out (`parentID=null`) because they
-    /// follow their parent and would report the same move twice.
+    /// for crosses into the UI. Child sessions are excluded (`parentID=null`): their tool work
+    /// is keyed separately, and a parent's subagent prompt/result does not attest a target path.
     ///
     /// `limit` is sent, and 2.0.23 answers with fifty sessions whatever it is set to: measured against
     /// the running service, `limit=5`, `limit=50` and `limit=500` all return the newest fifty, and
@@ -1871,7 +1871,7 @@ fn read_candidates(bridge: &AgentBridge, budget: Duration) -> Result<CandidateRe
 /// Keep that effective location until newer attributable work or an explicit session move.
 struct SessionWork {
     origin: PathBuf,
-    effective: PathBuf,
+    effective: Option<PathBuf>,
     targets: Vec<PathBuf>,
     completed: i64,
     updated: i64,
@@ -1879,32 +1879,48 @@ struct SessionWork {
     seen: Instant,
 }
 
-/// Only inspect executed tool contracts, never prompts, shell commands or Code Mode source.
-/// These inputs and Code Mode's toolCalls were inspected on OpenCode 2.0.26.
+/// Only inspect completed tool contracts, never prompts, shell commands or Code Mode source.
+/// OpenCode 2.0.26 documents edit/write/patch as Location-relative; only absolute shell.workdir is attributed.
+/// Its Code Mode transcript stores calls as metadata.toolCalls[{tool,status,input}].
 // lean-ctx: explicit execution/mutation targets only; extend when another tool exposes verified targets.
-fn work_targets(name: &str, input: &serde_json::Value) -> Vec<PathBuf> {
+fn work_targets(name: &str, input: &serde_json::Value, origin: &Path) -> Vec<PathBuf> {
+    let resolve = |value: &str| {
+        (!value.is_empty()).then(|| {
+            let path = PathBuf::from(value);
+            if path.is_absolute() || !matches!(name, "edit" | "write" | "patch") {
+                path
+            } else {
+                origin.join(path)
+            }
+        })
+    };
     let field = match name {
         "shell" => "workdir",
         "lean-ctx.ctx_shell" => "cwd",
-        "write" | "lean-ctx.ctx_patch" => "path",
+        "edit" | "write" | "lean-ctx.ctx_patch" => "path",
         "patch" => {
             return input["patchText"]
                 .as_str()
                 .into_iter()
                 .flat_map(str::lines)
                 .filter_map(|line| {
-                    ["*** Add File: ", "*** Update File: ", "*** Move to: "]
-                        .into_iter()
-                        .find_map(|prefix| line.strip_prefix(prefix))
+                    [
+                        "*** Add File: ",
+                        "*** Update File: ",
+                        "*** Delete File: ",
+                        "*** Move to: ",
+                    ]
+                    .into_iter()
+                    .find_map(|prefix| line.strip_prefix(prefix))
                 })
-                .map(PathBuf::from)
+                .filter_map(resolve)
                 .collect();
         }
         _ => return Vec::new(),
     };
     let mut paths: Vec<_> = input[field]
         .as_str()
-        .map(PathBuf::from)
+        .and_then(resolve)
         .into_iter()
         .collect();
     if name == "lean-ctx.ctx_patch" {
@@ -1912,14 +1928,18 @@ fn work_targets(name: &str, input: &serde_json::Value) -> Vec<PathBuf> {
             paths.extend(
                 ops.iter()
                     .filter_map(|op| op["path"].as_str())
-                    .map(PathBuf::from),
+                    .filter_map(resolve),
             );
         }
     }
     paths
 }
 
-fn latest_work(messages: &[serde_json::Value], after: i64) -> Option<(i64, Vec<PathBuf>)> {
+fn latest_work(
+    messages: &[serde_json::Value],
+    after: i64,
+    origin: &Path,
+) -> Option<(i64, Vec<PathBuf>)> {
     let mut latest: Option<(i64, Vec<PathBuf>)> = None;
     for tool in messages
         .iter()
@@ -1935,8 +1955,11 @@ fn latest_work(messages: &[serde_json::Value], after: i64) -> Option<(i64, Vec<P
         {
             continue;
         }
-        let mut targets =
-            work_targets(tool["name"].as_str().unwrap_or(""), &tool["state"]["input"]);
+        let mut targets = work_targets(
+            tool["name"].as_str().unwrap_or(""),
+            &tool["state"]["input"],
+            origin,
+        );
         if tool["name"] == "execute" {
             for call in tool["state"]["metadata"]["toolCalls"]
                 .as_array()
@@ -1947,6 +1970,7 @@ fn latest_work(messages: &[serde_json::Value], after: i64) -> Option<(i64, Vec<P
                     targets.extend(work_targets(
                         call["tool"].as_str().unwrap_or(""),
                         &call["input"],
+                        origin,
                     ));
                 }
             }
@@ -1963,6 +1987,29 @@ fn latest_work(messages: &[serde_json::Value], after: i64) -> Option<(i64, Vec<P
     latest
 }
 
+/// Keep history reads moving through the bounded newest-session page across polling ticks.
+fn rotate_sessions_after(sessions: &mut [ApiSession], cursor: Option<&str>) {
+    if let Some(index) = cursor.and_then(|cursor| sessions.iter().position(|s| s.id == cursor)) {
+        sessions.rotate_left(index + 1);
+    }
+}
+
+/// Resolve existing targets canonically. A deleted target's leaf can still be attributed through
+/// its canonical existing parent; missing ancestors and all other resolution errors are rejected.
+fn canonical_work_target(target: &Path) -> Option<PathBuf> {
+    match target.canonicalize() {
+        Ok(target) => Some(target),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let leaf = match target.components().next_back()? {
+                std::path::Component::Normal(leaf) => leaf,
+                _ => return None,
+            };
+            Some(target.parent()?.canonicalize().ok()?.join(leaf))
+        }
+        Err(_) => None,
+    }
+}
+
 /// Canonical paths and the deepest registered checkout prevent nested worktrees or symlinks
 /// from being attributed to their parent. A batch naming several worktrees names none.
 fn work_directory(checkouts: &[(String, PathBuf)], targets: &[PathBuf]) -> Option<PathBuf> {
@@ -1971,7 +2018,7 @@ fn work_directory(checkouts: &[(String, PathBuf)], targets: &[PathBuf]) -> Optio
         if !target.is_absolute() {
             return None;
         }
-        let target = target.canonicalize().ok()?;
+        let target = canonical_work_target(target)?;
         let mut candidates: Vec<_> = checkouts
             .iter()
             .filter_map(|(_, path)| path.canonicalize().ok())
@@ -2039,6 +2086,8 @@ pub struct AgentService {
     /// [`AgentService::relocations`], which is the only thing that reads or writes it.
     session_locations: Mutex<HashMap<String, SessionLocation>>,
     session_work: Mutex<HashMap<String, SessionWork>>,
+    /// Last session whose history was read, for fair reads across the newest-page limit.
+    relocation_history_cursor: Mutex<Option<String>>,
     /// Moves that have been reported and might not have arrived. See [`PendingMove`].
     pending_moves: Mutex<HashMap<String, PendingMove>>,
     sink: Mutex<Option<EventSink>>,
@@ -2143,6 +2192,7 @@ impl AgentService {
             busy_turns: Arc::new(Mutex::new(HashMap::new())),
             session_locations: Mutex::new(HashMap::new()),
             session_work: Mutex::new(HashMap::new()),
+            relocation_history_cursor: Mutex::new(None),
             pending_moves: Mutex::new(HashMap::new()),
             sink: Mutex::new(None),
             launcher,
@@ -2691,6 +2741,14 @@ impl AgentService {
         &self,
         checkouts: &[(String, PathBuf)],
     ) -> Result<Vec<AgentRelocation>, BridgeError> {
+        self.relocations_with_baseline(checkouts, false)
+    }
+
+    pub fn relocations_with_baseline(
+        &self,
+        checkouts: &[(String, PathBuf)],
+        baseline: bool,
+    ) -> Result<Vec<AgentRelocation>, BridgeError> {
         // Any live bridge reads every location, so the read is asked of one that is already
         // connected rather than of one this call would connect. A bridge is opened for a
         // checkout the panel is already talking to, which is also the only kind of checkout a
@@ -2707,6 +2765,20 @@ impl AgentService {
                 .cloned()
         };
         let Some((anchor_id, anchor_directory)) = anchor else {
+            if baseline {
+                self.session_work
+                    .lock()
+                    .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?
+                    .clear();
+                self.session_locations
+                    .lock()
+                    .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?
+                    .clear();
+                self.pending_moves
+                    .lock()
+                    .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?
+                    .clear();
+            }
             return Ok(Vec::new());
         };
         let bridge = self.bridge(&anchor_id, &anchor_directory)?;
@@ -2716,7 +2788,7 @@ impl AgentService {
             .session_work
             .lock()
             .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
-        let sessions = bridge.session_locations()?;
+        let mut sessions = bridge.session_locations()?;
         let now = Instant::now();
         let observed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -2738,6 +2810,11 @@ impl AgentService {
         } else {
             HashMap::new()
         };
+        let mut history_cursor = self
+            .relocation_history_cursor
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
+        rotate_sessions_after(&mut sessions, history_cursor.as_deref());
         let mut located = Vec::new();
         for session in sessions {
             let origin = PathBuf::from(session.location.unwrap().directory);
@@ -2745,7 +2822,7 @@ impl AgentService {
                 .entry(session.id.clone())
                 .or_insert_with(|| SessionWork {
                     origin: origin.clone(),
-                    effective: origin.clone(),
+                    effective: Some(origin.clone()),
                     targets: Vec::new(),
                     completed: observed,
                     updated: session.time.updated,
@@ -2755,7 +2832,7 @@ impl AgentService {
             entry.seen = now;
             if !same_directory(&entry.origin, &origin) {
                 entry.origin = origin.clone();
-                entry.effective = origin;
+                entry.effective = Some(origin);
                 entry.targets.clear();
                 entry.completed = observed;
             }
@@ -2766,46 +2843,66 @@ impl AgentService {
             let finishing = entry.running;
             entry.running |= active;
             let remaining = deadline.saturating_duration_since(Instant::now());
-            if (changed || active || finishing)
-                && !remaining.is_zero()
+            if (baseline || changed || active || finishing)
                 && checkouts
                     .iter()
                     .any(|(_, directory)| same_directory(directory, &entry.origin))
             {
-                validate_session_id(&session.id)?;
-                let messages: Result<Vec<serde_json::Value>, _> = bridge.get_unscoped_json(
-                    &format!(
-                        "/api/session/{}/message?type=assistant&order=desc&limit=10",
-                        session.id
-                    ),
-                    remaining,
-                );
-                if let Ok(messages) = messages {
-                    entry.updated = session.time.updated;
-                    entry.running = active;
-                    if let Some((completed, targets)) = latest_work(&messages, entry.completed) {
-                        entry.completed = completed;
-                        entry.targets = targets;
-                        // An ambiguous target cannot keep offering an older undelivered move.
-                        if work_directory(checkouts, &entry.targets).is_none() {
-                            self.pending_moves
-                                .lock()
-                                .map_err(|_| {
-                                    BridgeError::Failed("the agent service is poisoned".into())
-                                })?
-                                .remove(&session.id);
+                if remaining.is_zero() {
+                    if baseline {
+                        return Err(BridgeError::Unavailable(
+                            "could not establish the agent relocation baseline".into(),
+                        ));
+                    }
+                } else {
+                    validate_session_id(&session.id)?;
+                    let messages: Result<Vec<serde_json::Value>, _> = bridge.get_unscoped_json(
+                        &format!(
+                            "/api/session/{}/message?type=assistant&order=desc&limit=10",
+                            session.id
+                        ),
+                        remaining,
+                    );
+                    *history_cursor = Some(session.id.clone());
+                    match messages {
+                        Ok(messages) => {
+                            entry.updated = session.time.updated;
+                            entry.running = active;
+                            if let Some((completed, targets)) =
+                                latest_work(&messages, entry.completed, &entry.origin)
+                            {
+                                entry.completed = completed;
+                                entry.targets = targets;
+                                // An ambiguous target cannot keep offering an older undelivered move.
+                                if work_directory(checkouts, &entry.targets).is_none() {
+                                    self.pending_moves
+                                        .lock()
+                                        .map_err(|_| {
+                                            BridgeError::Failed(
+                                                "the agent service is poisoned".into(),
+                                            )
+                                        })?
+                                        .remove(&session.id);
+                                }
+                            }
                         }
+                        Err(error) if baseline => return Err(error),
+                        Err(_) => {}
                     }
                 }
             }
             // Resolve again even without new tools: the agent may have created a worktree before
             // Marvis registered it. The original target is retained, not its parent checkout.
             if let Some(directory) = work_directory(checkouts, &entry.targets) {
-                entry.effective = directory;
+                entry.effective = Some(directory);
+            } else if baseline && !entry.targets.is_empty() {
+                // An unresolved target has no checkout to seed; retaining an old effective dir
+                // would turn its later registration into a relocation from disabled-time work.
+                entry.effective = None;
             }
             located.push((session.id, entry.effective.clone()));
         }
-        self.record_relocations(checkouts, located, now)
+        self.record_relocations_with_baseline(checkouts, located, now, baseline)
     }
 
     /// What changed between the last read and this one, together with what is still owed.
@@ -2813,11 +2910,30 @@ impl AgentService {
     /// Split out from the read so that time can be given rather than waited for: both windows
     /// here are what stops a stale record from outliving its usefulness, and neither can be
     /// checked by sleeping in a test.
+    #[cfg(test)]
     fn record_relocations(
         &self,
         checkouts: &[(String, PathBuf)],
         located: Vec<(String, PathBuf)>,
         now: Instant,
+    ) -> Result<Vec<AgentRelocation>, BridgeError> {
+        self.record_relocations_with_baseline(
+            checkouts,
+            located
+                .into_iter()
+                .map(|(session_id, directory)| (session_id, Some(directory)))
+                .collect(),
+            now,
+            false,
+        )
+    }
+
+    fn record_relocations_with_baseline(
+        &self,
+        checkouts: &[(String, PathBuf)],
+        located: Vec<(String, Option<PathBuf>)>,
+        now: Instant,
+        baseline: bool,
     ) -> Result<Vec<AgentRelocation>, BridgeError> {
         let mut known = self
             .session_locations
@@ -2829,15 +2945,22 @@ impl AgentService {
             .lock()
             .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
         pending.retain(|_, entry| now.duration_since(entry.since) <= PENDING_MOVES_TTL);
+        if baseline {
+            // The baseline snapshot supersedes every move and location observed in the prior epoch.
+            known.clear();
+            pending.clear();
+        }
         for (session_id, directory) in located {
             // A session whose directory is not a checkout of this workspace is not news, and
             // naming it would be reporting on a project this app has no worktree for. It is not
             // forgotten either: its last known worktree is what the move is read from when the
             // worktree it walked into is registered.
-            let named = checkouts
-                .iter()
-                .find(|(_, candidate)| same_directory(candidate, &directory))
-                .map(|(checkout_id, _)| checkout_id.clone());
+            let named = directory.as_ref().and_then(|directory| {
+                checkouts
+                    .iter()
+                    .find(|(_, candidate)| same_directory(candidate, directory))
+                    .map(|(checkout_id, _)| checkout_id.clone())
+            });
             match known.get_mut(&session_id) {
                 Some(entry) => {
                     entry.seen = now;
@@ -2850,6 +2973,11 @@ impl AgentService {
                                         session_id,
                                         from_checkout_id: was.clone(),
                                         to_checkout_id: checkout_id.clone(),
+                                        observed_at: SystemTime::now()
+                                            .duration_since(UNIX_EPOCH)
+                                            .unwrap_or_default()
+                                            .as_millis()
+                                            as i64,
                                     },
                                     since: now,
                                 },
@@ -3357,6 +3485,19 @@ mod tests {
     };
     use crate::domain::agent::AgentRelocation;
     use crate::services::opencode::ServiceEndpoint;
+
+    fn assert_relocation(
+        actual: &[AgentRelocation],
+        session_id: &str,
+        from_checkout_id: &str,
+        to_checkout_id: &str,
+    ) {
+        assert_eq!(actual.len(), 1);
+        assert_eq!(actual[0].session_id, session_id);
+        assert_eq!(actual[0].from_checkout_id, from_checkout_id);
+        assert_eq!(actual[0].to_checkout_id, to_checkout_id);
+        assert!(actual[0].observed_at > 0);
+    }
 
     fn test_event_bridge(directory: &Path, port: u16) -> AgentBridge {
         AgentBridge {
@@ -4945,6 +5086,92 @@ mod tests {
         assert_eq!(second_requests[0].1, first_authorization);
     }
 
+    #[test]
+    fn relocation_baseline_refreshes_tool_targets_without_replaying_disabled_work() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let third = tempfile::tempdir().unwrap();
+        let fourth = tempfile::tempdir().unwrap();
+        let first_path = first.path().to_string_lossy().into_owned();
+        let second_path = second.path().to_string_lossy().into_owned();
+        let third_path = third.path().to_string_lossy().into_owned();
+        let fourth_path = fourth.path().to_string_lossy().into_owned();
+        let checkouts = vec![
+            ("first".to_string(), first.path().to_path_buf()),
+            ("second".to_string(), second.path().to_path_buf()),
+            ("third".to_string(), third.path().to_path_buf()),
+            ("fourth".to_string(), fourth.path().to_path_buf()),
+        ];
+        let list = |updated| {
+            serde_json::json!({
+                "data": [{
+                    "id": "ses_move",
+                    "time": {"updated": updated},
+                    "location": {"directory": first_path}
+                }]
+            })
+        };
+        let target = |path: &str, completed| {
+            serde_json::json!({
+                "data": [{
+                    "type": "assistant",
+                    "content": [{
+                        "type": "tool",
+                        "name": "shell",
+                        "time": {"completed": completed},
+                        "state": {
+                            "status": "completed",
+                            "input": {"workdir": path, "command": "git status"},
+                            "metadata": {}
+                        }
+                    }]
+                }]
+            })
+        };
+        let completed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 60_000;
+        let (port, server) = mock_json_responses(vec![
+            serde_json::json!({"data": [{"id": "build", "name": "Build", "mode": "primary"}]}),
+            list(1),
+            list(2),
+            serde_json::json!({"data": {}}),
+            target(&second_path, completed),
+            list(3),
+            serde_json::json!({"data": {}}),
+            target(&third_path, completed + 60_000),
+            list(3),
+            serde_json::json!({"data": {}}),
+            list(4),
+            serde_json::json!({"data": {}}),
+            target(&fourth_path, completed + 120_000),
+        ]);
+        let agents = AgentService::with_test_server(port);
+        agents.agents("first", first.path()).unwrap();
+        assert!(agents.relocations(&checkouts).unwrap().is_empty());
+        assert_relocation(
+            &agents.relocations(&checkouts).unwrap(),
+            "ses_move",
+            "first",
+            "second",
+        );
+        // Work changes again while follow is off; the baseline refreshes the tool-derived target.
+        assert!(agents
+            .relocations_with_baseline(&checkouts, true)
+            .unwrap()
+            .is_empty());
+        assert!(agents.relocations(&checkouts).unwrap().is_empty());
+        assert_relocation(
+            &agents.relocations(&checkouts).unwrap(),
+            "ses_move",
+            "third",
+            "fourth",
+        );
+        server.join().expect("mock server should finish");
+    }
+
     /// Every request that asks about a worktree names the directory twice, because the service
     /// reads the scope two ways.
     ///
@@ -5060,11 +5287,6 @@ mod tests {
             ),
             list(2),
             serde_json::json!({"data": {"ses_writer": {"type": "running"}, "ses_other": {"type": "running"}}}),
-            message(
-                "write",
-                serde_json::json!({"path": file, "content": "console.log(\"Hello, world!\");"}),
-                serde_json::json!({}),
-            ),
             // Another session's work remains attributable to that session, not the newest worktree.
             message(
                 "execute",
@@ -5073,17 +5295,22 @@ mod tests {
                     {"tool": "lean-ctx.ctx_shell", "status": "completed", "input": {"cwd": root.path(), "command": "git status"}}
                 ]}),
             ),
+            message(
+                "write",
+                serde_json::json!({"path": file, "content": "console.log(\"Hello, world!\");"}),
+                serde_json::json!({}),
+            ),
             list(2),
             serde_json::json!({"data": {}}),
+            message(
+                "shell",
+                serde_json::json!({"workdir": root.path(), "command": "git status"}),
+                serde_json::json!({}),
+            ),
             // Read once after running -> idle, even if session.time.updated did not change.
             message(
                 "patch",
                 serde_json::json!({"patchText": format!("*** Begin Patch\n*** Add File: {}\n+created\n*** End Patch", file.display())}),
-                serde_json::json!({}),
-            ),
-            message(
-                "shell",
-                serde_json::json!({"workdir": root.path(), "command": "git status"}),
                 serde_json::json!({}),
             ),
             list(2),
@@ -5097,12 +5324,8 @@ mod tests {
         assert!(agents.relocations(&both).unwrap().is_empty());
         // File work happened before the worktree was registered. Keep the original target.
         assert!(agents.relocations(&main).unwrap().is_empty());
-        let moved = vec![AgentRelocation {
-            session_id: "ses_writer".into(),
-            from_checkout_id: "main".into(),
-            to_checkout_id: "test".into(),
-        }];
-        assert_eq!(agents.relocations(&both).unwrap(), moved);
+        let moved = agents.relocations(&both).unwrap();
+        assert_relocation(&moved, "ses_writer", "main", "test");
         // The API still says main, but cannot pull the terminal back after the tool turn ends.
         assert_eq!(agents.relocations(&both).unwrap(), moved);
         let requests = server.join().unwrap();
@@ -5111,9 +5334,14 @@ mod tests {
             .filter(|request| request.0.contains("/message?"))
             .collect();
         assert_eq!(histories.len(), 5);
+        assert!(histories
+            .iter()
+            .all(|request| !request.0.contains("ses_child")));
         assert!(histories[0].0.contains("/ses_writer/message?"));
-        assert!(histories[1].0.contains("/ses_writer/message?"));
-        assert!(histories[2].0.contains("/ses_other/message?"));
+        assert!(histories[1].0.contains("/ses_other/message?"));
+        assert!(histories[2].0.contains("/ses_writer/message?"));
+        assert!(histories[3].0.contains("/ses_other/message?"));
+        assert!(histories[4].0.contains("/ses_writer/message?"));
         for request in histories {
             assert_eq!(request.1, crate::services::opencode::authorization("test"));
             assert!(!request
@@ -5124,7 +5352,7 @@ mod tests {
     }
 
     #[test]
-    fn tool_work_rejects_ambiguous_unexecuted_relative_and_read_only_targets() {
+    fn tool_work_rejects_ambiguous_unexecuted_unbased_and_read_only_targets() {
         use super::{latest_work, work_directory};
         let first = tempfile::tempdir().unwrap();
         let second = tempfile::tempdir().unwrap();
@@ -5145,30 +5373,169 @@ mod tests {
                 ]}}
             }]})
         };
-        let (stamp, targets) = latest_work(&[tool("completed")], 9).unwrap();
+        let (stamp, targets) = latest_work(&[tool("completed")], 9, first.path()).unwrap();
         assert_eq!(stamp, 10);
         assert!(work_directory(&checkouts, &targets).is_none());
-        assert!(latest_work(&[tool("running"), tool("error")], 9).is_none());
-        assert!(latest_work(&[tool("completed")], 10).is_none());
+        assert!(latest_work(&[tool("running"), tool("error")], 9, first.path()).is_none());
+        assert!(latest_work(&[tool("completed")], 10, first.path()).is_none());
         let mut single = tool("completed");
         single["content"][0]["state"]["metadata"]["toolCalls"]
             .as_array_mut()
             .unwrap()
             .truncate(1);
-        let (_, targets) = latest_work(&[single.clone()], 9).unwrap();
+        let (_, targets) = latest_work(&[single.clone()], 9, first.path()).unwrap();
         assert_eq!(
             work_directory(&checkouts, &targets),
             Some(first.path().canonicalize().unwrap())
         );
         single["content"][0]["state"]["metadata"]["truncated"] = serde_json::json!(true);
-        assert!(latest_work(&[single], 9).is_none());
+        assert!(latest_work(&[single], 9, first.path()).is_none());
         let read = serde_json::json!({"type":"assistant", "content":[{
             "type":"tool", "name":"execute", "time":{"completed":11}, "state":{"status":"completed",
             "input":{"code":"ctx_patch at another worktree"}, "metadata":{"toolCalls":[
                 {"tool":"lean-ctx.ctx_read", "status":"completed", "input":{"path":second.path()}}
             ]}}
         }]});
-        assert!(latest_work(&[read], 9).is_none());
+        assert!(latest_work(&[read], 9, first.path()).is_none());
+    }
+
+    #[test]
+    fn opencode_mutation_tools_resolve_documented_relative_paths_from_session_location() {
+        use super::{latest_work, work_directory};
+
+        let sandbox = tempfile::tempdir().unwrap();
+        let root = sandbox.path().join("checkout");
+        let source = root.join("src");
+        let foreign = sandbox.path().join("foreign");
+        std::fs::create_dir_all(&source).unwrap();
+        std::fs::create_dir_all(&foreign).unwrap();
+        let edited = source.join("main.rs");
+        let written = root.join("created.rs");
+        let deleted = source.join("removed.rs");
+        let escaped = foreign.join("outside.rs");
+        for path in [&edited, &written, &deleted, &escaped] {
+            std::fs::write(path, "fixture").unwrap();
+        }
+        std::fs::remove_file(&deleted).unwrap();
+
+        let checkouts = vec![("root".to_string(), root.clone())];
+        let message = |name: &str, input: serde_json::Value| {
+            serde_json::json!({"type":"assistant", "content":[{
+                "type":"tool", "name":name, "time":{"completed":10},
+                "state":{"status":"completed", "input":input}
+            }]})
+        };
+        let cases = [
+            (
+                "edit",
+                serde_json::json!({"path":"src/main.rs", "oldString":"a", "newString":"b"}),
+                edited,
+            ),
+            (
+                "write",
+                serde_json::json!({"path":"created.rs", "content":"created"}),
+                written,
+            ),
+            (
+                "shell",
+                serde_json::json!({"workdir":source.to_str().unwrap(), "command":"not parsed"}),
+                source,
+            ),
+            (
+                "patch",
+                serde_json::json!({"patchText":"*** Begin Patch\n*** Delete File: src/removed.rs\n*** End Patch"}),
+                deleted,
+            ),
+        ];
+        for (name, input, target) in cases {
+            let (_, targets) = latest_work(&[message(name, input)], 9, &root).unwrap();
+            assert_eq!(targets, vec![target]);
+            assert_eq!(
+                work_directory(&checkouts, &targets),
+                Some(root.canonicalize().unwrap())
+            );
+        }
+        let (_, targets) = latest_work(
+            &[message(
+                "shell",
+                serde_json::json!({"workdir":"src", "command":"not parsed"}),
+            )],
+            9,
+            &root,
+        )
+        .unwrap();
+        assert!(work_directory(&checkouts, &targets).is_none());
+
+        let (_, targets) = latest_work(
+            &[message(
+                "edit",
+                serde_json::json!({"path":"../foreign/outside.rs", "oldString":"a", "newString":"b"}),
+            )],
+            9,
+            &root,
+        )
+        .unwrap();
+        assert!(work_directory(&checkouts, &targets).is_none());
+
+        // lean-ctx's cwd/path base is not specified as the owning OpenCode Location.
+        let (_, targets) = latest_work(
+            &[message(
+                "lean-ctx.ctx_patch",
+                serde_json::json!({"path":"src/main.rs"}),
+            )],
+            9,
+            &root,
+        )
+        .unwrap();
+        assert!(work_directory(&checkouts, &targets).is_none());
+    }
+
+    #[test]
+    fn subagent_tool_input_does_not_attribute_child_work_to_its_parent() {
+        use super::latest_work;
+
+        let root = tempfile::tempdir().unwrap();
+        let parent = serde_json::json!({"type":"assistant", "content":[{
+            "type":"tool", "name":"execute", "time":{"completed":10},
+            "state":{"status":"completed", "input":{"code":"not inspected"}, "metadata":{"toolCalls":[
+                {"tool":"subagent", "status":"completed", "input":{
+                    "agent":"worker", "description":"make a change", "prompt":"update a source file"
+                }}
+            ]}}
+        }]});
+        assert!(latest_work(&[parent], 9, root.path()).is_none());
+    }
+
+    #[test]
+    fn history_reads_rotate_after_the_last_attempt_for_deterministic_fairness() {
+        use super::{rotate_sessions_after, ApiSession};
+
+        let sessions = || {
+            ["ses_first", "ses_middle", "ses_last"]
+                .into_iter()
+                .map(|id| {
+                    serde_json::from_value::<ApiSession>(serde_json::json!({"id":id})).unwrap()
+                })
+                .collect::<Vec<_>>()
+        };
+        let ids = |sessions: &[ApiSession]| {
+            sessions
+                .iter()
+                .map(|session| session.id.as_str())
+                .collect::<Vec<_>>()
+                .join(",")
+        };
+
+        let mut page = sessions();
+        rotate_sessions_after(&mut page, Some("ses_first"));
+        assert_eq!(ids(&page), "ses_middle,ses_last,ses_first");
+        // If that first read consumed the whole budget, the late session gets first chance next tick.
+        let mut page = sessions();
+        rotate_sessions_after(&mut page, Some("ses_middle"));
+        assert_eq!(ids(&page), "ses_last,ses_first,ses_middle");
+        let mut page = sessions();
+        rotate_sessions_after(&mut page, Some("ses_last"));
+        assert_eq!(ids(&page), "ses_first,ses_middle,ses_last");
     }
 
     /// A session that changes directory is the only sign of the move, and it can only be seen by
@@ -5227,12 +5594,8 @@ mod tests {
         assert!(agents.relocations(&checkouts).unwrap().is_empty());
         agents.agents("first", first.path()).unwrap();
         assert!(agents.relocations(&checkouts).unwrap().is_empty());
-        let moved = vec![AgentRelocation {
-            session_id: "ses_moved".to_string(),
-            from_checkout_id: "first".to_string(),
-            to_checkout_id: "second".to_string(),
-        }];
-        assert_eq!(agents.relocations(&checkouts).unwrap(), moved);
+        let moved = agents.relocations(&checkouts).unwrap();
+        assert_relocation(&moved, "ses_moved", "first", "second");
         // The next read brings a session that has just appeared, which is not a move, and the move
         // from before is offered again. Handing one over is the only thing this side can do about
         // delivery, and repeating it costs nothing: the terminal is looked up in the worktree it
@@ -5294,13 +5657,11 @@ mod tests {
             ("first".to_string(), first.path().to_path_buf()),
             ("second".to_string(), second.path().to_path_buf()),
         ];
-        assert_eq!(
-            agents.relocations(&with_both).unwrap(),
-            vec![AgentRelocation {
-                session_id: "ses_walk".to_string(),
-                from_checkout_id: "first".to_string(),
-                to_checkout_id: "second".to_string(),
-            }]
+        assert_relocation(
+            &agents.relocations(&with_both).unwrap(),
+            "ses_walk",
+            "first",
+            "second",
         );
 
         server.join().expect("mock server should finish");
@@ -5331,19 +5692,17 @@ mod tests {
             .unwrap()
             .is_empty());
         // It comes back in the worktree it moved to. That is still a move, not a new session.
-        assert_eq!(
-            agents
+        assert_relocation(
+            &agents
                 .record_relocations(
                     &checkouts,
                     located(second.path()),
-                    start + Duration::from_secs(4)
+                    start + Duration::from_secs(4),
                 )
                 .unwrap(),
-            vec![AgentRelocation {
-                session_id: "ses_quiet".to_string(),
-                from_checkout_id: "first".to_string(),
-                to_checkout_id: "second".to_string(),
-            }]
+            "ses_quiet",
+            "first",
+            "second",
         );
     }
 
@@ -5362,22 +5721,14 @@ mod tests {
         let located = |directory: &Path| vec![("ses_walk".to_string(), directory.to_path_buf())];
         let agents = AgentService::with_test_server(0);
         let start = Instant::now();
-        let moved = vec![AgentRelocation {
-            session_id: "ses_walk".to_string(),
-            from_checkout_id: "first".to_string(),
-            to_checkout_id: "second".to_string(),
-        }];
-
         assert!(agents
             .record_relocations(&checkouts, located(first.path()), start)
             .unwrap()
             .is_empty());
-        assert_eq!(
-            agents
-                .record_relocations(&checkouts, located(second.path()), start)
-                .unwrap(),
-            moved
-        );
+        let moved = agents
+            .record_relocations(&checkouts, located(second.path()), start)
+            .unwrap();
+        assert_relocation(&moved, "ses_walk", "first", "second");
         // Read again well inside the window: the move is offered once more, because the read that
         // got it is not known to have kept it.
         assert_eq!(
@@ -5396,6 +5747,85 @@ mod tests {
                 &checkouts,
                 located(second.path()),
                 start + PENDING_MOVES_TTL * 2
+            )
+            .unwrap()
+            .is_empty());
+    }
+
+    #[test]
+    fn a_baseline_discards_disabled_moves_and_seeds_the_effective_location() {
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let third = tempfile::tempdir().unwrap();
+        let fourth = tempfile::tempdir().unwrap();
+        let checkouts = vec![
+            ("first".to_string(), first.path().to_path_buf()),
+            ("second".to_string(), second.path().to_path_buf()),
+            ("third".to_string(), third.path().to_path_buf()),
+            ("fourth".to_string(), fourth.path().to_path_buf()),
+        ];
+        let located = |directory: &Path| vec![("ses_walk".to_string(), directory.to_path_buf())];
+        let agents = AgentService::with_test_server(0);
+        let start = Instant::now();
+
+        assert!(agents
+            .record_relocations(&checkouts, located(first.path()), start)
+            .unwrap()
+            .is_empty());
+        assert_relocation(
+            &agents
+                .record_relocations(&checkouts, located(second.path()), start)
+                .unwrap(),
+            "ses_walk",
+            "first",
+            "second",
+        );
+        // A tool target discovered after follow resumes is the baseline, not a move from stale state.
+        assert!(agents
+            .record_relocations_with_baseline(
+                &checkouts,
+                vec![("ses_walk".to_string(), Some(third.path().to_path_buf()))],
+                start + Duration::from_secs(1),
+                true,
+            )
+            .unwrap()
+            .is_empty());
+        assert!(agents
+            .record_relocations(
+                &checkouts,
+                located(third.path()),
+                start + Duration::from_secs(2)
+            )
+            .unwrap()
+            .is_empty());
+        assert_relocation(
+            &agents
+                .record_relocations(
+                    &checkouts,
+                    located(fourth.path()),
+                    start + Duration::from_secs(3),
+                )
+                .unwrap(),
+            "ses_walk",
+            "third",
+            "fourth",
+        );
+
+        // An unresolved tool target must not retain the old effective checkout and replay it later.
+        assert!(agents
+            .record_relocations_with_baseline(
+                &checkouts,
+                vec![("ses_walk".to_string(), None)],
+                start + Duration::from_secs(4),
+                true,
+            )
+            .unwrap()
+            .is_empty());
+        assert!(agents
+            .record_relocations(
+                &checkouts,
+                located(first.path()),
+                start + Duration::from_secs(5)
             )
             .unwrap()
             .is_empty());
@@ -5423,32 +5853,20 @@ mod tests {
             .record_relocations(&checkouts, located(first.path()), start)
             .unwrap()
             .is_empty());
-        assert_eq!(
-            agents
-                .record_relocations(&checkouts, located(second.path()), start)
-                .unwrap(),
-            vec![AgentRelocation {
-                session_id: "ses_walk".to_string(),
-                from_checkout_id: "first".to_string(),
-                to_checkout_id: "second".to_string(),
-            }]
-        );
+        let moved = agents
+            .record_relocations(&checkouts, located(second.path()), start)
+            .unwrap();
+        assert_relocation(&moved, "ses_walk", "first", "second");
         // The second hop arrives before anybody took the first, which is what a caller that threw
         // the answer away looks like from here.
-        assert_eq!(
-            agents
-                .record_relocations(
-                    &checkouts,
-                    located(third.path()),
-                    start + Duration::from_secs(1)
-                )
-                .unwrap(),
-            vec![AgentRelocation {
-                session_id: "ses_walk".to_string(),
-                from_checkout_id: "second".to_string(),
-                to_checkout_id: "third".to_string(),
-            }]
-        );
+        let latest = agents
+            .record_relocations(
+                &checkouts,
+                located(third.path()),
+                start + Duration::from_secs(1),
+            )
+            .unwrap();
+        assert_relocation(&latest, "ses_walk", "second", "third");
         // Still one answer for one session: the hop before it is not handed over again beside it.
         assert_eq!(
             agents

@@ -1361,9 +1361,10 @@ describe("TerminalSession UI", () => {
     expect(terminalSession.exists()).toBe(true);
     vi.mocked(writeTerminal).mockRejectedValueOnce(error);
 
-    await wrapper.vm.moveSession(created.session.id, target.id, 0);
+    const result = await wrapper.vm.moveSession(created.session.id, target.id, 0);
     await flushPromises();
 
+    expect(result).toEqual({ moved: true, directoryChange: "not-written" });
     expect(moveTerminal).toHaveBeenCalledWith(checkout.id, created.session.id, target.id, true);
     expect(saveTerminalLayout).toHaveBeenCalledWith(
       target.id,

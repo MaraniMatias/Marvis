@@ -258,8 +258,8 @@ export function listAgentCandidateSessions(checkoutId: string): Promise<AgentSes
  * Both sides are worktrees this app holds, so the answer is a pair of checkout ids and never a
  * path.
  */
-export function listAgentRelocations(): Promise<AgentRelocation[]> {
-  return invoke<AgentRelocation[]>("agent_relocations");
+export function listAgentRelocations(baseline = false): Promise<AgentRelocation[]> {
+  return invoke<AgentRelocation[]>("agent_relocations", { baseline });
 }
 /** Every agent the checkout's server offers, with the color OpenCode paints it with. */
 export function listAgentAgents(checkoutId: string): Promise<AgentAgent[]> {

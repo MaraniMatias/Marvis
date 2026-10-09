@@ -1524,12 +1524,12 @@ impl Database {
         self.load_workspace()
     }
 
-    /// Moves a terminal within its Git repository, or from a plain folder into Git.
+    /// Moves a terminal to another registered, non-missing checkout.
     ///
-    /// The process is not touched: a session is a row, and moving it hands the row to another
-    /// checkout so the terminal belongs to the worktree it is listed under. Both layouts are
-    /// reconciled in the same transaction as the row, because a layout still naming a session its
-    /// checkout no longer holds is a layout the next read prunes and the next save refuses.
+    /// The process is not touched: a session is a row, and moving it changes only the checkout that
+    /// owns it. Both layouts are reconciled in the same transaction as the row, because a layout
+    /// still naming a session its checkout no longer holds is a layout the next read prunes and the
+    /// next save refuses.
     ///
     /// `select_target` says whether the window should follow. A person dragging a row to another
     /// worktree wants to be there; a session that moved on its own does not get to decide what the
@@ -1555,7 +1555,7 @@ impl Database {
         if source_checkout_id == target_checkout_id {
             return Err("the terminal session is already in that worktree".into());
         }
-        let target_repo_id: String = transaction
+        let _target_repo_id: String = transaction
             .query_row(
                 "SELECT repo_id FROM checkouts
                  WHERE id = ?1 AND is_missing = 0 AND is_archived = 0",
@@ -1565,18 +1565,6 @@ impl Database {
             .optional()
             .map_err(db_error)?
             .ok_or_else(|| "checkout does not exist or is missing".to_string())?;
-        let (source_repo_id, source_kind): (String, String) = transaction
-            .query_row(
-                "SELECT c.repo_id, r.kind FROM checkouts c JOIN repos r ON r.id = c.repo_id WHERE c.id = ?1",
-                [&source_checkout_id],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .map_err(db_error)?;
-        // A plain-folder terminal can enter any registered checkout. Once it belongs to Git,
-        // its repository boundary applies to automatic and manual moves alike.
-        if source_repo_id != target_repo_id && source_kind != "plain" {
-            return Err("a terminal session cannot leave the repository it was opened in".into());
-        }
         transaction
             .execute(
                 "UPDATE sessions SET checkout_id = ?1 WHERE id = ?2",
@@ -4656,10 +4644,28 @@ mod tests {
             )
             .unwrap();
 
-        // Another repository is a different Git directory, so it is never a destination.
-        assert!(database
-            .move_terminal_session(&session.id, &other_root_id, true)
-            .is_err());
+        // A registered checkout in another Git repository is a valid destination.
+        let moved_elsewhere = database
+            .move_terminal_session(&session.id, &other_root_id, false)
+            .unwrap();
+        assert_eq!(
+            database.terminal_session_checkout(&session.id).unwrap(),
+            Some(other_root_id.clone())
+        );
+        let foreign_session = moved_elsewhere
+            .repos
+            .iter()
+            .flat_map(|repo| &repo.checkouts)
+            .find(|checkout| checkout.id == other_root_id)
+            .unwrap()
+            .sessions
+            .first()
+            .unwrap();
+        assert_eq!(foreign_session.name, session.name);
+        assert_eq!(foreign_session.created_at, session.created_at);
+        database
+            .move_terminal_session(&session.id, &root_id, false)
+            .unwrap();
         assert_eq!(
             database.terminal_session_checkout(&session.id).unwrap(),
             Some(root_id.clone())
@@ -4718,7 +4724,7 @@ mod tests {
     }
 
     #[test]
-    fn home_terminals_can_enter_git_but_cannot_leave_that_repository_afterwards() {
+    fn registered_checkouts_can_take_terminal_sessions_from_any_source() {
         for select_target in [false, true] {
             let temp = tempdir().unwrap();
             let home = temp.path().join("home");
@@ -4846,22 +4852,17 @@ mod tests {
                 assert_eq!(moved.active_checkout_id, before.active_checkout_id);
                 assert_eq!(moved.active_session_id, before.active_session_id);
             }
-            for invalid in [&home_id, &plain_id, &other_id] {
-                assert!(database
-                    .move_terminal_session(&session.id, invalid, select_target)
-                    .is_err());
+            // The same session can move from Git B back to Home, then onward to another plain
+            // checkout and back into Git A. Each move changes the row's checkout owner only.
+            for destination in [&other_id, &home_id, &plain_id, &root_id] {
+                database
+                    .move_terminal_session(&session.id, destination, select_target)
+                    .unwrap();
                 assert_eq!(
                     database.terminal_session_checkout(&session.id).unwrap(),
-                    Some(worktree_id.clone())
+                    Some(destination.clone())
                 );
             }
-            database
-                .move_terminal_session(&session.id, &root_id, select_target)
-                .unwrap();
-            assert_eq!(
-                database.terminal_session_checkout(&session.id).unwrap(),
-                Some(root_id)
-            );
         }
     }
 

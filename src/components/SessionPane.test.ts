@@ -298,6 +298,7 @@ describe("SessionPane terminal UI", () => {
 
     expect(terminalMock.mounts).toBe(2);
     expect(wrapper.findAllComponents({ name: "TerminalSession" })).toHaveLength(2);
+    expect(wrapper.emitted("shellCreated")).toEqual([[2, checkout.id, "session:live-2"]]);
     await wrapper.vm.requestClose("session:live-2");
 
     expect(terminalMock.closedIds).toEqual(["session:live-2"]);
@@ -399,8 +400,9 @@ describe("SessionPane terminal UI", () => {
     await flushPromises();
 
     // The process is the one already running, so a move is a row change and nothing is mounted.
-    await wrapper.vm.moveSession("session:live", target.id, 0);
+    const result = await wrapper.vm.moveSession("session:live", target.id, 0);
     await flushPromises();
+    expect(result).toEqual({ moved: true, directoryChange: "written" });
 
     expect(moveTerminal).toHaveBeenCalledWith(checkout.id, "session:live", target.id, true);
     expect(terminalMock.mounts).toBe(1);
@@ -613,10 +615,11 @@ describe("SessionPane terminal UI", () => {
     await flushPromises();
 
     terminalMock.busy = true;
-    await wrapper.vm.moveSession("session:live", target.id, 0);
+    const result = await wrapper.vm.moveSession("session:live", target.id, 0);
     await flushPromises();
 
     // A busy shell still gets a notice that the move succeeded but its directory stayed put.
+    expect(result).toEqual({ moved: true, directoryChange: "not-written" });
     expect(moveTerminal).toHaveBeenCalledTimes(1);
     expect(terminalMock.directoryChanges).toEqual([]);
     expect(toasts.value.map((toast) => toast.message)).toEqual([

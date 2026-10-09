@@ -46,6 +46,8 @@ pub struct AgentRelocation {
     pub session_id: String,
     pub from_checkout_id: String,
     pub to_checkout_id: String,
+    /// When this relocation was first observed, in Unix milliseconds. Replays keep the same value.
+    pub observed_at: i64,
 }
 
 /// One agent a checkout's server offers, as OpenCode describes it.

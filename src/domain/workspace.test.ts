@@ -74,17 +74,19 @@ describe("checkoutForWorkingDirectory", () => {
     branch: "main",
   });
 
-  it("lets Home enter any registered repo and then follows both directions within Git", () => {
+  it("follows a shell into any registered checkout from Home or Git", () => {
     const home = createPlainRepo({ path: "/work", name: "Home" }, "now");
     const repo = gitRepo();
     const plain = createPlainRepo({ path: "/notes", name: "Notes" }, "now");
-    const repos = [home, repo, plain];
+    const other = { ...gitRepo(), id: elsewhere.repoId, root: elsewhere.path, checkouts: [elsewhere] };
+    const repos = [home, repo, plain, other];
     expect(checkoutForWorkingDirectory(repos, home.checkouts[0].id, root.path)?.id).toBe(root.id);
     expect(checkoutForWorkingDirectory(repos, home.checkouts[0].id, sibling.path)?.id).toBe(sibling.id);
     expect(checkoutForWorkingDirectory(repos, home.checkouts[0].id, plain.root)?.id).toBe(plain.checkouts[0].id);
     expect(checkoutForWorkingDirectory(repos, root.id, sibling.path)?.id).toBe(sibling.id);
     expect(checkoutForWorkingDirectory(repos, sibling.id, root.path)?.id).toBe(root.id);
-    expect(checkoutForWorkingDirectory(repos, root.id, plain.root)).toBeNull();
+    expect(checkoutForWorkingDirectory(repos, root.id, plain.root)?.id).toBe(plain.checkouts[0].id);
+    expect(checkoutForWorkingDirectory(repos, root.id, elsewhere.path)?.id).toBe(elsewhere.id);
     expect(checkoutForWorkingDirectory(repos, home.checkouts[0].id, "/work/other-folder")?.id).toBe(
       home.checkouts[0].id,
     );
@@ -143,7 +145,7 @@ describe("checkoutForWorkingDirectory", () => {
     );
   });
 
-  it("names nothing for a directory in no worktree, in another repo, or in a missing one", () => {
+  it("names nothing for a directory in no checkout or a missing one", () => {
     const missing = createCheckout({
       repoId: "repo:/work/app",
       path: "/work/app-gone",
@@ -154,12 +156,27 @@ describe("checkoutForWorkingDirectory", () => {
     });
 
     expect(checkoutForWorkingDirectory(reposWith([root, sibling]), root.id, "/tmp")).toBeNull();
-    // Another repository shares no Git directory, so a terminal cannot be handed to it.
-    expect(checkoutForWorkingDirectory(reposWith([root, elsewhere]), root.id, "/work/other")?.id).not.toBe(
-      elsewhere.id,
-    );
+    // A shell may cross repository boundaries when the directory names a registered checkout.
+    expect(checkoutForWorkingDirectory(reposWith([root, elsewhere]), root.id, "/work/other")?.id).toBe(elsewhere.id);
     // A worktree whose directory is gone is not a place to work.
     expect(checkoutForWorkingDirectory(reposWith([root, missing]), root.id, "/work/app-gone")).toBeNull();
+  });
+
+  it("refuses equally deep matches from distinct checkouts", () => {
+    const duplicate = {
+      ...createCheckout({
+        repoId: "repo:/work/other",
+        path: "/private/work/app-feature",
+        canonicalPath: sibling.canonicalPath,
+        isPrimary: true,
+        branch: "main",
+      }),
+      id: "checkout:duplicate-path",
+    };
+
+    const repos = reposWith([root, sibling, duplicate]);
+    expect(checkoutForWorkingDirectory(repos, root.id, sibling.path)).toBeNull();
+    expect(checkoutForWorkingDirectory(repos, root.id, duplicate.path + "/src")).toBeNull();
   });
 
   it("compares the directory the OS spells against the worktree both ways", () => {

@@ -59,7 +59,8 @@ const props = withDefaults(
 );
 const emit = defineEmits<{
   openFolder: [];
-  workspaceUpdated: [workspace: WorkspaceState];
+  workspaceUpdated: [workspace: WorkspaceState, shellRequestToken?: number];
+  shellCreated: [token: number, checkoutId: string, sessionId: string];
   sessionStatusChanged: [sessionId: string, status: TerminalSessionStatus | null];
   updateDocumentMode: [mode: DocumentMode];
   readingPositionChanged: [position: { top: number; left: number }];
@@ -86,7 +87,7 @@ defineExpose({
     selectTarget?: boolean,
   ) =>
     sessionPane.value?.moveSession(sessionId, targetCheckoutId, index, changeDirectory, selectTarget) ??
-    Promise.resolve(false),
+    Promise.resolve({ moved: false, directoryChange: "not-requested" as const }),
 });
 
 /** The three views, one of them visible (D.1). */
@@ -137,7 +138,8 @@ function finishPreviewResize(event: PointerEvent) {
         :terminal-settings="terminalSettings"
         :zoom="zoom"
         @open-folder="$emit('openFolder')"
-        @workspace-updated="$emit('workspaceUpdated', $event)"
+        @workspace-updated="(workspace, shellRequestToken) => $emit('workspaceUpdated', workspace, shellRequestToken)"
+        @shell-created="(token, checkoutId, sessionId) => $emit('shellCreated', token, checkoutId, sessionId)"
         @session-status-changed="(sessionId, status) => $emit('sessionStatusChanged', sessionId, status)"
         @open-file="$emit('openFile', $event)"
         @open-external-url="$emit('openExternalUrl', $event)"

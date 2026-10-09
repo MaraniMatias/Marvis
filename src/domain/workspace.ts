@@ -272,10 +272,6 @@ function containsDirectory(parent: string, child: string): boolean {
 /**
  * The registered checkout matching a terminal's working directory.
  *
- * A terminal filed under a plain folder may enter any repository. Once filed under Git, it may
- * only move within that repository: a session labelled with one repo's tree must not be handed
- * to another repo.
- *
  * The answer may be the checkout the terminal is already under, and that is not a corner case: a
  * worktree created inside its own repository lives under the repository's directory, so the two
  * both contain it. The most specific one is the worktree the directory is really in, and answering
@@ -284,20 +280,28 @@ function containsDirectory(parent: string, child: string): boolean {
  *
  * Both `path` and `canonicalPath` are tried because the OS reports the directory as the kernel
  * recorded it and the two are not always spelled the same way, as `/tmp` and `/private/tmp` show.
+ * Equal-depth matches or duplicate canonical paths are ambiguous and name no checkout.
  */
 export function checkoutForWorkingDirectory(repos: Repo[], fromCheckoutId: string, directory: string): Checkout | null {
-  const fromRepo = repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === fromCheckoutId));
-  if (!fromRepo) return null;
-  const checkouts = repos.flatMap((repo) => repo.checkouts);
-  // The longest path is the most specific one, so a worktree nested in a worktree wins over the
-  // one holding it rather than whichever came first in the list.
-  const target = checkouts
-    .filter((checkout) => !checkout.isMissing && (fromRepo.kind !== "git" || checkout.repoId === fromRepo.id))
-    .filter(
-      (checkout) => containsDirectory(checkout.canonicalPath, directory) || containsDirectory(checkout.path, directory),
-    )
-    .sort((left, right) => right.canonicalPath.length - left.canonicalPath.length)[0];
-  return target ?? null;
+  if (!repos.some((repo) => repo.checkouts.some((checkout) => checkout.id === fromCheckoutId))) return null;
+  const checkouts = repos.flatMap((repo) => repo.checkouts.filter((checkout) => !checkout.isMissing));
+  const matches = checkouts.flatMap((checkout) => {
+    const depth = [checkout.path, checkout.canonicalPath]
+      .filter((path) => containsDirectory(path, directory))
+      .reduce((longest, path) => Math.max(longest, path.length), -1);
+    return depth < 0 ? [] : [{ checkout, depth }];
+  });
+  matches.sort((left, right) => right.depth - left.depth);
+  const target = matches[0];
+  if (
+    !target ||
+    checkouts.some(
+      (checkout) => checkout !== target.checkout && checkout.canonicalPath === target.checkout.canonicalPath,
+    ) ||
+    matches[1]?.depth === target.depth
+  )
+    return null;
+  return target.checkout;
 }
 
 export function repoIdForPath(canonicalPath: string): string {

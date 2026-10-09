@@ -198,7 +198,12 @@ const terminalAgents = useTerminalAgentRows(
  * is asked until the service answers: the read is asynchronous, so the first answer arrives after
  * this file has been set up.
  */
-useAgentRelocations(followAgentRelocation);
+useAgentRelocations(
+  followAgentRelocation,
+  computed(
+    () => settings.value.terminal.followWorktree === "agent" || settings.value.terminal.followWorktree === "both",
+  ),
+);
 const reviewTarget = ref<ReviewTarget>("markdown");
 let reviewTargetLoadGeneration = 0;
 watch(
@@ -246,6 +251,8 @@ watch(
   },
 );
 const shellRequest = ref<{ checkoutId: string; token: number } | null>(null);
+let shellRequestToken = 0;
+let pendingShellNavigation: { checkoutId: string; token: number; revision: number } | null = null;
 watch(launchCheckoutId, (checkoutId) => {
   if (checkoutId) void requestShell(checkoutId);
 });
@@ -277,7 +284,6 @@ const documentRefreshActivity = ref<Record<string, { revision: number; paths: st
 /** Hoisted so the pane is handed the same array when nothing has moved, rather than a new one on
  *  every repaint of the shell. */
 const NO_REFRESH_PATHS: string[] = [];
-let shellRequestToken = 0;
 let unlistenFileActivity: (() => void) | undefined;
 let activityListenerDisposed = false;
 let unlistenCloseRequested: (() => void) | undefined;
@@ -549,7 +555,7 @@ const activeCheckoutUiState = computed(() => {
  * answered by leaving the preview alone; the close button is the reader saying the preview is done
  * with, and it takes the whole panel back to the terminal whether or not one was already showing.
  */
-function showView(checkoutId: string, view: MainView, { giveBackToTerminal = false } = {}) {
+function showView(checkoutId: string, view: MainView, { giveBackToTerminal = false, navigation = true } = {}) {
   const previous = mainViews.value[checkoutId];
   if (
     !giveBackToTerminal &&
@@ -559,6 +565,7 @@ function showView(checkoutId: string, view: MainView, { giveBackToTerminal = fal
     previous.kind !== "terminal"
   )
     return;
+  if (navigation) noteTerminalNavigation();
   mainViews.value = { ...mainViews.value, [checkoutId]: view };
   updateCheckoutUiState(checkoutId, {
     ...mainViewToState(view, checkoutId),
@@ -610,6 +617,7 @@ function setDocumentMode(mode: DocumentMode) {
 }
 
 async function activateCheckoutTerminal(checkoutId: string, hasChanges = false) {
+  noteTerminalNavigation({ activeCheckoutId: checkoutId, activeSessionId: null });
   // A row that shows `+N -N` is advertising a diff, so picking it opens the whole change set
   // for that workdir rather than whatever view it had saved. A row with nothing changed keeps
   // restoring its saved view, and no terminal is started either way.
@@ -624,6 +632,7 @@ async function activateCheckoutTerminal(checkoutId: string, hasChanges = false) 
 async function activateTerminalSession(sessionId: string) {
   const checkout = allCheckouts.value.find((item) => item.sessions.some((session) => session.id === sessionId));
   if (!checkout) return;
+  noteTerminalNavigation({ activeCheckoutId: checkout.id, activeSessionId: sessionId });
   await selectWorkspaceSession(sessionId);
   if (!isSplitLayout.value) showView(checkout.id, { kind: "terminal", sessionId });
   else if (loadedCheckoutUiIds.has(checkout.id) && mainViews.value[checkout.id]?.kind === "terminal") {
@@ -1230,6 +1239,13 @@ onUnmounted(() => {
   systemPrefersDark.removeEventListener("change", applyTheme);
   unlistenFileActivity?.();
   if (inspectorCloseTimer !== undefined) window.clearTimeout(inspectorCloseTimer);
+  for (const [sessionId, pending] of manualDirectoryChanges) clearManualDirectoryChange(sessionId, pending, false);
+  manualRelocationCutoffs.clear();
+  queuedAgentRelocations.clear();
+  handledAgentRelocations.clear();
+  automaticMovePromises.clear();
+  manualMoveQueues.clear();
+  movingTerminals.clear();
 });
 
 function onViewportResize() {
@@ -1588,12 +1604,22 @@ function restoreArchivedWorktrees(repoId: string) {
 }
 
 async function requestShell(checkoutId: string) {
-  showView(checkoutId, { kind: "terminal", sessionId: null });
+  const selection = { activeCheckoutId: checkoutId, activeSessionId: null };
+  noteTerminalNavigation(selection);
+  showView(checkoutId, { kind: "terminal", sessionId: null }, { navigation: false });
+  const token = ++shellRequestToken;
+  const revision = terminalNavigationRevision;
+  pendingShellNavigation = { checkoutId, token, revision };
   try {
-    workspace.value = await persistCheckoutSelection(checkoutId);
-    shellRequest.value = { checkoutId, token: ++shellRequestToken };
+    await persistCheckoutSelection(checkoutId);
+    if (token !== shellRequestToken || revision !== terminalNavigationRevision) return;
+    workspace.value = { ...workspace.value, ...selection };
+    shellRequest.value = { checkoutId, token };
   } catch (cause) {
-    reportCause(cause);
+    if (token === shellRequestToken) {
+      if (pendingShellNavigation?.token === token) pendingShellNavigation = null;
+      reportCause(cause);
+    }
   }
 }
 
@@ -1695,7 +1721,14 @@ function updateSessionStatus(sessionId: string, status: TerminalSessionStatus | 
   if (status) {
     sessionRuntimeStatuses.value[sessionId] = status;
     followWorkingDirectory(sessionId, status);
-  } else delete sessionRuntimeStatuses.value[sessionId];
+  } else {
+    delete sessionRuntimeStatuses.value[sessionId];
+    const pending = manualDirectoryChanges.get(sessionId);
+    if (pending) clearManualDirectoryChange(sessionId, pending, false);
+    manualRelocationCutoffs.delete(sessionId);
+    queuedAgentRelocations.delete(sessionId);
+    handledAgentRelocations.delete(sessionId);
+  }
 }
 
 /**
@@ -1707,6 +1740,25 @@ function updateSessionStatus(sessionId: string, status: TerminalSessionStatus | 
  * moved, so those terminals are left to `followAgentRelocation`.
  */
 function followWorkingDirectory(sessionId: string, status: TerminalSessionStatus) {
+  const manualChange = manualDirectoryChanges.get(sessionId);
+  if (manualChange) {
+    const directory = status.workingDirectory;
+    const target = directory
+      ? checkoutForWorkingDirectory(workspace.value.repos, manualChange.targetCheckoutId, directory)
+      : null;
+    if (manualChange.phase === "moving") {
+      if (target?.id === manualChange.targetCheckoutId) manualChange.targetObserved = true;
+      return;
+    }
+    if (!directory) return;
+    if (target?.id === manualChange.targetCheckoutId) {
+      clearManualDirectoryChange(sessionId, manualChange);
+    } else {
+      const source = checkoutForWorkingDirectory(workspace.value.repos, manualChange.sourceCheckoutId, directory);
+      if (source?.id === manualChange.sourceCheckoutId) return;
+      clearManualDirectoryChange(sessionId, manualChange);
+    }
+  }
   if (!["cd", "both"].includes(settings.value.terminal.followWorktree)) return;
   if (!status.workingDirectory || status.foregroundApp === AGENT_APP) return;
   const checkouts = allCheckouts.value;
@@ -1728,11 +1780,11 @@ async function closeTerminalSession(sessionId: string) {
 }
 
 /**
- * Hands a live terminal to another worktree of the same repository.
+ * Hands a live terminal to another registered checkout without restarting it.
  *
  * The pane owns the live views, so it is the one that can move a terminal without restarting it:
  * this only carries the destination across. The workspace the backend returns already selects the
- * destination worktree, which is what puts the files and the changes panel on it.
+ * destination checkout, which is what puts the files and the changes panel on it.
  */
 async function moveTerminalSession(
   sessionId: string,
@@ -1741,9 +1793,81 @@ async function moveTerminalSession(
   changeDirectory = true,
   selectTarget = true,
 ) {
-  return (
-    (await mainPane.value?.moveSession(sessionId, targetCheckoutId, index, changeDirectory, selectTarget)) ?? false
+  if (!changeDirectory) {
+    return (await mainPane.value?.moveSession(sessionId, targetCheckoutId, index, false, selectTarget))?.moved ?? false;
+  }
+
+  const source = allCheckouts.value.find((checkout) => checkout.sessions.some((session) => session.id === sessionId));
+  const pending = manualDirectoryChanges.get(sessionId) ?? {
+    sourceCheckoutId: source?.id ?? workspace.value.activeCheckoutId ?? "",
+    targetCheckoutId,
+    requestedAt: Date.now(),
+    operations: 0,
+    phase: "moving" as const,
+    targetObserved: false,
+    timeoutExpired: false,
+    timeout: 0,
+  };
+  window.clearTimeout(pending.timeout);
+  pending.sourceCheckoutId = source?.id ?? pending.sourceCheckoutId;
+  pending.targetCheckoutId = targetCheckoutId;
+  pending.requestedAt = Date.now();
+  pending.operations += 1;
+  pending.phase = "moving";
+  pending.targetObserved = false;
+  pending.timeoutExpired = false;
+  pending.timeout = window.setTimeout(() => {
+    if (pending.phase === "moving") pending.timeoutExpired = true;
+    else clearManualDirectoryChange(sessionId, pending);
+  }, MANUAL_DIRECTORY_CHANGE_TIMEOUT_MS);
+  manualRelocationCutoffs.set(sessionId, pending.requestedAt);
+  const queuedRelocation = queuedAgentRelocations.get(sessionId);
+  if (queuedRelocation && queuedRelocation.observedAt <= pending.requestedAt) {
+    queuedAgentRelocations.delete(sessionId);
+  }
+  manualDirectoryChanges.set(sessionId, pending);
+
+  const previous = manualMoveQueues.get(sessionId) ?? Promise.resolve();
+  const move = previous.then(async () => {
+    const automaticMove = automaticMovePromises.get(sessionId);
+    if (automaticMove) await automaticMove.catch(() => false);
+    const currentSource = allCheckouts.value.find((checkout) =>
+      checkout.sessions.some((session) => session.id === sessionId),
+    );
+    if (currentSource && manualDirectoryChanges.get(sessionId) === pending) {
+      pending.sourceCheckoutId = currentSource.id;
+    }
+    return mainPane.value?.moveSession(sessionId, targetCheckoutId, index, true, selectTarget);
+  });
+  const queued = move.then(
+    () => undefined,
+    () => undefined,
   );
+  manualMoveQueues.set(sessionId, queued);
+
+  let result: { moved: boolean; directoryChange: "not-requested" | "written" | "not-written" } | undefined;
+  try {
+    result = await move;
+    return result?.moved ?? false;
+  } finally {
+    if (manualDirectoryChanges.get(sessionId) === pending) {
+      pending.operations -= 1;
+      if (pending.operations === 0) {
+        if (
+          result?.moved &&
+          result.directoryChange === "written" &&
+          !pending.targetObserved &&
+          !pending.timeoutExpired
+        ) {
+          pending.phase = "awaiting-target";
+        } else {
+          clearManualDirectoryChange(sessionId, pending);
+        }
+      }
+    }
+    if (manualMoveQueues.get(sessionId) === queued) manualMoveQueues.delete(sessionId);
+    drainAgentRelocation(sessionId);
+  }
 }
 
 /**
@@ -1771,7 +1895,12 @@ function terminalIsOnScreen(sessionId: string): boolean {
  */
 function windowFollowsMove(sessionId: string, fromCheckoutId: string) {
   const { activeCheckoutId, activeSessionId } = workspace.value;
-  return activeCheckoutId === fromCheckoutId && activeSessionId === sessionId && terminalIsOnScreen(sessionId);
+  return (
+    !pendingShellNavigation &&
+    activeCheckoutId === fromCheckoutId &&
+    activeSessionId === sessionId &&
+    terminalIsOnScreen(sessionId)
+  );
 }
 
 /**
@@ -1783,7 +1912,52 @@ function windowFollowsMove(sessionId: string, fromCheckoutId: string) {
  * move lands on a session that has already arrived and comes back as "already in that worktree",
  * which is a message to the person reading it. One terminal, one move, until it finishes.
  */
-const movingTerminals = new Set<string>();
+// Invalidates a pending automatic follow if navigation changes before its IPC resolves.
+let terminalNavigationRevision = 0;
+let terminalNavigationSelection: Pick<WorkspaceState, "activeCheckoutId" | "activeSessionId"> | null = null;
+const movingTerminals = new Map<string, number>();
+const automaticMovePromises = new Map<string, Promise<boolean>>();
+const manualMoveQueues = new Map<string, Promise<void>>();
+const queuedAgentRelocations = new Map<string, AgentRelocation>();
+const handledAgentRelocations = new Map<string, number>();
+// Agent relocation replies replay for 30 seconds; only a later timestamp supersedes a manual move.
+const manualRelocationCutoffs = new Map<string, number>();
+// PTY writes only acknowledge bytes; wait for the OS cwd, but do not suppress follow forever if `cd` fails.
+const MANUAL_DIRECTORY_CHANGE_TIMEOUT_MS = 15_000;
+interface PendingManualDirectoryChange {
+  sourceCheckoutId: string;
+  targetCheckoutId: string;
+  requestedAt: number;
+  operations: number;
+  phase: "moving" | "awaiting-target";
+  targetObserved: boolean;
+  timeoutExpired: boolean;
+  timeout: number;
+}
+const manualDirectoryChanges = new Map<string, PendingManualDirectoryChange>();
+
+function clearManualDirectoryChange(
+  sessionId: string,
+  expected: PendingManualDirectoryChange,
+  resumeAgentFollow = true,
+) {
+  if (manualDirectoryChanges.get(sessionId) !== expected) return;
+  window.clearTimeout(expected.timeout);
+  manualDirectoryChanges.delete(sessionId);
+  if (resumeAgentFollow) drainAgentRelocation(sessionId);
+  else queuedAgentRelocations.delete(sessionId);
+}
+
+function noteTerminalNavigation(
+  selection: Pick<WorkspaceState, "activeCheckoutId" | "activeSessionId"> = {
+    activeCheckoutId: workspace.value.activeCheckoutId,
+    activeSessionId: workspace.value.activeSessionId,
+  },
+) {
+  terminalNavigationRevision += 1;
+  terminalNavigationSelection = selection;
+  pendingShellNavigation = null;
+}
 
 /**
  * Hands a terminal to its Git worktree, including one initially filed under a plain folder,
@@ -1796,7 +1970,11 @@ const movingTerminals = new Set<string>();
  * The directory is never changed by either: the program already moved itself, and its shell is
  * sitting behind it with nothing at a prompt to read a `cd`.
  */
-async function moveTerminalToWorktree(sessionId: string, fromCheckoutId: string, toCheckoutId: string) {
+async function moveTerminalToWorktree(
+  sessionId: string,
+  fromCheckoutId: string,
+  toCheckoutId: string,
+): Promise<boolean> {
   const repo = workspace.value.repos.find((candidate) =>
     candidate.checkouts.some((checkout) => checkout.id === fromCheckoutId),
   );
@@ -1804,30 +1982,44 @@ async function moveTerminalToWorktree(sessionId: string, fromCheckoutId: string,
     candidate.checkouts.some((checkout) => checkout.id === toCheckoutId),
   );
   const target = targetRepo?.checkouts.find((checkout) => checkout.id === toCheckoutId);
-  const allowed = repo?.id === targetRepo?.id || repo?.kind === "plain";
-  // Plain-folder terminals may enter any checkout; Git terminals cannot leave their repository.
-  // The backend enforces the same boundary for manual and automatic moves.
-  if (!repo || !target || target.isMissing || !allowed) return;
+  // A registered non-missing checkout is a destination from any source; the backend applies the
+  // same target check to manual and automatic moves.
+  if (!repo || !target || target.isMissing || manualDirectoryChanges.has(sessionId)) return false;
   const follow = windowFollowsMove(sessionId, fromCheckoutId);
+  const navigationRevision = terminalNavigationRevision;
   // Decided before the move is taken, because the workspace it changes is the question: once the
   // row has left, the checkout it left no longer holds the terminal that was in front of us.
-  if (movingTerminals.has(sessionId)) return;
-  movingTerminals.add(sessionId);
-  try {
+  if (movingTerminals.has(sessionId)) return false;
+  movingTerminals.set(sessionId, navigationRevision);
+  const operation = Promise.resolve().then(async () => {
     // The pane reports whether the row actually moved, because a terminal with no live view does
     // not move and the pane it was on is still the pane on screen.
-    if (!(await moveTerminalSession(sessionId, toCheckoutId, 0, false, follow)) || !follow) return;
+    if (
+      !(await moveTerminalSession(sessionId, toCheckoutId, 0, false, follow)) ||
+      !follow ||
+      navigationRevision !== terminalNavigationRevision ||
+      manualDirectoryChanges.has(sessionId)
+    )
+      return false;
     // The same two steps a person clicking the row takes, so following looks like following: the
     // destination's view names the terminal, and the caret goes to it once the pane has rendered.
-    // `giveBackToTerminal` is not claimed here: it is the close button's claim that a preview is
-    // finished with, and a terminal moving on its own is not a reader closing anything. Without it
-    // a split layout keeps whatever document or diff the destination was showing, which is what
-    // clicking the row does.
-    showView(toCheckoutId, { kind: "terminal", sessionId });
+    // `giveBackToTerminal` is not claimed here: a terminal moving on its own is not a reader closing
+    // anything, so the destination keeps whatever document or diff it was showing.
+    showView(toCheckoutId, { kind: "terminal", sessionId }, { navigation: false });
     await nextTick();
     mainPane.value?.focusActiveTerminal();
+    return true;
+  });
+  automaticMovePromises.set(sessionId, operation);
+  try {
+    return await operation;
+  } catch (cause) {
+    reportCause(cause);
+    return false;
   } finally {
     movingTerminals.delete(sessionId);
+    if (automaticMovePromises.get(sessionId) === operation) automaticMovePromises.delete(sessionId);
+    drainAgentRelocation(sessionId);
   }
 }
 
@@ -1840,27 +2032,45 @@ async function moveTerminalToWorktree(sessionId: string, fromCheckoutId: string,
  * service lists, which is the same identification a sidebar row is drawn from. One terminal naming
  * the session is a move; none or several is not.
  *
- * The terminal is looked for across the destination repository and plain folders such as Home,
- * rather than only where the move says it left, because that hop can already be spent: a session
- * that moved twice while the first move was still on offer is reported as its last hop, and a terminal
- * that never got the first one is still in the worktree it started in. Naming the terminal rather
- * than the worktree covers both, and a terminal already standing in the destination is left alone,
- * which is also what stops a move the service re-offers from asking for a hop it already made.
+ * The terminal is looked for across every registered non-missing checkout, rather than only where
+ * the move says it left, because that hop can already be spent: a session that moved twice while the
+ * first move was still on offer is reported as its last hop, and a terminal that never got the first
+ * one is still in the worktree it started in. Naming the terminal rather than the worktree covers
+ * both, and a terminal already standing in the destination is left alone, which is also what stops
+ * a move the service re-offers from asking for a hop it already made.
  *
  * Which sessions the service lists is its whole list, so a session another client opened in one of
  * these directories is in it too. That is harmless here because the title is what says the session
  * is this terminal's: a terminal showing somebody else's session does not name this one, and one
  * naming none or several matches nothing.
  */
-function followAgentRelocation({ sessionId, toCheckoutId }: AgentRelocation) {
-  if (!["agent", "both"].includes(settings.value.terminal.followWorktree)) return;
+function queueAgentRelocation(terminalId: string, relocation: AgentRelocation) {
+  const queued = queuedAgentRelocations.get(terminalId);
+  if (!queued || relocation.observedAt > queued.observedAt) {
+    queuedAgentRelocations.set(terminalId, relocation);
+  }
+}
+
+function drainAgentRelocation(terminalId: string) {
+  if (manualDirectoryChanges.has(terminalId) || manualMoveQueues.has(terminalId) || movingTerminals.has(terminalId))
+    return;
+  const relocation = queuedAgentRelocations.get(terminalId);
+  if (!relocation) return;
+  queuedAgentRelocations.delete(terminalId);
+  followAgentRelocation(relocation);
+}
+
+function followAgentRelocation(relocation: AgentRelocation) {
+  const { sessionId, toCheckoutId, observedAt } = relocation;
+  if (!["agent", "both"].includes(settings.value.terminal.followWorktree) || !Number.isFinite(observedAt)) return;
   const repo = workspace.value.repos.find((candidate) =>
     candidate.checkouts.some((checkout) => checkout.id === toCheckoutId),
   );
-  if (!repo || repo.kind !== "git") return;
-  const eligible = workspace.value.repos.filter((candidate) => candidate.id === repo.id || candidate.kind === "plain");
-  const named = eligible
+  const target = repo?.checkouts.find((checkout) => checkout.id === toCheckoutId);
+  if (!repo || repo.kind !== "git" || !target || target.isMissing) return;
+  const named = workspace.value.repos
     .flatMap((candidate) => candidate.checkouts)
+    .filter((checkout) => !checkout.isMissing)
     .flatMap((checkout) =>
       checkout.sessions
         .filter((session) => terminalShowsSession(checkout.id, session.id, sessionId))
@@ -1868,6 +2078,23 @@ function followAgentRelocation({ sessionId, toCheckoutId }: AgentRelocation) {
     );
   if (named.length !== 1) return;
   const [terminal] = named;
+  if (observedAt <= (handledAgentRelocations.get(terminal.sessionId) ?? -Infinity)) return;
+  const cutoff = manualRelocationCutoffs.get(terminal.sessionId);
+  if (cutoff !== undefined && observedAt <= cutoff) {
+    handledAgentRelocations.set(terminal.sessionId, observedAt);
+    return;
+  }
+  const manual = manualDirectoryChanges.get(terminal.sessionId);
+  if (manual) {
+    if (observedAt <= manual.requestedAt) handledAgentRelocations.set(terminal.sessionId, observedAt);
+    else queueAgentRelocation(terminal.sessionId, relocation);
+    return;
+  }
+  if (movingTerminals.has(terminal.sessionId) || manualMoveQueues.has(terminal.sessionId)) {
+    queueAgentRelocation(terminal.sessionId, relocation);
+    return;
+  }
+  handledAgentRelocations.set(terminal.sessionId, observedAt);
   if (terminal.checkoutId === toCheckoutId) return;
   void moveTerminalToWorktree(terminal.sessionId, terminal.checkoutId, toCheckoutId);
 }
@@ -1905,6 +2132,60 @@ async function renameTerminalSession(sessionId: string, name: string) {
 
 function applyWorkspace(next: WorkspaceState) {
   updateWorkspace(next);
+}
+
+function onShellCreated(token: number, checkoutId: string, sessionId: string) {
+  const pending = pendingShellNavigation;
+  if (
+    !pending ||
+    pending.token !== token ||
+    pending.checkoutId !== checkoutId ||
+    pending.revision !== terminalNavigationRevision
+  )
+    return;
+  const selection = { activeCheckoutId: checkoutId, activeSessionId: sessionId };
+  noteTerminalNavigation(selection);
+  workspace.value = { ...workspace.value, ...selection };
+}
+
+// An automatic move returns its old selection snapshot; keep any newer navigation over it.
+function updatePaneWorkspace(next: WorkspaceState, shellToken?: number) {
+  const navigationChangedWhileMoving = [...movingTerminals.values()].some(
+    (revision) => revision !== terminalNavigationRevision,
+  );
+  const staleShellResponse =
+    shellToken !== undefined &&
+    (!pendingShellNavigation ||
+      pendingShellNavigation.token !== shellToken ||
+      pendingShellNavigation.revision !== terminalNavigationRevision);
+  const navigationPending = pendingShellNavigation?.revision === terminalNavigationRevision;
+  const selection =
+    navigationChangedWhileMoving || staleShellResponse || navigationPending ? terminalNavigationSelection : null;
+  let updated = selection ? { ...next, ...selection } : next;
+  if (selection?.activeSessionId) {
+    const selectedSession = workspace.value.repos
+      .flatMap((repo) => repo.checkouts)
+      .flatMap((checkout) => checkout.sessions)
+      .find((session) => session.id === selection.activeSessionId);
+    const returnedSession = updated.repos
+      .flatMap((repo) => repo.checkouts)
+      .flatMap((checkout) => checkout.sessions)
+      .some((session) => session.id === selection.activeSessionId);
+    if (selectedSession && !returnedSession) {
+      updated = {
+        ...updated,
+        repos: updated.repos.map((repo) => ({
+          ...repo,
+          checkouts: repo.checkouts.map((checkout) =>
+            checkout.id === selection.activeCheckoutId
+              ? { ...checkout, sessions: [...checkout.sessions, selectedSession] }
+              : checkout,
+          ),
+        })),
+      };
+    }
+  }
+  updateWorkspace(updated);
 }
 
 // A worktree added by something other than this app (an agent running `git worktree add`, a
@@ -2161,7 +2442,8 @@ function reportWarning(message: string) {
           }"
           :diff-scroll-top="activeCheckoutUiState?.diffScrollTop ?? 0"
           @open-folder="chooseFolder"
-          @workspace-updated="updateWorkspace"
+          @workspace-updated="updatePaneWorkspace"
+          @shell-created="onShellCreated"
           @session-status-changed="updateSessionStatus"
           @session-order="updateSessionOrder"
           @update-document-mode="setDocumentMode"

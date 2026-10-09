@@ -99,7 +99,7 @@ const emit = defineEmits<{
   restoreArchived: [repoId: string];
   closeSession: [sessionId: string];
   renameSession: [sessionId: string, name: string];
-  /** Hands a live terminal to another worktree of the same repository. */
+  /** Hands a live terminal to another registered checkout. */
   moveSession: [sessionId: string, targetCheckoutId: string, index: number];
 }>();
 
@@ -242,17 +242,17 @@ let autoScrollFrame: number | undefined;
 let suppressedClickSessionId: string | null = null;
 let suppressedClickTimer: number | undefined;
 
-/** A session may land on another live worktree of the same repository, never elsewhere. */
+/** Any registered, live checkout can take a terminal. */
 function moveDestination(session: Session, target: Checkout, index: number): string | null {
-  if (target.isMissing) return null;
-  const sourceRepo = props.repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === session.checkoutId));
-  const known = sourceRepo?.checkouts.some((checkout) => checkout.id === target.id && !checkout.isMissing);
-  if (!known) return null;
-  // Its own worktree is now a destination too, because a terminal can be reordered inside it. The slot
-  // it already sits in is not a destination: dropping a row where it is would report a move that
-  // changes nothing.
+  const sourceExists = props.repos.some((repo) =>
+    repo.checkouts.some((checkout) => checkout.id === session.checkoutId),
+  );
+  const targetRepo = props.repos.find((repo) => repo.checkouts.some((checkout) => checkout.id === target.id));
+  const registeredTarget = targetRepo?.checkouts.find((checkout) => checkout.id === target.id);
+  if (!sourceExists || !registeredTarget || registeredTarget.isMissing) return null;
+  // Its own worktree is a destination only when the drop changes its slot.
   if (target.id === session.checkoutId) {
-    const current = orderedSessions(target).findIndex((item) => item.id === session.id);
+    const current = orderedSessions(registeredTarget).findIndex((item) => item.id === session.id);
     return current < 0 || current === index ? null : target.id;
   }
   return target.id;
@@ -518,13 +518,7 @@ const AMBIGUOUS_AGENT_SESSION = "varias con este nombre";
 
 interface WorkdirItem {
   session: Session;
-  /**
-   * The worktrees this terminal can be moved to: the others in the same repository.
-   *
-   * A terminal's session belongs to one worktree, and moving it to a worktree of another
-   * repository would mean handing a shell to a Git directory it has nothing to do with. So the
-   * destinations are the siblings, and a row with none offers no action.
-   */
+  /** The registered, non-missing checkouts this terminal can move to. */
   destinations: { id: string; label: string; title: string }[];
   active: boolean;
   /**
@@ -1053,13 +1047,15 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
           : null;
       return {
         session,
-        destinations: repo.checkouts
-          .filter((sibling) => sibling.id !== checkout.id && !sibling.isMissing)
-          .map((sibling) => ({
-            id: sibling.id,
-            label: workdirTitle(repo, sibling),
-            title: sibling.path,
-          })),
+        destinations: props.repos.flatMap((candidateRepo) =>
+          candidateRepo.checkouts
+            .filter((candidate) => candidate.id !== checkout.id && moveDestination(session, candidate, 0))
+            .map((candidate) => ({
+              id: candidate.id,
+              label: workdirTitle(candidateRepo, candidate),
+              title: candidate.path,
+            })),
+        ),
         active: session.id === props.activeSessionId,
         /**
          * The row's name, which `sessionRowTitle` writes: the session this terminal is showing when

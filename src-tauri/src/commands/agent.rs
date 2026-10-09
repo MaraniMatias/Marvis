@@ -110,6 +110,7 @@ pub async fn agent_candidate_sessions(
 pub async fn agent_relocations(
     database: State<'_, Database>,
     agents: State<'_, Arc<AgentService>>,
+    baseline: Option<bool>,
 ) -> Result<Vec<AgentRelocation>, IpcError> {
     let database = database.inner().clone();
     let agents: Arc<AgentService> = Arc::clone(agents.inner());
@@ -117,7 +118,9 @@ pub async fn agent_relocations(
         let checkouts = database
             .checkout_directories()
             .map_err(|error| IpcError::new(IpcErrorCode::InvalidCheckout, error))?;
-        agents.relocations(&checkouts).map_err(agent::map_error)
+        agents
+            .relocations_with_baseline(&checkouts, baseline.unwrap_or(false))
+            .map_err(agent::map_error)
     })
     .await
     .map_err(operation_error)?
