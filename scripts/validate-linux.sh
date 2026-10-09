@@ -2,7 +2,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-IMAGE=marvis-release-validation:ubuntu-22.04-node22-rust1.97.1
+IMAGE=muster-release-validation:ubuntu-22.04-node22-rust1.97.1
 
 command -v docker >/dev/null || { echo "Docker is required for release validation (install/start Docker Desktop or OrbStack)." >&2; exit 1; }
 docker info >/dev/null 2>&1 || { echo "Docker is installed but its Linux daemon is unavailable; start Docker Desktop or OrbStack and retry." >&2; exit 1; }
@@ -11,7 +11,7 @@ version="$(node -p "require('./package.json').version")"
 sha="$(git rev-parse HEAD)"
 tmp_root="${TMPDIR:-/tmp}"
 if [[ "$(uname -s)" == Darwin && "$tmp_root" == /var/* ]]; then tmp_root="/private${tmp_root#/var}"; fi
-out="$(mktemp -d "$tmp_root/marvis-linux-release.XXXXXX")"
+out="$(mktemp -d "$tmp_root/muster-linux-release.XXXXXX")"
 trap 'rm -rf "$out"' EXIT
 
 package_manager="$(node -p "require('./package.json').packageManager")"
@@ -27,9 +27,9 @@ tar -cf - -C "$ROOT" \
   --exclude='.pnpm-store' --exclude='.env' --exclude='.env.*' --exclude='.npmrc' \
   --exclude='.netrc' --exclude='.ssh' --exclude='.aws' . |
   docker run --platform linux/amd64 --rm -i \
-    --mount type=volume,src=marvis-release-pnpm-linux-amd64,dst=/root/.local/share/pnpm/store \
-    --mount type=volume,src=marvis-release-cargo-linux-amd64,dst=/root/.cargo/registry \
-    --mount type=volume,src=marvis-release-target-rust1.97.1-linux-amd64,dst=/workspace/src-tauri/target \
+    --mount type=volume,src=muster-release-pnpm-linux-amd64,dst=/root/.local/share/pnpm/store \
+    --mount type=volume,src=muster-release-cargo-linux-amd64,dst=/root/.cargo/registry \
+    --mount type=volume,src=muster-release-target-rust1.97.1-linux-amd64,dst=/workspace/src-tauri/target \
     --mount "type=bind,src=$out,dst=/out" \
     -e RELEASE_VERSION="$version" -e RELEASE_SHA="$sha" -e APPIMAGE_EXTRACT_AND_RUN=1 \
     "$IMAGE" bash -euo pipefail -c '

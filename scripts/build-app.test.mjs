@@ -6,7 +6,7 @@ import { PINNED_RUST_TOOLCHAIN, pinnedBuildArgs, rustFlagsWithPathRemap, tauriBu
 test("Rust path remapping preserves existing flags and paths with spaces", () => {
   const env = rustFlagsWithPathRemap(
     { RUSTFLAGS: "--cfg existing --check-cfg=cfg(test)" },
-    "/work tree/Marvis",
+    "/work tree/Muster",
     "/cargo home/.cargo",
   );
 
@@ -16,7 +16,7 @@ test("Rust path remapping preserves existing flags and paths with spaces", () =>
       "--cfg",
       "existing",
       "--check-cfg=cfg(test)",
-      "--remap-path-prefix=/work tree/Marvis=.",
+      "--remap-path-prefix=/work tree/Muster=.",
       "--remap-path-prefix=/cargo home/.cargo=.cargo",
     ].join("\x1f"),
   );
@@ -26,7 +26,7 @@ test("Rust path remapping preserves existing flags and paths with spaces", () =>
 test("encoded Rust flags retain precedence and all existing arguments", () => {
   const env = rustFlagsWithPathRemap(
     { CARGO_ENCODED_RUSTFLAGS: ["--cfg", "existing value"].join("\x1f"), RUSTFLAGS: "--cfg ignored" },
-    "/work tree/Marvis",
+    "/work tree/Muster",
     "/cargo home/.cargo",
   );
 
@@ -35,7 +35,7 @@ test("encoded Rust flags retain precedence and all existing arguments", () => {
     [
       "--cfg",
       "existing value",
-      "--remap-path-prefix=/work tree/Marvis=.",
+      "--remap-path-prefix=/work tree/Muster=.",
       "--remap-path-prefix=/cargo home/.cargo=.cargo",
     ].join("\x1f"),
   );

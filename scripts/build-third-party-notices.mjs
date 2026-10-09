@@ -242,7 +242,7 @@ function installedRustPackages() {
   const nodes = new Map(metadata.resolve.nodes.map((node) => [node.id, node]));
   const workspaceMembers = new Set(metadata.workspace_members);
   const root = metadata.packages.find((pkg) => resolve(pkg.manifest_path) === CARGO_MANIFEST);
-  if (!root || !workspaceMembers.has(root.id)) throw new Error("cargo metadata did not identify the Marvis package");
+  if (!root || !workspaceMembers.has(root.id)) throw new Error("cargo metadata did not identify the Muster package");
 
   const reachable = new Set();
   function visit(id) {
@@ -299,19 +299,19 @@ function buildNotices() {
     join(DIST, "assets/FiraCode-OFL-1.1.txt"),
     readFileSync(join(ROOT, "src/assets/fonts/LICENSE-FiraCode.txt")),
   );
-  writeFileSync(join(DIST, "licenses/Marvis-MIT.txt"), readFileSync(join(ROOT, "LICENSE")));
-  const marvisLicense = readFileSync(join(DIST, "licenses/Marvis-MIT.txt"), "utf8").trimEnd();
+  writeFileSync(join(DIST, "licenses/Muster-MIT.txt"), readFileSync(join(ROOT, "LICENSE")));
+  const musterLicense = readFileSync(join(DIST, "licenses/Muster-MIT.txt"), "utf8").trimEnd();
   const catppuccinLicense = readFileSync(join(DIST, "assets/Catppuccin-MIT.txt"), "utf8").trimEnd();
   const firaLicense = readFileSync(join(DIST, "assets/FiraCode-OFL-1.1.txt"), "utf8").trimEnd();
 
   const notice = [
-    "Marvis — third-party production notices",
+    "Muster — third-party production notices",
     "",
-    "Project license: licenses/Marvis-MIT.txt.",
+    "Project license: licenses/Muster-MIT.txt.",
     "",
-    "## Marvis",
+    "## Muster",
     "",
-    marvisLicense,
+    musterLicense,
     "",
     "## Catppuccin icons",
     "",

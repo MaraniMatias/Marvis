@@ -42,7 +42,7 @@ function patchedGlibPackage() {
 }
 
 test("malformed Cargo.lock fails before any advisory lookup", (t) => {
-  const directory = mkdtempSync(join(tmpdir(), "marvis-audit-lock-"));
+  const directory = mkdtempSync(join(tmpdir(), "muster-audit-lock-"));
   t.after(() => rmSync(directory, { recursive: true, force: true }));
   const manifestPath = join(directory, "Cargo.toml");
   writeFileSync(manifestPath, '[package]\nname = "audit-fixture"\nversion = "0.1.0"\nedition = "2021"\n');

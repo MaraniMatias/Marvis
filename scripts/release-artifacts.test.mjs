@@ -12,7 +12,7 @@ const SHA = "0123456789abcdef0123456789abcdef01234567";
 const TARGETS = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu", "aarch64-unknown-linux-gnu"];
 
 function fixture(t) {
-  const root = mkdtempSync(join(tmpdir(), "marvis-release-artifacts-"));
+  const root = mkdtempSync(join(tmpdir(), "muster-release-artifacts-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const bin = join(root, "bin");
   mkdirSync(bin);
@@ -64,9 +64,9 @@ function collect(f, target, filenames, contents = {}) {
 
 function allTargets(f, omit) {
   const names = {
-    "aarch64-apple-darwin": ["Marvis_0.21.0_aarch64.dmg"],
-    "x86_64-unknown-linux-gnu": ["marvis_0.21.0_amd64.deb", "Marvis_0.21.0_amd64.AppImage"],
-    "aarch64-unknown-linux-gnu": ["marvis_0.21.0_arm64.deb", "Marvis_0.21.0_aarch64.AppImage"],
+    "aarch64-apple-darwin": ["Muster_0.21.0_aarch64.dmg"],
+    "x86_64-unknown-linux-gnu": ["muster_0.21.0_amd64.deb", "Muster_0.21.0_amd64.AppImage"],
+    "aarch64-unknown-linux-gnu": ["muster_0.21.0_arm64.deb", "Muster_0.21.0_aarch64.AppImage"],
   };
   return TARGETS.filter((target) => target !== omit).map((target) => collect(f, target, names[target]));
 }
@@ -131,14 +131,14 @@ test("AppImage architecture checks ignore target-looking filenames", (t) => {
   const cases = [
     {
       target: "x86_64-unknown-linux-gnu",
-      deb: "marvis_0.21.0_amd64.deb",
-      appImage: "Marvis_0.21.0_x86_64.AppImage",
+      deb: "muster_0.21.0_amd64.deb",
+      appImage: "Muster_0.21.0_x86_64.AppImage",
       payload: "ARM64_PAYLOAD",
     },
     {
       target: "aarch64-unknown-linux-gnu",
-      deb: "marvis_0.21.0_arm64.deb",
-      appImage: "Marvis_0.21.0_aarch64.AppImage",
+      deb: "muster_0.21.0_arm64.deb",
+      appImage: "Muster_0.21.0_aarch64.AppImage",
       payload: "X86_64_PAYLOAD",
     },
   ];
@@ -171,7 +171,7 @@ test("collect rejects wrong-version bundles before upload", (t) => {
   const f = fixture(t);
   const source = join(f.root, "bad");
   mkdirSync(source);
-  writeFileSync(join(source, "Marvis_0.20.0_aarch64.dmg"), "not current");
+  writeFileSync(join(source, "Muster_0.20.0_aarch64.dmg"), "not current");
   const result = run(
     f.env,
     "collect",

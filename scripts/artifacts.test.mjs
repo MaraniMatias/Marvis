@@ -33,7 +33,7 @@ test("production dist preserves third-party notices and shipped font binaries", 
   assert.match(firaLicense, /SIL OPEN FONT LICENSE Version 1\.1/);
   assert.match(firaLicense, /TERMINATION[\s\S]*DISCLAIMER[\s\S]*OTHER DEALINGS IN THE FONT SOFTWARE\./);
   assert.equal(
-    readFileSync(resolve(DIST, "licenses/Marvis-MIT.txt"), "utf8"),
+    readFileSync(resolve(DIST, "licenses/Muster-MIT.txt"), "utf8"),
     readFileSync(resolve(ROOT, "LICENSE"), "utf8"),
   );
 
@@ -97,7 +97,7 @@ test("Tauri frontendDist points at the verified production artifact", () => {
   const configPath = resolve(ROOT, "src-tauri/tauri.conf.json");
   const config = JSON.parse(readFileSync(configPath, "utf8"));
   assert.equal(resolve(dirname(configPath), config.build.frontendDist), DIST);
-  const debNotice = config.bundle.linux.deb.files["/usr/share/doc/marvis/THIRD-PARTY-NOTICES.txt"];
+  const debNotice = config.bundle.linux.deb.files["/usr/share/doc/muster/THIRD-PARTY-NOTICES.txt"];
   assert.equal(resolve(dirname(configPath), debNotice), resolve(DIST, "licenses/THIRD-PARTY-NOTICES.txt"));
 });
 
