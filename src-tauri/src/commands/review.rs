@@ -461,6 +461,8 @@ mod tests {
             serde_json::json!({"data": {"accepted": true}}),
             serde_json::json!({"data": session}),
             serde_json::json!({"data": {}}),
+            serde_json::json!({"data": []}),
+            serde_json::json!({"data": []}),
         ]);
         let agents = Arc::new(AgentService::with_test_server(port));
         let app = tauri::test::mock_app();
