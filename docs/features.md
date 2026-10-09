@@ -1,6 +1,6 @@
 # Muster feature catalog
 
-This catalog describes the implemented behavior in Muster v0.20.0. It separates user-facing features from backend-only commands and planned integrations; a registered command or a design document is not, by itself, a shipped UI feature.
+This catalog describes the implemented behavior in Muster v0.21.0. It separates user-facing features from backend-only commands and planned integrations; a registered command or a design document is not, by itself, a shipped UI feature.
 
 ## At a glance
 

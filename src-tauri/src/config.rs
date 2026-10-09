@@ -463,7 +463,7 @@ mod tests {
         let loaded = load(&path).unwrap();
         assert_eq!(loaded, AppSettings::default());
         save(&path, &loaded).unwrap();
-        let terminal = serde_json::to_value(&load(&path).unwrap()).unwrap()["terminal"].clone();
+        let terminal = serde_json::to_value(load(&path).unwrap()).unwrap()["terminal"].clone();
         assert_eq!(
             terminal,
             serde_json::json!({

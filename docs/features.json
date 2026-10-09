@@ -3,7 +3,7 @@
   "app": {
     "name": "Muster",
     "identifier": "dev.muster.workspace",
-    "version": "0.20.0",
+    "version": "0.21.0",
     "license": "MIT",
     "repository": "https://github.com/MaraniMatias/Muster",
     "description": "A local workspace for repositories, worktrees, changes, review notes, agent sessions, and terminals."
@@ -636,7 +636,7 @@
   ],
   "tests_executed_for_catalog": false,
   "catalog_notes": [
-    "This catalog describes the current v0.20.0 implementation, not plans or commands that have no UI entry point.",
+    "This catalog describes the current v0.21.0 implementation, not plans or commands that have no UI entry point.",
     "The audit scope names the source families reviewed; it is not an exhaustive file-count claim. Tests were inspected but not executed for this catalog."
   ]
 }
