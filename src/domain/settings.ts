@@ -63,14 +63,8 @@ export interface TerminalSettings {
    * On by default because it is the only way that row can know: a command that fails prints to the
    * terminal and leaves the shell running, so nothing else in the app can see it.
    *
-   * What it costs is the terminal's opening screen. The setup clears it, so whatever the shell printed
-   * while starting up — a version banner, a toolchain notice, a warning from an rc file — is discarded
-   * and the terminal opens looking as though it had just been opened. That is a real difference rather
-   * than an invisible one, which is why it is a setting.
-   *
-   * Read when a terminal is opened, so this decides what the terminals opened *after* the change get.
-   * Terminals already open keep the line they were given, and turning it on does not reach back into
-   * them — a shell cannot be told about it now without being asked again.
+   * Hooks run during native shell startup and leave banners and warnings visible.
+   * Applies only to new terminals; terminals already open keep their hooks.
    */
   shellIntegration: boolean;
 }
@@ -380,7 +374,7 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         path: "terminal.shellIntegration",
         label: "Report failed commands",
         description:
-          "Marvis writes a small shell script to ~/.marvis and runs one line of it in every terminal it opens, which is the only way a command that fails can turn the sidebar row red: a failing command leaves the shell running and nothing else can see it. It works in zsh and bash; in any other shell there is nothing to hook and rows stay as they are. It costs the terminal's opening screen — the setup clears it, so version banners, toolchain notices and warnings from your shell startup files are discarded. Turn this off and no script is written, the startup output stays, and a terminal's glyph stays the colour of whatever else is on screen whatever you run. Terminals already open keep their hook either way, so the change shows up in the next one.",
+          "Reports command failures in zsh and bash without clearing shell startup output. Other shells keep their normal configuration without command reporting. Applies to new terminals only.",
       },
     ],
   },

@@ -437,7 +437,7 @@ describe("TerminalSession UI", () => {
     expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({ lastCommandExit: 2 });
 
     // A command starting clears it, and the clear survives the poll too rather than coming back.
-    terminalMock.oscHandlers.get(133)?.("A");
+    terminalMock.oscHandlers.get(133)?.("C");
     await vi.advanceTimersByTimeAsync(750);
     const cleared = wrapper.emitted("statusChanged")?.at(-1)?.[0] as { lastCommandExit?: number };
     expect(cleared.lastCommandExit).toBeUndefined();

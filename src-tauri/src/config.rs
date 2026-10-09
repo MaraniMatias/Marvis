@@ -107,9 +107,10 @@ pub struct TerminalSettings {
     /// failed command's row red.
     ///
     /// Read when a terminal is created, so this only decides what the terminals opened *after* the
-    /// change get: terminals already open keep the line they were given, and turning it on does not
+    /// change get: terminals already open keep their startup hooks, and turning it on does not
     /// reach back into them. Off costs the red bar, because nothing else in the app can see a command
     /// that failed without ending the shell.
+    /// Native shell startup preserves banners and warnings; unsupported shells remain uninstrumented.
     pub shell_integration: bool,
 }
 
@@ -364,6 +365,7 @@ mod tests {
                 zoom: 1.2,
                 theme: "light".into(),
                 content_background: CONTENT_BACKGROUND.into(),
+                tree_sticky_scroll: true,
             },
             terminal: TerminalSettings {
                 font_size: 18.0,
@@ -549,6 +551,7 @@ mod tests {
                     zoom: 1.0,
                     theme: "dark".into(),
                     content_background: CONTENT_BACKGROUND.into(),
+                    tree_sticky_scroll: true,
                 },
                 ..AppSettings::default()
             },

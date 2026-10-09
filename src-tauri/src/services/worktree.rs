@@ -2452,7 +2452,7 @@ mod tests {
                     cwd: PathBuf::from(&checkout.canonical_path),
                     cols: 80,
                     rows: 24,
-                    startup_line: None,
+                    env: vec![],
                 },
                 Box::new(|_| Ok(())),
             )

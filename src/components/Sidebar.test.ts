@@ -3530,6 +3530,7 @@ describe("a label is weighed against its row rather than cut between its halves"
                 title: "Review the duplicated rows",
                 agent: { label: "plan", color: null, attention: "none" },
                 running: false,
+                awaitingReply: false,
                 updatedAt: Date.now(),
               },
             ],

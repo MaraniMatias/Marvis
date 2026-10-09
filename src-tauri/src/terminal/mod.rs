@@ -1,6 +1,7 @@
 use portable_pty::{native_pty_system, Child, CommandBuilder, MasterPty, PtySize};
 use std::{
     collections::HashMap,
+    ffi::OsString,
     io::{self, Read, Write},
     path::PathBuf,
     sync::{
@@ -23,12 +24,8 @@ pub struct SpawnOptions {
     pub cwd: PathBuf,
     pub cols: u16,
     pub rows: u16,
-    /// A line of input to send once the program has reached a prompt, or `None` for none.
-    ///
-    /// Only ever shell integration, and deliberately opaque: this module does not know what shell it
-    /// spawned or what the line says. Whether there is one at all is `services::terminal`'s decision,
-    /// which is also where the setting that turns it off is read.
-    pub startup_line: Option<String>,
+    /// Environment overrides for this child only.
+    pub env: Vec<(OsString, OsString)>,
 }
 
 struct Session {
@@ -40,36 +37,6 @@ struct Session {
     #[cfg(unix)]
     terminal_session_id: Option<u32>,
     closing: AtomicBool,
-    /// Whether the startup line has gone out, and what the reader thread has seen meanwhile.
-    startup: Mutex<StartupState>,
-    /// Signalled when `startup` changes, so the thread waiting on a prompt and the input waiting on
-    /// that thread both wake without polling.
-    startup_changed: Condvar,
-}
-
-/// What the startup line is waiting on, and what it is waiting for.
-///
-/// Split out of `Session` because it is the one field here with a lock order of its own: the reader
-/// thread takes it on every chunk of output, the startup thread holds it while it waits, and user
-/// input takes it only to find out whether it may go ahead. All three are short and none of them
-/// holds it while touching the writer, so there is nothing to deadlock against.
-#[derive(Default)]
-struct StartupState {
-    /// Set once the reader thread has seen any bytes at all.
-    output_seen: bool,
-    /// When the reader thread last saw bytes, which is what "the shell has stopped talking" means.
-    last_output: Option<Instant>,
-    /// Whether input may go to the shell yet.
-    ///
-    /// True from the start for a session with no startup line, so the common path never waits. A
-    /// session with one holds input until the line has been written or abandoned, because a
-    /// keystroke that arrives first is a command the shell reads before the line that was supposed to
-    /// come before it — the line then never registers and the session silently reports no exit codes
-    /// for the rest of its life.
-    ///
-    /// Only the startup thread ever sets this for a session that has a line, and it sets it on every
-    /// one of its exits, which is what lets `await_startup_line` wait here with no deadline of its own.
-    ready: bool,
 }
 
 struct ChildState {
@@ -142,6 +109,9 @@ impl TerminalBackend {
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
         command.env("TERM_PROGRAM", "Marvis");
+        for (key, value) in options.env {
+            command.env(key, value);
+        }
 
         let reader = pair
             .master
@@ -173,35 +143,19 @@ impl TerminalBackend {
             #[cfg(unix)]
             terminal_session_id,
             closing: AtomicBool::new(false),
-            startup: Mutex::new(StartupState {
-                // A session with a line to send holds its input until the line has gone out, so the
-                // shell cannot read a keystroke ahead of it.
-                ready: options.startup_line.is_none(),
-                ..StartupState::default()
-            }),
-            startup_changed: Condvar::new(),
         });
         let reader_session = Arc::clone(&session);
         let reader_fd = session.master_fd;
         if let Err(error) = thread::Builder::new()
             .name("marvis-pty-reader".into())
-            .spawn(move || read_output(reader, reader_fd, &mut output, &reader_session))
+            .spawn(move || {
+                let _session = reader_session;
+                read_output(reader, reader_fd, &mut output)
+            })
         {
             let _ = terminate_session(&session, &id);
             return Err(error.to_string());
         }
-        if let Some(line) = options.startup_line {
-            let startup_session = Arc::clone(&session);
-            let startup_id = id.clone();
-            if let Err(error) = thread::Builder::new()
-                .name("marvis-pty-startup".into())
-                .spawn(move || install_startup_line(&startup_session, &startup_id, &line))
-            {
-                let _ = terminate_session(&session, &id);
-                return Err(error.to_string());
-            }
-        }
-
         let inserted = match self.sessions.lock() {
             Ok(mut sessions) if !sessions.contains_key(&id) => {
                 sessions.insert(id.clone(), SessionEntry::Active(Arc::clone(&session)));
@@ -236,7 +190,6 @@ impl TerminalBackend {
             ));
         }
         let session = self.session(id)?;
-        await_startup_line(&session);
         write_to_session(&session, id, bytes)
     }
 
@@ -344,30 +297,6 @@ impl TerminalBackend {
 }
 
 impl Session {
-    /// Records that the program has printed something, and when it last did.
-    ///
-    /// Called by the reader thread for every chunk. Cheap on purpose: it takes the one lock here that
-    /// is not on the write path and does nothing else.
-    fn note_output(&self) {
-        let mut startup = self
-            .startup
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        startup.output_seen = true;
-        startup.last_output = Some(Instant::now());
-        self.startup_changed.notify_all();
-    }
-
-    /// Lets input through, whether the line went out or not.
-    fn release_startup_input(&self) {
-        let mut startup = self
-            .startup
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        startup.ready = true;
-        self.startup_changed.notify_all();
-    }
-
     fn foreground_process(&self) -> bool {
         self.foreground_group()
             .zip(self.process_id)
@@ -975,12 +904,7 @@ fn wait_pty_readable(fd: libc::c_int) -> io::Result<()> {
     }
 }
 
-fn read_output(
-    mut reader: Box<dyn Read + Send>,
-    master_fd: libc::c_int,
-    output: &mut OutputSink,
-    session: &Session,
-) {
+fn read_output(mut reader: Box<dyn Read + Send>, master_fd: libc::c_int, output: &mut OutputSink) {
     let mut buffer = [0_u8; 64 * 1024];
     // Said once. A window that is gone refuses every chunk from here to the end of the session,
     // and a line per chunk would bury everything else the log is for.
@@ -1000,9 +924,6 @@ fn read_output(
             Err(error) if error.kind() == io::ErrorKind::WouldBlock => continue,
             Err(_) => break,
             Ok(count) => {
-                // Before the sink, because this is what tells the startup line the program is alive,
-                // and a renderer that has gone away must not hold that up.
-                session.note_output();
                 // A disconnected renderer must not stop draining the PTY and deadlock its child.
                 if let Err(error) = output(&buffer[..count]) {
                     if !reported {
@@ -1188,178 +1109,6 @@ impl OutputGate {
     }
 }
 
-/// How long a program may be quiet before input written to it is drawn by its line editor rather than
-/// by the tty, which is what makes the line appear on screen twice.
-///
-/// Quiet is the signal, and it has to be *this* quiet rather than a moment's silence. Measured on a
-/// login zsh here: the shell prints in bursts with gaps between them, and the longest gap during
-/// startup was 49ms — the moment a line written then is echoed plainly and then drawn again by the
-/// editor. Waiting for the first output is not enough either, because a shell's first bytes arrive
-/// long before its prompt does. `ESC [ ? 2 0 0 4 h` is the exact signal — bracketed paste mode going
-/// on is the shell saying its line editor is live — but bash never sends it here, so it cannot be the
-/// only thing this waits for.
-///
-/// A program that is slow to start produces longer gaps, which is what makes any fixed value a
-/// compromise. It errs long on purpose: writing too late costs the markers for this session, while
-/// writing too early costs a duplicated line and still installs the hook.
-const STARTUP_QUIET: Duration = Duration::from_millis(250);
-
-/// How long the startup line waits for a prompt before it gives the session up as uninstrumented.
-///
-/// Bounded because the other end of it is a terminal somebody is looking at: a program that prints
-/// nothing at all, or dies during startup, must not leave a pane that cannot be typed into. The wait
-/// releases input either way, so the cost of giving up is only the missing markers.
-const STARTUP_TIMEOUT: Duration = Duration::from_secs(5);
-
-/// How often the startup thread looks at its own deadline, which is also the shortest it will sleep.
-///
-/// Only that thread polls. The gate in `await_startup_line` waits on the condvar with no timeout at
-/// all, because it has nothing to time out against.
-const STARTUP_POLL: Duration = Duration::from_millis(10);
-
-/// Writes the line a program was spawned with, once it is at a prompt.
-///
-/// Waiting is what makes the write land in a state the shell can read cleanly. A program that has not
-/// reached its prompt yet is still in canonical mode with the tty line discipline echoing for it, so a
-/// line written then is echoed plainly into the middle of whatever startup output is arriving — and is
-/// then drawn a second time, with the editor's own syntax colouring, once the line editor takes over.
-/// Both orderings were captured and fed through a real terminal: written immediately the line is drawn
-/// twice, written after the program goes quiet it is drawn once.
-///
-/// The sourced script clears the screen, so neither render survives to be seen any more. This wait is
-/// kept anyway, and for two reasons that are not about visibility. The clear covers the whole screen
-/// only once; anything the shell prints *after* it is not covered, so waiting for the program to stop
-/// talking is what makes the screen the clear finds a finished one rather than a half-written one. And
-/// one echo is one echo: the second render is bytes on a wire for no reason.
-///
-/// What this wait must not become is a way for the two to race, because the line's script clears the
-/// screen and a command the user had already run would go with it. The gate in `await_startup_line` is
-/// what holds that ordering, and it is why this function can afford to take its time — the gate has no
-/// deadline, so however long this takes, a keystroke waits behind it rather than overtaking it.
-///
-/// This thread is also the only thing that ever sets `ready` for a session that has a startup line,
-/// and it does so on all three of its exits: after writing the line, on the timeout below, and on a
-/// close. That is what lets `await_startup_line` wait without a deadline of its own.
-///
-/// A close or a shutdown while this is waiting ends it: the session is on its way out and the line
-/// has nowhere left to go. Nothing here reports an error for that, because a session that closed
-/// before it was instrumented is a session that is already gone.
-/// Resolves the gate when `install_startup_line` returns, however it returns.
-///
-/// This function is the only thing that ever lets a gated session's input through, and it lets it
-/// through by returning. That is a promise about the text of one function rather than about the thread
-/// running it: a single `expect`, an index, or a `?` on a `None` added anywhere in there, and a thread
-/// that dies at that point leaves `ready` false for good — `await_startup_line` blocked on a condvar
-/// nobody will signal again, and `terminal_write` hanging for the life of the session with nothing in
-/// the log to say why. Nothing in there can panic today, every lock taking the poison out rather than
-/// propagating it, which is exactly why this is here: a property that holds because nobody has written
-/// the line yet stops holding the day somebody does.
-///
-/// A `Drop` is enough, because a panic unwinds. It calls the same `release_startup_input` the ordinary
-/// exits call, so there is one way to resolve the gate rather than two that could disagree.
-/// `pub(crate)` only so a test can hold one and let it unwind, which is the only way to reach the panic
-/// path this exists for without writing a panic into the function it guards.
-struct StartupGate<'a> {
-    session: &'a Session,
-}
-
-impl Drop for StartupGate<'_> {
-    fn drop(&mut self) {
-        self.session.release_startup_input();
-    }
-}
-
-fn install_startup_line(session: &Session, id: &str, line: &str) {
-    // Held for the whole function, so the gate is resolved on the way out of it and not at three
-    // separate points inside it: a close, the timeout, and having written the line.
-    let _gate = StartupGate { session };
-    let deadline = Instant::now() + STARTUP_TIMEOUT;
-    loop {
-        if session.closing.load(Ordering::Acquire) {
-            return;
-        }
-        if session.output_settled() {
-            break;
-        }
-        let startup = session
-            .startup
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if Instant::now() >= deadline {
-            // Nothing was ever printed, or it never stopped: this session goes without the line.
-            log::debug!("terminal {id} never reached a prompt; leaving it uninstrumented");
-            return;
-        }
-        let remaining = deadline
-            .saturating_duration_since(Instant::now())
-            .min(STARTUP_POLL);
-        let _unused = session
-            .startup_changed
-            .wait_timeout(startup, remaining)
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-    }
-    // The same path user input takes, so `closing` is honoured and there is one way in rather than a
-    // second one that could disagree about it. `StartupGate` releases the gate as this returns.
-    let _ = write_to_session(session, id, format!("{line}\n").as_bytes());
-}
-
-impl Session {
-    /// Whether the program has printed something and has since been quiet long enough.
-    fn output_settled(&self) -> bool {
-        let startup = self
-            .startup
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        startup.output_seen
-            && startup
-                .last_output
-                .is_some_and(|last| last.elapsed() >= STARTUP_QUIET)
-    }
-}
-
-/// Holds input until the startup line has gone out, so a keystroke cannot overtake it.
-///
-/// A no-op for every session without a startup line, which is most of them and all of them once the
-/// setting is off.
-///
-/// It has **no deadline of its own**, and that is load-bearing rather than tidy: *the gate never
-/// gives up on a line that is still going to be written.* The gate exists so that the startup line is
-/// the first thing this shell reads, and a deadline here lets the two race — a keystroke is put into
-/// the shell, and the startup line is written behind it, where the sourced script's clear destroys
-/// that command rather than merely reordering it.
-///
-/// A deadline here cannot be made safe by choosing a value. The one this used to carry was measured
-/// from *the keystroke*, while the startup thread's is measured from *that thread's first
-/// scheduling*, so the two expire in an order that depends on when the OS got round to the thread. A
-/// backstop far beyond `STARTUP_TIMEOUT` did not fix that, only narrowed it: it is the same race with
-/// a longer fuse, and the way to reach it — a startup thread that is spawned but has not run — is
-/// exactly the way in which the line is still pending and still going to be written. The gate cannot
-/// tell those apart, because both look like a line that has not gone out.
-///
-/// So the answer is not a longer clock but the fact that waiting here cannot hang. `spawn` starts the
-/// thread with `thread::Builder::spawn` and returns an error without registering the session if that
-/// fails, so every session reachable through `write` has one. That thread resolves the gate through
-/// `StartupGate`, which fires on every way out of it including an unwind, so `ready` arrives without
-/// this function ever having to invent it or bound how long it waits.
-/// `the_gate_does_not_give_up_on_a_startup_line_that_is_still_pending` is the test for the first half
-/// and `the_gate_is_released_even_when_the_startup_thread_dies` for the second.
-///
-/// No lock is taken while `startup` is held, and `write_to_session` takes `writer` without holding
-/// `startup`, so there is no `startup` → `writer` edge here to order against anything: the only two
-/// holders of `startup` are this function and the startup thread, neither of which writes.
-fn await_startup_line(session: &Session) {
-    let mut startup = session
-        .startup
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner);
-    while !startup.ready {
-        startup = session
-            .startup_changed
-            .wait(startup)
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-    }
-}
-
 /// The one way bytes reach a shell, so `closing` is checked once and everything that writes goes
 /// through the same refusal.
 fn write_to_session(session: &Session, id: &str, bytes: &[u8]) -> Result<(), String> {
@@ -1396,14 +1145,14 @@ mod tests {
         io,
         path::PathBuf,
         sync::{
-            atomic::{AtomicBool, AtomicUsize, Ordering},
-            mpsc, Arc, Condvar, Mutex,
+            atomic::{AtomicUsize, Ordering},
+            mpsc, Arc, Mutex,
         },
         thread,
         time::{Duration, Instant},
     };
 
-    use portable_pty::{native_pty_system, Child, ChildKiller, ExitStatus, PtySize};
+    use portable_pty::{Child, ChildKiller, ExitStatus};
     use tempfile::tempdir;
 
     #[cfg(unix)]
@@ -1413,9 +1162,9 @@ mod tests {
     #[cfg(unix)]
     use super::{process_group_exists, signal_group_with, GroupSignal, REAP_POLL_INTERVAL};
     use super::{
-        start_child_reaper, ChildState, OutputGate, OutputSink, Session, SessionEntry,
-        SpawnOptions, StartupGate, StartupState, TerminalBackend, MAX_TERMINAL_INPUT_BYTES,
-        OUTPUT_HIGH_WATER_BYTES, OUTPUT_LOW_WATER_BYTES, OUTPUT_RESUME_TIMEOUT, STARTUP_TIMEOUT,
+        start_child_reaper, ChildState, OutputGate, OutputSink, SpawnOptions, TerminalBackend,
+        MAX_TERMINAL_INPUT_BYTES, OUTPUT_HIGH_WATER_BYTES, OUTPUT_LOW_WATER_BYTES,
+        OUTPUT_RESUME_TIMEOUT,
     };
 
     fn spawn(
@@ -1434,7 +1183,7 @@ mod tests {
                     cwd: std::env::current_dir().unwrap(),
                     cols: 80,
                     rows: 24,
-                    startup_line: None,
+                    env: vec![],
                 },
                 output,
             )
@@ -1506,256 +1255,6 @@ mod tests {
             );
             thread::sleep(Duration::from_millis(1));
         }
-    }
-
-    /// The gate has to hold a keystroke back until the startup line is out, and that ordering is what
-    /// makes the sourced script's clear safe rather than destructive.
-    ///
-    /// The clear in that script wipes the screen. It is only harmless because the screen at the moment
-    /// it runs holds nothing but the shell's own startup output, its prompt and the injected line —
-    /// which is exactly what it should wipe. A keystroke that got in first would be a command the
-    /// clear then destroys, and this is the test that says a keystroke cannot get in first.
-    ///
-    /// Written immediately, before the shell has printed anything, which is the earliest a frontend
-    /// could possibly write: it needs `createTerminal` to resolve first, and that happens after the
-    /// spawn that starts the startup thread. So this is not a tight race — it is the real ordering,
-    /// asserted from the bytes the shell actually received.
-    #[test]
-    fn a_keystroke_never_overtakes_the_startup_line() {
-        if std::process::Command::new("/bin/sh")
-            .arg("--version")
-            .output()
-            .is_err()
-        {
-            return;
-        }
-        let backend = TerminalBackend::default();
-        let captured: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (sender, receiver) = mpsc::channel();
-        let kept = Arc::clone(&captured);
-        let output: OutputSink = Box::new(move |bytes| {
-            kept.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend_from_slice(bytes);
-            sender.send(bytes.to_vec()).map_err(|e| e.to_string())
-        });
-        backend
-            .spawn(
-                "gated".into(),
-                SpawnOptions {
-                    program: PathBuf::from("/bin/sh"),
-                    args: vec!["-i".into()],
-                    cwd: std::env::current_dir().unwrap(),
-                    cols: 80,
-                    rows: 24,
-                    startup_line: Some("echo STARTUPLINE".into()),
-                },
-                output,
-            )
-            .unwrap();
-        // The whole point: written before the shell has settled, so the gate is what orders them.
-        backend.write("gated", b"echo USERFIRST\n").unwrap();
-        synchronize_shell(&backend, &receiver, "gated");
-
-        let stream = String::from_utf8_lossy(
-            &captured
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner),
-        )
-        .to_string();
-        let startup_at = stream
-            .find("STARTUPLINE")
-            .expect("the startup line never ran");
-        let user_at = stream
-            .find("USERFIRST")
-            .expect("the keystroke never reached the shell");
-        assert!(
-            startup_at < user_at,
-            "the keystroke was read before the startup line: {stream}"
-        );
-        backend.close("gated").unwrap();
-    }
-
-    /// Input is not held forever by a startup line that is never going to arrive.
-    ///
-    /// A shell that prints nothing at all — or dies on the way up — must not leave a pane that cannot
-    /// be typed into. The startup thread gives up after `STARTUP_TIMEOUT` and lets input through, and
-    /// this says the pane is usable again after that rather than trusting the arithmetic.
-    #[test]
-    fn input_is_released_when_the_startup_line_is_abandoned() {
-        let backend = TerminalBackend::default();
-        let (sender, receiver) = sink();
-        let output: OutputSink = sender;
-        // A program that never prints anything, so the settle never happens and the line is abandoned.
-        backend
-            .spawn(
-                "silent".into(),
-                SpawnOptions {
-                    program: PathBuf::from("/bin/sh"),
-                    args: vec!["-c".into(), "sleep 30".into()],
-                    cwd: std::env::current_dir().unwrap(),
-                    cols: 80,
-                    rows: 24,
-                    startup_line: Some("echo NEVER".into()),
-                },
-                output,
-            )
-            .unwrap();
-
-        let started = Instant::now();
-        backend.write("silent", b"still typable\n").unwrap();
-        let elapsed = started.elapsed();
-        assert!(
-            elapsed >= STARTUP_TIMEOUT,
-            "the write went through before the startup line was given up: {elapsed:?}"
-        );
-        // And the bytes really did arrive, rather than the write being refused.
-        let deadline = Instant::now() + Duration::from_secs(3);
-        let mut seen = false;
-        while Instant::now() < deadline && !seen {
-            if let Ok(bytes) = receiver.recv_timeout(Duration::from_millis(200)) {
-                seen = String::from_utf8_lossy(&bytes).contains("still typable");
-            }
-        }
-        assert!(seen, "input was released but never reached the shell");
-        backend.close("silent").unwrap();
-    }
-
-    /// The other half of the same ordering: the gate must not hand input over while the startup line
-    /// is still pending, however long that takes. The startup thread's timeout does not bound the gate: a
-    /// thread that has been spawned but has not run yet leaves input waiting until it resolves the line.
-    ///
-    /// The session is assembled here rather than spawned because this is the one state the spawn path
-    /// cannot be asked for: a spawn whose startup thread failed to start registers no session at all,
-    /// and one whose thread does start releases input when it resolves the line. This test observes the
-    /// pending gate past the historical 60-second backstop, then resolves it explicitly.
-    #[test]
-    fn the_gate_does_not_give_up_on_a_startup_line_that_is_still_pending() {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
-        // A spawn that reached its startup thread and one whose thread failed to start are both
-        // accounted for in the doc comment above; what is left is the session itself, with a line
-        // still owed to it and nothing yet to say so.
-        #[cfg(unix)]
-        let master_fd = pair.master.as_raw_fd().unwrap();
-        #[cfg(not(unix))]
-        let master_fd = -1;
-        let session = Arc::new(Session {
-            master: Mutex::new(pair.master),
-            master_fd,
-            writer: Mutex::new(Box::new(io::sink())),
-            child: Mutex::new(ChildState {
-                child: None,
-                exit_code: Some(0),
-                child_released: true,
-            }),
-            process_id: None,
-            #[cfg(unix)]
-            terminal_session_id: None,
-            closing: AtomicBool::new(false),
-            startup: Mutex::new(StartupState {
-                ready: false,
-                ..StartupState::default()
-            }),
-            startup_changed: Condvar::new(),
-        });
-        let backend = Arc::new(TerminalBackend::default());
-        backend
-            .sessions
-            .lock()
-            .unwrap()
-            .insert("pending".into(), SessionEntry::Active(Arc::clone(&session)));
-
-        let (wrote, is_written) = mpsc::channel();
-        let (started, has_started) = mpsc::channel();
-        let writer = Arc::clone(&backend);
-        thread::spawn(move || {
-            let _ = started.send(());
-            let _ = writer.write("pending", b"echo TYPED_FIRST\n");
-            let _ = wrote.send(());
-        });
-
-        has_started
-            .recv_timeout(Duration::from_secs(5))
-            .expect("writer thread did not start");
-        assert!(
-            is_written.recv_timeout(Duration::from_secs(62)).is_err(),
-            "input was released while the startup line was still pending"
-        );
-        // And it is held by the line rather than by anything being wrong: the write goes through as
-        // soon as the thread that owns the line says so.
-        session.release_startup_input();
-        is_written
-            .recv_timeout(Duration::from_secs(5))
-            .expect("input stayed blocked after the startup line was resolved");
-    }
-
-    /// The gate has no deadline, so the only thing standing between a hung `terminal_write` and a
-    /// terminal that never accepts input again is the startup thread reaching the end of its function.
-    /// A panic skips the returns on purpose, so this unwinds through the same guard and says the gate
-    /// still comes open.
-    #[test]
-    fn the_gate_is_released_even_when_the_startup_thread_dies() {
-        let pair = native_pty_system()
-            .openpty(PtySize {
-                rows: 24,
-                cols: 80,
-                pixel_width: 0,
-                pixel_height: 0,
-            })
-            .unwrap();
-        #[cfg(unix)]
-        let master_fd = pair.master.as_raw_fd().unwrap();
-        #[cfg(not(unix))]
-        let master_fd = -1;
-        let session = Session {
-            master: Mutex::new(pair.master),
-            master_fd,
-            writer: Mutex::new(Box::new(io::sink())),
-            child: Mutex::new(ChildState {
-                child: None,
-                exit_code: Some(0),
-                child_released: true,
-            }),
-            process_id: None,
-            #[cfg(unix)]
-            terminal_session_id: None,
-            closing: AtomicBool::new(false),
-            startup: Mutex::new(StartupState {
-                ready: false,
-                ..StartupState::default()
-            }),
-            startup_changed: Condvar::new(),
-        };
-
-        // The panic message is expected rather than a failure, and the default hook prints it. Silenced
-        // so a passing run does not look like a failing one.
-        let previous = std::panic::take_hook();
-        std::panic::set_hook(Box::new(|_| {}));
-        let unwound = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _gate = StartupGate { session: &session };
-            panic!("the startup thread died before it wrote the line");
-        }));
-        std::panic::set_hook(previous);
-
-        assert!(
-            unwound.is_err(),
-            "the panic has to unwind for this to say anything"
-        );
-        assert!(
-            session
-                .startup
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .ready,
-            "input is still blocked and nothing will ever open it again"
-        );
     }
 
     #[test]
@@ -1850,7 +1349,7 @@ mod tests {
                     cwd: directory.path().to_path_buf(),
                     cols: 80,
                     rows: 24,
-                    startup_line: None,
+                    env: vec![],
                 },
                 output,
             )

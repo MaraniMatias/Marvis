@@ -88,7 +88,7 @@ pub fn create_with_settings(
     let TerminalOptions { cols, rows, prompt } = options;
     let cwd = database.terminal_checkout_path(checkout_id)?;
     reject_prompt(prompt.as_deref())?;
-    let program = inherited_shell();
+    let mut program = inherited_shell();
     let name = program
         .file_name()
         .map(|name| name.to_string_lossy().into_owned())
@@ -107,7 +107,7 @@ pub fn create_with_settings(
         status: SessionStatus::Active,
     };
 
-    let args = inherited_shell_args(&program);
+    let mut args = inherited_shell_args(&program);
     // Resolved before the spawn because `program` is moved into it below, and the hook text is a
     // property of the shell that is being started rather than of the PTY that is about to exist.
     // Read here rather than at the prompt so that turning the setting off leaves every terminal that
@@ -117,11 +117,17 @@ pub fn create_with_settings(
     // setting on part-way through a session work, without the file having to exist for a setting that
     // was off when the app started. A failure is swallowed — a terminal with no markers is still a
     // usable terminal, which is the whole fallback.
-    let startup_line = if shell_integration.unwrap_or(true) {
+    let integration = if shell_integration.unwrap_or(true) {
         install_shell_integration(&program, script_dir.as_deref())
     } else {
         None
     };
+    let mut child_env = Vec::new();
+    if let Some(integration) = integration {
+        program = integration.program;
+        args = integration.args;
+        child_env = integration.env;
+    }
     backend.spawn(
         session.id.clone(),
         SpawnOptions {
@@ -130,7 +136,7 @@ pub fn create_with_settings(
             cwd,
             cols,
             rows,
-            startup_line,
+            env: child_env,
         },
         output,
     )?;
@@ -211,238 +217,229 @@ fn inherited_shell_args(program: &Path) -> Vec<String> {
 ///
 /// `print -P` rather than `printf` for zsh, which takes the escapes as two characters where `printf`
 /// needs four: `\e` against `\033` and `\a` against `\007`.
-const OSC_EXIT: &str = r"\e]133;D;$?\a";
 const OSC_STARTED: &str = r"\e]133;C\a";
 
 /// The same two markers for bash, which has no `print` and so spells the escapes the long way.
 const OSC_EXIT_BASH: &str = r"\033]133;D;%s\007";
 const OSC_STARTED_BASH: &str = r"\033]133;C\007";
 
-/// What the sourced script does to the screen before the shell redraws its prompt.
-///
-/// A clear rather than an erase of the row the setup line was drawn on, which is what this used to be
-/// and which was not enough. An erase removes the text and leaves the row, so a terminal whose prompt
-/// is taller than one row opened with the prompt's first rows, then blank rows where the setup had
-/// been, then the first command — a gap in the middle of the top of the screen, which is what was
-/// reported. `ESC[3J` discards the scrollback, `ESC[H` homes the cursor and `ESC[2J` erases the
-/// display, after which the prompt is drawn at row 0 and the terminal is what a freshly opened one
-/// looks like.
-///
-/// Written as escapes rather than shelling out to `clear`, for two reasons that are both about not
-/// depending on something that may not be there: `clear` is not guaranteed to be on `PATH`, and
-/// neither is `tput`, and a setup step that fails is a terminal with no markers and an error in it.
-///
-/// It has to be the shell that emits this. Bytes written to the pty master are INPUT: zsh's line
-/// editor would consume them, and a bare clear sent that way comes back as the visual bell rather
-/// than as a clear. That was measured, and it is the whole reason the hook body lives in a file that
-/// the shell sources instead of being typed at it.
-///
-/// ## Why wiping the screen is safe here
-///
-/// A clear run at the wrong moment destroys work, so the whole of the safety of this rests on one
-/// ordering: when this runs, the shell cannot have read a byte of user input. That ordering is the
-/// startup gate in `terminal/mod.rs`.
-///
-/// `TerminalBackend::write` — the only path user input takes to a pty — waits for the startup line to
-/// go out before it writes anything, and it has no deadline of its own, so it cannot time out while
-/// the line is still pending. `install_startup_line` writes the line and only then releases input, and
-/// on its own timeout it abandons the line without writing it at all. So the screen at the instant
-/// this script runs holds the shell's startup output, its prompt, and the setup line, and all three
-/// are what a clear is for. The gate that exists to stop a keystroke overtaking the hook is the same
-/// thing that makes this safe; neither is true without the other.
-///
-/// The gate used to carry a deadline of its own, and that was a hole in this argument rather than a
-/// belt-and-braces measure: it was measured from the keystroke while the startup thread's was measured
-/// from that thread's first scheduling, so a keystroke arriving in between would expire first, put the
-/// user's command into the shell, and only then have the setup line written behind it. It has been
-/// replaced by a backstop far beyond the startup thread's own timeout, which cannot fire while the
-/// line is still pending. `a_keystroke_never_overtakes_the_startup_line` in `terminal/mod.rs` is the
-/// test for the ordering this depends on.
-///
-/// ## What it costs
-///
-/// The startup output is real output somebody asked for: a toolchain banner, a version notice, a
-/// warning from a startup file. With the integration on it is gone; with the integration off it is
-/// there. That is a behavioural difference the feature introduces rather than hides, which is why it
-/// is a setting, and why the setting says so.
-const CLEAR_SCREEN: &str = r"\033[3J\033[H\033[2J";
-
-/// The script a terminal sources, per shell.
-///
-/// Two bodies rather than one that dispatches, because they are genuinely different shells' work and
-/// a `case` over `$0` inside a sourced file is a way for one of them to be wrong without the other
-/// being noticed.
-///
-/// zsh appends to the hook arrays by name. `add-zsh-hook` is not used because it is not a builtin but
-/// an autoloadable *function*, so it exists only once something has loaded it — usually an rc file,
-/// because frameworks like oh-my-zsh do. In a zsh with no rc files nothing has, and calling it fails
-/// with `command not found: add-zsh-hook`: the line is already echoed by then, so the shell looks
-/// fine, no hook is registered, and every session in that terminal silently never reports an exit
-/// code. Appending to the arrays is the whole of what `add-zsh-hook` does underneath, and
-/// `precmd_functions` and `preexec_functions` are ordinary zsh parameters, so there is nothing to
-/// load and nothing that can be missing.
-///
-/// Each entry is the *name* of a function rather than a command: zsh looks an entry up and runs it,
-/// it does not eval it. That was measured, not assumed, and it is why the two definitions exist —
-/// `precmd_functions+=('print -Pn "…"')` registers nothing and emits no marker at all.
-///
-/// ## bash: the two hooks, and what they do to a shell that already had them
-///
-/// bash gets a function rather than an inline `PROMPT_COMMAND` string because `$?` has to be read
-/// before anything else in the command resets it. That is the whole reason for the function, and it
-/// is why the function also **returns** the status it read: without the `return`, `printf`'s own exit
-/// status — 0 — is what every prompt command after ours sees, and a user whose prompt colours on
-/// `$?` gets a green prompt for a command that failed. Measured on both a bash 3.2 and a bash 5.3 in
-/// a PTY: with the `return`, the commands after ours read the command's status; without it they read
-/// 0.
-///
-/// Which shape the hook is installed in depends on what `PROMPT_COMMAND` already is, because bash
-/// 5.1 made it an array and both are live in the wild:
-///
-/// - As an **array** it is prepended to: `PROMPT_COMMAND=(__marvis_prompt_command "${…[@]}")`. Each
-///   element is then run with `$?` still holding the command's status, so ours reading it costs the
-///   user's own elements nothing — measured, and that is the form a multi-element array needs or the
-///   elements after the first are folded into one string and cannot be addressed individually.
-/// - As a **string** it is prepended to as a string, which is what a bash older than 5.1 has and what
-///   a user who set `PROMPT_COMMAND='a; b'` has.
-///
-/// Assigning a string to a variable that is already an array does *not* replace the array — it
-/// assigns element 0 and leaves the rest, measured on both versions — which is why the original line
-/// did not actually lose a user's prompt commands on bash 5.1+. What it did instead was fold element
-/// 0 into a compound string (`[0]="__marvis_prompt_command; a"`), which is what a prompt framework
-/// that later reads or rewrites `PROMPT_COMMAND` sees as a corrupted array. The array form removes
-/// that, and the version test is there because on bash 3.2 an array `PROMPT_COMMAND` is *not* run as
-/// an array at all — only element 0 is, which would silently drop every prompt command after the
-/// first. That was measured too: `PROMPT_COMMAND=(a b)` runs `a` alone on 3.2 and `a` then `b` on
-/// 5.3.
-///
-/// `PS0` stands in for zsh's `preexec`, which bash has no named hook for. bash expands it
-/// immediately before it runs a command, which is the same point in the sequence, and it is an
-/// ordinary variable: `$PS0` reads the user's value back, so prepending the marker to it needs no
-/// trap introspection at all. Measured in a real PTY: the marker lands between the echoed line and
-/// the command's own output, for `cd` and `[ -f … ]` as readily as for `echo`, and a user's own
-/// `PS0` still fires after ours rather than being replaced by it.
-///
-/// This replaces a `trap … DEBUG`, which cannot be read back from here. bash *suspends* the DEBUG
-/// trap for the duration of a sourced file and restores it afterwards, so `trap -p DEBUG` inside one
-/// prints nothing on either a bash 3.2 or a 5.3, while the same command typed at the prompt prints
-/// the trap. Measured, and so is every other route to it — `trap -p`, a command substitution, a
-/// redirect to a file and reading that file back, all empty. A trap *set* inside the sourced file is
-/// reported normally; it is the inherited one that cannot be seen. That is what made a chain dead
-/// code rather than a chain: the read-back was always the empty string, so the `eval` ran nothing,
-/// and the cost was the opposite of the intent — on a 5.3 the user's trap was destroyed silently,
-/// and on a 3.2 the hook's marker never fired either.
-///
-/// ## What it costs
-///
-/// `PS0` arrived in bash 4.4. `/bin/bash` on macOS is 3.2.57, which is what this app spawns when
-/// `$SHELL` says so, and a bash 3.2 with `PS0` set emits nothing at all for `cd`, `[ -f /etc/hosts ]`
-/// or `false`, where a 5.3 emits one for each. So on a bash 3.2 the sidebar row keeps the previous
-/// command's colour while the next one runs, instead of turning blue the moment it starts. That is
-/// the trade taken over taking over somebody's `DEBUG` trap. Setting `PS0` on a 3.2 is inert rather
-/// than broken — the user's own `PS0` does not fire there either — so nothing of theirs is taken
-/// away for our marker not arriving.
+/// Hooks run after user startup, before the first prompt; no PTY input is injected.
 fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
     match program.file_name().and_then(|name| name.to_str()) {
         Some("zsh") => Some((
             "hook.zsh",
             format!(
-                "# Written by Marvis and sourced by every terminal it opens. Nothing here is read by \
-                 anything else, and it is safe to delete once those terminals are closed.\n\
-                 #\n\
-                 # The last line clears the screen, so this leaves nothing of itself behind and the \
-                 terminal opens looking as though it had just been opened.\n\
-                 marvis_pc() {{ print -Pn \"{OSC_EXIT}\"; }}\n\
-                 precmd_functions+=(marvis_pc)\n\
-                 marvis_px() {{ print -Pn \"{OSC_STARTED}\"; }}\n\
-                 preexec_functions+=(marvis_px)\n\
-                 printf '{CLEAR_SCREEN}'\n"
+                r#"# Written by Marvis.
+if [[ -z ${{__marvis_integrated-}} ]]; then
+  typeset -g __marvis_integrated=1 __marvis_pending=0
+  marvis_pc() {{
+    local __marvis_status=$?
+    (( __marvis_pending )) || __marvis_status=0
+    __marvis_pending=0
+    printf '{OSC_EXIT_BASH}' "$__marvis_status"
+  }}
+  marvis_px() {{ __marvis_pending=1; print -Pn "{OSC_STARTED}"; }}
+  precmd_functions=(marvis_pc ${{precmd_functions:#marvis_pc}})
+  preexec_functions+=(marvis_px)
+fi
+"#
             ),
         )),
         Some("bash") => Some((
             "hook.bash",
             format!(
-                "# Written by Marvis and sourced by every terminal it opens. Nothing here is read by \
-                 anything else, and it is safe to delete once those terminals are closed.\n\
-                 #\n\
-                 # Every line here prepends to something the shell already had, because a bash \
-                 that was configured before this file was sourced keeps its configuration either \
-                 way.\n\
-                 #\n\
-                 # The last line clears the screen, so this leaves nothing of itself behind and the \
-                 terminal opens looking as though it had just been opened.\n\
-                 __marvis_prompt_command() {{ local __marvis_status=$?; printf '{OSC_EXIT_BASH}' \
-                 \"$__marvis_status\"; return \"$__marvis_status\"; }}\n\
-                 if [[ ${{BASH_VERSINFO[0]}} -gt 5 || ${{BASH_VERSINFO[0]}} -eq 5 && \
-                 ${{BASH_VERSINFO[1]}} -ge 1 ]] && [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == \
-                 'declare -a'* ]]; then\n\
-                 \x20 PROMPT_COMMAND=(__marvis_prompt_command \"${{PROMPT_COMMAND[@]}}\")\n\
-                 else\n\
-                 \x20 PROMPT_COMMAND=\"__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}\"\n\
-                 fi\n\
-                 __marvis_previous_ps0=${{PS0-}}\n\
-                 printf -v PS0 '%s' '{OSC_STARTED_BASH}'\"$__marvis_previous_ps0\"\n\
-                 printf '{CLEAR_SCREEN}'\n"
+                r#"# Written by Marvis.
+if [[ -z ${{__marvis_integrated-}} ]]; then
+  __marvis_integrated=1
+  __marvis_first_prompt=1
+  __marvis_prompt_command() {{
+    local __marvis_status=$?
+    if [[ $__marvis_first_prompt == 1 ]]; then
+      if [[ ${{__marvis_restore_posix-}} == off ]]; then set +o posix; fi
+      unset __marvis_restore_posix
+      __marvis_status=0
+      __marvis_first_prompt=0
+    fi
+    printf '{OSC_EXIT_BASH}' "$__marvis_status"
+    return "$__marvis_status"
+  }}
+  if [[ ${{BASH_VERSINFO[0]}} -gt 5 || ${{BASH_VERSINFO[0]}} -eq 5 && ${{BASH_VERSINFO[1]}} -ge 1 ]] && [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == 'declare -a'* ]]; then
+    PROMPT_COMMAND=(__marvis_prompt_command "${{PROMPT_COMMAND[@]}}")
+  else
+    PROMPT_COMMAND="__marvis_prompt_command${{PROMPT_COMMAND:+; $PROMPT_COMMAND}}"
+  fi
+  printf -v PS0 '%s' '{OSC_STARTED_BASH}'"${{PS0-}}"
+fi
+"#
             ),
         )),
-        // `sh` has no prompt hook that fires after a command with `$?` still intact, and a terminal
-        // under it keeps the behaviour it has today rather than half a hook.
         _ => None,
     }
 }
 
-/// The one line of input that installs the script, or `None` when there is nothing to install.
-///
-/// Kept to one short row on purpose. The erase above can only reach one row, and a line long enough
-/// to wrap would leave its first row behind — which is how this was drawn as 146 characters wrapping
-/// over three, and then as one line a person opened a terminal and did not want to look at.
-fn shell_integration_line(script: &Path) -> String {
-    // Quoted the way `TerminalSession.vue`'s `changeDirectory` quotes a path it types at a shell:
-    // single quotes, with an embedded one closed, escaped and reopened. A home directory may contain
-    // a space — this app's own folder is `~/.marvis`, but a person's `$HOME` is whatever they chose —
-    // and an unquoted path is a terminal with no hook and an error nobody reads.
-    format!(". '{}'", script.to_string_lossy().replace('\'', "'\\''"))
+struct ShellIntegration {
+    program: PathBuf,
+    args: Vec<String>,
+    env: Vec<(std::ffi::OsString, std::ffi::OsString)>,
 }
 
-/// Writes the script if it is not already there, and returns the line that sources it.
-///
-/// The file is written before the spawn and is never deleted while a session is live, so it outlives
-/// the shell that reads it: the shell is a separate process with its own cwd and environment, and the
-/// only thing it needs from this one is that the file is on disk when it gets there. Nothing here
-/// depends on this process still running.
-///
-/// Written per terminal rather than once at launch, because the setting is read per terminal: that
-/// is what makes turning it on part-way through a session work without the file having to exist for a
-/// setting that was off when the app started. Rewriting is avoided by comparing first, so opening a
-/// dozen terminals touches the disk once.
-fn install_shell_integration(program: &Path, script_dir: Option<&Path>) -> Option<String> {
+fn shell_quote(path: &Path) -> String {
+    format!("'{}'", path.to_string_lossy().replace('\'', "'\\''"))
+}
+
+fn install_shell_integration(
+    program: &Path,
+    script_dir: Option<&Path>,
+) -> Option<ShellIntegration> {
     let (name, contents) = shell_integration_script(program)?;
     let dir = script_dir?;
+    let bash = name == "hook.bash";
+    // Preserve deliberately POSIX-configured shells instead of imposing ordinary Bash mode.
+    if bash && env::var_os("POSIXLY_CORRECT").is_some() {
+        return None;
+    }
+    let mut child_program = program.to_path_buf();
     let script = dir.join(name);
-    let already_there = fs::read_to_string(&script).is_ok_and(|existing| existing == contents);
-    if !already_there {
-        if let Err(error) = fs::create_dir_all(dir) {
+    let mut files = vec![(script.clone(), contents)];
+    let mut overrides = Vec::new();
+    let mut args = inherited_shell_args(program);
+    if bash {
+        // Bash ignores --rcfile for login shells; Bash 3.2 also skips ENV unless invoked as sh.
+        // A private symlink retains the selected executable and native login/logout state. ENV
+        // restores ordinary Bash mode before profiles, and the first prompt restores it again
+        // after sh startup's late POSIX reset, before user prompt hooks or queued input.
+        #[cfg(unix)]
+        {
+            use std::{
+                hash::{Hash, Hasher},
+                os::unix::fs::symlink,
+            };
+            let target = fs::canonicalize(program).ok()?;
+            let mut hash = std::collections::hash_map::DefaultHasher::new();
+            target.hash(&mut hash);
+            let link_dir = dir.join(format!("bash-{:016x}", hash.finish()));
+            fs::create_dir_all(&link_dir).ok()?;
+            let link = link_dir.join("sh");
+            if fs::read_link(&link).as_ref().ok() != Some(&target) {
+                // Never replace an unexpected file or another selected shell's link.
+                if symlink(&target, &link).is_err() && fs::read_link(&link).ok() != Some(target) {
+                    return None;
+                }
+            }
+            child_program = link;
+        }
+        #[cfg(not(unix))]
+        {
+            return None;
+        }
+        let bootstrap = dir.join("bootstrap.bash");
+        files.push((
+            bootstrap.clone(),
+            format!(
+                r#"# Written by Marvis.
+set +o posix
+BASH=$__MARVIS_BASH
+if (( BASH_VERSINFO[0] >= 5 )); then BASH_ARGV0=$BASH; fi
+unset __MARVIS_BASH
+if [[ $__MARVIS_ENV_SET == 1 ]]; then export ENV=$__MARVIS_ENV; else unset ENV; fi
+unset __MARVIS_ENV_SET __MARVIS_ENV
+[[ ! -r /etc/profile ]] || . /etc/profile
+if [[ -r $HOME/.bash_profile ]]; then . "$HOME/.bash_profile"
+elif [[ -r $HOME/.bash_login ]]; then . "$HOME/.bash_login"
+elif [[ -r $HOME/.profile ]]; then . "$HOME/.profile"
+fi
+if shopt -qo posix; then __marvis_restore_posix=on; else __marvis_restore_posix=off; fi
+. {}
+"#,
+                shell_quote(&script)
+            ),
+        ));
+        overrides.extend([
+            (
+                "__MARVIS_ENV_SET".into(),
+                if env::var_os("ENV").is_some() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .into(),
+            ),
+            (
+                "__MARVIS_ENV".into(),
+                env::var_os("ENV").unwrap_or_default(),
+            ),
+            ("__MARVIS_BASH".into(), program.as_os_str().into()),
+            ("ENV".into(), bootstrap.into_os_string()),
+        ]);
+        args.insert(0, "--noprofile".into());
+    } else {
+        let bootstrap = dir.join("zsh");
+        overrides.extend([
+            (
+                "__MARVIS_ZDOTDIR_SET".into(),
+                if env::var_os("ZDOTDIR").is_some() {
+                    "1"
+                } else {
+                    "0"
+                }
+                .into(),
+            ),
+            (
+                "__MARVIS_ZDOTDIR".into(),
+                env::var_os("ZDOTDIR").unwrap_or_default(),
+            ),
+            ("ZDOTDIR".into(), bootstrap.clone().into_os_string()),
+        ]);
+        for file in [".zshenv", ".zprofile", ".zshrc", ".zlogin"] {
+            let mut text = String::from("# Written by Marvis; forward the user's startup files.\n");
+            if file == ".zshenv" {
+                text.push_str("typeset -g __marvis_bootstrap=$ZDOTDIR\n");
+            }
+            text.push_str("if [[ $__MARVIS_ZDOTDIR_SET == 1 ]]; then export ZDOTDIR=$__MARVIS_ZDOTDIR; else unset ZDOTDIR; fi\n");
+            text.push_str(&format!(
+                "[[ ! -r ${{ZDOTDIR-$HOME}}/{file} ]] || source \"${{ZDOTDIR-$HOME}}/{file}\"\n"
+            ));
+            text.push_str("__MARVIS_ZDOTDIR_SET=${+ZDOTDIR}\n__MARVIS_ZDOTDIR=${ZDOTDIR-}\n");
+            if file == ".zlogin" {
+                text.push_str(&format!(
+                    "unset __MARVIS_ZDOTDIR_SET __MARVIS_ZDOTDIR __marvis_bootstrap\nsource {}\n",
+                    shell_quote(&script)
+                ));
+            } else if file == ".zshrc" {
+                text.push_str(&format!("if [[ -o login && -o rcs ]]; then\n  export ZDOTDIR=$__marvis_bootstrap\nelse\n  unset __MARVIS_ZDOTDIR_SET __MARVIS_ZDOTDIR __marvis_bootstrap\n  source {}\nfi\n", shell_quote(&script)));
+            } else {
+                text.push_str("if [[ -o rcs ]]; then\n  export ZDOTDIR=$__marvis_bootstrap\nelse\n  unset __MARVIS_ZDOTDIR_SET __MARVIS_ZDOTDIR __marvis_bootstrap\nfi\n");
+            }
+            files.push((bootstrap.join(file), text));
+        }
+    }
+    for (path, contents) in files {
+        if fs::read_to_string(&path).is_ok_and(|existing| existing == contents) {
+            continue;
+        }
+        let written = fs::create_dir_all(path.parent()?)
+            .map_err(|error| error.to_string())
+            .and_then(|()| {
+                crate::services::files::atomic_write(
+                    &path,
+                    contents.as_bytes(),
+                    script_permissions(&path),
+                )
+                .map_err(|error| error.message)
+            });
+        if let Err(error) = written {
             log::warn!(
                 "terminal {} could not be integrated: {error}",
                 program.display()
             );
             return None;
         }
-        let written = crate::services::files::atomic_write(
-            &script,
-            contents.as_bytes(),
-            script_permissions(&script),
-        );
-        if let Err(error) = written {
-            log::warn!(
-                "terminal {} could not be integrated: {}",
-                program.display(),
-                error.message
-            );
-            return None;
-        }
     }
-    Some(shell_integration_line(&script))
+    Some(ShellIntegration {
+        program: child_program,
+        args,
+        env: overrides,
+    })
 }
 
 /// The mode the script is written with, or the one it already has.
@@ -483,7 +480,7 @@ mod tests {
         path::{Path, PathBuf},
         process::Command,
         sync::Arc,
-        time::{Duration, Instant},
+        time::Duration,
     };
 
     use tempfile::tempdir;
@@ -496,7 +493,7 @@ mod tests {
 
     use super::{
         create_with_options, create_with_settings, inherited_shell_args, install_shell_integration,
-        rename, shell_integration_line, shell_integration_script, TerminalOptions, CLEAR_SCREEN,
+        rename, shell_integration_script, shell_quote, ShellIntegration, TerminalOptions,
     };
 
     fn plain_repo(path: &Path) -> Repo {
@@ -551,37 +548,19 @@ mod tests {
         }
     }
 
-    /// Where the sourced script is written for a test, and the line that sources it.
-    ///
-    /// The real directory name is used where the test is about a real path, and a space is put in it
-    /// by the caller that wants one, because a `$HOME` with a space in it is a person's machine rather
-    /// than an edge case and the quoting has to survive it.
-    fn script_in(directory: &Path, shell: &str) -> String {
+    fn script_in(directory: &Path, shell: &str) -> ShellIntegration {
         let line = install_shell_integration(Path::new(shell), Some(directory))
             .unwrap_or_else(|| panic!("{shell} was expected to be integrated"));
         line
     }
 
-    /// Spawns a real shell with the real script, through the real spawn path, and asks a command to
-    /// fail.
-    ///
-    /// Everything about this is a real shell rather than a stub because the whole subject is what a
-    /// shell *accepts*: a script that is syntactically valid, calls things that exist, and ends up
-    /// registered. A test that only compared the string would have shipped both the missing
-    /// `autoload -Uz add-zsh-hook` and an `add-zsh-hook` that nothing had loaded.
-    ///
-    /// The line goes in as `startup_line` rather than being written by the test, so this exercises the
-    /// same timing production does: the backend decides when the shell is ready for it.
-    fn assert_shell_reports_a_failing_command(shell: &str, args: &[&str], session: &str) {
-        assert_script_installs(shell, args, session, tempdir().unwrap().path());
+    fn assert_shell_reports_a_failing_command(shell: &str, session: &str) {
+        assert_script_installs(shell, session, tempdir().unwrap().path());
     }
 
-    /// Opens a real shell with the script written where `script_dir` says, and checks that a failing
-    /// command is reported.
-    fn assert_script_installs(shell: &str, args: &[&str], session: &str, script_dir: &Path) {
+    fn assert_script_installs(shell: &str, session: &str, script_dir: &Path) {
         shell_stream(
             shell,
-            args,
             session,
             script_dir,
             &[b"false\n"],
@@ -590,21 +569,20 @@ mod tests {
         );
     }
 
-    /// Spawns a real shell with the real script, types `commands` at it, and hands the whole stream to
-    /// `check` once the last prompt has been drawn.
-    ///
-    /// Every chunk is kept rather than drained at the end, because `wait_for_output` consumes the
-    /// channel to find its marker and what came *before* that marker is usually the subject.
     fn shell_stream(
         shell: &str,
-        args: &[&str],
         session: &str,
         script_dir: &Path,
         commands: &[&[u8]],
         ends_with: &[u8],
         check: impl Fn(&str),
     ) {
-        let line = script_in(script_dir, shell);
+        let mut integration = script_in(script_dir, shell);
+        let home = tempdir().unwrap();
+        integration.env.extend([
+            ("HOME".into(), home.path().as_os_str().into()),
+            ("__MARVIS_ZDOTDIR_SET".into(), "0".into()),
+        ]);
         let backend = TerminalBackend::default();
         let (sender, receiver) = std::sync::mpsc::channel();
         let collected: Arc<std::sync::Mutex<Vec<u8>>> = Arc::new(std::sync::Mutex::new(Vec::new()));
@@ -619,12 +597,12 @@ mod tests {
             .spawn(
                 session.to_string(),
                 SpawnOptions {
-                    program: Path::new(shell).to_path_buf(),
-                    args: args.iter().map(|arg| (*arg).to_string()).collect(),
+                    program: integration.program,
+                    args: integration.args,
                     cwd: std::env::current_dir().unwrap(),
                     cols: 80,
                     rows: 24,
-                    startup_line: Some(line),
+                    env: integration.env,
                 },
                 output,
             )
@@ -647,58 +625,27 @@ mod tests {
         check(&String::from_utf8_lossy(&stream));
     }
 
-    /// A failed command is what the sidebar bar is for, and it is invisible to the backend: `clang`
-    /// failing does not kill the shell, so no `waitpid` ever has a code to read. This is the only
-    /// source of one — the shell's own `$?`, printed by the script — so it runs the shells the app
-    /// actually spawns and asserts on the bytes that come back.
-    ///
-    /// Every shell with no integration (`sh`) is skipped rather than faked, because a script written
-    /// for a shell that does not answer would make this pass for the wrong reason.
     #[test]
     fn a_failing_command_in_a_live_shell_reports_its_exit_code_over_osc_133() {
         for shell in ["/bin/zsh", "/bin/bash"] {
             if Command::new(shell).arg("--version").output().is_err() {
                 continue;
             }
-            assert_shell_reports_a_failing_command(shell, &["-l", "-i"], shell);
+            assert_shell_reports_a_failing_command(shell, shell);
         }
     }
 
-    /// The marker that clears a red row has to say *a command is starting*, and it has to say it for a
-    /// **builtin**.
-    ///
-    /// A user runs `cd`, `clear`, `[ -f … ]` far more often than they run a program, and a marker hung
-    /// off command *execution* would miss every one of them: there is no child process to notice and no
-    /// exit status to read. So the first half of this asks each shell to do something only a builtin can
-    /// do — `cd` changes the shell's own working directory, `[` is a conditional the shell evaluates
-    /// itself — and asserts a marker is drawn for each.
-    ///
-    /// The second half is what makes the marker's *position* the subject rather than its existence.
-    /// `C` is command execution start in OSC 133, and this emits it from `preexec`/`PS0`, immediately
-    /// before the command's own output. A prompt hook (`precmd`/`PROMPT_COMMAND`) would put it after
-    /// the output instead — it fires once the next prompt is being drawn. So the marker is required to
-    /// sit between the command line being echoed and the output that command produced.
-    ///
-    /// Two builtins rather than one command per line, because the shells fire at different granularity —
-    /// bash's `PS0` once per simple command, zsh's `preexec` once per line — and a marker wired to
-    /// the wrong one of those still looks right for a single simple command.
-    ///
-    /// Bash is not in here. Its marker comes from `PS0`, which arrived in 4.4 and does not exist in
-    /// the 3.2 that `/bin/bash` is on macOS, so a marker cannot be required of every bash on the
-    /// machine. `the_bash_started_marker_fires_before_the_command_it_marks` asks each one and asserts
-    /// the position where there is a `PS0` to expand.
     #[test]
     fn the_started_marker_fires_for_builtins_and_before_their_output() {
         // What `echo` prints, chosen so that finding it means finding that command's output rather than
         // the line editor drawing the typed command back.
         const OUTPUT: &str = "MARVIS_MARKER_ORDERING_PROBE";
-        for (shell, args) in [("/bin/zsh", ["-f", "-i"])] {
+        for shell in ["/bin/zsh"] {
             if Command::new(shell).arg("--version").output().is_err() {
                 continue;
             }
             shell_stream(
                 shell,
-                &args,
                 &format!("ordering:{shell}"),
                 tempdir().unwrap().path(),
                 &[
@@ -710,9 +657,7 @@ mod tests {
                 |stream| {
                     // Counted from the point the script was sourced: everything before that is the shell
                     // starting up rather than a command anybody ran.
-                    let (_, after) = stream
-                        .split_once("hook.")
-                        .expect("the script was never sourced, so no marker is attributable to it");
+                    let after = stream;
                     let started = after.matches("\x1b]133;C\x07").count();
                     assert!(
                         started >= 3,
@@ -740,36 +685,14 @@ mod tests {
         }
     }
 
-    /// The regression this pins: the script used to call `add-zsh-hook` with nothing having loaded it.
-    ///
-    /// It is an autoloadable zsh *function*, not a builtin, so it only exists if something loaded it
-    /// first — usually an rc file, because oh-my-zsh and friends do. Under `-l` on a developer's
-    /// machine it therefore always worked, and the test above passed while the feature was silently
-    /// dead for everyone without a zsh framework: `command not found: add-zsh-hook`, no hook
-    /// registered, no OSC 133, ever, and no error anywhere because the line was already echoed.
-    ///
-    /// `zsh -f` is that user. `-f` skips every rc file, so whatever the machine running this has
-    /// installed cannot be what makes the hook work — only what the script does for itself. It now
-    /// appends to `precmd_functions` directly, which is what `add-zsh-hook` does underneath, so there
-    /// is no longer anything that can be missing.
     #[test]
     fn the_zsh_script_reports_a_failure_in_a_zsh_with_no_startup_files() {
         if Command::new("/bin/zsh").arg("--version").output().is_err() {
             return;
         }
-        assert_script_installs(
-            "/bin/zsh",
-            &["-f", "-i"],
-            "session:zsh-no-rc",
-            tempdir().unwrap().path(),
-        );
+        assert_script_installs("/bin/zsh", "session:zsh-no-rc", tempdir().unwrap().path());
     }
 
-    /// A `$HOME` with a space in it is somebody's machine, and an unquoted path there is a terminal
-    /// with no hook and an error nobody reads.
-    ///
-    /// Live rather than string-compared because the whole failure is what the *shell* makes of the
-    /// quoting: a path with a space in it, sourced for real, has to report a failing command.
     #[test]
     fn a_path_with_a_space_in_it_still_installs_the_script() {
         if Command::new("/bin/zsh").arg("--version").output().is_err() {
@@ -778,163 +701,25 @@ mod tests {
         let directory = tempdir().unwrap();
         let with_a_space = directory.path().join("a folder of mine");
         fs::create_dir(&with_a_space).unwrap();
-        assert_script_installs("/bin/zsh", &["-l", "-i"], "session:spaced", &with_a_space);
+        assert_script_installs("/bin/zsh", "session:spaced", &with_a_space);
     }
 
-    /// A quote in the path is the other half of the same quoting rule: single quotes are closed,
-    /// escaped and reopened, the way `TerminalSession.vue`'s `changeDirectory` does it.
     #[test]
     fn a_path_with_a_quote_in_it_is_quoted_the_way_a_shell_needs() {
-        let line = shell_integration_line(Path::new("/home/someone/it's mine/hook.zsh"));
+        let line = shell_quote(Path::new("/home/someone/it's mine/hook.zsh"));
         assert_eq!(
-            line, ". '/home/someone/it'\\''s mine/hook.zsh'",
+            line, "'/home/someone/it'\\''s mine/hook.zsh'",
             "the quote must be closed, escaped and reopened, and the whole path wrapped once"
         );
-        // And the line is still one row, which is what lets the erase reach it.
         assert!(!line.contains('\n'));
     }
 
-    /// What a zsh script has to be, and is not allowed to be, anything else.
-    ///
-    /// `precmd_functions` takes the *name* of a function and runs it; it does not eval its entries.
-    /// That was measured rather than assumed, and the difference is the whole reason the script
-    /// defines two functions: `precmd_functions+=('print -Pn "…"')` is accepted without complaint,
-    /// registers nothing, and emits no marker at all, which is the silent-no-op failure this feature
-    /// cannot afford. `add-zsh-hook` is gone for the same class of reason — it is an autoloadable
-    /// function that a shell with no rc files has never loaded.
-    #[test]
-    fn the_zsh_script_appends_function_names_and_needs_nothing_loaded_first() {
-        let (_, script) = shell_integration_script(Path::new("/bin/zsh")).unwrap();
-        assert!(
-            !script.contains("add-zsh-hook"),
-            "add-zsh-hook is an autoloadable function, and a shell with no rc files has not loaded it"
-        );
-        for parameter in ["precmd_functions+=(", "preexec_functions+=("] {
-            let entry = script
-                .split(parameter)
-                .nth(1)
-                .and_then(|rest| rest.split(')').next())
-                .unwrap_or_default();
-            let name = entry.trim();
-            assert!(
-                name.starts_with("marvis_"),
-                "{parameter} must name a function, and got {entry:?}"
-            );
-            assert!(
-                script.contains(&format!("{name}()")),
-                "{name} is appended but never defined, so zsh would look it up and find nothing"
-            );
-        }
-    }
-
-    /// The clear has to come from the shell, and it has to be its last act.
-    ///
-    /// Bytes written to the pty master are input: zsh's line editor would consume them, and a bare
-    /// clear sent that way comes back as the visual bell rather than as a clear. That was measured,
-    /// and it is why the hook body lives in a file the shell sources.
-    #[test]
-    fn the_script_clears_the_screen_and_does_it_last() {
-        for shell in ["/bin/zsh", "/bin/bash"] {
-            let Some((_, script)) = shell_integration_script(Path::new(shell)) else {
-                continue;
-            };
-            let mut lines = script
-                .lines()
-                .filter(|line| !line.trim().is_empty())
-                .collect::<Vec<_>>();
-            let last = lines.pop().unwrap();
-            assert_eq!(
-                last.trim(),
-                format!("printf '{CLEAR_SCREEN}'"),
-                "the clear must be the last thing {shell} does, or output is drawn over it"
-            );
-            // Scrollback, home, display — in that order. Homing between the two erases is what puts
-            // `2J` over the whole screen rather than over what is below the cursor, and `3J` is what
-            // stops the setup line sitting in the scrollback a scrollback would bring back.
-            assert_eq!(CLEAR_SCREEN, r"\033[3J\033[H\033[2J");
-            // It is emitted as escapes rather than by running `clear`, which is not guaranteed to be
-            // on PATH, and a setup step that fails is a terminal with no markers and an error in it.
-            assert!(
-                !script.contains("clear "),
-                "the clear must not depend on a program being there"
-            );
-        }
-    }
-
-    /// A screen that has been wiped is a screen somebody could have lost work on, so the claim that it
-    /// is safe is a claim about ordering and it is worth pinning the two halves of it here.
-    ///
-    /// The gate that holds user input back is in `terminal/mod.rs` and is tested there
-    /// (`a_keystroke_never_overtakes_the_startup_line`). What is asserted here is that this script is
-    /// the thing that depends on it: the clear and the gate are two ends of one guarantee, and a
-    /// change to either without the other is how the guarantee is lost.
-    #[test]
-    fn the_clear_is_only_reachable_behind_the_input_gate() {
-        for shell in ["/bin/zsh", "/bin/bash"] {
-            let Some((_, script)) = shell_integration_script(Path::new(shell)) else {
-                continue;
-            };
-            // The script reaches the screen only as the last statement of the one line that is gated,
-            // so there is no path from this file to the screen that does not go through it.
-            assert_eq!(
-                script.matches(&format!("printf '{CLEAR_SCREEN}'")).count(),
-                1,
-                "{shell}: the clear must appear once, as the last line, and nowhere else"
-            );
-            // And nothing before it writes to the screen at all, so the clear cannot be running early
-            // in a script that has already done something visible.
-            let body: String = script
-                .lines()
-                .filter(|line| !line.trim().is_empty() && !line.starts_with('#'))
-                .collect::<Vec<_>>()
-                .join("\n");
-            let without_the_clear = body.replace(&format!("printf '{CLEAR_SCREEN}'"), "");
-            assert!(
-                !without_the_clear.contains(r"\033["),
-                "{shell}: only the clear may write to the screen: {without_the_clear}"
-            );
-        }
-    }
-
-    /// The injected line stays short, whatever the path looks like.
-    ///
-    /// The clear now covers the whole screen, so a line long enough to wrap is not left on screen — but
-    /// it is still typed at a prompt, and a line that wraps is a line the line editor redraws in
-    /// pieces. Short is one less thing between this and a terminal that opens cleanly.
-    #[test]
-    fn the_injected_line_is_one_short_row() {
-        for shell in ["/bin/zsh", "/bin/bash"] {
-            let (name, _) = shell_integration_script(Path::new(shell)).unwrap();
-            let line = shell_integration_line(
-                &Path::new("/home/a-rather-long-username")
-                    .join(".marvis")
-                    .join(name),
-            );
-            assert!(
-                line.chars().count() < 60,
-                "{shell}: {} chars, which can wrap behind a wide prompt: {line}",
-                line.chars().count()
-            );
-            assert!(!line.contains('\n'));
-        }
-    }
-
-    /// Where the script goes, and what is left behind when it is not wanted.
-    ///
-    /// It is written per terminal and never deleted, which is what makes turning the setting on
-    /// part-way through a session work: there is no file to have existed at launch. It is written
-    /// before the spawn, so the shell that reads it is never racing the write, and it is left alone
-    /// when the setting is off so that a session opened with the setting on and then turned off does
-    /// not have anything to strip out of a terminal that is already running.
     #[test]
     fn the_script_is_written_next_to_the_settings_and_only_when_it_is_wanted() {
         let directory = tempdir().unwrap();
         let zsh = Path::new("/bin/zsh");
-        let line = install_shell_integration(zsh, Some(directory.path())).unwrap();
-        assert_eq!(
-            line,
-            shell_integration_line(&directory.path().join("hook.zsh"))
-        );
+        let integration = install_shell_integration(zsh, Some(directory.path())).unwrap();
+        assert_eq!(integration.args, inherited_shell_args(zsh));
         assert!(directory.path().join("hook.zsh").is_file());
         // The two shells get their own files rather than one that dispatches on `$0`, and only the one
         // a terminal actually asked for is written.
@@ -963,22 +748,10 @@ mod tests {
             );
         }
         // No folder to write into means no integration rather than a line pointing at nothing.
-        assert_eq!(install_shell_integration(zsh, None), None);
+        assert!(install_shell_integration(zsh, None).is_none());
         assert!(shell_integration_script(Path::new("/bin/sh")).is_none());
     }
 
-    /// Every bash the machine has.
-    ///
-    /// The script has to be right on all of them rather than on whichever one happens to come first,
-    /// because `inherited_shell` spawns `$SHELL` and a person who has installed a bash has usually put
-    /// it there on purpose. `/bin/bash` is always in the list even when nothing else is, because on
-    /// macOS that is the one most terminals get and the oldest bash there is.
-    ///
-    /// `PATH` holds directories, so each one is asked for a `bash` inside it rather than being mistaken
-    /// for one. Looking for a `PATH` entry that *is* a bash finds nothing on an ordinary system, which
-    /// left this returning only the `/bin/bash` fallback — and since that is the 3.2, which is the one
-    /// bash without `PS0`, every bash assertion in this file had been running against the single
-    /// version that cannot exercise the interesting half of the script.
     fn bashes() -> Vec<String> {
         let mut found: Vec<String> = std::env::var("PATH")
             .unwrap_or_default()
@@ -999,11 +772,6 @@ mod tests {
         found
     }
 
-    /// Whether this bash runs every element of a `PROMPT_COMMAND` array, or only the first.
-    ///
-    /// Asked of the shell rather than read off its version number, because it is the property the
-    /// script branches on and therefore the one that has to hold. Measured false on bash 3.2, which is
-    /// what `/bin/bash` is on macOS, so the script has to take the string branch there.
     fn bash_honours_prompt_command_arrays(bash: &str) -> bool {
         let run = "\
 PROMPT_COMMAND=(probe_one probe_two)
@@ -1014,16 +782,6 @@ probe_two() { printf '[TWO]'; }
         bash_session_with(bash, run, &[b"true\n"], b"\x1b]133;D;0\x07").contains("[ONE][TWO]")
     }
 
-    /// Whether this bash expands `PS0`, which is where the started marker comes from.
-    ///
-    /// Asked of the shell rather than read off its version number, because it is the property the
-    /// script depends on and therefore the one that has to hold. Measured false on bash 3.2, which
-    /// is what `/bin/bash` is on macOS and the version this app is most likely to spawn, and true on
-    /// bash 4.4 and later — where `PS0` arrived.
-    ///
-    /// Measured *through the install*, because the script prepends to `PS0` and a probe that ran
-    /// against an untouched shell would be asking a different question than the one production
-    /// asks: whether the value still fires once ours is on the front of it.
     fn bash_expands_ps0(bash: &str) -> bool {
         let run = "PS0='<MARVIS_PS0_PROBE>'\n";
         // `true` is there to draw one more prompt, and the answer is on it.
@@ -1031,14 +789,6 @@ probe_two() { printf '[TWO]'; }
             .contains("<MARVIS_PS0_PROBE>")
     }
 
-    /// A session's output from after the hook was sourced, and nothing before it.
-    ///
-    /// The startup line is the hook, so everything ahead of this sentinel is the shell starting up and
-    /// the user's rc file doing its own work — including firing their own `DEBUG` trap, which is
-    /// exactly what an assertion about whether the hook kept that trap would be looking for. A whole
-    /// stream cannot tell "the trap survived the install" from "the trap fired before the install
-    /// happened", and a test that cannot tell them passes against a shell the trap was taken from.
-    /// The sentinel is printed by the first command typed, so it is after the install by construction.
     fn bash_session_after_install(
         bash: &str,
         rc: &str,
@@ -1056,21 +806,13 @@ probe_two() { printf '[TWO]'; }
         after.to_string()
     }
 
-    /// Opens a bash with a startup file of the test's own, runs the real install script against it, and
-    /// hands back everything the shell printed.
-    ///
-    /// The user's prompt work and their DEBUG trap are installed by `--rcfile` rather than by the test
-    /// writing to the PTY, because that is the order they exist in for real: a bashrc has run long
-    /// before the line this app types, and a script that only survives because nothing was set up yet
-    /// is not a script that leaves a shell alone.
-    ///
-    /// Every chunk is kept rather than drained at the end, because `wait_for_output` consumes the
-    /// channel to find its marker and what came *before* that marker is the subject here.
     fn bash_session_with(bash: &str, rc: &str, commands: &[&[u8]], ends_with: &[u8]) -> String {
         let directory = tempdir().unwrap();
         let rcfile = directory.path().join("bashrc");
-        fs::write(&rcfile, rc).unwrap();
-        let line = script_in(directory.path(), bash);
+        let (name, script) = shell_integration_script(Path::new(bash)).unwrap();
+        let hook = directory.path().join(name);
+        fs::write(&hook, script).unwrap();
+        fs::write(&rcfile, format!("{rc}\n. {}\n", shell_quote(&hook))).unwrap();
         let backend = TerminalBackend::default();
         let (sender, receiver) = std::sync::mpsc::channel();
         // Every chunk is kept rather than drained at the end, because `wait_for_output` consumes the
@@ -1097,7 +839,7 @@ probe_two() { printf '[TWO]'; }
                     cwd: std::env::current_dir().unwrap(),
                     cols: 80,
                     rows: 24,
-                    startup_line: Some(line),
+                    env: vec![("HOME".into(), directory.path().as_os_str().into())],
                 },
                 output,
             )
@@ -1117,17 +859,6 @@ probe_two() { printf '[TWO]'; }
         String::from_utf8_lossy(&stream).into_owned()
     }
 
-    /// A bash script that installs itself has to leave the shell it lands in as it found it.
-    ///
-    /// Two things in it do reach into somebody's configuration. The `PROMPT_COMMAND` assignment
-    /// replaced a multi-element array a person had set up, taking every prompt command but the first
-    /// with it; and a `trap … DEBUG` replaced a DEBUG trap they had, with no error anywhere and no way
-    /// back. A user on a bash 5.1+ who had two or three prompt commands in the array opened a terminal
-    /// and found one of them gone.
-    ///
-    /// Asserted against a real bash with a real rc file rather than by comparing the script's text,
-    /// because the subject is what the shell *does* with the text, and that is the class of bug that
-    /// shipped a syntactically perfect `PROMPT_COMMAND="…"` in the first place.
     #[test]
     fn the_bash_script_keeps_a_prompt_that_was_already_there() {
         // The same three prompt commands as an array, which is what bash 5.1 and later use, and as a
@@ -1195,18 +926,6 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         }
     }
 
-    /// The started marker comes from `PS0`, so it must land where `preexec` does in zsh: after the
-    /// line the person typed and before anything the command prints.
-    ///
-    /// Both halves matter and neither is checkable without the other. That a marker appears at all
-    /// only says `PS0` is expanded — `precmd` would do that too, and a marker in the wrong place still
-    /// clears the row, one command late. Position is what separates a pre-command hook from a
-    /// post-command one, so it is the position that is asserted here, against a real bash with a
-    /// real rc file, and a user's own `PS0` is checked in the same breath because prepending to a
-    /// value somebody else set is the easy way to break it.
-    ///
-    /// `bash_expands_ps0` is asked of each shell rather than assumed, so the test says the same thing
-    /// on every bash the machine has and expects the honest answer where `PS0` does not exist.
     #[test]
     fn the_bash_started_marker_fires_before_the_command_it_marks() {
         const USER_PS0: &str = "PS0='[USER:%s:%d]'\n";
@@ -1293,10 +1012,6 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         }
     }
 
-    /// Every terminal gets the same script, and it is not rewritten for each one.
-    ///
-    /// Opening a dozen terminals touching the disk once is the difference between a feature that is
-    /// invisible and one that is merely cheap.
     #[test]
     fn the_script_is_written_once_and_reused() {
         let directory = tempdir().unwrap();
@@ -1320,14 +1035,6 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         assert!(written_at <= settled);
     }
 
-    /// Opens a real terminal with a real setting and reports whether the script reached it.
-    ///
-    /// Goes through `create_with_settings` rather than through the backend, because the setting is
-    /// only read on the way in: what a terminal already has cannot be taken away by turning the
-    /// setting off afterwards, which is what the field's own doc comment promises.
-    ///
-    /// Returns whether the app's folder ended up holding a script, which is the whole of what the
-    /// setting decides: no file and no line, or a file and a line.
     fn opening_a_terminal_writes(script_dir: &Path, setting: Option<bool>) -> bool {
         let directory = tempdir().unwrap();
         let checkout = directory.path().join("checkout");
@@ -1355,29 +1062,17 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         )
         .unwrap();
 
-        if setting == Some(false) {
-            // Nothing is going to print a marker, so this waits on something the shell prints itself,
-            // which is also what proves the session is live and not merely registered.
-            backend
-                .write(&created.session.id, b"printf 'MARVISPROBE\\n'\n")
-                .unwrap();
-            wait_for_output(&receiver, b"MARVISPROBE", Duration::from_secs(15));
-        }
+        // A marker cannot match the tty echo: this proves startup completed and input executed,
+        // whether integration was enabled, disabled or preparation failed.
+        backend
+            .write(&created.session.id, b"printf '\\036MARVISPROBE\\037'\n")
+            .unwrap();
+        wait_for_output(&receiver, b"\x1eMARVISPROBE\x1f", Duration::from_secs(15));
         assert!(backend.status(&created.session.id).is_ok());
         backend.close(&created.session.id).unwrap();
         script_dir.join("hook.zsh").is_file() || script_dir.join("hook.bash").is_file()
     }
 
-    /// The setting decides what the next terminal gets, and nothing else moves.
-    ///
-    /// Off writes no script and sends no line, so a terminal behaves as it did before this existed: no
-    /// script to source, so no OSC 133, so the frontend never has an exit code to turn a row red from.
-    /// There is nothing to strip out of a terminal that is already open either — there was never
-    /// anything in it to strip.
-    ///
-    /// `None` is "no settings file was reachable" and reads as on, because the feature ships on and a
-    /// person whose file is broken already gets an error from the settings dialog. Reading it as off
-    /// would quietly take the feature away from everybody whose file has not been written yet.
     #[test]
     fn the_setting_decides_whether_a_new_terminal_is_integrated() {
         if Command::new("/bin/zsh").arg("--version").output().is_err() {
@@ -1396,153 +1091,312 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         assert!(opening_a_terminal_writes(tempdir().unwrap().path(), None));
     }
 
-    /// Writes a capture of a real session's output for `terminal-shell-integration-render.test.ts` to
-    /// replay through a real terminal.
-    ///
-    /// This is the only test here that can see the erase, because the erase's bytes are in the stream
-    /// whether or not they are honoured: a screen is what tells a line that was drawn from one that
-    /// was drawn and then taken back off. The frontend test asserts on the rendered screen, and this
-    /// is where the bytes come from.
-    ///
-    /// `#[ignore]`d because it writes into the source tree and the render test reads a committed
-    /// capture. Regenerate with:
-    ///
-    /// ```text
-    /// MARVIS_CAPTURE_FIXTURES=src/lib/__fixtures__ cargo test --manifest-path src-tauri/Cargo.toml \
-    ///   captures_a_real_session_for_the_render_test -- --ignored
-    /// ```
     #[test]
     #[ignore = "regenerates committed fixtures; see MARVIS_CAPTURE_FIXTURES"]
     fn captures_a_real_session_for_the_render_test() {
-        let Some(directory) = std::env::var_os("MARVIS_CAPTURE_FIXTURES") else {
-            panic!("set MARVIS_CAPTURE_FIXTURES to the directory to write captures into");
-        };
-        let directory = PathBuf::from(directory);
+        let directory = PathBuf::from(
+            std::env::var_os("MARVIS_CAPTURE_FIXTURES").expect("set MARVIS_CAPTURE_FIXTURES"),
+        );
         fs::create_dir_all(&directory).unwrap();
-        for (name, shell, args) in [
-            ("zsh-login", "/bin/zsh", &["-l", "-i"][..]),
-            ("zsh-bare", "/bin/zsh", &["-f", "-i"][..]),
-            ("bash-login", "/bin/bash", &["-l", "-i"][..]),
+        let bash = "/bin/bash";
+        for (name, shell, banner) in [
+            ("zsh-login", "/bin/zsh", true),
+            ("zsh-bare", "/bin/zsh", false),
+            ("bash-login", bash, true),
         ] {
-            if Command::new(shell).arg("--version").output().is_err() {
-                continue;
-            }
-            let stream = capture_a_session(shell, args, tempdir().unwrap().path());
-            fs::write(directory.join(format!("{name}.bin")), &stream).unwrap();
-            println!("captured {name}: {} bytes", stream.len());
-        }
-        // Two controls, both of which the render test needs to be able to fail. Without the first, "the
-        // terminal opens pristine" could be an instrument that never saw the residue. Without the
-        // second, waiting for the shell to be ready could look like it makes no difference.
-        let stream = capture_a_session_without_the_clear();
-        fs::write(directory.join("control-no-clear.bin"), &stream).unwrap();
-        println!("captured control-no-clear: {} bytes", stream.len());
-
-        // Held, not dropped at the end of the statement: the directory has to still be there when the
-        // shell reads the script out of it.
-        let script_dir = tempdir().unwrap();
-        let line = script_in(script_dir.path(), "/bin/zsh");
-        let stream = capture_a_stream("/bin/zsh", &["-l", "-i"], Some(line), false);
-        fs::write(directory.join("control-no-settle.bin"), &stream).unwrap();
-        println!("captured control-no-settle: {} bytes", stream.len());
-    }
-
-    /// A real session's output: the injected line, the script's own markers, and a failing command.
-    fn capture_a_session(shell: &str, args: &[&str], script_dir: &Path) -> Vec<u8> {
-        let line = script_in(script_dir, shell);
-        capture_a_stream(shell, args, Some(line), true)
-    }
-
-    /// The same, with a script that registers nothing and never clears, so the setup leaves its mark.
-    fn capture_a_session_without_the_clear() -> Vec<u8> {
-        let directory = tempdir().unwrap();
-        let script = directory.path().join("hook.zsh");
-        fs::write(
-            &script,
-            "# Captured without the clear, as the control for the render test.\n\
-             marvis_pc() { print -Pn \"\\e]133;D;$?\\a\"; }\n\
-             precmd_functions+=(marvis_pc)\n",
-        )
-        .unwrap();
-        capture_a_stream(
-            "/bin/zsh",
-            &["-l", "-i"],
-            Some(shell_integration_line(&script)),
-            true,
-        )
-    }
-
-    /// Drains the receiver until it has been quiet for `quiet_for`, which is the observable that means
-    /// the shell has stopped talking and its line editor has taken over.
-    fn wait_for_quiet(receiver: &std::sync::mpsc::Receiver<Vec<u8>>, quiet_for: Duration) {
-        let deadline = Instant::now() + Duration::from_secs(10);
-        while Instant::now() < deadline {
-            match receiver.recv_timeout(quiet_for) {
-                Ok(_) => continue,
-                Err(_) => return,
-            }
-        }
-    }
-
-    /// Spawns a shell, waits for it to install `startup_line`, then fails a command and returns
-    /// everything the session printed.
-    fn capture_a_stream(
-        shell: &str,
-        args: &[&str],
-        startup_line: Option<String>,
-        settle: bool,
-    ) -> Vec<u8> {
-        let backend = TerminalBackend::default();
-        let captured: std::sync::Arc<std::sync::Mutex<Vec<u8>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let (sender, receiver) = std::sync::mpsc::channel();
-        let kept = std::sync::Arc::clone(&captured);
-        let output: OutputSink = Box::new(move |bytes| {
-            kept.lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                .extend_from_slice(bytes);
-            sender.send(bytes.to_vec()).map_err(|e| e.to_string())
-        });
-        let session = "session:capture".to_string();
-        // `settle` false is the line written the moment the shell exists, while it is still loading its
-        // startup files. Production waits; this is what it is waiting for.
-        backend
-            .spawn(
-                session.clone(),
-                SpawnOptions {
-                    program: Path::new(shell).to_path_buf(),
-                    args: args.iter().map(|arg| (*arg).to_string()).collect(),
-                    cwd: std::env::current_dir().unwrap(),
-                    cols: 80,
-                    rows: 24,
-                    startup_line: if settle { startup_line.clone() } else { None },
-                },
-                output,
-            )
-            .unwrap();
-        if !settle {
-            backend
-                .write(
-                    &session,
-                    format!("{}\n", startup_line.unwrap_or_default()).as_bytes(),
+            let home = tempdir().unwrap();
+            let scripts = tempdir().unwrap();
+            let rc = "printf 'USER STARTUP BANNER\n'\nPS1='marvis-test> '\n";
+            if shell.ends_with("zsh") {
+                fs::write(
+                    home.path().join(".zshrc"),
+                    if banner { rc } else { "PS1='marvis-test> '\n" },
                 )
                 .unwrap();
+            } else {
+                fs::write(home.path().join(".bash_profile"), rc).unwrap();
+            }
+            let stream = native_session(
+                shell,
+                home.path(),
+                scripts.path(),
+                false,
+                &[b"false\n"],
+                b"\x1b]133;D;1\x07",
+                &[],
+            );
+            fs::write(directory.join(format!("{name}.bin")), &stream).unwrap();
         }
-        wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(20));
-        // The prompt is still being drawn when that marker arrives, and typing into a shell that has
-        // not finished drawing one is the same race the startup settle exists for — it would put an
-        // extra render of `false` into the capture and make it a worse picture of a real session than
-        // the app produces. So: wait for the quiet that means the line editor is armed.
-        wait_for_quiet(&receiver, Duration::from_millis(400));
-        backend.write(&session, b"false\n").unwrap();
-        wait_for_output(&receiver, b"\x1b]133;D;1\x07", Duration::from_secs(15));
-        backend.close(&session).unwrap();
-        // The sink is gone by now, so the Arc is the only thing still holding the bytes.
-        let stream = captured
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
-        stream
+    }
+
+    fn native_session(
+        shell: &str,
+        home: &Path,
+        scripts: &Path,
+        immediate: bool,
+        commands: &[&[u8]],
+        end: &[u8],
+        extra_env: &[(std::ffi::OsString, std::ffi::OsString)],
+    ) -> String {
+        let mut integration = script_in(scripts, shell);
+        integration.env.extend([
+            ("HOME".into(), home.as_os_str().into()),
+            ("__MARVIS_ZDOTDIR_SET".into(), "0".into()),
+        ]);
+        integration.env.extend_from_slice(extra_env);
+        let backend = TerminalBackend::default();
+        let (sender, receiver) = std::sync::mpsc::channel();
+        let collected = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let kept = Arc::clone(&collected);
+        backend
+            .spawn(
+                "native".into(),
+                SpawnOptions {
+                    program: integration.program,
+                    args: integration.args,
+                    cwd: home.into(),
+                    cols: 80,
+                    rows: 24,
+                    env: integration.env,
+                },
+                Box::new(move |bytes| {
+                    kept.lock().unwrap().extend_from_slice(bytes);
+                    sender.send(bytes.to_vec()).map_err(|e| e.to_string())
+                }),
+            )
+            .unwrap();
+        if !immediate {
+            wait_for_output(&receiver, b"\x1b]133;D;0\x07", Duration::from_secs(15));
+            // Fixture input models a person typing after readline is ready, not a redraw race.
+            while receiver.recv_timeout(Duration::from_millis(100)).is_ok() {}
+        }
+        for command in commands {
+            backend.write("native", command).unwrap();
+        }
+        wait_for_output(&receiver, end, Duration::from_secs(15));
+        if !immediate {
+            while receiver.recv_timeout(Duration::from_millis(100)).is_ok() {}
+        }
+        backend.close("native").unwrap();
+        let bytes = collected.lock().unwrap().clone();
+        String::from_utf8(bytes).unwrap()
+    }
+
+    #[test]
+    fn native_login_startup_preserves_order_banners_aliases_hooks_and_queued_input() {
+        let mut shells = vec!["/bin/zsh".to_string()];
+        shells.extend(bashes());
+        for shell in shells {
+            let home = tempdir().unwrap();
+            let scripts = home.path().join("it's my scripts");
+            fs::create_dir(&scripts).unwrap();
+            let log = home.path().join("order");
+            let history = home.path().join("history");
+            if shell.ends_with("zsh") {
+                let redirected = home.path().join("it's my config");
+                fs::create_dir(&redirected).unwrap();
+                fs::write(
+                    home.path().join(".zshenv"),
+                    format!(
+                        "echo env >> {}; export ZDOTDIR={}\n",
+                        shell_quote(&log),
+                        shell_quote(&redirected)
+                    ),
+                )
+                .unwrap();
+                fs::write(
+                    redirected.join(".zprofile"),
+                    format!("echo profile >> {}\n", shell_quote(&log)),
+                )
+                .unwrap();
+                fs::write(redirected.join(".zshrc"), format!("echo rc >> {}\nprintf 'USER STARTUP BANNER\n'\nalias native_alias='printf ALIAS_OK'\nHISTFILE={}; HISTSIZE=100; SAVEHIST=100\nuser_prompt() {{ printf USER_HOOK; return 0; }}\nprecmd_functions=(user_prompt)\nfalse\n", shell_quote(&log), shell_quote(&history))).unwrap();
+                fs::write(
+                    redirected.join(".zlogin"),
+                    format!("echo login >> {}; false\n", shell_quote(&log)),
+                )
+                .unwrap();
+                fs::write(redirected.join(".zlogout"), "printf '\\036LOGOUT\\037'\n").unwrap();
+            } else {
+                fs::write(
+                    home.path().join(".bash_profile"),
+                    format!(
+                        "echo profile >> {}; . \"$HOME/.bashrc\"\n",
+                        shell_quote(&log)
+                    ),
+                )
+                .unwrap();
+                fs::write(home.path().join(".bash_login"), "echo WRONG_PROFILE\n").unwrap();
+                fs::write(home.path().join(".profile"), "echo WRONG_PROFILE\n").unwrap();
+                fs::write(home.path().join(".bashrc"), format!("echo rc >> {}\nprintf 'USER STARTUP BANNER\n'\nalias native_alias='printf ALIAS_OK'\nHISTFILE={}\nPROMPT_COMMAND='printf USER_HOOK'\nfalse\n", shell_quote(&log), shell_quote(&history))).unwrap();
+                fs::write(
+                    home.path().join(".bash_logout"),
+                    "printf '\\036LOGOUT\\037'\n",
+                )
+                .unwrap();
+            }
+            let stream = native_session(
+                &shell,
+                home.path(),
+                &scripts,
+                true,
+                &[b"native_alias\n", b"false\n", b"exit\n"],
+                b"\x1eLOGOUT\x1f",
+                &[],
+            );
+            assert!(
+                stream.contains("USER STARTUP BANNER")
+                    && stream.contains("ALIAS_OK")
+                    && stream.contains("USER_HOOK"),
+                "{shell}: {stream}"
+            );
+            assert!(stream.contains("\x1b]133;D;1\x07"), "{shell}: {stream}");
+            assert!(
+                !stream.contains("WRONG_PROFILE")
+                    && !stream.contains("hook.")
+                    && !stream.contains("\x1b[2J"),
+                "{shell}: {stream}"
+            );
+            assert_eq!(
+                fs::read_to_string(log).unwrap(),
+                if shell.ends_with("zsh") {
+                    "env\nprofile\nrc\nlogin\n"
+                } else {
+                    "profile\nrc\n"
+                }
+            );
+            assert!(fs::read_to_string(history)
+                .unwrap()
+                .contains("native_alias"));
+            let first = stream.find("\x1b]133;D;").unwrap();
+            assert!(
+                stream[first..].starts_with("\x1b]133;D;0\x07"),
+                "startup failure leaked: {stream}"
+            );
+        }
+    }
+
+    #[test]
+    fn zsh_keeps_preexisting_and_mutated_zdotdir_and_installs_hooks_once() {
+        let home = tempdir().unwrap();
+        let original = home.path().join("original config");
+        let changed = home.path().join("it's my changed config");
+        fs::create_dir(&original).unwrap();
+        fs::create_dir(&changed).unwrap();
+        let scripts = home.path().join("scripts");
+        fs::write(home.path().join(".zshenv"), "printf WRONG_HOME_CONFIG\n").unwrap();
+        fs::write(
+            original.join(".zshenv"),
+            format!("export ZDOTDIR={}\n", shell_quote(&changed)),
+        )
+        .unwrap();
+        fs::write(changed.join(".zprofile"), "printf 'USER PROFILE\n'\n").unwrap();
+        fs::write(changed.join(".zshrc"), "PS1='user> '\n").unwrap();
+        fs::write(changed.join(".zlogin"), "printf 'USER LOGIN\n'\n").unwrap();
+        let hook = scripts.join("hook.zsh");
+        let command = format!("source {}; source {}; [[ $ZDOTDIR == {} && -o AUTO_MENU && -o login && ${{#precmd_functions}} == 1 && ${{#preexec_functions}} == 1 && -z ${{__MARVIS_ZDOTDIR_SET+x}} ]] && printf '\\036PRESERVED\\037'\n", shell_quote(&hook), shell_quote(&hook), shell_quote(&changed));
+        let stream = native_session(
+            "/bin/zsh",
+            home.path(),
+            &scripts,
+            false,
+            &[command.as_bytes()],
+            b"\x1ePRESERVED\x1f",
+            &[
+                ("__MARVIS_ZDOTDIR_SET".into(), "1".into()),
+                ("__MARVIS_ZDOTDIR".into(), original.into_os_string()),
+            ],
+        );
+        assert!(stream.contains("USER PROFILE") && stream.contains("USER LOGIN"));
+        assert!(!stream.contains("WRONG_HOME_CONFIG"));
+    }
+
+    #[test]
+    fn native_bash_keeps_login_state_normal_mode_env_and_user_debug_trap() {
+        for bash in bashes() {
+            let home = tempdir().unwrap();
+            let scripts = home.path().join("scripts");
+            fs::write(
+                home.path().join(".bash_profile"),
+                format!("shopt -q login_shell && ! shopt -qo posix && [[ $BASH == {} ]] && printf STARTUP_MODE_OK\ntrap 'printf USER_DEBUG' DEBUG\nPS1='user> '\n", shell_quote(Path::new(&bash))),
+            )
+            .unwrap();
+            let hook = scripts.join("hook.bash");
+            let command = format!(". {}; . {}; shopt -q login_shell && ! shopt -qo posix && [[ $ENV == 'user env' && -z ${{__MARVIS_ENV_SET+x}} ]] && printf '\\036PRESERVED\\037'\n", shell_quote(&hook), shell_quote(&hook));
+            let stream = native_session(
+                &bash,
+                home.path(),
+                &scripts,
+                false,
+                &[command.as_bytes()],
+                b"\x1ePRESERVED\x1f",
+                &[
+                    ("__MARVIS_ENV_SET".into(), "1".into()),
+                    ("__MARVIS_ENV".into(), "user env".into()),
+                ],
+            );
+            assert!(
+                stream.contains("USER_DEBUG") && stream.contains("STARTUP_MODE_OK"),
+                "{stream}"
+            );
+            assert_eq!(
+                stream.matches("\x1b]133;C\x07").count(),
+                usize::from(bash_expands_ps0(&bash)),
+                "{stream}"
+            );
+            let typed = stream.rfind(". ").expect("the command was not echoed");
+            assert!(
+                stream[typed..].contains("USER_DEBUG"),
+                "user DEBUG trap was lost: {stream}"
+            );
+            assert_eq!(stream.matches("\x1b]133;D;0\x07").count(), 2, "{stream}");
+        }
+    }
+
+    #[test]
+    fn zsh_reports_failures_without_skipping_the_users_prompt_hooks() {
+        let home = tempdir().unwrap();
+        fs::write(home.path().join(".zshrc"), "precmd() { printf '[SPECIAL:%s]' \"$?\"; }\nuser_prompt() { printf '[HOOK:%s]' \"$?\"; }\nprecmd_functions=(user_prompt)\n").unwrap();
+        let stream = native_session(
+            "/bin/zsh",
+            home.path(),
+            tempdir().unwrap().path(),
+            false,
+            &[b"false\n"],
+            b"\x1b]133;D;1\x07",
+            &[],
+        );
+        assert!(stream.contains("[SPECIAL:1]"), "{stream}");
+        assert!(stream.contains("[HOOK:1]"), "{stream}");
+    }
+
+    #[test]
+    fn slow_native_startup_is_not_abandoned_after_five_seconds() {
+        let home = tempdir().unwrap();
+        fs::write(
+            home.path().join(".zshrc"),
+            "printf 'SLOW STARTUP\n'; sleep 5.2; printf 'STARTUP FINISHED\n'\n",
+        )
+        .unwrap();
+        let stream = native_session(
+            "/bin/zsh",
+            home.path(),
+            tempdir().unwrap().path(),
+            true,
+            &[b"false\n"],
+            b"\x1b]133;D;1\x07",
+            &[],
+        );
+        assert!(stream.contains("SLOW STARTUP") && stream.contains("STARTUP FINISHED"));
+        assert!(!stream.contains("hook.") && !stream.contains("\x1b[2J"));
+    }
+
+    #[test]
+    fn failed_preparation_leaves_a_usable_uninstrumented_login_shell() {
+        let directory = tempdir().unwrap();
+        let blocked = directory.path().join("blocked");
+        fs::write(&blocked, "not a directory").unwrap();
+        assert!(install_shell_integration(Path::new("/bin/zsh"), Some(&blocked)).is_none());
+        assert!(!opening_a_terminal_writes(&blocked, Some(true)));
     }
 
     #[test]
