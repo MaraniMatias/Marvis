@@ -880,7 +880,7 @@ describe("FileDiff", () => {
     wrapper.unmount();
   });
 
-  it("leaves the library to guess for a file no grammar is detected for", async () => {
+  it("passes the detected grammar for SVG files to the library", async () => {
     mocks.getGitDiff.mockResolvedValue({
       path: "assets/logo.svg",
       patch: "diff --git a/assets/logo.svg b/assets/logo.svg\n@@ -1 +1 @@\n-old\n+new\n",
@@ -893,11 +893,10 @@ describe("FileDiff", () => {
     });
     const wrapper = mountDiff({ path: "assets/logo.svg" });
     await flushPromises();
-    // Undefined, not a guess: the library falls back to detecting the language, which is the same
-    // as never having been told one.
+    // SVG is XML, and the shared source-language table tells both editor and diff to use that grammar.
     for (const file of mocks.diffFiles) {
-      expect(file.oldLang).toBeUndefined();
-      expect(file.newLang).toBeUndefined();
+      expect(file.oldLang).toBe("xml");
+      expect(file.newLang).toBe("xml");
     }
     wrapper.unmount();
   });
