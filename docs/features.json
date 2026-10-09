@@ -1,0 +1,642 @@
+{
+  "$comment": "Current, source-backed catalog of implemented Marvis behavior. Screenshot capture scaffolding and unsupported reconstruction claims are intentionally excluded.",
+  "app": {
+    "name": "Marvis",
+    "identifier": "dev.marvis.workspace",
+    "version": "0.20.0",
+    "license": "MIT",
+    "repository": "https://github.com/MaraniMatias/Marvis",
+    "description": "A local workspace for repositories, worktrees, changes, review notes, agent sessions, and terminals."
+  },
+  "platforms": {
+    "shipped": [
+      {
+        "os": "macOS",
+        "architecture": "arm64 (Apple Silicon)",
+        "package": "DMG"
+      },
+      {
+        "os": "Linux",
+        "architecture": "amd64",
+        "package": "DEB and AppImage"
+      },
+      {
+        "os": "Linux",
+        "architecture": "arm64",
+        "package": "DEB and AppImage"
+      }
+    ],
+    "not_shipped": [
+      {
+        "os": "Windows",
+        "reason": "No Windows release target is configured."
+      }
+    ],
+    "evidence": ["src-tauri/tauri.conf.json", ".github/workflows/release.yml"]
+  },
+  "features": [
+    {
+      "id": "workspace-and-checkouts",
+      "status": "implemented",
+      "name": "Repositories and worktrees in one workspace",
+      "description": "Open Git repositories and plain folders in one workspace, browse their checkouts, select the active one, and reopen recent paths.",
+      "details": [
+        "Worktree creation accepts a task name and new branch but always starts from main and creates under the repository's .worktrees directory; arbitrary bases and locations are not offered.",
+        "Worktrees can be archived without changing disk or deleted with dirty-file, active-session, unmerged-commit, and opt-in branch-deletion safeguards.",
+        "Removing a repository or plain folder from the panel deletes its registration and cascaded local checkout data, including review notes/rounds and saved UI state, but not repository files; archived worktrees can be restored without losing their state."
+      ],
+      "evidence": [
+        "src/App.vue",
+        "src/components/Sidebar.vue",
+        "src/components/WorktreeDialog.vue",
+        "src/domain/workspace.ts",
+        "src-tauri/src/commands/workspace.rs",
+        "src-tauri/src/services/worktree.rs",
+        "src-tauri/src/persistence/mod.rs",
+        "docs/README.md"
+      ]
+    },
+    {
+      "id": "file-browser-and-editor",
+      "status": "implemented",
+      "name": "Browse and edit checkout files",
+      "description": "Navigate a checkout's file tree, open source files in the document pane, edit them, and save changes to disk.",
+      "details": [
+        "Recognized source files receive automatic language detection and syntax highlighting; a searchable language picker can override the language.",
+        "CodeMirror provides line numbers, undo history, folding, bracket matching/closing, rectangular and multiple selections, configured indentation, and changed-line markers.",
+        "Sticky folder rows can keep parent directories visible while scrolling."
+      ],
+      "evidence": [
+        "src/components/InspectorPane.vue",
+        "src/components/DocumentPane.vue",
+        "src/lib/code-editor.ts",
+        "src/lib/source-languages.ts",
+        "src-tauri/src/commands/files.rs"
+      ]
+    },
+    {
+      "id": "git-changes-and-diffs",
+      "status": "implemented",
+      "name": "Inspect working-tree changes",
+      "description": "See changed files and line counts, inspect individual diffs or the stacked change set, and follow repository changes as they update.",
+      "details": [
+        "Each checkout compares tracked committed changes from the merge base of its HEAD and the repository default branch, together with staged, unstaged, and untracked working-tree changes.",
+        "A primary checkout on its default branch usually shows ordinary working-tree status; a checkout on another branch can include committed changes since the common ancestor. Counts are not limited to uncommitted edits or the worktree creation point."
+      ],
+      "evidence": [
+        "src/components/InspectorPane.vue",
+        "src/components/FileDiff.vue",
+        "src/presentation/active-git-snapshot.ts",
+        "src/presentation/git-watchers.ts",
+        "src/presentation/workspace.ts",
+        "src-tauri/src/services/workspace.rs",
+        "src-tauri/src/services/git.rs"
+      ]
+    },
+    {
+      "id": "review-notes",
+      "status": "implemented",
+      "name": "Line-anchored review notes",
+      "description": "Attach notes to lines or ranges in a diff. Notes progress through draft, sent, and resolved states; outdated is a separate flag for changed anchors. Outdated anchors can be reviewed and accepted, and notes can be edited or deleted.",
+      "evidence": [
+        "src/components/FileDiff.vue",
+        "src/components/ReviewNoteList.vue",
+        "src/components/ReviewComposer.vue",
+        "src/presentation/review-notes.ts",
+        "src-tauri/src/commands/review.rs"
+      ]
+    },
+    {
+      "id": "review-delivery",
+      "status": "implemented",
+      "name": "Send review rounds to OpenCode or export Markdown",
+      "description": "Collect open review notes into a review round, choose an OpenCode session, and send or queue the round; Markdown export is available for other tools.",
+      "details": [
+        "The UI reports unfinished rounds and can include outdated notes in a send or export.",
+        "OpenCode delivery is handled through Marvis review-round dispatch and reconciliation, not by directly exposing the low-level agent prompt command."
+      ],
+      "evidence": [
+        "src/App.vue",
+        "src/components/FileDiff.vue",
+        "src/presentation/review-notes.ts",
+        "src/domain/review.ts",
+        "src-tauri/src/commands/review.rs",
+        "src-tauri/src/services/review_round.rs"
+      ]
+    },
+    {
+      "id": "opencode-sessions",
+      "status": "implemented",
+      "name": "OpenCode session sidebar",
+      "description": "Connect to the already-running local OpenCode service and show session activity alongside terminals; review delivery selects an existing session or creates one if none is available.",
+      "details": [
+        "Marvis discovers the already-running service from its local registration, accepts API major version 2, and does not launch OpenCode. It only accepts a loopback endpoint and uses the registration password for authentication.",
+        "Review delivery can select an existing session or create one when there is no target session. Terminal association is inferred from terminal title and foreground process, not a durable shell session identifier."
+      ],
+      "evidence": [
+        "src/App.vue",
+        "src/components/Sidebar.vue",
+        "src/components/FileDiff.vue",
+        "src/presentation/agent-sessions.ts",
+        "src-tauri/src/services/opencode.rs",
+        "src-tauri/src/services/agent.rs"
+      ]
+    },
+    {
+      "id": "integrated-terminals",
+      "status": "implemented",
+      "name": "Multiple terminals per checkout",
+      "description": "Open shell sessions in the selected checkout, interact with terminal output, and optionally follow worktree changes caused by shell navigation or OpenCode activity.",
+      "details": [
+        "Terminal preferences include font, ligatures, cursor, scrollbar, shell integration, and worktree-following mode.",
+        "Terminal processes are runtime state and are not restored as running sessions after application restart."
+      ],
+      "evidence": [
+        "src/components/TerminalSession.vue",
+        "src/lib/marvis-terminal.ts",
+        "src-tauri/src/services/terminal.rs",
+        "src-tauri/src/persistence/mod.rs"
+      ]
+    },
+    {
+      "id": "markdown-preview",
+      "status": "implemented",
+      "name": "Rendered Markdown documents",
+      "description": "Preview Markdown with tables, task lists, fenced code highlighting, front-matter metadata, and checkout-relative images.",
+      "details": [
+        "Raw HTML is disabled; links and local image paths are restricted, and rendered output is sanitized.",
+        "Remote images and paths that escape the checkout are not loaded as preview images.",
+        "Dedicated media previews support PNG, JPG/JPEG, GIF, WebP, AVIF, ICO, BMP, MP4, WebM, MOV, OGV, and SVG; PDF and audio preview are not supported."
+      ],
+      "evidence": [
+        "src/components/DocumentPane.vue",
+        "src/presentation/markdown-preview.ts",
+        "src/lib/markdown-preview.ts",
+        "src-tauri/src/commands/files.rs"
+      ]
+    },
+    {
+      "id": "resizable-layout",
+      "status": "implemented",
+      "name": "Resizable, focused workspace layout",
+      "description": "Resize the navigation, main document, and inspector panes, and use the available split or focused layout modes.",
+      "evidence": ["src/App.vue", "src/domain/ui-state.ts", "src/presentation/layout-persistence.ts"]
+    },
+    {
+      "id": "settings",
+      "status": "implemented",
+      "name": "Interface, terminal, and editor preferences",
+      "description": "Configure appearance, scale, typography, terminal behavior, and editor indentation. Preferences are stored in ~/.marvis/config.yml.",
+      "evidence": ["src/components/SettingsDialog.vue", "src/domain/settings.ts", "src-tauri/src/config.rs"]
+    },
+    {
+      "id": "local-persistence",
+      "status": "implemented",
+      "name": "Local workspace and review persistence",
+      "description": "Store workspace, checkout UI state, and review data locally; restore the workspace on launch. Settings are kept separately in the local configuration file.",
+      "details": [
+        "The SQLite schema has a strict version check and no migration ladder; a database with an unknown schema version is refused.",
+        "Terminal processes and terminal session layouts are cleared at startup."
+      ],
+      "evidence": [
+        "src-tauri/src/persistence/mod.rs",
+        "src/domain/ui-state.ts",
+        "src/presentation/layout-persistence.ts",
+        "src-tauri/src/config.rs"
+      ]
+    }
+  ],
+  "feature_audit": [
+    {
+      "id": "repository-and-worktree-navigation",
+      "status": "implemented",
+      "behavior": [
+        "Open directory registers a selected Git repository/worktree or plain folder. The titlebar workdir menu lists this window's checkouts, recent paths not already open, and Open directory.",
+        "Repository groups can be collapsed; their menu creates a worktree, restores every archived worktree for that repository, or removes the repository from the panel. Removing a primary/plain folder deletes its registration and cascaded Marvis state (including review notes/rounds and saved checkout UI state) but not disk files; Home cannot be removed. Reopening the folder creates a fresh registration and does not restore deleted notes.",
+        "Worktree creation accepts a task name and new branch, always branches from local main or origin/main, and is fixed to the repository root's .worktrees directory. Main must exist, an already checked-out branch is refused, and the location is added to Git's exclude file; no arbitrary base/location picker is offered.",
+        "Archive hides a worktree but retains its files, branch, commits, registration, and attached Marvis review/UI state; it is unavailable with active shell or agent sessions. Restore is one confirmed action for the repository's entire archived set.",
+        "Delete removes the worktree directory or prunes metadata for a missing worktree, and cascades away its Marvis review/UI state including notes and rounds. Dirty files require explicit confirmation; active shell sessions are listed and their exact IDs confirmed before stopping; active OpenCode sessions must first be stopped. The UI reports commits not merged into the default branch, keeps the branch by default, and makes deleting it an explicit choice that can discard unmerged commits. The primary checkout cannot be deleted.",
+        "Missing checkouts are shown as missing and cannot be selected; closing a missing row deletes its registration and cascaded review data but not repository/worktree files. The UI does not automatically find or reattach a moved directory."
+      ],
+      "sources": [
+        "src/App.vue",
+        "src/presentation/recent-paths.ts",
+        "src/components/Sidebar.vue",
+        "src/components/WorktreeDialog.vue",
+        "src-tauri/src/services/workspace.rs",
+        "src-tauri/src/services/worktree.rs"
+      ],
+      "tests": [
+        {
+          "path": "src/App.test.ts",
+          "verifies": "Recent-project menu behavior and confirmed archive restoration."
+        },
+        {
+          "path": "src/components/Sidebar.test.ts",
+          "verifies": "Repository grouping, checkout selection, terminal rows, and worktree actions."
+        },
+        {
+          "path": "src/components/WorktreeDialog.test.ts",
+          "verifies": "Main-based creation, fixed location, archive/delete choice, and removal confirmations."
+        },
+        {
+          "path": "src-tauri/src/services/worktree.rs",
+          "verifies": "Inline Rust tests for main-only creation, fixed location, dirty removal confirmation, unmerged commits, opt-in branch deletion, primary protection, and exact terminal confirmation."
+        },
+        {
+          "path": "src-tauri/src/services/workspace.rs",
+          "verifies": "Inline Rust tests for archive/restore and close registration behavior."
+        },
+        {
+          "path": "src/components/ConfirmDialog.test.ts",
+          "verifies": "Confirmation, Escape cancellation, and modal focus."
+        },
+        {
+          "path": "src/domain/workspace.test.ts",
+          "verifies": "Checkout identity and terminal directory-to-worktree resolution."
+        }
+      ]
+    },
+    {
+      "id": "file-tree-and-changes-list",
+      "status": "implemented",
+      "behavior": [
+        "Directories load on expansion; expanded paths and scroll positions are retained per checkout; large row lists are virtualized.",
+        "Sticky folder ancestors are configurable; dotfiles and Git-ignored entries are visually subdued.",
+        "The tree exposes expand/select rather than in-tree search or filesystem context-menu actions; the document toolbar provides copy-path.",
+        "Loading, empty, missing, permission, and truncated directory states are rendered in the tree.",
+        "Changes are grouped by parent directory and show status plus available line counts; rename source paths and untracked files remain represented.",
+        "Selecting a changed path opens its diff; All changes opens the combined change set; Git status events refresh data."
+      ],
+      "sources": [
+        "src/components/InspectorPane.vue",
+        "src/presentation/active-git-snapshot.ts",
+        "src/presentation/git-watchers.ts",
+        "src-tauri/src/services/files.rs",
+        "src-tauri/src/services/git.rs"
+      ],
+      "tests": [
+        {
+          "path": "src/components/InspectorPane.test.ts",
+          "verifies": "Tree states, ignored/hidden styling, virtualization, sticky ancestors, change grouping/counts, and refresh."
+        },
+        { "path": "src/domain/ui-state.test.ts", "verifies": "Per-checkout saved paths and layout normalization." }
+      ]
+    },
+    {
+      "id": "document-editor-and-preview",
+      "status": "implemented",
+      "behavior": [
+        "CodeMirror edits source files with line numbers, undo history, syntax highlighting, indentation preferences, changed-line markers, a fold gutter/keymap, bracket matching/closing, rectangular selection, and multiple cursors.",
+        "The Code view has a searchable language override; Markdown defaults to View and can switch to Code.",
+        "Prettier uses checkout configuration when a parser is available. Formatting creates a draft; Save writes it and Cancel discards it. Saves guard against stale on-disk content. The document toolbar copies the file path.",
+        "Markdown renders GFM tables, tasks, fenced code, and expandable YAML front matter. Relative links stay inside the checkout; web links open externally; remote images are not fetched.",
+        "Rendered Markdown is sanitized and raw HTML is disabled. Media previews support PNG, JPG/JPEG, GIF, WebP, AVIF, ICO, BMP, MP4, WebM, MOV, OGV, and SVG; SVG is parsed and displayed as an image. PDF/audio previews are not supported."
+      ],
+      "sources": [
+        "src/components/DocumentPane.vue",
+        "src/lib/code-editor.ts",
+        "src/lib/source-languages.ts",
+        "src/lib/prettier-format.ts",
+        "src/domain/media.ts",
+        "src/lib/markdown-preview.ts",
+        "src/presentation/markdown-preview.ts",
+        "src/lib/front-matter.ts",
+        "src-tauri/src/services/files.rs"
+      ],
+      "tests": [
+        {
+          "path": "src/components/DocumentPane.test.ts",
+          "verifies": "View/Code, media lifecycle, safe links, drafts, formatting, and SVG preview."
+        },
+        { "path": "src/lib/code-editor.test.ts", "verifies": "Gutter/undo, indentation, and changed-line markers." },
+        { "path": "src/lib/source-languages.test.ts", "verifies": "Language detection mappings." },
+        {
+          "path": "src/lib/markdown-preview.test.ts",
+          "verifies": "Markdown rendering, contained images, sanitization, and YAML metadata rendering."
+        },
+        { "path": "src/lib/front-matter.test.ts", "verifies": "Front-matter fence recognition." },
+        { "path": "src/lib/changed-lines.test.ts", "verifies": "Changed-line mapping." }
+      ],
+      "not_claimed": [
+        "Document-pane breadcrumb navigation (the titlebar has path crumbs)",
+        "General find/replace, lint, or completion panel",
+        "PDF preview",
+        "Audio preview"
+      ]
+    },
+    {
+      "id": "git-diff-presentation",
+      "status": "implemented",
+      "behavior": [
+        "Every Git checkout compares tracked committed changes from merge-base(default ref, HEAD) to HEAD, alongside staged/unstaged and untracked working-tree changes; line counts use the same base.",
+        "The default ref is the persisted repo default branch, else origin/HEAD, else the primary checkout's current branch. When no default branch is saved, the UI prompts for one and validates it against local/origin refs. A primary on its default branch usually shows ordinary git status; other branches can include committed changes since the common ancestor, not only uncommitted changes or changes since worktree creation.",
+        "Diffs render in unified mode with foldable hunks; no side-by-side mode control is present.",
+        "All changes is a stack of per-file diffs loaded when expanded. Large diffs are virtualized and fetched in bounded pages.",
+        "Binary, symlink, and over-limit diffs have explicit non-text states. Limits include 100,000 lines, 10,000 hunks, 32 MiB, 4 KiB hunk headers, and 64 KiB per line.",
+        "Late results for a checkout, path, or diff revision no longer selected are discarded; unavailable diff lines cannot be used to fabricate a review range."
+      ],
+      "sources": [
+        "src/components/FileDiff.vue",
+        "src/components/use-large-diff.ts",
+        "src/presentation/diff-loader.ts",
+        "src/presentation/workspace.ts",
+        "src-tauri/src/services/workspace.rs",
+        "src-tauri/src/services/git.rs"
+      ],
+      "tests": [
+        {
+          "path": "src/components/FileDiff.test.ts",
+          "verifies": "Unified rendering, hunk folding, refresh identity, and review ranges."
+        },
+        { "path": "src/components/use-large-diff.test.ts", "verifies": "Large-diff paging and viewport windowing." },
+        { "path": "src/presentation/diff-loader.test.ts", "verifies": "Diff refresh and stale read handling." },
+        {
+          "path": "src-tauri/src/services/git.rs",
+          "verifies": "Inline Rust tests for merge-base-based file/count snapshots and default-ref resolution."
+        }
+      ],
+      "not_claimed": ["Side-by-side diff mode"]
+    },
+    {
+      "id": "review-note-lifecycle",
+      "status": "implemented",
+      "behavior": [
+        "Notes capture checkout, file, old/new side, line or range, text, and anchor code/hash.",
+        "Statuses are draft, sent, and resolved; outdated is a separate sticky flag. Unloaded diff text yields unknown rather than a guessed anchor verdict.",
+        "Notes can be edited/deleted; outdated notes are withheld unless explicitly included; resolution requires a sent, current, verifiable anchor.",
+        "Markdown export uses captured note data and preserves selected ranges."
+      ],
+      "sources": [
+        "src/domain/review.ts",
+        "src/components/FileDiff.vue",
+        "src/components/ReviewNoteList.vue",
+        "src/components/ReviewComposer.vue",
+        "src/presentation/review-notes.ts",
+        "src-tauri/src/persistence/mod.rs"
+      ],
+      "tests": [
+        {
+          "path": "src/domain/review.test.ts",
+          "verifies": "Markdown export, note selection, range code, and anchor outcomes."
+        },
+        {
+          "path": "src/presentation/review-notes.test.ts",
+          "verifies": "Persistence, edits, drift, queue/flush/reconciliation, and acknowledgement."
+        },
+        {
+          "path": "src/components/FileDiff.test.ts",
+          "verifies": "Note creation, send gating, outdated inclusion, and resolution controls."
+        }
+      ]
+    },
+    {
+      "id": "review-round-delivery",
+      "status": "implemented",
+      "behavior": [
+        "A selected batch is recorded as a round for one OpenCode session; the exact prompt and deduplication marker are stored before dispatch.",
+        "Busy-agent rounds can be queued. Reconciliation checks transcript markers, confirms landed sends, and safely retries absent sends instead of blindly duplicating uncertain sends.",
+        "Queued rounds flush when the agent becomes available. Acknowledgement means the agent turn ended, not that notes were resolved."
+      ],
+      "sources": [
+        "src/presentation/review-notes.ts",
+        "src-tauri/src/commands/review.rs",
+        "src-tauri/src/services/review_round.rs"
+      ],
+      "tests": [
+        {
+          "path": "src/presentation/review-notes.test.ts",
+          "verifies": "Round dispatch, queue/flush, reconciliation, and finished-turn acknowledgement."
+        },
+        {
+          "path": "src-tauri/src/services/review_round.rs",
+          "verifies": "Inline Rust tests for record-before-send, marker reconciliation/retry, ownership, and size/target validation."
+        }
+      ]
+    },
+    {
+      "id": "opencode-bridge",
+      "status": "implemented",
+      "behavior": [
+        "Marvis discovers the already-running service from its local registration, accepts API major version 2, refuses non-loopback endpoints, and authenticates with the registration password; it does not launch the service.",
+        "Review delivery selects an existing session or creates one when there is no target. Terminal/session association is inferred from terminal title and foreground process; ambiguous matches are not treated as confirmed."
+      ],
+      "sources": [
+        "src/presentation/agent-sessions.ts",
+        "src-tauri/src/services/opencode.rs",
+        "src-tauri/src/services/agent.rs",
+        "src/components/Sidebar.vue"
+      ],
+      "tests": [
+        {
+          "path": "src/components/Sidebar.test.ts",
+          "verifies": "Terminal title matching, truncated/duplicate names, and refusal to borrow a different terminal's session."
+        },
+        { "path": "src/presentation/agent-sessions.test.ts", "verifies": "Agent session list behavior." }
+      ]
+    },
+    {
+      "id": "terminal-runtime",
+      "status": "implemented",
+      "behavior": [
+        "Multiple shell processes can exist per checkout; sidebar rows select, rename, and close them, while the main pane mounts the selected terminal.",
+        "A live PTY can be reordered or moved to another same-repository worktree without restart. Manual moves send cd only for an idle shell; automatic follow can react to cd and/or OpenCode activity.",
+        "Closing a foreground process requires confirmation; idle shells close without a prompt. zsh/bash shell hooks report command exit status for newly created terminals while preserving user startup behavior.",
+        "Terminal links open validated checkout files or external web URLs. Scrollbar modes are hidden/auto/always, and WebGL rendering can fall back."
+      ],
+      "not_implemented_in_current_ui": [
+        "Terminal tab bar",
+        "Split-terminal panes",
+        "Restoring historical PTYs after restart"
+      ],
+      "why_not_claimed": "A terminal layout type and backend load/save commands exist, but SessionPane normalizes layouts to one live session and the test confirms legacy split layouts do not mount historical PTYs.",
+      "sources": [
+        "src/components/Sidebar.vue",
+        "src/components/SessionPane.vue",
+        "src/components/TerminalSession.vue",
+        "src/domain/terminal-layout.ts",
+        "src/lib/terminal-shell-integration.ts",
+        "src/lib/terminal-file-links.ts",
+        "src/lib/terminal-paths.ts",
+        "src-tauri/src/services/terminal.rs"
+      ],
+      "tests": [
+        {
+          "path": "src/components/SessionPane.test.ts",
+          "verifies": "Multiple sessions, live moves/reordering, and legacy split collapse."
+        },
+        {
+          "path": "src/components/TerminalSession.test.ts",
+          "verifies": "PTY I/O, close confirmation, resize/polling, output flow, and renderer recovery."
+        },
+        { "path": "src/domain/terminal-layout.test.ts", "verifies": "Saved layout normalization." },
+        {
+          "path": "src/lib/terminal-file-links.test.ts",
+          "verifies": "Checkout path validation and modifier-click opening."
+        },
+        { "path": "src/lib/terminal-paths.test.ts", "verifies": "Terminal output path and URL parsing." },
+        { "path": "src/lib/terminal-keys.test.ts", "verifies": "Terminal keyboard protocol parsing." },
+        { "path": "src/lib/terminal-shell-integration.test.ts", "verifies": "Shell OSC payload parsing." },
+        {
+          "path": "src-tauri/src/services/terminal.rs",
+          "verifies": "Inline Rust tests for zsh/bash hooks and startup preservation."
+        }
+      ]
+    },
+    {
+      "id": "app-shell-settings-accessibility",
+      "status": "implemented",
+      "behavior": [
+        "The titlebar crumb menu filters context labels/hints while retaining pinned actions; workspace panels resize and offer split/focused layouts.",
+        "Workspace layout and per-checkout document/inspector UI state are persisted locally. Preferences are a separate YAML file under the user's home and apply only after confirmation.",
+        "Settings normalize invalid enum/range values. Command/Control shortcuts toggle side panels, create a terminal, and change/reset interface scale.",
+        "Dialogs provide modal focus behavior; the Tauri menu provides About and Edit. Generic WebView right-click menus are suppressed to prevent accidental reloads that discard drafts. The app handles native close requests by flushing UI/settings writes and asking before stopping active commands.",
+        "WebView policy blocks remote scripts and object embedding; file commands validate checkout-relative paths; Markdown rendering is sanitized."
+      ],
+      "sources": [
+        "src/App.vue",
+        "src/components/SettingsDialog.vue",
+        "src/domain/settings.ts",
+        "src/domain/shortcuts.ts",
+        "src/domain/ui-state.ts",
+        "src/presentation/layout-persistence.ts",
+        "src/lib/dialog-focus.ts",
+        "src/lib/context-menu.ts",
+        "src-tauri/src/menus.rs",
+        "src-tauri/src/main.rs",
+        "src-tauri/tauri.conf.json",
+        "src-tauri/src/services/files.rs"
+      ],
+      "tests": [
+        {
+          "path": "src/App.test.ts",
+          "verifies": "Close handling, layout, zoom, shortcuts, settings persistence/errors, theme, and focus."
+        },
+        { "path": "src/domain/settings.test.ts", "verifies": "Preference defaults and normalization." },
+        { "path": "src/domain/shortcuts.test.ts", "verifies": "Platform modifier selection and chord labels." },
+        { "path": "src/domain/zoom.test.ts", "verifies": "Scale shortcut steps." },
+        { "path": "src/domain/titlebar-menu.test.ts", "verifies": "Menu query filtering." },
+        { "path": "src/lib/dialog-focus.test.ts", "verifies": "Tab trapping." },
+        {
+          "path": "src/lib/context-menu.test.ts",
+          "verifies": "Right-click menu suppression on the app shell and editable/read surfaces."
+        }
+      ]
+    }
+  ],
+  "settings_defaults": {
+    "interface": {
+      "font_size_px": 14,
+      "zoom_percent": 100,
+      "theme": "system",
+      "content_background": "#16181c",
+      "sticky_folder_rows": true,
+      "font_size_range_px": [11, 20],
+      "zoom_range_percent": [80, 150],
+      "zoom_step_percent": 10
+    },
+    "terminal": {
+      "font_size_px": 16,
+      "ligatures": true,
+      "cursor_blink": true,
+      "cursor_style": "block",
+      "scrollbar": "hidden",
+      "shell_integration": true,
+      "follow_worktree": "agent",
+      "font_size_range_px": [9, 32],
+      "follow_worktree_options": ["off", "cd", "agent", "both"]
+    },
+    "editor": {
+      "font_size_px": 13,
+      "ligatures": true,
+      "cursor_blink": true,
+      "indent_with_spaces": true,
+      "indent_size_columns": 2,
+      "font_size_range_px": [9, 32],
+      "indent_size_range_columns": [1, 8]
+    },
+    "evidence": ["src/domain/settings.ts", "src/domain/zoom.ts"]
+  },
+  "runtime_notes": [
+    {
+      "topic": "OpenCode prerequisite and compatibility",
+      "behavior": "OpenCode must already be running. Marvis reads its local service registration, accepts API major 2 at a loopback endpoint, and authenticates using the registered password; it does not start the service.",
+      "evidence": ["src-tauri/src/services/opencode.rs", "src-tauri/src/services/agent.rs"]
+    },
+    {
+      "topic": "Startup",
+      "behavior": "Workspace and persisted UI/review state are restored, but running terminal processes are not. Closing/removing a checkout registration or deleting a worktree cascades away its persisted Marvis data, including review notes and rounds; archiving preserves it.",
+      "evidence": ["src-tauri/src/persistence/mod.rs", "src/presentation/layout-persistence.ts"]
+    },
+    {
+      "topic": "Unclaimed recovery behavior",
+      "behavior": "Do not describe moved/missing-checkout relocation as a shipped UI feature: locate_missing_checkout is backend-only.",
+      "evidence": ["src-tauri/src/main.rs"]
+    }
+  ],
+  "backend_only": [
+    {
+      "name": "git_viewed_files / git_mark_viewed",
+      "note": "Registered backend commands; not exposed as current UI actions.",
+      "evidence": ["src-tauri/src/main.rs", "src-tauri/src/commands/git.rs"]
+    },
+    {
+      "name": "locate_missing_checkout",
+      "note": "Backend command only; do not claim the UI automatically relocates or reattaches a moved checkout.",
+      "evidence": ["src-tauri/src/main.rs", "src-tauri/src/commands/workspace.rs"]
+    },
+    {
+      "name": "agent_prompt / agent_stop",
+      "note": "Direct backend commands, not current UI controls; review delivery uses the review-round flow.",
+      "evidence": ["src-tauri/src/main.rs", "src-tauri/src/commands/agent.rs", "src-tauri/src/services/review_round.rs"]
+    }
+  ],
+  "planned_not_implemented": [
+    {
+      "name": "Codex review destination",
+      "status": "specified, not implemented",
+      "evidence": ["docs/todo/phase-2-codex.md"]
+    },
+    {
+      "name": "Claude Code review destination",
+      "status": "specified, not implemented",
+      "evidence": ["docs/todo/phase-3-claude-code.md"]
+    },
+    {
+      "name": "pi review destination",
+      "status": "specified, not implemented",
+      "evidence": ["docs/todo/phase-4-pi.md"]
+    }
+  ],
+  "release_tooling": {
+    "app_feature": false,
+    "release_version_policy": "The release tooling accepts v0 semantic versions while the project is on v0.*.*.",
+    "release_script": "scripts/release.mjs checks, bumps, or restores the version in package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml, and the Marvis entry in src-tauri/Cargo.lock. A bump writes files only; it does not commit, tag, or push.",
+    "release_driver": "scripts/release.sh requires a clean main checkout, runs the local release validation gate, commits only the four version manifests, pushes the validated commit, and delegates package creation/publication to the GitHub release workflow. Its dry-run is validation-only (no tag/release), but may push the prepared version commit.",
+    "ci": "ci.yml runs on pull requests and main pushes, performs checks on macOS and a Linux packaging job; release.yml builds and verifies the configured release artifacts.",
+    "package_checks": [
+      "release version consistency",
+      "formatting, lint, Rust lint, and type checking",
+      "frontend, release-script, audit, Rust, artifact, and build tests",
+      "security audits and platform packaging"
+    ],
+    "evidence": [
+      "package.json",
+      "scripts/release.mjs",
+      "scripts/release.sh",
+      ".github/workflows/ci.yml",
+      ".github/workflows/release.yml",
+      "src-tauri/tauri.conf.json"
+    ]
+  },
+  "audit_scope": [
+    "User-facing UI and presentation flows",
+    "Relevant Rust IPC commands, services, and persistence",
+    "Tests, project documentation, configuration, and release targets"
+  ],
+  "tests_executed_for_catalog": false,
+  "catalog_notes": [
+    "This catalog describes the current v0.20.0 implementation, not plans or commands that have no UI entry point.",
+    "The audit scope names the source families reviewed; it is not an exhaustive file-count claim. Tests were inspected but not executed for this catalog."
+  ]
+}
