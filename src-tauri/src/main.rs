@@ -99,7 +99,7 @@ const RECORDING_THE_HOME_CHECKOUT: &str = "recording the Home checkout";
 /// the schema versions the two builds speak, and repeating the database path or the user's
 /// directories here would only put the same local layout in the log a second time.
 fn startup_failure(step: &str, cause: &str) -> std::io::Error {
-    let message = format!("Marvis did not start: {step} failed: {cause}");
+    let message = format!("Muster did not start: {step} failed: {cause}");
     log::error!("{message}");
     std::io::Error::other(message)
 }
@@ -185,7 +185,7 @@ fn main() {
             // Both steps are logged on the way out rather than left to the panic the propagation
             // ends in: a database this build refuses to open, by name, is a question a person can
             // act on, and it has to reach the file support reads to be answered.
-            let database = persistence::Database::open(data_dir.join("marvis.sqlite3"))
+            let database = persistence::Database::open(data_dir.join("muster.sqlite3"))
                 .map_err(|cause| startup_failure(OPENING_THE_WORKSPACE_DATABASE, &cause))?;
             database
                 .set_home_checkout_id(crate::domain::workspace::checkout_id_for_path(
@@ -270,7 +270,7 @@ fn main() {
             agents.set_event_sink(std::sync::Arc::new(
                 move |event: services::agent::AgentEvent| {
                     // A dead window must not take the reader thread down with it.
-                    let _ = emitter.emit("marvis://agent-event", event);
+                    let _ = emitter.emit("muster://agent-event", event);
                 },
             ));
             app.manage(agents);
@@ -355,7 +355,7 @@ fn main() {
             commands::ui_state::review_target_save
         ])
         .build(tauri::generate_context!())
-        .expect("failed to build Marvis");
+        .expect("failed to build Muster");
     app.run(|handle, event| {
         // Nothing below runs on its own: the loop ends with `std::process::exit`, so a `Drop` in
         // the managed state is never reached.
@@ -611,7 +611,7 @@ mod startup_tests {
 
         assert_eq!(
             about.credits.as_deref(),
-            Some("https://github.com/MaraniMatias/Marvis"),
+            Some("https://github.com/MaraniMatias/Muster"),
             "the About panel has no repository in it"
         );
         // The two lines above the credits. The mock runtime calls itself "test" and carries the
@@ -977,7 +977,7 @@ mod startup_tests {
     fn the_window_opens_on_the_page_background_and_not_on_a_white_frame() {
         // A webview with no background color of its own paints white until the page covers it, and
         // wry only stops it doing so when one is set. So the window opens on the dark palette's
-        // page background and the app opens on `--marvis-bg-0`, and the difference is a frame the
+        // page background and the app opens on `--muster-bg-0`, and the difference is a frame the
         // user sees on every launch. Setting it is not enough on its own: the value lives in a
         // config file and the color it has to match lives in a stylesheet, and nothing makes the
         // two follow each other when the palette changes. This is where that is said out loud.
@@ -991,9 +991,9 @@ mod startup_tests {
             .as_str()
             .expect("the window has no `backgroundColor`, so it opens on a white frame")
             .to_lowercase();
-        let stylesheet = include_str!("../../src/marvis.css");
+        let stylesheet = include_str!("../../src/muster.css");
         assert!(
-            stylesheet.contains(&format!("--marvis-bg-0: {page_background};")),
+            stylesheet.contains(&format!("--muster-bg-0: {page_background};")),
             "the window opens on {page_background} but the page is painted on something else, so \
              the frame before the first paint is a different color than the app"
         );

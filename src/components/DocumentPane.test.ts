@@ -505,7 +505,7 @@ describe("DocumentPane", () => {
       totalLines: 3,
       hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
     });
-    mocks.getReviewRootPath.mockResolvedValue("/Users/dev/.marvis/tmp/code-reviews");
+    mocks.getReviewRootPath.mockResolvedValue("/Users/dev/.muster/tmp/code-reviews");
     vi.stubGlobal("Worker", InlinePrettierWorker);
     for (const toast of [...toasts.value]) dismiss(toast.id);
   });
@@ -523,7 +523,7 @@ describe("DocumentPane", () => {
     });
     mocks.readCheckoutFile.mockImplementation(async (_checkoutId: string, path: string) => ({
       path,
-      content: path.endsWith(".md") ? "# Marvis\n\n[unsafe](javascript:alert(1))" : "const answer: number = 42;",
+      content: path.endsWith(".md") ? "# Muster\n\n[unsafe](javascript:alert(1))" : "const answer: number = 42;",
     }));
     const harness = defineComponent({
       components: { InspectorPane, MainPane },
@@ -557,7 +557,7 @@ describe("DocumentPane", () => {
     await flushPromises();
     await wrapper.get('[aria-label="Checkout files"] button').trigger("click");
     await vi.waitFor(() => expect(wrapper.find('[aria-label="File contents"] article').exists()).toBe(true));
-    expect(wrapper.get('[aria-label="File contents"] article').text()).toContain("Marvis");
+    expect(wrapper.get('[aria-label="File contents"] article').text()).toContain("Muster");
     expect(wrapper.get('[aria-label="File contents"]').element.querySelector('a[href^="javascript:"]')).toBeNull();
     expect(mocks.readCheckoutFile).toHaveBeenCalledWith(currentCheckout.id, "docs/readme.md", "checkout");
 
@@ -568,7 +568,7 @@ describe("DocumentPane", () => {
       .trigger("click");
     // Code is the editor, so the Code view only has its text once CodeMirror is mounted.
     await vi.waitFor(() => expect(wrapper.find(".cm-line").exists()).toBe(true));
-    expect(wrapper.get(".cm-content").text()).toContain("# Marvis");
+    expect(wrapper.get(".cm-content").text()).toContain("# Muster");
 
     await wrapper.get('[aria-label="Inspector sections"]').findAll("button")[1].trigger("click");
     expect(wrapper.text()).toContain("docs/readme.md");
@@ -663,7 +663,7 @@ describe("DocumentPane", () => {
     await wrapper.get('[aria-label="Copy file path"]').trigger("click");
 
     expect(mocks.getReviewRootPath).toHaveBeenCalledOnce();
-    expect(writeText).toHaveBeenCalledWith("/Users/dev/.marvis/tmp/code-reviews/notes.md");
+    expect(writeText).toHaveBeenCalledWith("/Users/dev/.muster/tmp/code-reviews/notes.md");
     wrapper.unmount();
   });
 
@@ -971,10 +971,10 @@ describe("DocumentPane", () => {
     expect(trigger.classes()).not.toContain("document-mode-button");
     expect(language.classes()).not.toContain("document-mode-control");
     // And the list behind it is the menu the titlebar opens, the same one the worktree menu is.
-    expect(wrapper.find(".marvis-menu").exists()).toBe(true);
+    expect(wrapper.find(".muster-menu").exists()).toBe(true);
     // The rows scroll, not the field that filters them.
-    expect(wrapper.get('[role="listbox"]').classes()).toContain("marvis-menu-scroll");
-    expect(wrapper.find(".marvis-menu-search").exists()).toBe(true);
+    expect(wrapper.get('[role="listbox"]').classes()).toContain("muster-menu-scroll");
+    expect(wrapper.find(".muster-menu-search").exists()).toBe(true);
     expect(wrapper.get('[role="option"]').classes()).toContain("menu-item");
     expect(mode.findAll("button").map((button) => button.text())).toEqual(["View", "Code"]);
 
@@ -1073,7 +1073,7 @@ describe("DocumentPane", () => {
   });
 
   it("puts the close button on the toolbar, past the controls that read the file", async () => {
-    mocks.readCheckoutFile.mockResolvedValue({ path: "docs/readme.md", content: "# Marvis" });
+    mocks.readCheckoutFile.mockResolvedValue({ path: "docs/readme.md", content: "# Muster" });
     const wrapper = mount(DocumentPane, { props: documentPaneProps("docs/readme.md", "view") });
     await vi.waitFor(() => expect(wrapper.find(".markdown-preview").exists()).toBe(true));
 
@@ -1117,9 +1117,9 @@ describe("DocumentPane", () => {
     await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
 
     await vi.waitFor(() =>
-      expect(wrapper.findAll(".marvis-changed-line").map((line) => line.text())).toEqual(["const b = 2;"]),
+      expect(wrapper.findAll(".muster-changed-line").map((line) => line.text())).toEqual(["const b = 2;"]),
     );
-    expect(wrapper.find(".marvis-changed-line-marker").exists()).toBe(true);
+    expect(wrapper.find(".muster-changed-line-marker").exists()).toBe(true);
     wrapper.unmount();
   });
 
@@ -1130,7 +1130,7 @@ describe("DocumentPane", () => {
     await vi.waitFor(() => expect(wrapper.find(".cm-content").exists()).toBe(true));
 
     expect(mocks.getGitDiff).not.toHaveBeenCalled();
-    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    expect(wrapper.find(".muster-changed-line").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1149,7 +1149,7 @@ describe("DocumentPane", () => {
     // Every line of a new file is an added line, so the marks would cover all of it and say nothing
     // the path in the toolbar does not.
     expect(mocks.getGitDiff).not.toHaveBeenCalled();
-    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    expect(wrapper.find(".muster-changed-line").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1185,7 +1185,7 @@ describe("DocumentPane", () => {
     await vi.waitFor(() => expect(wrapper.findAll(".shiki .line").length).toBeGreaterThan(0));
 
     await vi.waitFor(() =>
-      expect(wrapper.findAll(".marvis-changed-line").map((row) => row.text().replace(/^\d+/, ""))).toEqual([
+      expect(wrapper.findAll(".muster-changed-line").map((row) => row.text().replace(/^\d+/, ""))).toEqual([
         "const c = 3;",
       ]),
     );
@@ -1208,7 +1208,7 @@ describe("DocumentPane", () => {
     // The marks are an addition to a file that reads perfectly well without them, so a failure to
     // get them is not a failure to open the file.
     expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
-    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    expect(wrapper.find(".muster-changed-line").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1228,7 +1228,7 @@ describe("DocumentPane", () => {
 
     // The one refusal that is an answer rather than a fault, so it is not worth a toast either.
     expect(toasts.value).toHaveLength(0);
-    expect(wrapper.find(".marvis-changed-line").exists()).toBe(false);
+    expect(wrapper.find(".muster-changed-line").exists()).toBe(false);
     wrapper.unmount();
   });
 
@@ -1285,14 +1285,14 @@ describe("DocumentPane", () => {
     // once the host is there. Reading it off the host rather than the editor is the whole point:
     // CodeMirror builds its theme once and nothing reconfigures it for a preference.
     const host = wrapper.get<HTMLElement>(".code-editor-host").element;
-    expect(host.style.getPropertyValue("--marvis-editor-font-size")).toBe("17px");
-    expect(host.style.getPropertyValue("--marvis-editor-ligatures")).toBe("none");
+    expect(host.style.getPropertyValue("--muster-editor-font-size")).toBe("17px");
+    expect(host.style.getPropertyValue("--muster-editor-ligatures")).toBe("none");
 
     await wrapper.setProps({
       editorSettings: { fontSize: 20, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
     });
-    expect(host.style.getPropertyValue("--marvis-editor-font-size")).toBe("20px");
-    expect(host.style.getPropertyValue("--marvis-editor-ligatures")).toBe("normal");
+    expect(host.style.getPropertyValue("--muster-editor-font-size")).toBe("20px");
+    expect(host.style.getPropertyValue("--muster-editor-ligatures")).toBe("normal");
     wrapper.unmount();
   });
 
@@ -1315,13 +1315,13 @@ describe("DocumentPane", () => {
     // setting reconfigured into the editor: a preference that rebuilt the editor would take the
     // document, the undo history and the caret with it to stop a light blinking.
     const host = wrapper.get<HTMLElement>(".code-editor-host").element;
-    expect(host.style.getPropertyValue("--marvis-editor-cursor-blink")).toBe("paused");
+    expect(host.style.getPropertyValue("--muster-editor-cursor-blink")).toBe("paused");
     expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
 
     await wrapper.setProps({
       editorSettings: { fontSize: 13, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
     });
-    expect(host.style.getPropertyValue("--marvis-editor-cursor-blink")).toBe("running");
+    expect(host.style.getPropertyValue("--muster-editor-cursor-blink")).toBe("running");
     // The same editor, still: `cm-content` is not rebuilt, so the text it holds is the one above.
     expect(wrapper.find(".cm-content").text()).toContain("const a = 1;");
     wrapper.unmount();
@@ -1435,7 +1435,7 @@ describe("DocumentPane", () => {
   it("refreshes a figure the document references when its own text did not change", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
-      content: "![preview](images/pic.png)\n\n# Marvis",
+      content: "![preview](images/pic.png)\n\n# Muster",
     });
     mocks.readCheckoutMarkdownImage.mockResolvedValue({
       mimeType: "image/png",
@@ -1478,7 +1478,7 @@ describe("DocumentPane", () => {
   it("leaves a preview and its figures alone when the activity moved something else", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
-      content: "![preview](images/pic.png)\n\n# Marvis",
+      content: "![preview](images/pic.png)\n\n# Muster",
     });
     const wrapper = mount(DocumentPane, {
       props: {
@@ -1537,7 +1537,7 @@ describe("DocumentPane", () => {
   it("refreshes a figure the superseded read was triggered by, not only the one that replaced it", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
-      content: "![preview](images/pic.png)\n\n# Marvis",
+      content: "![preview](images/pic.png)\n\n# Muster",
     });
     mocks.readCheckoutMarkdownImage.mockResolvedValue({
       mimeType: "image/png",
@@ -1573,7 +1573,7 @@ describe("DocumentPane", () => {
       sizeBytes: 8,
     });
     await wrapper.setProps({ refreshRevision: 2, refreshPaths: ["src/app.ts"] });
-    resolveRead({ path: "docs/readme.md", content: "![preview](images/pic.png)\n\n# Marvis" });
+    resolveRead({ path: "docs/readme.md", content: "![preview](images/pic.png)\n\n# Muster" });
 
     // Both batches are spent as one, so the figure the superseded read named is asked again and the
     // batch that named nothing the page draws reads nothing itself.
@@ -1632,7 +1632,7 @@ describe("DocumentPane", () => {
   it("warns and drops a figure whose file is gone, and takes the warning back when it returns", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
-      content: "![preview](images/pic.png)\n\n# Marvis",
+      content: "![preview](images/pic.png)\n\n# Muster",
     });
     mocks.readCheckoutMarkdownImage.mockResolvedValue({
       mimeType: "image/png",
@@ -1670,7 +1670,7 @@ describe("DocumentPane", () => {
   it("publishes no figure that a newer document has already replaced", async () => {
     mocks.readCheckoutFile.mockResolvedValue({
       path: "docs/readme.md",
-      content: "![preview](images/pic.png)\n\n# Marvis",
+      content: "![preview](images/pic.png)\n\n# Muster",
     });
     mocks.readCheckoutMarkdownImage.mockResolvedValueOnce({
       mimeType: "image/png",

@@ -59,7 +59,7 @@ impl ReviewRound {
 }
 
 /// The prefix of the marker embedded in every review prompt.
-pub const ROUND_MARKER_PREFIX: &str = "marvis-review";
+pub const ROUND_MARKER_PREFIX: &str = "muster-review";
 
 /// The fixed instructions every review message starts with.
 pub const AGENT_PROMPT_PREFIX: &str = "You are receiving a code review of this checkout, over the current working tree.\nFix directly what the comments make clear;\nask before touching anything you are unsure about.\n";

@@ -92,7 +92,7 @@ export interface WorkspaceState {
   homeCheckoutId?: string | null;
 }
 
-/** A folder Marvis has opened before, as the workdir menu lists it. */
+/** A folder Muster has opened before, as the workdir menu lists it. */
 export interface RecentPath {
   canonicalPath: string;
   lastOpenedAt: string;
@@ -209,7 +209,7 @@ export function agentSessionTitle(status: TerminalSessionStatus | null | undefin
  *
  * **The row says nothing about where the terminal is.** The worktree or branch row directly above
  * already carries that identity, and repeating it on every child gave two sibling shells the same
- * text — `zsh · Marvis` twice, side by side — which is the one thing a list of terminals cannot be:
+ * text — `zsh · Muster` twice, side by side — which is the one thing a list of terminals cannot be:
  * two rows the reader cannot tell apart. So the name is the session and nothing else: an idle shell
  * reads `zsh`, a running one reads `pnpm` or `opencode`, a renamed one reads its rename, and an
  * identified agent reads its session's title.

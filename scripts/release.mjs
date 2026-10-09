@@ -26,7 +26,7 @@ const SEMVER = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 /** The first `version = "..."` under `[package]`, which is the crate's own and not a dependency's. */
 const CARGO_VERSION = /^version\s*=\s*"([^"]+)"/m;
 const CARGO_PACKAGE = /^\[package\][\s\S]*?^version\s*=\s*"[^"]+"/m;
-const CARGO_LOCK_VERSION = /^(\[\[package\]\]\nname = "marvis"\nversion = ")([^"]+)(")/m;
+const CARGO_LOCK_VERSION = /^(\[\[package\]\]\nname = "muster"\nversion = ")([^"]+)(")/m;
 const JSON_VERSION = /^(\s*"version":\s*")[^"]+(")/m;
 
 /** Reads and writes one version field, touching nothing else in the file. */
@@ -54,14 +54,14 @@ function cargoLockManifest(path) {
     read() {
       const versions = matches(readFileSync(path, "utf8"));
       if (versions.length !== 1) {
-        throw new Error(`${path} has ${versions.length} marvis package entries, expected exactly one`);
+        throw new Error(`${path} has ${versions.length} muster package entries, expected exactly one`);
       }
       return versions[0][2];
     },
     write(version) {
       const content = readFileSync(path, "utf8");
       if (matches(content).length !== 1) {
-        throw new Error(`${path} does not contain exactly one marvis package entry`);
+        throw new Error(`${path} does not contain exactly one muster package entry`);
       }
       writeFileSync(path, content.replace(CARGO_LOCK_VERSION, `$1${version}$3`));
     },

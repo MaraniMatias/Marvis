@@ -220,7 +220,7 @@ describe("WorktreeDialog", () => {
     expect(wrapper.text()).toContain("keeps every file");
     expect(wrapper.text()).toContain("removes its directory from disk");
     const del = wrapper.findAll("button").find((button) => button.text() === "Delete");
-    expect(del?.classes()).toContain("marvis-button-danger");
+    expect(del?.classes()).toContain("muster-button-danger");
     expect(wrapper.findAll("button").map((button) => button.text())).toContain("Archive");
     expect(wrapper.findAll("button").map((button) => button.text())).toContain("Cancel");
     expect(

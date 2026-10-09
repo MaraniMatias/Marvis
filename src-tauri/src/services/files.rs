@@ -34,8 +34,8 @@ const MAX_DIRECTORY_ENTRIES: usize = 2000;
 /// repository, which would otherwise put it in the list the moment ignores became visible.
 const GIT_DIRECTORY: &str = ".git";
 
-/// The one product choice behind `~/.marvis/tmp/code-reviews/`.
-const REVIEW_ROOT_FROM_HOME: &str = ".marvis/tmp/code-reviews";
+/// The one product choice behind `~/.muster/tmp/code-reviews/`.
+const REVIEW_ROOT_FROM_HOME: &str = ".muster/tmp/code-reviews";
 
 #[derive(Clone)]
 pub struct ReviewRoot(pub PathBuf);
@@ -733,7 +733,7 @@ pub(crate) fn atomic_write(
         .duration_since(UNIX_EPOCH)
         .map(|duration| duration.as_nanos())
         .unwrap_or_default();
-    let temporary = parent.join(format!(".{name}.marvis-{nonce}-{}", std::process::id()));
+    let temporary = parent.join(format!(".{name}.muster-{nonce}-{}", std::process::id()));
     let result = (|| {
         let mut file = OpenOptions::new()
             .write(true)

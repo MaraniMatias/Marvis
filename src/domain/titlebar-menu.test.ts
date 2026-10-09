@@ -11,7 +11,7 @@ function menu(): TitlebarMenuSection[] {
     {
       kind: "group",
       label: "This Window",
-      items: [item("checkout:main", "main", "/Marvis"), item("checkout:api", "api", "/Marvis/api")],
+      items: [item("checkout:main", "main", "/Muster"), item("checkout:api", "api", "/Muster/api")],
     },
     { kind: "group", label: "Recent Projects", items: [item("recent:skills", "skills", "/Trabajo/skills")] },
     { kind: "separator" },
@@ -36,12 +36,12 @@ describe("visibleSections", () => {
   it("matches a label or the hint behind it, whatever the case", () => {
     expect(labels(visibleSections(menu(), "API"))).toEqual(["api", "Open directory"]);
     // The repo name is the hint, so it is searchable even when the label is a branch.
-    expect(labels(visibleSections(menu(), "marvis"))).toEqual(["main", "api", "Open directory"]);
+    expect(labels(visibleSections(menu(), "muster"))).toEqual(["main", "api", "Open directory"]);
     expect(labels(visibleSections(menu(), "skills"))).toEqual(["skills", "Open directory"]);
   });
 
   it("takes every word typed, so a label and a hint narrow together", () => {
-    expect(labels(visibleSections(menu(), "api marvis"))).toEqual(["api", "Open directory"]);
+    expect(labels(visibleSections(menu(), "api muster"))).toEqual(["api", "Open directory"]);
     expect(labels(visibleSections(menu(), "api nothing"))).toEqual(["Open directory"]);
   });
 

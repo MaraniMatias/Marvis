@@ -57,7 +57,7 @@ mod tests {
     #[test]
     fn only_a_searchable_program_file_counts_as_executable() {
         let temp = tempdir().unwrap();
-        let program = temp.path().join("marvis-test-program-3c19");
+        let program = temp.path().join("muster-test-program-3c19");
         fs::write(&program, "#!/bin/sh\n").unwrap();
         #[cfg(unix)]
         {
@@ -69,8 +69,8 @@ mod tests {
         // A directory and a path that is not there are both not a program to run.
         assert!(!is_executable(temp.path()));
         assert!(!is_executable(
-            &temp.path().join("marvis-test-missing-91af")
+            &temp.path().join("muster-test-missing-91af")
         ));
-        assert!(find_executable("marvis-test-missing-91af").is_none());
+        assert!(find_executable("muster-test-missing-91af").is_none());
     }
 }

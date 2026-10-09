@@ -1,11 +1,11 @@
 {
-  "$comment": "Current, source-backed catalog of implemented Marvis behavior. Screenshot capture scaffolding and unsupported reconstruction claims are intentionally excluded.",
+  "$comment": "Current, source-backed catalog of implemented Muster behavior. Screenshot capture scaffolding and unsupported reconstruction claims are intentionally excluded.",
   "app": {
-    "name": "Marvis",
-    "identifier": "dev.marvis.workspace",
+    "name": "Muster",
+    "identifier": "dev.muster.workspace",
     "version": "0.20.0",
     "license": "MIT",
-    "repository": "https://github.com/MaraniMatias/Marvis",
+    "repository": "https://github.com/MaraniMatias/Muster",
     "description": "A local workspace for repositories, worktrees, changes, review notes, agent sessions, and terminals."
   },
   "platforms": {
@@ -113,7 +113,7 @@
       "description": "Collect open review notes into a review round, choose an OpenCode session, and send or queue the round; Markdown export is available for other tools.",
       "details": [
         "The UI reports unfinished rounds and can include outdated notes in a send or export.",
-        "OpenCode delivery is handled through Marvis review-round dispatch and reconciliation, not by directly exposing the low-level agent prompt command."
+        "OpenCode delivery is handled through Muster review-round dispatch and reconciliation, not by directly exposing the low-level agent prompt command."
       ],
       "evidence": [
         "src/App.vue",
@@ -130,7 +130,7 @@
       "name": "OpenCode session sidebar",
       "description": "Connect to the already-running local OpenCode service and show session activity alongside terminals; review delivery selects an existing session or creates one if none is available.",
       "details": [
-        "Marvis discovers the already-running service from its local registration, accepts API major version 2, and does not launch OpenCode. It only accepts a loopback endpoint and uses the registration password for authentication.",
+        "Muster discovers the already-running service from its local registration, accepts API major version 2, and does not launch OpenCode. It only accepts a loopback endpoint and uses the registration password for authentication.",
         "Review delivery can select an existing session or create one when there is no target session. Terminal association is inferred from terminal title and foreground process, not a durable shell session identifier."
       ],
       "evidence": [
@@ -153,7 +153,7 @@
       ],
       "evidence": [
         "src/components/TerminalSession.vue",
-        "src/lib/marvis-terminal.ts",
+        "src/lib/muster-terminal.ts",
         "src-tauri/src/services/terminal.rs",
         "src-tauri/src/persistence/mod.rs"
       ]
@@ -186,7 +186,7 @@
       "id": "settings",
       "status": "implemented",
       "name": "Interface, terminal, and editor preferences",
-      "description": "Configure appearance, scale, typography, terminal behavior, and editor indentation. Preferences are stored in ~/.marvis/config.yml.",
+      "description": "Configure appearance, scale, typography, terminal behavior, and editor indentation. Preferences are stored in ~/.muster/config.yml.",
       "evidence": ["src/components/SettingsDialog.vue", "src/domain/settings.ts", "src-tauri/src/config.rs"]
     },
     {
@@ -212,10 +212,10 @@
       "status": "implemented",
       "behavior": [
         "Open directory registers a selected Git repository/worktree or plain folder. The titlebar workdir menu lists this window's checkouts, recent paths not already open, and Open directory.",
-        "Repository groups can be collapsed; their menu creates a worktree, restores every archived worktree for that repository, or removes the repository from the panel. Removing a primary/plain folder deletes its registration and cascaded Marvis state (including review notes/rounds and saved checkout UI state) but not disk files; Home cannot be removed. Reopening the folder creates a fresh registration and does not restore deleted notes.",
+        "Repository groups can be collapsed; their menu creates a worktree, restores every archived worktree for that repository, or removes the repository from the panel. Removing a primary/plain folder deletes its registration and cascaded Muster state (including review notes/rounds and saved checkout UI state) but not disk files; Home cannot be removed. Reopening the folder creates a fresh registration and does not restore deleted notes.",
         "Worktree creation accepts a task name and new branch, always branches from local main or origin/main, and is fixed to the repository root's .worktrees directory. Main must exist, an already checked-out branch is refused, and the location is added to Git's exclude file; no arbitrary base/location picker is offered.",
-        "Archive hides a worktree but retains its files, branch, commits, registration, and attached Marvis review/UI state; it is unavailable with active shell or agent sessions. Restore is one confirmed action for the repository's entire archived set.",
-        "Delete removes the worktree directory or prunes metadata for a missing worktree, and cascades away its Marvis review/UI state including notes and rounds. Dirty files require explicit confirmation; active shell sessions are listed and their exact IDs confirmed before stopping; active OpenCode sessions must first be stopped. The UI reports commits not merged into the default branch, keeps the branch by default, and makes deleting it an explicit choice that can discard unmerged commits. The primary checkout cannot be deleted.",
+        "Archive hides a worktree but retains its files, branch, commits, registration, and attached Muster review/UI state; it is unavailable with active shell or agent sessions. Restore is one confirmed action for the repository's entire archived set.",
+        "Delete removes the worktree directory or prunes metadata for a missing worktree, and cascades away its Muster review/UI state including notes and rounds. Dirty files require explicit confirmation; active shell sessions are listed and their exact IDs confirmed before stopping; active OpenCode sessions must first be stopped. The UI reports commits not merged into the default branch, keeps the branch by default, and makes deleting it an explicit choice that can discard unmerged commits. The primary checkout cannot be deleted.",
         "Missing checkouts are shown as missing and cannot be selected; closing a missing row deletes its registration and cascaded review data but not repository/worktree files. The UI does not automatically find or reattach a moved directory."
       ],
       "sources": [
@@ -418,7 +418,7 @@
       "id": "opencode-bridge",
       "status": "implemented",
       "behavior": [
-        "Marvis discovers the already-running service from its local registration, accepts API major version 2, refuses non-loopback endpoints, and authenticates with the registration password; it does not launch the service.",
+        "Muster discovers the already-running service from its local registration, accepts API major version 2, refuses non-loopback endpoints, and authenticates with the registration password; it does not launch the service.",
         "Review delivery selects an existing session or creates one when there is no target. Terminal/session association is inferred from terminal title and foreground process; ambiguous matches are not treated as confirmed."
       ],
       "sources": [
@@ -560,12 +560,12 @@
   "runtime_notes": [
     {
       "topic": "OpenCode prerequisite and compatibility",
-      "behavior": "OpenCode must already be running. Marvis reads its local service registration, accepts API major 2 at a loopback endpoint, and authenticates using the registered password; it does not start the service.",
+      "behavior": "OpenCode must already be running. Muster reads its local service registration, accepts API major 2 at a loopback endpoint, and authenticates using the registered password; it does not start the service.",
       "evidence": ["src-tauri/src/services/opencode.rs", "src-tauri/src/services/agent.rs"]
     },
     {
       "topic": "Startup",
-      "behavior": "Workspace and persisted UI/review state are restored, but running terminal processes are not. Closing/removing a checkout registration or deleting a worktree cascades away its persisted Marvis data, including review notes and rounds; archiving preserves it.",
+      "behavior": "Workspace and persisted UI/review state are restored, but running terminal processes are not. Closing/removing a checkout registration or deleting a worktree cascades away its persisted Muster data, including review notes and rounds; archiving preserves it.",
       "evidence": ["src-tauri/src/persistence/mod.rs", "src/presentation/layout-persistence.ts"]
     },
     {
@@ -611,7 +611,7 @@
   "release_tooling": {
     "app_feature": false,
     "release_version_policy": "The release tooling accepts v0 semantic versions while the project is on v0.*.*.",
-    "release_script": "scripts/release.mjs checks, bumps, or restores the version in package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml, and the Marvis entry in src-tauri/Cargo.lock. A bump writes files only; it does not commit, tag, or push.",
+    "release_script": "scripts/release.mjs checks, bumps, or restores the version in package.json, src-tauri/tauri.conf.json, src-tauri/Cargo.toml, and the Muster entry in src-tauri/Cargo.lock. A bump writes files only; it does not commit, tag, or push.",
     "release_driver": "scripts/release.sh requires a clean main checkout, runs the local release validation gate, commits only the four version manifests, pushes the validated commit, and delegates package creation/publication to the GitHub release workflow. Its dry-run is validation-only (no tag/release), but may push the prepared version commit.",
     "ci": "ci.yml runs on pull requests and main pushes, performs checks on macOS and a Linux packaging job; release.yml builds and verifies the configured release artifacts.",
     "package_checks": [

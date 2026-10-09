@@ -63,7 +63,7 @@ xattr -dr com.apple.quarantine /Applications/Muster.app
 ### Debian / Ubuntu
 
 ```sh
-sudo apt install ./Muster_<version>_amd64.deb   # or _arm64.deb
+sudo apt install ./muster_<version>_amd64.deb   # or _arm64.deb
 ```
 
 ### Other Linux
@@ -99,7 +99,7 @@ What an agent sends to a model provider is up to that agent.
 
 ## Workspace data
 
-Muster keeps repository registrations, review notes and rounds, and workspace state in `Muster.sqlite3`, in the app-data directory for `dev.Muster.workspace`. Repository and worktree files stay where they are. Terminal processes cannot outlive the app, so Muster clears terminal sessions and their layouts on startup; window size and UI state survive a restart.
+Muster keeps repository registrations, review notes and rounds, and workspace state in `muster.sqlite3`, in the app-data directory for `dev.muster.workspace`. Repository and worktree files stay where they are. Terminal processes cannot outlive the app, so Muster clears terminal sessions and their layouts on startup; window size and UI state survive a restart.
 
 Missing folders stay registered and are marked missing. If the path comes back, Muster restores that registration with its metadata.
 
@@ -120,15 +120,15 @@ Check the database first. Muster does not migrate its schema. A build refuses a 
 1. **Read the log.** It names the refusal.
 
    ```sh
-   tail -n 60 "$HOME/Library/Logs/dev.Muster.workspace/Muster.log"                        # macOS
-   tail -n 60 "${XDG_DATA_HOME:-$HOME/.local/share}/dev.Muster.workspace/logs/Muster.log" # Linux
+   tail -n 60 "$HOME/Library/Logs/dev.muster.workspace/Muster.log"                        # macOS
+   tail -n 60 "${XDG_DATA_HOME:-$HOME/.local/share}/dev.muster.workspace/logs/Muster.log" # Linux
    ```
 
 2. **Ask the database which schema it holds.**
 
    ```sh
-   DB="$HOME/Library/Application Support/dev.Muster.workspace/Muster.sqlite3"     # macOS
-   DB="${XDG_DATA_HOME:-$HOME/.local/share}/dev.Muster.workspace/Muster.sqlite3"  # Linux
+   DB="$HOME/Library/Application Support/dev.muster.workspace/muster.sqlite3"     # macOS
+   DB="${XDG_DATA_HOME:-$HOME/.local/share}/dev.muster.workspace/muster.sqlite3"  # Linux
    sqlite3 "$DB" 'pragma user_version;'   # compare with SCHEMA_VERSION in src-tauri/src/persistence/mod.rs
    ```
 
@@ -142,7 +142,7 @@ Check the database first. Muster does not migrate its schema. A build refuses a 
 
 The next launch writes a fresh schema and opens an empty workspace.
 
-This removes repository and checkout registrations, review notes and rounds, viewed files, per-checkout UI state, and the saved window size and position. It does not touch repository or worktree files, `~/.Muster/config.yml` (UI, terminal and editor settings), or `~/.Muster/tmp/code-reviews/` (review exports).
+This removes repository and checkout registrations, review notes and rounds, viewed files, per-checkout UI state, and the saved window size and position. It does not touch repository or worktree files, `~/.muster/config.yml` (UI, terminal and editor settings), or `~/.muster/tmp/code-reviews/` (review exports).
 
 On Linux the log lives inside the database directory, so copy it out before removing anything.
 

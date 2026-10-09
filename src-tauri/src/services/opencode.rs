@@ -1,6 +1,6 @@
 //! Discovery of the OpenCode service a person starts themselves.
 //!
-//! Marvis is a client of that service and never its owner. The service registers itself so its
+//! Muster is a client of that service and never its owner. The service registers itself so its
 //! clients can find it, this reads that registration and checks that the service answers there.
 //! Nothing here starts a server and nothing here ends one: a service that is not running leaves
 //! the app disconnected, which is a state to wait in, not a failure to clean up after.
@@ -22,7 +22,7 @@ const SERVICE_DIR: &str = "opencode";
 const SERVICE_FILE: &str = "service.json";
 
 /// The API major this app speaks. A service on another major answers a different contract, and
-/// Marvis would be sending a request shaped for this one against it.
+/// Muster would be sending a request shaped for this one against it.
 const SUPPORTED_MAJOR: &str = "2";
 
 /// A discovery probe is a single loopback request. A service that is gone fails to connect at
@@ -122,7 +122,7 @@ fn supported_version(version: &str) -> Result<(), String> {
 /// to it. Plain HTTP is likewise what the service serves, so a scheme this client has no TLS
 /// support for is refused rather than downgraded.
 fn endpoint(url: &str, password: String) -> Result<ServiceEndpoint, String> {
-    let refused = || format!("the OpenCode service registered an address Marvis cannot use: {url}");
+    let refused = || format!("the OpenCode service registered an address Muster cannot use: {url}");
     let authority = url
         .strip_prefix("http://")
         .ok_or_else(refused)?

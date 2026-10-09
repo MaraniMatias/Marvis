@@ -26,7 +26,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: marvis-release
+  group: muster-release
   cancel-in-progress: false
 
 jobs:
@@ -82,7 +82,7 @@ jobs:
             fi
             [[ "$(git cat-file -t "refs/tags/$RELEASE_VERSION")" == tag ]] || { echo "Existing release tag is not the original annotated tag." >&2; exit 1; }
             tag_subject="$(git for-each-ref --format='%(contents:subject)' "refs/tags/$RELEASE_VERSION")"
-            expected_tag_subject="Marvis $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"
+            expected_tag_subject="Muster $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"
             [[ "$tag_subject" == "$expected_tag_subject" ]] || { echo "Existing tag does not belong to this exact workflow run; refusing recovery." >&2; exit 1; }
             recovery=true
           fi
@@ -210,12 +210,12 @@ jobs:
             fi
             [[ "$(git cat-file -t "refs/tags/$RELEASE_VERSION")" == tag ]] || { echo "Existing tag is not annotated." >&2; exit 1; }
             tag_subject="$(git for-each-ref --format='%(contents:subject)' "refs/tags/$RELEASE_VERSION")"
-            expected_tag_subject="Marvis $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"
+            expected_tag_subject="Muster $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"
             [[ "$tag_subject" == "$expected_tag_subject" ]] || { echo "Existing tag does not belong to this exact workflow run." >&2; exit 1; }
           else
             git config user.name "github-actions[bot]"
             git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-            git tag -a "$RELEASE_VERSION" "$RELEASE_SHA" -m "Marvis $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"
+            git tag -a "$RELEASE_VERSION" "$RELEASE_SHA" -m "Muster $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"
             git push origin "refs/tags/$RELEASE_VERSION"
           fi
       - name: Publish the already-validated payload (safe to retry)
@@ -253,7 +253,7 @@ jobs:
               ' CHANGELOG.md)"
               if [[ -n "$curated" ]]; then notes=(--notes "$curated"); fi
             fi
-            gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" "${files[@]}" --verify-tag --title "Marvis $RELEASE_VERSION" --generate-notes "${notes[@]}"
+            gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" "${files[@]}" --verify-tag --title "Muster $RELEASE_VERSION" --generate-notes "${notes[@]}"
           fi
           actual="$(gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)"
           [[ "$actual" == "$expected_names" ]] || { echo "Published release assets are incomplete or unexpected." >&2; exit 1; }

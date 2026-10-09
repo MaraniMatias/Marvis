@@ -1,4 +1,4 @@
-//! `~/.marvis/config.yml`: the preferences the Settings dialog owns.
+//! `~/.muster/config.yml`: the preferences the Settings dialog owns.
 //!
 //! One file, in the user's home, written by the dialog and read at launch. It is not the
 //! database: the database holds state that belongs to a workspace (which checkouts exist, how wide
@@ -16,7 +16,7 @@ use crate::{
     services::files::atomic_write,
 };
 
-const CONFIG_DIR_FROM_HOME: &str = ".marvis";
+const CONFIG_DIR_FROM_HOME: &str = ".muster";
 const CONFIG_FILE_NAME: &str = "config.yml";
 
 const UI_FONT_SIZE_MIN: f64 = 11.0;
@@ -59,7 +59,7 @@ pub fn dir_of(config_file: &ConfigFile) -> Option<&Path> {
 /// this build cannot read.
 ///
 /// That is the whole reason these `default`s exist, and it is not a reading of what an older build
-/// wrote. `~/.marvis/config.yml` survives every upgrade, is hand-edited, and is not covered by
+/// wrote. `~/.muster/config.yml` survives every upgrade, is hand-edited, and is not covered by
 /// `SCHEMA_VERSION`: refusing a file because a key is absent would take the settings of everyone
 /// who never opened the dialog on a preference that has a default anyway.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
@@ -323,7 +323,7 @@ mod tests {
         tempfile::tempdir().unwrap()
     }
 
-    /// Where `~/.marvis/config.yml` lands inside a temporary home, folder created: a test that
+    /// Where `~/.muster/config.yml` lands inside a temporary home, folder created: a test that
     /// writes the file by hand is standing in for a person who already has the folder.
     fn config_path_in(home: &tempfile::TempDir) -> PathBuf {
         let path = home

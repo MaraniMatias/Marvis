@@ -1,10 +1,10 @@
-# Marvis feature catalog
+# Muster feature catalog
 
-This catalog describes the implemented behavior in Marvis v0.20.0. It separates user-facing features from backend-only commands and planned integrations; a registered command or a design document is not, by itself, a shipped UI feature.
+This catalog describes the implemented behavior in Muster v0.20.0. It separates user-facing features from backend-only commands and planned integrations; a registered command or a design document is not, by itself, a shipped UI feature.
 
 ## At a glance
 
-Marvis is a local desktop workspace for repositories and worktrees. It brings file browsing and editing, Git changes, line-anchored review notes, OpenCode sessions, and per-checkout terminals into one resizable window.
+Muster is a local desktop workspace for repositories and worktrees. It brings file browsing and editing, Git changes, line-anchored review notes, OpenCode sessions, and per-checkout terminals into one resizable window.
 
 ## Implemented features
 
@@ -36,7 +36,7 @@ Sources: [FileDiff](../src/components/FileDiff.vue), [ReviewNoteList](../src/com
 
 ### OpenCode sessions
 
-Marvis discovers the already-running OpenCode service from its local registration and speaks API major version 2; it does not launch OpenCode. It accepts only a loopback service endpoint and authenticates with the registration password. Review delivery can select an existing session or create one when there is no target session. Session activity shown alongside terminals is associated by terminal title and foreground process, not a durable shell session identifier.
+Muster discovers the already-running OpenCode service from its local registration and speaks API major version 2; it does not launch OpenCode. It accepts only a loopback service endpoint and authenticates with the registration password. Review delivery can select an existing session or create one when there is no target session. Session activity shown alongside terminals is associated by terminal title and foreground process, not a durable shell session identifier.
 
 Sources: [Sidebar](../src/components/Sidebar.vue), [session presentation](../src/presentation/agent-sessions.ts), [review composer](../src/components/ReviewComposer.vue), [OpenCode discovery/version check](../src-tauri/src/services/opencode.rs), [agent bridge](../src-tauri/src/services/agent.rs).
 
@@ -44,13 +44,13 @@ Sources: [Sidebar](../src/components/Sidebar.vue), [session presentation](../src
 
 Open multiple shell terminals in a checkout and interact with them in the workspace. Terminal settings include font size, ligatures, blinking and cursor shape, scrollbar visibility, shell integration, and worktree-following behavior. Following can be disabled or triggered by shell navigation, OpenCode activity, or either.
 
-Terminals are runtime processes: Marvis does not restore them as running sessions after an application restart.
+Terminals are runtime processes: Muster does not restore them as running sessions after an application restart.
 
-Sources: [TerminalSession](../src/components/TerminalSession.vue), [terminal setup](../src/lib/marvis-terminal.ts), [terminal service](../src-tauri/src/services/terminal.rs), [persistence startup behavior](../src-tauri/src/persistence/mod.rs).
+Sources: [TerminalSession](../src/components/TerminalSession.vue), [terminal setup](../src/lib/muster-terminal.ts), [terminal service](../src-tauri/src/services/terminal.rs), [persistence startup behavior](../src-tauri/src/persistence/mod.rs).
 
 ### Layout and preferences
 
-The navigation, document, and inspector areas can be resized, and the workspace offers split and focused layout modes. Marvis remembers workspace and checkout UI state. Preferences are stored separately in ~/.marvis/config.yml.
+The navigation, document, and inspector areas can be resized, and the workspace offers split and focused layout modes. Muster remembers workspace and checkout UI state. Preferences are stored separately in ~/.muster/config.yml.
 
 | Area      | Default                                                                                                        | Available settings                                                                                                                                             |
 | --------- | -------------------------------------------------------------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------- |
@@ -66,10 +66,10 @@ The summaries above are backed by the following narrower behaviors. These distin
 
 ### Repository and file navigation
 
-- Open directory uses a single-folder picker and registers a Git repository/worktree or a plain folder. The titlebar workdir menu lists checkouts already in this window, recent paths not already open, and Open directory; opening a recent path registers it in the workspace. Repository groups can be collapsed. Their action menu creates worktrees, restores archived worktrees, or removes the repository from the panel. Removing a primary checkout or plain folder deletes its workspace registration and cascaded Marvis state for those checkouts, including review notes/rounds and saved UI state, but leaves repository files untouched; the Home checkout cannot be removed. This is not an archive or an undo, so export needed notes or back up the database first. Opening it again creates a fresh registration; previously deleted attached notes and rounds do not return.
+- Open directory uses a single-folder picker and registers a Git repository/worktree or a plain folder. The titlebar workdir menu lists checkouts already in this window, recent paths not already open, and Open directory; opening a recent path registers it in the workspace. Repository groups can be collapsed. Their action menu creates worktrees, restores archived worktrees, or removes the repository from the panel. Removing a primary checkout or plain folder deletes its workspace registration and cascaded Muster state for those checkouts, including review notes/rounds and saved UI state, but leaves repository files untouched; the Home checkout cannot be removed. This is not an archive or an undo, so export needed notes or back up the database first. Opening it again creates a fresh registration; previously deleted attached notes and rounds do not return.
 - Git repositories group their primary checkout and worktrees; plain folders have no Git worktree actions. Creation accepts a task name and new branch, fixes the directory to `repo/.worktrees`, and always branches from local main or origin/main; it is not an arbitrary location/base picker. Creation requires main to exist and refuses a branch already checked out. The .worktrees directory is added to Git's exclude file.
-- A worktree can be archived to hide it from the sidebar while retaining its files, branch, commits, registration, and attached Marvis review/UI state for a later restore. One repository action restores all its archived worktrees. Archive is unavailable while shell or agent sessions are active. Delete removes the worktree directory (or prunes metadata for a missing worktree) and its attached Marvis state, including review notes/rounds: dirty files require explicit confirmation, active shell sessions are listed and their exact set confirmed before they are stopped, and active OpenCode sessions must be stopped first. The dialog reports commits not merged into the repository default branch; branch deletion is opt-in and can discard those commits. The primary checkout cannot be deleted.
-- Missing checkouts are represented as missing and cannot be selected. A user can close a missing row to clear its registration and cascaded Marvis state, including attached review notes/rounds; repository/worktree files are not deleted, and Marvis does not automatically discover or reattach moved folders. The backend locate command is not exposed as a UI action.
+- A worktree can be archived to hide it from the sidebar while retaining its files, branch, commits, registration, and attached Muster review/UI state for a later restore. One repository action restores all its archived worktrees. Archive is unavailable while shell or agent sessions are active. Delete removes the worktree directory (or prunes metadata for a missing worktree) and its attached Muster state, including review notes/rounds: dirty files require explicit confirmation, active shell sessions are listed and their exact set confirmed before they are stopped, and active OpenCode sessions must be stopped first. The dialog reports commits not merged into the repository default branch; branch deletion is opt-in and can discard those commits. The primary checkout cannot be deleted.
+- Missing checkouts are represented as missing and cannot be selected. A user can close a missing row to clear its registration and cascaded Muster state, including attached review notes/rounds; repository/worktree files are not deleted, and Muster does not automatically discover or reattach moved folders. The backend locate command is not exposed as a UI action.
 - The Files tree loads directories as they are expanded, retains expanded paths and scroll position per checkout, windows large row lists, and can pin ancestor folders while scrolling. Dotfiles and Git-ignored entries are visually subdued. Empty, loading, missing, permission and truncated-list states are presented in the tree. The tree exposes expand/select rather than in-tree search or filesystem context-menu actions; the document toolbar has a copy-path action.
 - The Changes list groups paths by parent directory, preserves rename source paths, displays Git status and available added/deleted counts, and includes untracked files. Selecting a file opens its diff; All changes opens the stacked change set. Git status events refresh the tree and change list.
 
@@ -91,7 +91,7 @@ Tests: [DocumentPane.test.ts](../src/components/DocumentPane.test.ts) covers mod
 
 ### Git status and diff presentation
 
-- Every Git checkout uses the same repository default base: the persisted default branch, otherwise origin/HEAD, otherwise the primary checkout's current branch. When no default branch is saved for the repository, Marvis prompts for one; the selected branch must exist locally or as an origin ref. For each checkout, tracked committed differences are compared from merge-base(default ref, HEAD) to HEAD, alongside staged/unstaged status and untracked files; line counts use the same base. Thus a primary checkout on its default branch usually represents ordinary git status, while a primary on another branch or a worktree can include committed branch changes since the common ancestor. These counts are not limited to uncommitted changes or to the worktree's creation point. Binary files have no fabricated zero counts; rename rows retain the old path. Diff rendering is unified, with foldable hunks and no side-by-side mode control. All changes is a stack of per-file diffs, with each file read when expanded.
+- Every Git checkout uses the same repository default base: the persisted default branch, otherwise origin/HEAD, otherwise the primary checkout's current branch. When no default branch is saved for the repository, Muster prompts for one; the selected branch must exist locally or as an origin ref. For each checkout, tracked committed differences are compared from merge-base(default ref, HEAD) to HEAD, alongside staged/unstaged status and untracked files; line counts use the same base. Thus a primary checkout on its default branch usually represents ordinary git status, while a primary on another branch or a worktree can include committed branch changes since the common ancestor. These counts are not limited to uncommitted changes or to the worktree's creation point. Binary files have no fabricated zero counts; rename rows retain the old path. Diff rendering is unified, with foldable hunks and no side-by-side mode control. All changes is a stack of per-file diffs, with each file read when expanded.
 - Large diffs are virtualized and fetched in bounded pages around the viewport. Pages and in-flight requests are capped; stale responses for a different checkout, path or revision are discarded. Binary, symlink and over-limit changes receive explicit non-text states rather than being treated as empty text. Safe preview ceilings include 100,000 lines, 10,000 hunks, 32 MiB, 4 KiB hunk headers and 64 KiB per line.
 - The diff uses the editor font setting. Note range selection is available on unified lines; a range is refused if required code was not loaded, rather than exporting a guessed snippet. Git watcher revisions prevent unchanged updates from needlessly rebuilding the open diff.
 
@@ -111,7 +111,7 @@ Tests: [review.test.ts](../src/domain/review.test.ts) covers Markdown export, no
 
 ### OpenCode service boundary
 
-The OpenCode bridge calls an already-running local API v2 service; Marvis does not spawn the OpenCode executable or service. The sidebar can create/select sessions and reflect their activity. Terminal-to-session association is inferred from the OpenCode terminal title and current foreground process, not a durable shell session identifier; ambiguous or missing matches are not presented as confirmed associations.
+The OpenCode bridge calls an already-running local API v2 service; Muster does not spawn the OpenCode executable or service. The sidebar can create/select sessions and reflect their activity. Terminal-to-session association is inferred from the OpenCode terminal title and current foreground process, not a durable shell session identifier; ambiguous or missing matches are not presented as confirmed associations.
 
 Sources: [agent-session presentation](../src/presentation/agent-sessions.ts), [OpenCode API client](../src-tauri/src/services/opencode.rs), [agent bridge](../src-tauri/src/services/agent.rs), [Sidebar](../src/components/Sidebar.vue).
 
@@ -146,7 +146,7 @@ The catalog was checked against user-facing UI and presentation flows, relevant 
 
 ## Local data and startup
 
-Workspace, checkout UI, and review data are stored locally; settings live in the local configuration file. Marvis restores the workspace but does not restart terminal processes. Explicitly closing/removing a registration or deleting a worktree cascades away its associated persisted Marvis data, including notes and review rounds, while leaving repository files untouched unless the worktree Delete action is chosen. Archive preserves that local state. The SQLite schema uses a strict version check and has no migration ladder: a database stamped with an unrecognized schema version is refused rather than upgraded.
+Workspace, checkout UI, and review data are stored locally; settings live in the local configuration file. Muster restores the workspace but does not restart terminal processes. Explicitly closing/removing a registration or deleting a worktree cascades away its associated persisted Muster data, including notes and review rounds, while leaving repository files untouched unless the worktree Delete action is chosen. Archive preserves that local state. The SQLite schema uses a strict version check and has no migration ladder: a database stamped with an unrecognized schema version is refused rather than upgraded.
 
 Sources: [Persistence](../src-tauri/src/persistence/mod.rs), [settings config](../src-tauri/src/config.rs).
 

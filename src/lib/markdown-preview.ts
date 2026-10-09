@@ -135,7 +135,7 @@ type MarkdownParser = InstanceType<typeof MarkdownIt>;
 function dropHtmlComments(markdown: MarkdownParser): void {
   markdown.block.ruler.before(
     "paragraph",
-    "marvis_html_comment",
+    "muster_html_comment",
     (state, startLine, endLine, silent) => {
       const start = state.bMarks[startLine] + state.tShift[startLine];
       // Four spaces of indent is a code block, whatever the line starts with.
@@ -166,7 +166,7 @@ function dropHtmlComments(markdown: MarkdownParser): void {
 
   // `html_inline` is in the chain whatever `html` says: the rule itself declines, it is not
   // unregistered, so it is the one neighbour that is always there to sit in front of.
-  markdown.inline.ruler.before("html_inline", "marvis_html_comment", (state, silent) => {
+  markdown.inline.ruler.before("html_inline", "muster_html_comment", (state, silent) => {
     if (!state.src.startsWith("<!--", state.pos)) return false;
     const end = state.src.indexOf("-->", state.pos + 4);
     // An `<!--` that is never closed is text, which is what GitHub leaves it as too.
@@ -203,7 +203,7 @@ export async function renderMarkdownPreview(source: string, markdownPath: string
       images.push({ source: sourcePath, path });
     }
     token.attrSet("src", "");
-    token.attrSet("data-marvis-image", String(imageIndex));
+    token.attrSet("data-muster-image", String(imageIndex));
     return renderer.renderToken(tokens, index, options);
   };
 
@@ -241,7 +241,7 @@ export async function renderMarkdownPreview(source: string, markdownPath: string
       "tr",
       "ul",
     ],
-    ALLOWED_ATTR: ["alt", "checked", "class", "data-marvis-image", "disabled", "href", "src", "title", "type"],
+    ALLOWED_ATTR: ["alt", "checked", "class", "data-muster-image", "disabled", "href", "src", "title", "type"],
     ALLOW_DATA_ATTR: false,
   });
   // happy-dom (used by Vitest) unwraps table tags while sanitizing table sections.
@@ -263,8 +263,8 @@ export function attachMarkdownImages(
   images: ReadonlyMap<string, { mimeType: string; dataBase64: string }>,
 ): string {
   const document = new DOMParser().parseFromString(sanitizedHtml, "text/html");
-  for (const element of document.querySelectorAll("img[data-marvis-image]")) {
-    const index = Number(element.getAttribute("data-marvis-image"));
+  for (const element of document.querySelectorAll("img[data-muster-image]")) {
+    const index = Number(element.getAttribute("data-muster-image"));
     const path = Number.isInteger(index) ? imagePaths[index] : undefined;
     const image = path ? images.get(path) : undefined;
     if (image && SAFE_IMAGE_MIME_TYPES.has(image.mimeType) && /^[a-z\d+/]+=*$/i.test(image.dataBase64)) {
@@ -272,7 +272,7 @@ export function attachMarkdownImages(
     } else {
       element.removeAttribute("src");
     }
-    element.removeAttribute("data-marvis-image");
+    element.removeAttribute("data-muster-image");
   }
   return document.body.innerHTML;
 }

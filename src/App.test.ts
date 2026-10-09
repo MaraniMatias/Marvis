@@ -355,7 +355,7 @@ vi.mock("./presentation/git-watchers", () => ({
 }));
 vi.mock("./presentation/review-notes", () => ({
   // The diff reaches the send through this key, so the real one has to be here.
-  REVIEW_SENDER: Symbol("marvis:review-sender"),
+  REVIEW_SENDER: Symbol("muster:review-sender"),
   useReviewNotes: () => ({
     checkoutId: "checkout:one",
     notes: mocks.reviewNotes,
@@ -379,7 +379,7 @@ vi.mock("./presentation/agent-sessions", async () => {
   const turns = reactive({ value: 0 });
   mocks.turns = turns;
   return {
-    AGENT_EVENT: "marvis://agent-event",
+    AGENT_EVENT: "muster://agent-event",
     useAgentSessions: () => ({
       checkoutId: "checkout:one",
       sessions: mocks.agentSessions,
@@ -663,7 +663,7 @@ describe("App UI integration", () => {
   beforeEach(() => {
     vi.useFakeTimers();
     vi.resetAllMocks();
-    // Marvis is a macOS app, so ⌘ is the modifier these tests press, and saying it here is what
+    // Muster is a macOS app, so ⌘ is the modifier these tests press, and saying it here is what
     // keeps the machine running them from deciding it: `navigator.platform` comes from the host's
     // own OS, which on a Linux runner reports Linux, and then every ⌘ in this file answers as Ctrl
     // and no shortcut fires. A test about the other platform says so itself.
@@ -733,7 +733,7 @@ describe("App UI integration", () => {
     // The scale is written to the document rather than to the app, so it outlives the component
     // that set it and would be the next test's starting point.
     document.documentElement.style.removeProperty("zoom");
-    document.documentElement.style.removeProperty("--marvis-ui-font-scale");
+    document.documentElement.style.removeProperty("--muster-ui-font-scale");
     delete document.documentElement.dataset.theme;
     vi.useRealTimers();
   });
@@ -1353,7 +1353,7 @@ describe("App UI integration", () => {
       for (const testid of ["repo-crumb", "worktree-crumb", "item-crumb"]) {
         const crumb = wrapper.get(`[data-testid="${testid}"]`);
         expect(crumb.classes()).toContain("text-menu-control");
-        expect(crumb.classes()).not.toContain("marvis-control");
+        expect(crumb.classes()).not.toContain("muster-control");
       }
       // The workdir is the one that says where you are, so it is the only crumb set forward, and
       // each crumb carries its own place in the line, which is what says what it gives up.
@@ -1399,11 +1399,11 @@ describe("App UI integration", () => {
       // The repo root is the head of a list, so closing it reaches the worktrees with it.
       await wrapper.get('[data-testid="close-missing-base"]').trigger("click");
       expect(confirm).toHaveBeenLastCalledWith(
-        "Close “/checkout:one” and its checkout list in Marvis? No files will be deleted.",
+        "Close “/checkout:one” and its checkout list in Muster? No files will be deleted.",
       );
       // A worktree is one entry, and nothing is closed while the question is unanswered.
       await wrapper.get('[data-testid="close-missing-worktree"]').trigger("click");
-      expect(confirm).toHaveBeenLastCalledWith("Close “/checkout:two” in Marvis? No files will be deleted.");
+      expect(confirm).toHaveBeenLastCalledWith("Close “/checkout:two” in Muster? No files will be deleted.");
       expect(mocks.closeMissingCheckout).not.toHaveBeenCalled();
 
       confirm.mockReturnValue(true);
@@ -1448,7 +1448,7 @@ describe("App UI integration", () => {
 
       await wrapper.get('[data-testid="close-missing-base"]').trigger("click");
 
-      expect(confirm).toHaveBeenCalledWith("Close “/notes” and its checkout list in Marvis? No files will be deleted.");
+      expect(confirm).toHaveBeenCalledWith("Close “/notes” and its checkout list in Muster? No files will be deleted.");
       expect(mocks.closeMissingCheckout).toHaveBeenCalledWith("checkout:one");
       wrapper.unmount();
       confirm.mockRestore();
@@ -2593,12 +2593,12 @@ describe("App UI integration", () => {
       // The repo root is the head of a list, so its row's close reaches the worktrees with it.
       await wrapper.get('[data-testid="close-workdir-base"]').trigger("click");
       expect(confirm).toHaveBeenLastCalledWith(
-        "Remove “/checkout:one” and its checkout list from Marvis? No files will be deleted, and opening the folder again brings it back.",
+        "Remove “/checkout:one” and its checkout list from Muster? No files will be deleted, and opening the folder again brings it back.",
       );
       // A worktree is one entry, and nothing is closed while the question is unanswered.
       await wrapper.get('[data-testid="close-workdir-worktree"]').trigger("click");
       expect(confirm).toHaveBeenLastCalledWith(
-        "Remove “/checkout:two” from Marvis? No files will be deleted, and opening the folder again brings it back.",
+        "Remove “/checkout:two” from Muster? No files will be deleted, and opening the folder again brings it back.",
       );
       expect(mocks.closeCheckout).not.toHaveBeenCalled();
 
@@ -2727,7 +2727,7 @@ describe("App UI integration", () => {
   });
 
   describe("layout", () => {
-    it("starts the panels at the marvis default widths within their clamps", async () => {
+    it("starts the panels at the muster default widths within their clamps", async () => {
       const wrapper = await mountApp(workspaceWith(checkout("checkout:one")));
       const panels = wrapper.findAll("#navigation-panel, #inspector-panel");
 
@@ -3445,7 +3445,7 @@ describe("App UI integration", () => {
       checkoutId: "checkout:one",
       sessionId: "ses_one",
       status: "dispatched",
-      marker: "marvis-review:round:1",
+      marker: "muster-review:round:1",
       noteIds: ["note:1"],
       createdAt: "1",
       updatedAt: "2",
@@ -3499,7 +3499,7 @@ describe("App UI integration", () => {
       checkoutId: "checkout:one",
       sessionId: "ses_new",
       status: "dispatched",
-      marker: "marvis-review:round:1",
+      marker: "muster-review:round:1",
       noteIds: ["note:1"],
       createdAt: "1",
       updatedAt: "2",
@@ -4143,7 +4143,7 @@ describe("App UI integration", () => {
       });
       await flushPromises();
       expect(wrapper.find('[data-testid="settings-button"]').exists()).toBe(true);
-      expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe(String(18 / 14));
+      expect(document.documentElement.style.getPropertyValue("--muster-ui-font-scale")).toBe(String(18 / 14));
       wrapper.unmount();
     });
 
@@ -4261,7 +4261,7 @@ describe("App UI integration", () => {
       };
       vi.spyOn(window, "matchMedia").mockReturnValue(system as unknown as MediaQueryList);
 
-      // The attribute is the whole of it: the two palettes in `marvis.css` are keyed off it, and a
+      // The attribute is the whole of it: the two palettes in `muster.css` are keyed off it, and a
       // palette the preference names outright is followed rather than argued with.
       const light = await mountApp(
         workspaceWith(checkout("checkout:one")),
@@ -4405,7 +4405,7 @@ describe("App UI integration", () => {
       await fontSize.trigger("change");
 
       // The draft is the dialog's own until Apply, so nothing on screen has moved yet.
-      expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe("1");
+      expect(document.documentElement.style.getPropertyValue("--muster-ui-font-scale")).toBe("1");
 
       await wrapper
         .findAll("button")
@@ -4414,7 +4414,7 @@ describe("App UI integration", () => {
       await flushPromises();
       // Applied, the whole type scale on the document moves: the window is redrawn at 18/14 of
       // the size it was drawn at, with no reload and without waiting for the file to be written.
-      expect(document.documentElement.style.getPropertyValue("--marvis-ui-font-scale")).toBe(String(18 / 14));
+      expect(document.documentElement.style.getPropertyValue("--muster-ui-font-scale")).toBe(String(18 / 14));
       expect(mocks.saveSettings).toHaveBeenCalledWith({
         ...DEFAULT_SETTINGS,
         ui: { ...DEFAULT_SETTINGS.ui, fontSize: 18 },
@@ -4436,7 +4436,7 @@ describe("App UI integration", () => {
         .trigger("click");
       await flushPromises();
 
-      expect(document.documentElement.style.getPropertyValue("--marvis-content-bg-0")).toBe("#334455");
+      expect(document.documentElement.style.getPropertyValue("--muster-content-bg-0")).toBe("#334455");
       expect(mocks.saveSettings).toHaveBeenCalledWith({
         ...DEFAULT_SETTINGS,
         ui: { ...DEFAULT_SETTINGS.ui, theme: "dark", contentBackground: "#334455" },
@@ -4453,7 +4453,7 @@ describe("App UI integration", () => {
           },
         },
       );
-      expect(document.documentElement.style.getPropertyValue("--marvis-content-bg-0")).toBe("");
+      expect(document.documentElement.style.getPropertyValue("--muster-content-bg-0")).toBe("");
       light.unmount();
     });
 
@@ -4485,7 +4485,7 @@ describe("App UI integration", () => {
         ...DEFAULT_SETTINGS,
         ui: { ...DEFAULT_SETTINGS.ui, theme: "dark" },
       });
-      expect(document.documentElement.style.getPropertyValue("--marvis-content-bg-0")).toBe(
+      expect(document.documentElement.style.getPropertyValue("--muster-content-bg-0")).toBe(
         DEFAULT_SETTINGS.ui.contentBackground,
       );
       wrapper.unmount();

@@ -1,6 +1,6 @@
 /**
  * Replay deterministic real-PTY captures through xterm. Regenerate with:
- * MARVIS_CAPTURE_FIXTURES="$PWD/src/lib/__fixtures__/terminal-shell-integration" cargo test \
+ * MUSTER_CAPTURE_FIXTURES="$PWD/src/lib/__fixtures__/terminal-shell-integration" cargo test \
  *   --manifest-path src-tauri/Cargo.toml captures_a_real_session -- --ignored
  */
 import { readFileSync } from "node:fs";
@@ -75,8 +75,8 @@ describe("native shell integration startup", () => {
   it("renders the failing command and the user's next prompt", async () => {
     for (const name of SESSIONS) {
       const rows = (await renderedRows(capture(name))).filter((row) => row.trim().length > 0);
-      expect(rows.join("\n"), name).toContain("marvis-test> false");
-      expect(rows.at(-1)?.trimEnd(), name).toBe("marvis-test>");
+      expect(rows.join("\n"), name).toContain("muster-test> false");
+      expect(rows.at(-1)?.trimEnd(), name).toBe("muster-test>");
     }
   });
 });

@@ -389,7 +389,7 @@ describe("useAgentSessions", () => {
     const whileDisconnected = mocks.listAgentSessions.mock.calls.length;
     expect(whileDisconnected).toBeGreaterThan(0);
 
-    // Nothing is started on Marvis's side, so the only way to notice a service is to ask again.
+    // Nothing is started on Muster's side, so the only way to notice a service is to ask again.
     await vi.advanceTimersByTimeAsync(5000);
     expect(mocks.listAgentSessions.mock.calls.length).toBeGreaterThan(whileDisconnected);
 
@@ -597,7 +597,7 @@ describe("useTerminalAgentRows", () => {
   });
 
   it("gives each terminal its own worktree's agent, independently", async () => {
-    // The case this exists for: two Marvis terminals, two worktrees, two different agents. A
+    // The case this exists for: two Muster terminals, two worktrees, two different agents. A
     // single active-checkout answer would paint both rows with whichever worktree is selected.
     perCheckout({
       "checkout:first": [{ id: "ses_one", agent: "coder", running: true }],

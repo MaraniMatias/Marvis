@@ -16,5 +16,5 @@ __pycache__/
 /.worktrees/
 /.lean-ctx/
 
-# Mockup: repo git anidado y su zip, no forman parte de Marvis.
+# Mockup: repo git anidado y su zip, no forman parte de Muster.
 docs/demo-video

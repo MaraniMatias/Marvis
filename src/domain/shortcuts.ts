@@ -42,7 +42,7 @@ export function carriesAppModifier(event: ModifierKey, platform: string = naviga
  * What the window answers to, written down so Settings can say so.
  *
  * These are not preferences, which is why they are not in `SETTINGS_SECTIONS`: none of them is
- * written to `~/.marvis/config.yml`, none is restored, and a person cannot change one. They are a
+ * written to `~/.muster/config.yml`, none is restored, and a person cannot change one. They are a
  * record of fact about this build, the same way the credits are, so the dialog draws them and
  * writes nothing.
  *

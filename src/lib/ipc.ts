@@ -297,7 +297,7 @@ export function syncWorkspaceRepo(repoId: string): Promise<WorkspaceState | null
   return invoke<WorkspaceState | null>("sync_workspace_repo", { repoId });
 }
 
-/** The folders Marvis has had open before, newest first. The backend keeps the ten newest. */
+/** The folders Muster has had open before, newest first. The backend keeps the ten newest. */
 export function listRecentPaths(): Promise<RecentPath[]> {
   return invoke<RecentPath[]>("list_recent_paths");
 }
@@ -312,7 +312,7 @@ export function closeCheckout(checkoutId: string): Promise<WorkspaceState> {
   return invoke<WorkspaceState>("close_checkout", { checkoutId });
 }
 
-/** Removes a checkout whose directory is gone from Marvis alone: nothing on disk is deleted. */
+/** Removes a checkout whose directory is gone from Muster alone: nothing on disk is deleted. */
 export function closeMissingCheckout(checkoutId: string): Promise<WorkspaceState> {
   return invoke<WorkspaceState>("close_missing_checkout", { checkoutId });
 }
@@ -403,7 +403,7 @@ export function saveAppLayout(layout: AppLayoutState): Promise<void> {
   return invoke<void>("ui_layout_save", { layout });
 }
 
-/** The preferences the Settings dialog owns, from `~/.marvis/config.yml`. */
+/** The preferences the Settings dialog owns, from `~/.muster/config.yml`. */
 export function loadSettings(): Promise<AppSettings> {
   return invoke<AppSettings>("settings_load");
 }

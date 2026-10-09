@@ -159,7 +159,7 @@ describe("runFormat", () => {
 
 describe("config overrides", () => {
   it("matches Prettier basename, braces, classes, Unicode, exclusions and ordered nested config overrides", async () => {
-    const root = await mkdtemp(join(tmpdir(), "marvis-prettier-"));
+    const root = await mkdtemp(join(tmpdir(), "muster-prettier-"));
     const options = {
       printWidth: 120,
       overrides: [

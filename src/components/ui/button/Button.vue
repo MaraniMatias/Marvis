@@ -17,8 +17,8 @@ withDefaults(
   <button
     :type="type"
     :disabled="disabled"
-    class="marvis-button"
-    :class="[`marvis-button-${variant}`, `marvis-button-${size}`]"
+    class="muster-button"
+    :class="[`muster-button-${variant}`, `muster-button-${size}`]"
   >
     <slot />
   </button>

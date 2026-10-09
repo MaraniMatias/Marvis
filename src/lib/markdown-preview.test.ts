@@ -41,7 +41,7 @@ describe("Markdown preview", () => {
       new Map([["docs/images/pic.png", { mimeType: "image/png", dataBase64: "iVBORw0KGgo=" }]]),
     );
     expect(html).toContain('src="data:image/png;base64,iVBORw0KGgo="');
-    expect(html).not.toContain("data-marvis-image");
+    expect(html).not.toContain("data-muster-image");
   });
 
   it("colors fenced code, including a fence nested in a blockquote", async () => {

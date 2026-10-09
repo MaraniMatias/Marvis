@@ -108,7 +108,7 @@ impl TerminalBackend {
         command.cwd(options.cwd);
         command.env("TERM", "xterm-256color");
         command.env("COLORTERM", "truecolor");
-        command.env("TERM_PROGRAM", "Marvis");
+        command.env("TERM_PROGRAM", "Muster");
         for (key, value) in options.env {
             command.env(key, value);
         }
@@ -147,7 +147,7 @@ impl TerminalBackend {
         let reader_session = Arc::clone(&session);
         let reader_fd = session.master_fd;
         if let Err(error) = thread::Builder::new()
-            .name("marvis-pty-reader".into())
+            .name("muster-pty-reader".into())
             .spawn(move || {
                 let _session = reader_session;
                 read_output(reader, reader_fd, &mut output)
@@ -566,7 +566,7 @@ fn finish_child(process: &mut ChildState, id: &str) -> Result<(), String> {
     }
     match start_child_reaper(process, |reaper| {
         thread::Builder::new()
-            .name("marvis-pty-reaper".into())
+            .name("muster-pty-reaper".into())
             .spawn(reaper)
             .map(drop)
     }) {
@@ -1219,9 +1219,9 @@ mod tests {
         id: &str,
     ) {
         backend
-            .write(id, b"printf '\\036MARVIS_READY\\037\\n'\n")
+            .write(id, b"printf '\\036MUSTER_READY\\037\\n'\n")
             .unwrap();
-        wait_for_output(receiver, b"\x1eMARVIS_READY\x1f", Duration::from_secs(5));
+        wait_for_output(receiver, b"\x1eMUSTER_READY\x1f", Duration::from_secs(5));
     }
 
     pub(crate) fn wait_for_output(
@@ -1434,12 +1434,12 @@ mod tests {
         backend
             .write(
                 "blocked",
-                b"stty -echo -icanon; printf '\\036MARVIS_BLOCKED\\037\\n'; sleep 30\n",
+                b"stty -echo -icanon; printf '\\036MUSTER_BLOCKED\\037\\n'; sleep 30\n",
             )
             .unwrap();
         wait_for_output(
             &blocked_receiver,
-            b"\x1eMARVIS_BLOCKED\x1f",
+            b"\x1eMUSTER_BLOCKED\x1f",
             Duration::from_secs(5),
         );
 
@@ -1478,10 +1478,10 @@ mod tests {
         backend
             .write(
                 "closing-write",
-                b"stty -echo -icanon; printf '\\036MARVIS_CLOSING\\037\\n'; sleep 30\n",
+                b"stty -echo -icanon; printf '\\036MUSTER_CLOSING\\037\\n'; sleep 30\n",
             )
             .unwrap();
-        wait_for_output(&receiver, b"\x1eMARVIS_CLOSING\x1f", Duration::from_secs(5));
+        wait_for_output(&receiver, b"\x1eMUSTER_CLOSING\x1f", Duration::from_secs(5));
         let session = backend.sessions.lock().unwrap()["closing-write"]
             .session()
             .clone();

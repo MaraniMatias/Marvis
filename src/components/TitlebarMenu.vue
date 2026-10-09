@@ -94,14 +94,14 @@ function onOpenChange(open: boolean) {
         side="bottom"
         :align="align"
         :side-offset="4"
-        class="surface-popover marvis-menu marvis-menu-scroll w-72"
+        class="surface-popover muster-menu muster-menu-scroll w-72"
       >
         <DropdownMenuFilter
           v-if="searchPlaceholder"
           v-model="query"
           :placeholder="searchPlaceholder"
           :auto-focus="true"
-          class="marvis-menu-search"
+          class="muster-menu-search"
         />
         <template v-for="(section, index) in sections" :key="sectionKey(section, index)">
           <DropdownMenuSeparator v-if="section.kind === 'separator'" class="menu-separator" />

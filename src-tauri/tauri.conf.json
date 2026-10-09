@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "Marvis",
+  "productName": "Muster",
   "version": "0.20.0",
-  "identifier": "dev.marvis.workspace",
+  "identifier": "dev.muster.workspace",
   "build": {
     "beforeDevCommand": "pnpm dev",
     "devUrl": "http://127.0.0.1:1420",
@@ -13,7 +13,7 @@
     "windows": [
       {
         "label": "main",
-        "title": "Marvis",
+        "title": "Muster",
         "width": 1280,
         "height": 800,
         "minWidth": 900,
@@ -34,7 +34,7 @@
     "targets": ["dmg", "deb", "appimage"],
     "icon": ["icons/icon.png"],
     "category": "DeveloperTool",
-    "homepage": "https://github.com/MaraniMatias/Marvis",
+    "homepage": "https://github.com/MaraniMatias/Muster",
     "copyright": "Copyright (c) 2026 Marani Matias Ezequiel",
     "shortDescription": "A focused workspace for repositories and checkouts",
     "longDescription": "Browse files, review diffs, leave notes, and keep a terminal per checkout, in one window.",
@@ -46,9 +46,9 @@
       "deb": {
         "section": "devel",
         "files": {
-          "/usr/share/doc/marvis/copyright": "../LICENSE",
-          "/usr/share/doc/marvis/THIRD-PARTY-NOTICES.txt": "../dist/licenses/THIRD-PARTY-NOTICES.txt",
-          "/usr/share/metainfo/dev.marvis.workspace.metainfo.xml": "dev.marvis.workspace.metainfo.xml"
+          "/usr/share/doc/muster/copyright": "../LICENSE",
+          "/usr/share/doc/muster/THIRD-PARTY-NOTICES.txt": "../dist/licenses/THIRD-PARTY-NOTICES.txt",
+          "/usr/share/metainfo/dev.muster.workspace.metainfo.xml": "dev.muster.workspace.metainfo.xml"
         }
       }
     }

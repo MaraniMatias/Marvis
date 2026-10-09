@@ -7,7 +7,7 @@ import { CARGO_REGISTRY_SOURCE } from "./audit-rust.mjs";
 import { packageLicenseFiles, pinnedSourceLicenseFiles } from "./build-third-party-notices.mjs";
 
 function fixture(t) {
-  const base = mkdtempSync(join(tmpdir(), "marvis-license-files-"));
+  const base = mkdtempSync(join(tmpdir(), "muster-license-files-"));
   const dependency = join(base, "dependency");
   mkdirSync(dependency);
   t.after(() => rmSync(base, { recursive: true, force: true }));

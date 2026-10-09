@@ -13,7 +13,7 @@ import { ligatureRanges } from "./ligature-joiner";
  * rasterized per glyph from this string: a face that is not in it gets a tofu box or a borrowed
  * face drawn at the cell width, and a statusline is mostly separators.
  */
-export const TERMINAL_FONT_FAMILY = '"Marvis Nerd Mono", "Marvis Nerd Icons", monospace';
+export const TERMINAL_FONT_FAMILY = '"Muster Nerd Mono", "Muster Nerd Icons", monospace';
 
 /**
  * A character from the icon face, asked for by name.
@@ -42,8 +42,8 @@ export function terminalFontSize(fontSize: number, zoom: number): number {
 /**
  * The terminal's colors, read out of the stylesheet rather than written here (B.1).
  *
- * Every color xterm.js wants is a `--marvis-*` token, so this is a table of what to ask for rather
- * than a palette: the two themes live in `src/marvis.css` and switching between them is a matter
+ * Every color xterm.js wants is a `--muster-*` token, so this is a table of what to ask for rather
+ * than a palette: the two themes live in `src/muster.css` and switching between them is a matter
  * of reading the same names again. A name the stylesheet does not answer is left out instead of
  * defaulted here, which leaves xterm.js to draw that one with its own color rather than to paint it
  * with a value nothing else in the app agrees on.
@@ -53,27 +53,27 @@ export function terminalFontSize(fontSize: number, zoom: number): number {
  * pretending the canvas is not painted.
  */
 const TERMINAL_THEME_TOKENS = {
-  background: "--marvis-content-bg-0",
-  foreground: "--marvis-content-text",
-  cursor: "--marvis-cursor",
-  cursorAccent: "--marvis-content-bg-0",
-  selectionBackground: "--marvis-selection",
-  black: "--marvis-ansi-black",
-  red: "--marvis-ansi-red",
-  green: "--marvis-ansi-green",
-  yellow: "--marvis-ansi-yellow",
-  blue: "--marvis-ansi-blue",
-  magenta: "--marvis-ansi-magenta",
-  cyan: "--marvis-ansi-cyan",
-  white: "--marvis-ansi-white",
-  brightBlack: "--marvis-ansi-bright-black",
-  brightRed: "--marvis-ansi-bright-red",
-  brightGreen: "--marvis-ansi-bright-green",
-  brightYellow: "--marvis-ansi-bright-yellow",
-  brightBlue: "--marvis-ansi-bright-blue",
-  brightMagenta: "--marvis-ansi-bright-magenta",
-  brightCyan: "--marvis-ansi-bright-cyan",
-  brightWhite: "--marvis-ansi-bright-white",
+  background: "--muster-content-bg-0",
+  foreground: "--muster-content-text",
+  cursor: "--muster-cursor",
+  cursorAccent: "--muster-content-bg-0",
+  selectionBackground: "--muster-selection",
+  black: "--muster-ansi-black",
+  red: "--muster-ansi-red",
+  green: "--muster-ansi-green",
+  yellow: "--muster-ansi-yellow",
+  blue: "--muster-ansi-blue",
+  magenta: "--muster-ansi-magenta",
+  cyan: "--muster-ansi-cyan",
+  white: "--muster-ansi-white",
+  brightBlack: "--muster-ansi-bright-black",
+  brightRed: "--muster-ansi-bright-red",
+  brightGreen: "--muster-ansi-bright-green",
+  brightYellow: "--muster-ansi-bright-yellow",
+  brightBlue: "--muster-ansi-bright-blue",
+  brightMagenta: "--muster-ansi-bright-magenta",
+  brightCyan: "--muster-ansi-bright-cyan",
+  brightWhite: "--muster-ansi-bright-white",
 } as const;
 
 /**
@@ -83,7 +83,7 @@ const TERMINAL_THEME_TOKENS = {
  * repaints on `options.theme` and keeps its buffer, so the PTY behind it is never told anything and
  * no session is lost to a change of palette.
  */
-export function marvisTerminalTheme(): ITheme {
+export function musterTerminalTheme(): ITheme {
   const computed = getComputedStyle(document.documentElement);
   const theme: ITheme = {};
   for (const [name, token] of Object.entries(TERMINAL_THEME_TOKENS)) {
@@ -108,11 +108,11 @@ export type RendererLevel = "webgl" | "dom";
  * The scale is a parameter because the terminal's cell size has to be the size it is drawn at
  * before it is ever opened: a terminal built at the unscaled cell and scaled afterwards spends
  * its first frame measuring a grid that is already the wrong size. The size and the cursor are
- * preferences from `~/.marvis/config.yml`, read here for the same reason; the ligatures are not,
+ * preferences from `~/.muster/config.yml`, read here for the same reason; the ligatures are not,
  * because the joiner only exists once the terminal is on the page.
  *
  * The cursor's shape is a preference from the same file, and the shape it opens on is a block: a
- * cell filled with the theme's `--marvis-cursor` and the glyph under it in the background, so the
+ * cell filled with the theme's `--muster-cursor` and the glyph under it in the background, so the
  * caret is the one thing on the page drawn the other way round. Whether it blinks is the other
  * half of that choice, and a program that asks for another shape through DECSCUSR is answered out
  * of this one rather than fought with it.
@@ -122,7 +122,7 @@ export type RendererLevel = "webgl" | "dom";
  * the focused shape, which says so in shape rather than in a color that has to differ from the
  * focused one.
  */
-export function createMarvisTerminal(
+export function createMusterTerminal(
   fontSize = 16,
   cursorBlink = true,
   cursorStyle: TerminalCursorStyle = "block",
@@ -137,7 +137,7 @@ export function createMarvisTerminal(
     fontSize: terminalFontSize(fontSize, zoom),
     lineHeight: 1.2,
     scrollback: 10000,
-    theme: marvisTerminalTheme(),
+    theme: musterTerminalTheme(),
   });
   // Widths and combining marks as Unicode 11 sees them, so emoji and CJK stop breaking the
   // grid that Neovim and the agent TUI draw their panels on. It has to be the active version
@@ -173,7 +173,7 @@ export function preloadTerminalFonts(): Promise<unknown> {
   terminalFonts ??= Promise.allSettled([
     document.fonts.load(`16px ${TERMINAL_FONT_FAMILY}`),
     document.fonts.load(`700 16px ${TERMINAL_FONT_FAMILY}`),
-    document.fonts.load(`16px "Marvis Nerd Icons"`, ICON_PROBE),
+    document.fonts.load(`16px "Muster Nerd Icons"`, ICON_PROBE),
   ]);
   return terminalFonts;
 }

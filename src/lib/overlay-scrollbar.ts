@@ -1,5 +1,5 @@
 /**
- * Where the thumb of a Marvis overlay scrollbar goes.
+ * Where the thumb of a Muster overlay scrollbar goes.
  *
  * The arithmetic is the scrollbar every desktop has had for thirty years: the thumb is as much of
  * the track as the viewport is of the content, never smaller than a thumb you can catch, and its

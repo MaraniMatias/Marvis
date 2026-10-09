@@ -1,5 +1,5 @@
 /**
- * The preferences the Settings dialog owns, in the shape they are written to `~/.marvis/config.yml`.
+ * The preferences the Settings dialog owns, in the shape they are written to `~/.muster/config.yml`.
  *
  * They are preferences rather than layout: a person sets them once and forgets they made them, so
  * they live in a file they can open and edit, not in the database that remembers which checkouts
@@ -46,7 +46,7 @@ export interface TerminalSettings {
   ligatures: boolean;
   cursorBlink: boolean;
   /**
-   * The shape of the cursor. A block by default: it is filled with the theme's `--marvis-cursor`
+   * The shape of the cursor. A block by default: it is filled with the theme's `--muster-cursor`
    * and the glyph under it is the surface, so a caret is the one thing on the page drawn the other
    * way round, and a bar is the quieter answer for a person who would rather not have a cell of
    * their screen filled in.

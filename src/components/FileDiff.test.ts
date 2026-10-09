@@ -620,7 +620,7 @@ describe("FileDiff", () => {
     // The row height is handed to the stylesheet and the arithmetic from the same number, so a row
     // cannot end up taller than the padding that stands in for the rows that are not on screen.
     expect(wrapper.get('[aria-label="Diff contents"]').attributes("style")).toContain(
-      `--marvis-diff-row-height: ${row}px`,
+      `--muster-diff-row-height: ${row}px`,
     );
     expect(wrapper.get('[data-testid="diff-font-size"]').text()).toBe("20");
     wrapper.unmount();
@@ -722,7 +722,7 @@ describe("FileDiff", () => {
   it("hands the library the two texts of the file, which is what its grammar reads", async () => {
     // A grammar reads a file, not a hunk of one: the lines inside `<script setup lang="ts">` of a
     // `.vue` file are markup to a grammar that was never shown the tag that opened them. So what
-    // arrives with the patch is the whole of each side, under the name Marvis calls the language.
+    // arrives with the patch is the whole of each side, under the name Muster calls the language.
     const wrapper = mountDiff({});
     await vi.waitFor(() => expect(mocks.prepared).toHaveLength(1));
     expect(mocks.prepared[0]).toEqual({
@@ -787,7 +787,7 @@ describe("FileDiff", () => {
     wrapper.unmount();
   });
 
-  it("hands the library a highlighter, which is the only way it highlights with Marvis' grammars", async () => {
+  it("hands the library a highlighter, which is the only way it highlights with Muster' grammars", async () => {
     // The diff is highlighted by the same grammars the editor reads with, and the library takes a
     // replacement only through this prop. It arrives a moment after the diff does, because a grammar
     // is a dynamic import and a file is read in one, and holding the text back for either would cost
@@ -1017,8 +1017,8 @@ describe("FileDiff", () => {
     const wrapper = mountDiff({ review: reviewApi([note()]) }, many.sender);
     await flushPromises();
 
-    expect(wrapper.get('[data-testid="send-review"]').classes()).toContain("marvis-button-md");
-    expect(wrapper.get('[data-testid="send-target"]').classes()).toContain("marvis-select");
+    expect(wrapper.get('[data-testid="send-review"]').classes()).toContain("muster-button-md");
+    expect(wrapper.get('[data-testid="send-target"]').classes()).toContain("muster-select");
     expect(wrapper.find(".session-target-menu").exists()).toBe(true);
     expect(wrapper.get('[data-testid="send-target"]').attributes("title")).toBe(longTitle);
     const options = wrapper.findAll(SESSION_OPTION);

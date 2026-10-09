@@ -9,7 +9,7 @@ import {
 } from "./ui-state";
 
 describe("persisted UI state", () => {
-  it("keeps the marvis default panel widths", () => {
+  it("keeps the muster default panel widths", () => {
     expect(DEFAULT_APP_LAYOUT).toEqual({
       mode: "focus",
       sidebarWidth: 240,

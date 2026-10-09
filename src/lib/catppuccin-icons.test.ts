@@ -8,7 +8,7 @@ import { CATPPUCCIN_ICON_MARKUP } from "./catppuccin-icons";
  * Read rather than imported: vitest hands back an empty string for a stylesheet it does not run,
  * and an empty table would make every assertion below pass for the wrong reason.
  */
-const stylesheet = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "marvis.css"), "utf8");
+const stylesheet = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "muster.css"), "utf8");
 
 /** Where each palette lives: the dark half is the `:root` block ahead of the light override. */
 const light = stylesheet.indexOf(':root[data-theme="light"]');
@@ -23,7 +23,7 @@ const tokens = [
     [
       ...Object.values(CATPPUCCIN_ICON_MARKUP)
         .join("")
-        .matchAll(/var\((--marvis-icon-[a-z0-9-]+)\)/g),
+        .matchAll(/var\((--muster-icon-[a-z0-9-]+)\)/g),
     ].map(([, token]) => token),
   ),
 ];

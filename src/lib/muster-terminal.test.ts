@@ -5,20 +5,20 @@ import { fileURLToPath } from "node:url";
 import { beforeEach, afterEach, describe, expect, it, vi } from "vitest";
 import {
   attachTerminalRenderer,
-  createMarvisTerminal,
+  createMusterTerminal,
   enableTerminalSelectionCopy,
-  marvisTerminalTheme,
+  musterTerminalTheme,
   setTerminalLigatures,
   watchTerminalRendererRecovery,
   MAX_RENDERER_RECOVERIES,
-} from "./marvis-terminal";
+} from "./muster-terminal";
 
 /**
  * The token table as it is written down. Read from disk rather than imported, because vitest hands
  * back an empty string for a stylesheet it does not run, and an empty table would make every
  * assertion below pass for the wrong reason.
  */
-const stylesheet = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "marvis.css"), "utf8");
+const stylesheet = readFileSync(join(dirname(fileURLToPath(import.meta.url)), "..", "muster.css"), "utf8");
 
 const stubs = vi.hoisted(() => ({
   loaded: [] as string[],
@@ -134,7 +134,7 @@ function fakeTerminal() {
   return new FakeTerminal({});
 }
 
-describe("createMarvisTerminal", () => {
+describe("createMusterTerminal", () => {
   beforeEach(() => {
     stubs.loaded = [];
     stubs.webglFails = false;
@@ -144,7 +144,7 @@ describe("createMarvisTerminal", () => {
 
   // B.1: the face and the colors come from the tokens; the size and the cursor are preferences.
   it("builds the terminal the panel has always drawn", () => {
-    createMarvisTerminal();
+    createMusterTerminal();
 
     expect(stubs.terminal?.options).toMatchObject({
       allowProposedApi: true,
@@ -155,7 +155,7 @@ describe("createMarvisTerminal", () => {
       cursorInactiveStyle: "outline",
       // Icons behind the text face: the atlas is rasterized per glyph from this string, so a
       // family that is not in it draws a statusline's separators as tofu.
-      fontFamily: '"Marvis Nerd Mono", "Marvis Nerd Icons", monospace',
+      fontFamily: '"Muster Nerd Mono", "Muster Nerd Icons", monospace',
       fontSize: 16,
       lineHeight: 1.2,
       scrollback: 10000,
@@ -163,21 +163,21 @@ describe("createMarvisTerminal", () => {
   });
 
   it("paints itself out of the stylesheet rather than out of a palette of its own", () => {
-    // Every color is a `--marvis-*` token, so which one arrives is the theme's answer rather than
+    // Every color is a `--muster-*` token, so which one arrives is the theme's answer rather than
     // this file's: a terminal opened in the light palette gets the light one without a second copy
     // of the values anywhere.
     const style = document.createElement("style");
-    style.textContent = `:root { --marvis-content-bg-0: #282c33; --marvis-content-text: #dce0e5; --marvis-cursor: #c2c9f1; }
-      :root[data-theme="light"] { --marvis-content-bg-0: #fafafa; --marvis-content-text: #242529; --marvis-cursor: #242529; }`;
+    style.textContent = `:root { --muster-content-bg-0: #282c33; --muster-content-text: #dce0e5; --muster-cursor: #c2c9f1; }
+      :root[data-theme="light"] { --muster-content-bg-0: #fafafa; --muster-content-text: #242529; --muster-cursor: #242529; }`;
     document.head.append(style);
     try {
       // The cursor pair is the requirement rather than a detail of the palette: the cursor is the
-      // theme's own `--marvis-cursor` and the glyph under a block is the theme's background, so a
+      // theme's own `--muster-cursor` and the glyph under a block is the theme's background, so a
       // cell with default colors under the cursor is drawn inverted and neither value is written
       // here. Two values rather than one per cell, because a cell that arrives with a color of its
       // own does not hand it to the block.
       document.documentElement.dataset.theme = "dark";
-      expect(marvisTerminalTheme()).toMatchObject({
+      expect(musterTerminalTheme()).toMatchObject({
         background: "#282c33",
         foreground: "#dce0e5",
         cursor: "#c2c9f1",
@@ -185,7 +185,7 @@ describe("createMarvisTerminal", () => {
       });
 
       document.documentElement.dataset.theme = "light";
-      expect(marvisTerminalTheme()).toMatchObject({
+      expect(musterTerminalTheme()).toMatchObject({
         background: "#fafafa",
         foreground: "#242529",
         cursor: "#242529",
@@ -197,7 +197,7 @@ describe("createMarvisTerminal", () => {
   });
 
   it("builds the terminal at the size and cursor the settings ask for", () => {
-    createMarvisTerminal(20, false, "underline", 1.2);
+    createMusterTerminal(20, false, "underline", 1.2);
 
     // The size is the preference's own, multiplied by the window's scale: the terminal's host
     // cancels the scale out so the grid is measured in screen pixels, which means the cell has to
@@ -207,15 +207,15 @@ describe("createMarvisTerminal", () => {
 
   it("hands xterm.js a full ANSI palette, and every color of it out of the stylesheet", () => {
     // The names are read out of the real stylesheet rather than listed here, because the list that
-    // matters is the one `marvis.css` carries: a token renamed there has to take this down with it,
+    // matters is the one `muster.css` carries: a token renamed there has to take this down with it,
     // and xterm.js' own palette — which is not this window's — is what a missing one falls back to.
-    const names = [...new Set([...stylesheet.matchAll(/(--marvis-[a-z0-9-]+):/g)].map(([, name]) => name))];
+    const names = [...new Set([...stylesheet.matchAll(/(--muster-[a-z0-9-]+):/g)].map(([, name]) => name))];
     const colors = names.map((_, index) => `#${(index + 1).toString(16).padStart(6, "0")}`);
     const style = document.createElement("style");
     style.textContent = `:root { ${names.map((name, index) => `${name}: ${colors[index]};`).join(" ")} }`;
     document.head.append(style);
     try {
-      const theme = marvisTerminalTheme();
+      const theme = musterTerminalTheme();
 
       expect(Object.keys(theme).sort()).toEqual([
         "background",
@@ -247,7 +247,7 @@ describe("createMarvisTerminal", () => {
   });
 
   it("turns on Unicode 11 and the clipboard handler before the first render", () => {
-    const terminal = createMarvisTerminal() as unknown as FakeTerminal;
+    const terminal = createMusterTerminal() as unknown as FakeTerminal;
 
     // Both are proposed API in 6.0, and both change how the terminal measures itself or answers
     // a paste, so they have to be in place before it is on the page.
@@ -258,7 +258,7 @@ describe("createMarvisTerminal", () => {
 
 describe("setTerminalLigatures", () => {
   it("registers the joiner that draws the programming ligatures", () => {
-    const terminal = createMarvisTerminal() as unknown as FakeTerminal;
+    const terminal = createMusterTerminal() as unknown as FakeTerminal;
 
     setTerminalLigatures(terminal as never, true);
 
@@ -269,7 +269,7 @@ describe("setTerminalLigatures", () => {
   });
 
   it("takes the joiner back when the preference is switched off, and puts it back", () => {
-    const terminal = createMarvisTerminal() as unknown as FakeTerminal;
+    const terminal = createMusterTerminal() as unknown as FakeTerminal;
 
     setTerminalLigatures(terminal as never, true);
     setTerminalLigatures(terminal as never, false);
@@ -284,7 +284,7 @@ describe("setTerminalLigatures", () => {
   });
 
   it("does not take the terminal down when xterm.js refuses the joiner", () => {
-    const terminal = createMarvisTerminal() as unknown as FakeTerminal;
+    const terminal = createMusterTerminal() as unknown as FakeTerminal;
     terminal.joinerFailures = true;
 
     expect(() => setTerminalLigatures(terminal as never, true)).not.toThrow();
@@ -590,7 +590,7 @@ describe("preloadTerminalFonts", () => {
       },
       configurable: true,
     });
-    const { preloadTerminalFonts } = await import("./marvis-terminal");
+    const { preloadTerminalFonts } = await import("./muster-terminal");
     return preloadTerminalFonts();
   }
 
@@ -598,7 +598,7 @@ describe("preloadTerminalFonts", () => {
   // the answer is kept. Without this, every panel re-parses 1.1MB of woff2 on its own mount.
   it("asks for every bundled face once and hands every later caller the same promise", async () => {
     await freshPreload(() => Promise.resolve([]));
-    const { preloadTerminalFonts } = await import("./marvis-terminal");
+    const { preloadTerminalFonts } = await import("./muster-terminal");
     const first = preloadTerminalFonts();
     const second = preloadTerminalFonts();
 
@@ -606,9 +606,9 @@ describe("preloadTerminalFonts", () => {
     // The icon face is asked for by name and with a character it has, because a family list is
     // where to look rather than a request, and a face holding only icons covers no space.
     expect(stubs.fontLoads).toEqual([
-      ['16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace', undefined],
-      ['700 16px "Marvis Nerd Mono", "Marvis Nerd Icons", monospace', undefined],
-      ['16px "Marvis Nerd Icons"', "\uE0B0"],
+      ['16px "Muster Nerd Mono", "Muster Nerd Icons", monospace', undefined],
+      ['700 16px "Muster Nerd Mono", "Muster Nerd Icons", monospace', undefined],
+      ['16px "Muster Nerd Icons"', "\uE0B0"],
     ]);
     await expect(first).resolves.toHaveLength(3);
   });

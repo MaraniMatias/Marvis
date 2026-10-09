@@ -68,7 +68,7 @@ function tokensByLine(view: EditorView): Map<string, string[]> {
 
 /**
  * The color the editor actually painted a token with, read back out of the injected stylesheet. It
- * is whatever the rule carries: a hex, or the `var(--marvis-syntax-*)` the theme resolves.
+ * is whatever the rule carries: a hex, or the `var(--muster-syntax-*)` the theme resolves.
  */
 function colorForSpan(span: Element): string | undefined {
   const classes = span.className.split(/\s+/);
@@ -77,7 +77,7 @@ function colorForSpan(span: Element): string | undefined {
     .map((style) => style.textContent ?? "")
     .join("}");
   for (const block of css.split("}")) {
-    const rule = block.match(/^\s*\.(.+?)\s*\{\s*(?:color:\s*(#[0-9a-f]{3,8}|var\(--marvis-[a-z0-9-]+\)))?/i);
+    const rule = block.match(/^\s*\.(.+?)\s*\{\s*(?:color:\s*(#[0-9a-f]{3,8}|var\(--muster-[a-z0-9-]+\)))?/i);
     if (rule?.[2] && rule[1].split(/\s+/).some((name) => classes.includes(name))) return rule[2];
   }
   return undefined;
@@ -127,8 +127,8 @@ describe("code editor", () => {
 
     // A key and its value are YAML, so they take the colors YAML gives them rather than the flat
     // text the Markdown grammar would leave the block as. The comment is YAML's too.
-    expect(colorPaintedOn(view, "name")).toBe("var(--marvis-syntax-token-constant)");
-    expect(colorPaintedOn(view, "# a note")).toBe("var(--marvis-syntax-token-comment)");
+    expect(colorPaintedOn(view, "name")).toBe("var(--muster-syntax-token-constant)");
+    expect(colorPaintedOn(view, "# a note")).toBe("var(--muster-syntax-token-comment)");
 
     // The document behind the block is still read as Markdown: a heading is still a heading.
     expect(nodeNames(view)).toContain("ATXHeading1");
@@ -137,7 +137,7 @@ describe("code editor", () => {
   it("keeps CRLF front matter and following Markdown aligned", () => {
     const view = mount("markdown", ["---", "name: tamis", "...", "# Tamis"].join("\r\n"));
 
-    expect(colorPaintedOn(view, "name")).toBe("var(--marvis-syntax-token-constant)");
+    expect(colorPaintedOn(view, "name")).toBe("var(--muster-syntax-token-constant)");
     expect(nodeNames(view)).toContain("ATXHeading1");
   });
 
@@ -209,7 +209,7 @@ describe("code editor", () => {
 
     const atBound = mount("markdown", block(FRONT_MATTER_SCAN_LINES));
     expect(forceParsing(atBound, atBound.state.doc.length)).toBe(true);
-    expect(colorPaintedOn(atBound, "key0")).toBe("var(--marvis-syntax-token-constant)");
+    expect(colorPaintedOn(atBound, "key0")).toBe("var(--muster-syntax-token-constant)");
 
     const pastBound = mount("markdown", block(FRONT_MATTER_SCAN_LINES + 1));
     expect(forceParsing(pastBound, pastBound.state.doc.length)).toBe(true);
@@ -222,11 +222,11 @@ describe("code editor", () => {
     // The tokens are the ones the Shiki theme names for the same grammar, so a file stops changing
     // color when it becomes editable — and `var()` rather than a hex, which is what makes the same
     // markup readable in either palette without a second render.
-    expect(colorPaintedOn(view, "const")).toBe("var(--marvis-syntax-token-keyword)");
-    expect(colorPaintedOn(view, "answer")).toBe("var(--marvis-syntax-foreground)");
-    expect(colorPaintedOn(view, "number")).toBe("var(--marvis-syntax-token-string-expression)");
-    expect(colorPaintedOn(view, "42")).toBe("var(--marvis-syntax-token-constant)");
-    expect(colorPaintedOn(view, "// note")).toBe("var(--marvis-syntax-token-comment)");
+    expect(colorPaintedOn(view, "const")).toBe("var(--muster-syntax-token-keyword)");
+    expect(colorPaintedOn(view, "answer")).toBe("var(--muster-syntax-foreground)");
+    expect(colorPaintedOn(view, "number")).toBe("var(--muster-syntax-token-string-expression)");
+    expect(colorPaintedOn(view, "42")).toBe("var(--muster-syntax-token-constant)");
+    expect(colorPaintedOn(view, "// note")).toBe("var(--muster-syntax-token-comment)");
   });
 
   it("paints every token with a token, and with no palette of its own", () => {
@@ -250,7 +250,7 @@ describe("code editor", () => {
 
       expect({ language, painted }).toEqual({
         language,
-        painted: painted.filter((color) => color.startsWith("var(--marvis-")),
+        painted: painted.filter((color) => color.startsWith("var(--muster-")),
       });
     }
   });
@@ -388,7 +388,7 @@ describe("the lines the checkout has changed", () => {
 
     // The line itself can lose the tint to the editor's active-line background, so the dot is what
     // carries the mark on the line somebody is standing on.
-    expect(view.dom.querySelector(".marvis-changed-line-marker")).not.toBeNull();
+    expect(view.dom.querySelector(".muster-changed-line-marker")).not.toBeNull();
   });
 
   it("keeps a mark on its own line as the text above it is edited", () => {
@@ -427,7 +427,7 @@ describe("the lines the checkout has changed", () => {
     setEditorChangedLines(view, []);
 
     expect(changedTexts(view)).toEqual([]);
-    expect(view.dom.querySelector(".marvis-changed-line-marker")).toBeNull();
+    expect(view.dom.querySelector(".muster-changed-line-marker")).toBeNull();
   });
 
   it("does nothing to a view this build did not build", () => {

@@ -1,11 +1,11 @@
 [package]
-name = "marvis"
+name = "muster"
 version = "0.20.0"
 description = "A focused workspace for repositories and checkouts"
 authors = ["Marani Matias Ezequiel"]
 license = "MIT"
-homepage = "https://github.com/MaraniMatias/Marvis"
-repository = "https://github.com/MaraniMatias/Marvis"
+homepage = "https://github.com/MaraniMatias/Muster"
+repository = "https://github.com/MaraniMatias/Muster"
 edition = "2021"
 
 [build-dependencies]
@@ -16,7 +16,7 @@ base64 = "0.22"
 roxmltree = "0.21"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-# `~/.marvis/config.yml`, written by the Settings dialog and hand-editable, so it is read as YAML
+# `~/.muster/config.yml`, written by the Settings dialog and hand-editable, so it is read as YAML
 # rather than as JSON: a person opening the file should be able to read it.
 serde_yaml = { package = "serde_yaml_ng", version = "0.10" }
 tauri = { version = "2", features = [] }

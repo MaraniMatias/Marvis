@@ -406,7 +406,7 @@ watch(
 
       <div v-if="!activeView" class="session-empty grid h-full place-items-center p-6 text-center">
         <div class="max-w-md">
-          <p class="text-sm text-(--marvis-text-dim)">
+          <p class="text-sm text-(--muster-text-dim)">
             {{
               checkout?.isMissing
                 ? `Directory missing: ${checkout.path}`
@@ -436,7 +436,7 @@ watch(
             <PlusIcon class="size-3.5 shrink-0" aria-hidden="true" />
             {{ isOpening ? "Opening…" : "Open directory" }}
           </Button>
-          <span v-else-if="isStarting" class="mt-3 block text-xs text-(--marvis-text-faint)" role="status">
+          <span v-else-if="isStarting" class="mt-3 block text-xs text-(--muster-text-faint)" role="status">
             Starting session…
           </span>
         </div>

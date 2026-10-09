@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
-const temporaryRoot = mkdtempSync(join(tmpdir(), "marvis-load-benchmark-"));
+const temporaryRoot = mkdtempSync(join(tmpdir(), "muster-load-benchmark-"));
 const child = spawn(
   "cargo",
   [

@@ -1,8 +1,8 @@
 /**
- * What Marvis is built out of, and the licence each piece travels under.
+ * What Muster is built out of, and the licence each piece travels under.
  *
  * These are not preferences, which is why they are not in `SETTINGS_SECTIONS`: nothing here is
- * written to `~/.marvis/config.yml`, nothing is restored, and changing your mind about it is not
+ * written to `~/.muster/config.yml`, nothing is restored, and changing your mind about it is not
  * what anybody means to do. They are a record of fact about the build, so they live in their own
  * module and the About section draws them.
  *
@@ -17,7 +17,7 @@
 export interface CreditsEntry {
   /** The name the project ships under, so a person reading this can find it. */
   name: string;
-  /** What it does for Marvis, in a line: a list of names says nothing about why any of them is here. */
+  /** What it does for Muster, in a line: a list of names says nothing about why any of them is here. */
   role: string;
   /** The licence, spelled the way the project spells it, because that is what the notice has to say. */
   license: string;
@@ -134,7 +134,7 @@ export const CREDITS: CreditsGroup[] = [ARTWORK, COLORS, TYPE, LIBRARIES];
  * what is on screen.
  */
 export const ACKNOWLEDGEMENT =
-  "Marvis is MIT licensed. Most of what is drawn in it is not ours: the icons, the colors, the " +
+  "Muster is MIT licensed. Most of what is drawn in it is not ours: the icons, the colors, the " +
   "typeface and the libraries all belong to the projects named in the credits, each under a " +
   "licence that allows this use. Marani Matias Ezequiel built the rest.";
 
@@ -156,4 +156,4 @@ export const CREDITS_TITLE = "Credits and licences";
  * surface, so there is no "Copy Link Address" to fall back on. It is also the same address the
  * macOS About panel carries as a link, so the two agree about where this is.
  */
-export const REPOSITORY = "https://github.com/MaraniMatias/Marvis";
+export const REPOSITORY = "https://github.com/MaraniMatias/Muster";

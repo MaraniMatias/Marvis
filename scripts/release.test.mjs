@@ -20,15 +20,15 @@ const RELEASE_SHELL = fileURLToPath(new URL("./release.sh", import.meta.url));
 const WORKFLOW_DIR = fileURLToPath(new URL("../.github/workflows/", import.meta.url));
 
 function fixture(t, lockVersion = "0.9.0") {
-  const cwd = mkdtempSync(join(tmpdir(), "marvis-release-"));
+  const cwd = mkdtempSync(join(tmpdir(), "muster-release-"));
   t.after(() => rmSync(cwd, { recursive: true, force: true }));
   mkdirSync(join(cwd, "src-tauri"));
   writeFileSync(join(cwd, "package.json"), '{\n  "version": "0.9.0"\n}\n');
   writeFileSync(join(cwd, "src-tauri", "tauri.conf.json"), '{\n  "version": "0.9.0"\n}\n');
-  writeFileSync(join(cwd, "src-tauri", "Cargo.toml"), '[package]\nname = "marvis"\nversion = "0.9.0"\n');
+  writeFileSync(join(cwd, "src-tauri", "Cargo.toml"), '[package]\nname = "muster"\nversion = "0.9.0"\n');
   writeFileSync(
     join(cwd, "src-tauri", "Cargo.lock"),
-    `version = 4\n\n[[package]]\nname = "marvis"\nversion = "${lockVersion}"\n`,
+    `version = 4\n\n[[package]]\nname = "muster"\nversion = "${lockVersion}"\n`,
   );
   execFileSync("git", ["init", "-q"], { cwd });
   execFileSync("git", ["config", "user.name", "Release Test"], { cwd });
@@ -89,7 +89,7 @@ test("tagged recovery skips builds and requires the retained final artifact", ()
     ),
   );
   assert.ok(workflow.includes('[[ "$VALIDATION_ONLY" != true ]] ||'));
-  const tagIdentity = 'expected_tag_subject="Marvis $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"';
+  const tagIdentity = 'expected_tag_subject="Muster $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"';
   assert.equal(workflow.split(tagIdentity).length - 1, 2);
   assert.ok(workflow.includes('notes=(--notes "$curated")'));
   assert.ok(workflow.includes('--generate-notes "${notes[@]}"'));
@@ -128,7 +128,7 @@ test("--bump writes all four versions without Git or tag side effects", (t) => {
     " M src-tauri/Cargo.toml",
     " M src-tauri/tauri.conf.json",
   ]);
-  assert.match(readFileSync(join(cwd, "src-tauri", "Cargo.lock"), "utf8"), /name = "marvis"\nversion = "0\.10\.0"/);
+  assert.match(readFileSync(join(cwd, "src-tauri", "Cargo.lock"), "utf8"), /name = "muster"\nversion = "0\.10\.0"/);
   const check = run(cwd, "--check", "v0.10.0");
   assert.equal(check.status, 0);
   assert.match(check.stdout, /every version file is 0\.10\.0, matching v0\.10\.0/);
@@ -226,12 +226,12 @@ function releaseFixture(t) {
   git(cwd, "add", "scripts");
   git(cwd, "commit", "-qm", "fixture release scripts");
   git(cwd, "branch", "-M", "main");
-  const remote = mkdtempSync(join(tmpdir(), "marvis-release-remote-"));
+  const remote = mkdtempSync(join(tmpdir(), "muster-release-remote-"));
   t.after(() => rmSync(remote, { recursive: true, force: true }));
   execFileSync("git", ["init", "--bare", "-q", remote]);
   git(cwd, "remote", "add", "origin", remote);
   git(cwd, "push", "-q", "-u", "origin", "main");
-  const bin = mkdtempSync(join(tmpdir(), "marvis-release-bin-"));
+  const bin = mkdtempSync(join(tmpdir(), "muster-release-bin-"));
   t.after(() => rmSync(bin, { recursive: true, force: true }));
   const ghLog = join(bin, "gh.log");
   const bunLog = join(bin, "bun.log");
@@ -433,7 +433,7 @@ test("retry of an already tagged matching release reuses its original workflow",
   git(f.cwd, "add", "package.json", "src-tauri/Cargo.toml", "src-tauri/Cargo.lock", "src-tauri/tauri.conf.json");
   git(f.cwd, "commit", "-qm", "chore: release v0.10.0");
   const sha = git(f.cwd, "rev-parse", "HEAD");
-  git(f.cwd, "tag", "-a", "v0.10.0", "-m", "Marvis v0.10.0 at " + sha + "; workflow run 101");
+  git(f.cwd, "tag", "-a", "v0.10.0", "-m", "Muster v0.10.0 at " + sha + "; workflow run 101");
   git(f.cwd, "push", "-q", "origin", "main");
   git(f.cwd, "push", "-q", "origin", "refs/tags/v0.10.0");
   const tagObject = git(f.cwd, "rev-parse", "refs/tags/v0.10.0");

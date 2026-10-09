@@ -1,6 +1,6 @@
 use serde::Serialize;
 
-/// One OpenCode session Marvis knows about, scoped to the checkout that owns it.
+/// One OpenCode session Muster knows about, scoped to the checkout that owns it.
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct AgentSession {
@@ -84,7 +84,7 @@ pub struct AgentEvent {
 #[derive(Debug, Clone, Copy, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub enum AgentEventKind {
-    /// Anything Marvis does not model yet. The UI ignores it safely.
+    /// Anything Muster does not model yet. The UI ignores it safely.
     Unknown,
     /// A turn started: `session.execution.started` or a new `session.step.started`.
     TurnStarted,
@@ -125,7 +125,7 @@ impl AgentStatus {
 ///
 /// v2.0.18 has no `session.execution.completed`, only the `*.failed` variants, and no
 /// `session.idle` event at all: idleness is `time.idle` on the session object. So a turn
-/// is "finished" only when the server says so, and Marvis must not infer it from silence.
+/// is "finished" only when the server says so, and Muster must not infer it from silence.
 pub fn agent_event_kind(raw_type: &str) -> AgentEventKind {
     match raw_type {
         "session.execution.started" | "session.step.started" => AgentEventKind::TurnStarted,
@@ -177,7 +177,7 @@ mod tests {
     }
 
     #[test]
-    fn ignores_types_marvis_does_not_model() {
+    fn ignores_types_muster_does_not_model() {
         for raw in [
             "server.connected",
             "mcp.status.changed",

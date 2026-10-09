@@ -929,7 +929,7 @@ impl GitWatcherManager {
         let worker_plan = plan.clone();
         let worker_registration_id = registration_id.clone();
         thread::Builder::new()
-            .name("marvis-git-watch".into())
+            .name("muster-git-watch".into())
             .spawn(move || {
                 loop {
                     match receive_debounced_change(&inbox, WATCH_DEBOUNCE, WATCH_MAX_BATCH) {
@@ -1114,7 +1114,7 @@ fn affected_checkouts(plan: &RepoWatchPlan, event: &notify::Event) -> Option<Wat
             }
         }
         if let Some((root, checkout_id)) = longest_path_match(&plan.roots, path) {
-            // Marvis's default location is inside the repository root. Until the registration
+            // Muster's default location is inside the repository root. Until the registration
             // event has brought a new worktree into the plan, its files would look like primary
             // checkout edits; ignore that reserved folder and let the shared Git metadata event
             // add its real root to the next watch plan.
@@ -1260,7 +1260,7 @@ fn ignored_paths(root: &Path, paths: &[PathBuf]) -> Option<usize> {
 ///
 /// Git registers a linked worktree as `<common>/worktrees/<name>`, and it does so whichever hand
 /// added it: a worktree an agent created with `git worktree add` in a terminal is registered the
-/// same way one Marvis created itself is, so the same write is what the sidebar has to notice.
+/// same way one Muster created itself is, so the same write is what the sidebar has to notice.
 ///
 /// The registration is also where a checkout does its own bookkeeping, and that is the part to
 /// refuse. A `git add` creates `index.lock` and rewrites `index`, a commit moves `HEAD`, and a
@@ -2215,7 +2215,7 @@ fn run_capped_git<const N: usize>(
     let over_cap = Arc::new(AtomicBool::new(false));
     let pipe = match drain_pipe(
         child.stdout.take().expect("piped stdout"),
-        "marvis-git-stdout",
+        "muster-git-stdout",
         cap + 1,
         over_cap.clone(),
     ) {
@@ -2509,7 +2509,7 @@ fn scan_git_diff(
     // deadline either. A thread that could not be started leaves a Git writing into a pipe nobody
     // will ever read, so the child is ended before the failure is handed back.
     let (scanned, scans) = mpsc::sync_channel(1);
-    if let Err(error) = start_read_thread("marvis-git-diff", move || {
+    if let Err(error) = start_read_thread("muster-git-diff", move || {
         let _ = scanned.send(scan_diff_lines(stdout, page_range));
     }) {
         stop_git_read(&mut child, GroupIdentity::Reserved);
@@ -2525,7 +2525,7 @@ fn scan_git_diff(
     let stderr = match PipeReader::take(
         child.stderr.take().expect("piped stderr"),
         "stderr",
-        "marvis-git-diff-stderr",
+        "muster-git-diff-stderr",
         GIT_DIAGNOSTIC_CAP,
     ) {
         Ok(pipe) => pipe,
@@ -3571,7 +3571,7 @@ fn spawn_and_collect(
         // The write end is dropped when the bytes are all there, which is what tells a read that is
         // waiting for its list that the list is complete: a `--stdin` read that never sees the end
         // waits forever, and the deadline would end it having answered nothing.
-        if let Err(error) = start_read_thread("marvis-git-input", move || {
+        if let Err(error) = start_read_thread("muster-git-input", move || {
             let mut pipe = pipe;
             let _ = pipe.write_all(&bytes);
         }) {
@@ -3858,13 +3858,13 @@ impl GitPipes {
             stdout: PipeReader::take(
                 child.stdout.take().expect("piped stdout"),
                 "stdout",
-                "marvis-git-stdout",
+                "muster-git-stdout",
                 GIT_OUTPUT_CAP,
             )?,
             stderr: PipeReader::take(
                 child.stderr.take().expect("piped stderr"),
                 "stderr",
-                "marvis-git-stderr",
+                "muster-git-stderr",
                 GIT_DIAGNOSTIC_CAP,
             )?,
         })
@@ -4357,8 +4357,8 @@ mod tests {
     fn init_repo(root: &Path) {
         fs::create_dir_all(root).unwrap();
         git(root, &["init", "-b", "trunk"]);
-        git(root, &["config", "user.name", "Marvis test"]);
-        git(root, &["config", "user.email", "marvis@example.invalid"]);
+        git(root, &["config", "user.name", "Muster test"]);
+        git(root, &["config", "user.email", "muster@example.invalid"]);
         fs::write(root.join("base.txt"), "base\n").unwrap();
         git(root, &["add", "base.txt"]);
         git(root, &["commit", "-m", "base"]);
@@ -5329,7 +5329,7 @@ line.txt";
             "echo $$ > \"{}\"; cat > /dev/null; sleep 30",
             git_pid.display()
         );
-        let _writer = ImpossibleReadThread::new("marvis-git-input", Duration::from_millis(300));
+        let _writer = ImpossibleReadThread::new("muster-git-input", Duration::from_millis(300));
 
         let started = Instant::now();
         let error = run_command_with_input(
@@ -5363,7 +5363,7 @@ line.txt";
         let git_pid = temp.path().join("git-pid");
         let script = format!("echo $$ > \"{}\"; sleep 30", git_pid.display());
 
-        for reader in ["marvis-git-stdout", "marvis-git-stderr"] {
+        for reader in ["muster-git-stdout", "muster-git-stderr"] {
             let _reader = ImpossibleReadThread::new(reader, Duration::from_millis(300));
             let started = Instant::now();
             let error = run_command_with_timeout(
@@ -5395,7 +5395,7 @@ line.txt";
         let temp = tempdir().unwrap();
         let git_pid = temp.path().join("git-pid");
         let script = format!("echo $$ > \"{}\"; sleep 30", git_pid.display());
-        let _reader = ImpossibleReadThread::new("marvis-git-stdout", Duration::from_millis(300));
+        let _reader = ImpossibleReadThread::new("muster-git-stdout", Duration::from_millis(300));
 
         let read = run_capped_git(
             "sh",
@@ -5725,7 +5725,7 @@ line.txt";
                     left: printed,
                     at_the_end: at_the_end.clone(),
                 },
-                "marvis-git-stdout",
+                "muster-git-stdout",
                 cap,
                 Arc::new(AtomicBool::new(false)),
             )
@@ -7145,7 +7145,7 @@ line.txt";
     /// that has the new worktree's directory and Git directory in it — a plan that did not grow
     /// is a watcher whose reach stops before the worktree the user is about to look at.
     #[test]
-    fn a_worktree_added_outside_marvis_reaches_the_plan_and_is_therefore_watched() {
+    fn a_worktree_added_outside_muster_reaches_the_plan_and_is_therefore_watched() {
         let temp = tempdir().unwrap();
         let root = temp.path().join("repo");
         init_repo(&root);

@@ -3,11 +3,11 @@
 Status: specified, not implemented. Depends on phase 1 (`docs/review-export.md`) for
 `ReviewTarget`, and borrows phase 2's one-shot shape (`docs/phase-2-codex.md`).
 
-**Not parity with OpenCode.** Same reasoning as every non-OpenCode phase: Marvis can name the
+**Not parity with OpenCode.** Same reasoning as every non-OpenCode phase: Muster can name the
 program in front of one of its terminals (`src-tauri/src/terminal/process.rs:21-34` macOS,
 `:55` Linux; surfaced as `foregroundApp`, `src-tauri/src/domain/workspace.rs:83-89`) but the name
 `claude` does not carry that process's conversation id, and there is no authorization to write
-into a session the user started. So Claude Code is driven headless, into a **Marvis-managed
+into a session the user started. So Claude Code is driven headless, into a **Muster-managed
 conversation**, one process per round.
 
 Claude Code's own situation is the worst of the four harnesses for an unattended host, and the
@@ -77,18 +77,18 @@ surfacing rather than smoothing over.
 | **SIGINT**  | ends the turn cleanly. The `result` is written.                                                           |
 | **SIGTERM** | **exits 143, leaves the turn unfinished, and records no `result` for it** [source: `sdk.mjs`, `0.3.284`]. |
 
-The consequence for Marvis is concrete: a round killed with SIGTERM is a round whose
+The consequence for Muster is concrete: a round killed with SIGTERM is a round whose
 `result` never arrives, so "did the turn finish?" has no answer from the protocol. A round in
 that state has to be left `dispatching`, exactly as a crashed send is
 (`src-tauri/src/services/review_round.rs:236-239`) — recognizable, not repeated. That is the
-existing mechanism doing its job, but it means **Marvis must send SIGINT, not SIGTERM**, and that
+existing mechanism doing its job, but it means **Muster must send SIGINT, not SIGTERM**, and that
 is a code-level requirement with a comment on it, because SIGTERM is the reflex and a refactor to
 "standardize the shutdown signal" would break the round bookkeeping silently.
 
 There is a second-order effect: **an interrupted turn stays interrupted on resume** unless
 `CLAUDE_CODE_RESUME_INTERRUPTED_TURN=1` is set [source: `sdk.mjs`]. So a user who resumes the
-Marvis conversation by hand after an interrupted turn gets the interruption again. Decide whether
-Marvis sets that variable on the child it spawns, and write down which way — **unconfirmed as a
+Muster conversation by hand after an interrupted turn gets the interruption again. Decide whether
+Muster sets that variable on the child it spawns, and write down which way — **unconfirmed as a
 product decision.**
 
 ## 4. Cancel
@@ -96,7 +96,7 @@ product decision.**
 Cancel is a control record on stdin, not a signal:
 
 ```json
-{ "type": "control_request", "request_id": "marvis-cancel-1", "request": { "subtype": "interrupt" } }
+{ "type": "control_request", "request_id": "muster-cancel-1", "request": { "subtype": "interrupt" } }
 ```
 
 [source: `sdk.mjs`]. This is the only in-protocol cancel, and it is strictly better than §3's
@@ -120,10 +120,10 @@ The lifecycle, as documented:
   did not exist to resume, which is why the version floor is not optional.
 - `--resume` also accepts an absolute path to the `.jsonl`.
 - Sessions created with `-p` are excluded from `claude --continue` and from the interactive
-  picker. That is fine and even desirable: Marvis's conversation is Marvis's.
+  picker. That is fine and even desirable: Muster's conversation is Muster's.
 
 **The recipe is therefore: mint with `--session-id <uuid>`, later resume with the same id.** The
-Marvis id is a UUIDv7 generated per checkout, stored where `ReviewRound.session_id` already lives
+Muster id is a UUIDv7 generated per checkout, stored where `ReviewRound.session_id` already lives
 (`src/domain/review.ts:39`, `Option<String>`), and the name shown to the user is derived from it.
 
 **The exact minting argv is [unverified].** Whether a no-turn session can be created without a
@@ -158,7 +158,7 @@ with non-alphanumerics replaced by `-` [source: Claude Code docs].
 parsing it directly can break on any release** [source: code.claude.com/docs/en]. So:
 
 - User message text is stored verbatim, which means a literal substring search for
-  `marvis-review:<round id>` works. The marker (`src-tauri/src/domain/review.rs:67-69`) is pure
+  `muster-review:<round id>` works. The marker (`src-tauri/src/domain/review.rs:67-69`) is pure
   ASCII with no JSON-escapable characters, so the same constraint as Codex holds and the same
   reasoning applies.
 - The cwd encoding and the file layout are **unsupported**. Reconstructing a path from a cwd by
@@ -194,7 +194,7 @@ chosen, it is documented, it is visible, and the user can tell what it is from t
 reading a source file.
 
 `--allowedTools` is worth pairing with whatever mode is chosen, so the set of things the review
-can cause is bounded by Marvis rather than by the model. The exact set is a product decision and is
+can cause is bounded by Muster rather than by the model. The exact set is a product decision and is
 **unconfirmed**.
 
 ## 8. Round lifecycle
@@ -212,7 +212,7 @@ Identical to phase 2 and to what exists today, and for the same reasons:
 6. On reconnect, `reconcile_round` greps the transcript for the marker and either confirms or
    requeues (`:161-191`).
 
-The Marvis-generated `--session-id` must be written to the round **before** the first turn, and it
+The Muster-generated `--session-id` must be written to the round **before** the first turn, and it
 is known before the process starts, which is the one thing phase 3 has that phase 2 does not: the
 session id is never in doubt, so reconciliation never has to search by name or timestamp.
 
@@ -245,7 +245,7 @@ the list; add it or do not — **unconfirmed**. The `OPENCODE_UNAVAILABLE` messa
 - **The permission mode is undecided** and it is the largest open item in this phase (§7).
   `bypassPermissions` is available here and is not available in Codex, so the decision cannot be
   inherited.
-- Whether a resumed conversation that already contains a Marvis marker would cause
+- Whether a resumed conversation that already contains a Muster marker would cause
   `reconcile_round` to confirm a round that was never actually completed. The marker is in the
   _user_ message, so a round that was sent and then killed shows the marker and reconciles as
   landed — which is correct, because it was sent. The subtle case is a round whose _turn_ never

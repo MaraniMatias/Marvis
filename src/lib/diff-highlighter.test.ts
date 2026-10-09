@@ -178,10 +178,10 @@ function colorOf(markup: string | undefined, needle: string): string | undefined
   return undefined;
 }
 
-const KEYWORD = "var(--marvis-syntax-token-keyword)";
-const FUNCTION = "var(--marvis-syntax-token-function)";
-const CONSTANT = "var(--marvis-syntax-token-constant)";
-const FOREGROUND = "var(--marvis-syntax-foreground)";
+const KEYWORD = "var(--muster-syntax-token-keyword)";
+const FUNCTION = "var(--muster-syntax-token-function)";
+const CONSTANT = "var(--muster-syntax-token-constant)";
+const FOREGROUND = "var(--muster-syntax-foreground)";
 
 /** The markup a diff draws for one line, which is the whole chain this module is responsible for. */
 function drawn(file: DiffFile, side: "old" | "new", line: number): string | undefined {
@@ -533,7 +533,7 @@ describe("diff highlighter", () => {
 
     // The line is still the patch's line, drawn; it is only that none of it is ours to color.
     expect(lineOf(drawn(files[0], "new", 1))).toBe(next[0]);
-    expect(drawn(files[0], "new", 1)).not.toContain("marvis-syntax");
+    expect(drawn(files[0], "new", 1)).not.toContain("muster-syntax");
   });
 
   it("leaves a file with no text of its own to the library, which is what the diff falls back to", async () => {
@@ -545,7 +545,7 @@ describe("diff highlighter", () => {
     expect(highlighter).toBeUndefined();
     const markup = drawn(files[0], "new", 1) ?? "";
     expect(markup).toContain("hljs-");
-    expect(markup).not.toContain("marvis-syntax");
+    expect(markup).not.toContain("muster-syntax");
   });
 
   it("reads nothing past the limits it reads a file under", async () => {
@@ -596,7 +596,7 @@ describe("diff highlighter", () => {
 
   it("claims a language only once its grammar is loaded", async () => {
     // A language nothing is loaded for is the library's to answer for, which is what keeps a file
-    // Marvis has no grammar for rendering the way it always has rather than rendering nothing.
+    // Muster has no grammar for rendering the way it always has rather than rendering nothing.
     expect(await prepareDiffHighlighting("no-such-language", { new: "x\n" })).toBeUndefined();
     expect(await prepareDiffHighlighting(undefined, { new: "x\n" })).toBeUndefined();
     // Plaintext is deliberately in no allowlist, so this is not ours to answer either.
@@ -607,8 +607,8 @@ describe("diff highlighter", () => {
     expect(await prepareDiffHighlighting("typescript", { new: "const a = 1;\n" })).toBeDefined();
   });
 
-  it("reads a grammar under the name Shiki knows it by, not the name Marvis calls it", async () => {
-    // `gitignore` is Marvis' own name for a file of bare globs, and Shiki has no such grammar, so it
+  it("reads a grammar under the name Shiki knows it by, not the name Muster calls it", async () => {
+    // `gitignore` is Muster' own name for a file of bare globs, and Shiki has no such grammar, so it
     // borrows `ini`. The name is only how the grammar is asked for.
     const path = ".gitignore";
     const lines = ["# a comment", "*.log", ""];
