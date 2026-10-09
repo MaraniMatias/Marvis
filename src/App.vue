@@ -1707,7 +1707,7 @@ function updateSessionStatus(sessionId: string, status: TerminalSessionStatus | 
  * moved, so those terminals are left to `followAgentRelocation`.
  */
 function followWorkingDirectory(sessionId: string, status: TerminalSessionStatus) {
-  if (!settings.value.terminal.followDirectoryAcrossWorktrees) return;
+  if (!["cd", "both"].includes(settings.value.terminal.followWorktree)) return;
   if (!status.workingDirectory || status.foregroundApp === AGENT_APP) return;
   const checkouts = allCheckouts.value;
   const from = checkouts.find((checkout) => checkout.sessions.some((session) => session.id === sessionId));
@@ -1747,7 +1747,7 @@ async function moveTerminalSession(
 }
 
 /**
- * Whether the terminal is the one on screen, which is what `visible` asks about.
+ * Whether the terminal is the one on screen.
  *
  * Being the selected session is not the same thing as being visible: opening a document takes the
  * whole panel in a single layout, and the terminal behind it is still selected while nothing of it
@@ -1763,14 +1763,13 @@ function terminalIsOnScreen(sessionId: string): boolean {
 /**
  * Whether the window takes `sessionId` with it when it leaves `fromCheckoutId` on its own.
  *
- * `visible` answers for what is on screen, which is the only question that has a good answer: a
+ * Only a terminal on screen takes the window with it: a
  * terminal nobody was looking at moving in the sidebar must not change the pane someone is working
  * in, and the terminal that *was* on screen must not leave an empty pane behind. Selecting a
  * terminal and then opening a file over it is looking at the file, and a move that takes the window
  * with it interrupts a reader for a terminal they had put aside.
  */
 function windowFollowsMove(sessionId: string, fromCheckoutId: string) {
-  if (settings.value.terminal.followSelection === "always") return true;
   const { activeCheckoutId, activeSessionId } = workspace.value;
   return activeCheckoutId === fromCheckoutId && activeSessionId === sessionId && terminalIsOnScreen(sessionId);
 }
@@ -1787,8 +1786,8 @@ function windowFollowsMove(sessionId: string, fromCheckoutId: string) {
 const movingTerminals = new Set<string>();
 
 /**
- * Hands a terminal to a sibling worktree of the same repository because it started working there,
- * and brings the window with it when the policy says so.
+ * Hands a terminal to its Git worktree, including one initially filed under a plain folder,
+ * and brings the window with it only when that terminal is on screen.
  *
  * Both detectors end here — an OpenCode session that moved itself, and a shell that `cd`'d into a
  * worktree — because the guards and the follow are the same for both, and the only thing that
@@ -1801,10 +1800,14 @@ async function moveTerminalToWorktree(sessionId: string, fromCheckoutId: string,
   const repo = workspace.value.repos.find((candidate) =>
     candidate.checkouts.some((checkout) => checkout.id === fromCheckoutId),
   );
-  const target = repo?.checkouts.find((checkout) => checkout.id === toCheckoutId);
-  // A destination this app cannot label with a live worktree of the same repository is not one a
-  // session can be handed to; the backend refuses it, so it is not asked.
-  if (!repo || !target || target.isMissing) return;
+  const targetRepo = workspace.value.repos.find((candidate) =>
+    candidate.checkouts.some((checkout) => checkout.id === toCheckoutId),
+  );
+  const target = targetRepo?.checkouts.find((checkout) => checkout.id === toCheckoutId);
+  const allowed = repo?.id === targetRepo?.id || (repo?.kind === "plain" && targetRepo?.kind === "git");
+  // Plain-folder terminals may enter Git; terminals already in Git cannot leave their repository.
+  // The backend enforces the same boundary for manual and automatic moves.
+  if (!repo || !target || target.isMissing || !allowed) return;
   const follow = windowFollowsMove(sessionId, fromCheckoutId);
   // Decided before the move is taken, because the workspace it changes is the question: once the
   // row has left, the checkout it left no longer holds the terminal that was in front of us.
@@ -1837,9 +1840,9 @@ async function moveTerminalToWorktree(sessionId: string, fromCheckoutId: string,
  * service lists, which is the same identification a sidebar row is drawn from. One terminal naming
  * the session is a move; none or several is not.
  *
- * The terminal is looked for across the whole repository rather than in the worktree the move says
- * it left, because the hop that move names can already be spent: a session that moved a second
- * time while the first move was still on offer is reported as the hop it last took, and a terminal
+ * The terminal is looked for across the destination repository and plain folders such as Home,
+ * rather than only where the move says it left, because that hop can already be spent: a session
+ * that moved twice while the first move was still on offer is reported as its last hop, and a terminal
  * that never got the first one is still in the worktree it started in. Naming the terminal rather
  * than the worktree covers both, and a terminal already standing in the destination is left alone,
  * which is also what stops a move the service re-offers from asking for a hop it already made.
@@ -1850,16 +1853,19 @@ async function moveTerminalToWorktree(sessionId: string, fromCheckoutId: string,
  * naming none or several matches nothing.
  */
 function followAgentRelocation({ sessionId, toCheckoutId }: AgentRelocation) {
-  if (!settings.value.terminal.followAgentAcrossWorktrees) return;
+  if (!["agent", "both"].includes(settings.value.terminal.followWorktree)) return;
   const repo = workspace.value.repos.find((candidate) =>
     candidate.checkouts.some((checkout) => checkout.id === toCheckoutId),
   );
-  if (!repo) return;
-  const named = repo.checkouts.flatMap((checkout) =>
-    checkout.sessions
-      .filter((session) => terminalShowsSession(checkout.id, session.id, sessionId))
-      .map((session) => ({ checkoutId: checkout.id, sessionId: session.id })),
-  );
+  if (!repo || repo.kind !== "git") return;
+  const eligible = workspace.value.repos.filter((candidate) => candidate.id === repo.id || candidate.kind === "plain");
+  const named = eligible
+    .flatMap((candidate) => candidate.checkouts)
+    .flatMap((checkout) =>
+      checkout.sessions
+        .filter((session) => terminalShowsSession(checkout.id, session.id, sessionId))
+        .map((session) => ({ checkoutId: checkout.id, sessionId: session.id })),
+    );
   if (named.length !== 1) return;
   const [terminal] = named;
   if (terminal.checkoutId === toCheckoutId) return;

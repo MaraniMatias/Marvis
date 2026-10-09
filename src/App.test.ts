@@ -20,6 +20,7 @@ import { WORKDIR_ICONS } from "./presentation/workdir-icons";
 import type { ReviewSender } from "./presentation/review-notes";
 import type { Checkout, Repo, Session, WorkspaceState } from "./domain/workspace";
 import FileIcon from "./components/FileIcon.vue";
+import SelectControl from "./components/ui/select/SelectControl.vue";
 
 const mocks = vi.hoisted(() => ({
   initialWorkspace: null as WorkspaceState | null,
@@ -58,6 +59,7 @@ const mocks = vi.hoisted(() => ({
   /** The sessions each worktree's OpenCode lists, as `useTerminalAgentRows` would report them. */
   agentSessionsByCheckout: {} as Record<string, { id: string; title: string }[]>,
   moveSession: vi.fn(),
+  focusActiveTerminal: vi.fn(),
   onCloseRequested: null as ((event: { preventDefault(): void }) => Promise<void>) | null,
   currentWindow: null as {
     onCloseRequested: (handler: (event: { preventDefault(): void }) => Promise<void>) => Promise<() => void>;
@@ -463,7 +465,7 @@ const SessionPaneStub = defineComponent({
   emits: ["sessionStatusChanged", "workspaceUpdated"],
   setup(props, { expose }) {
     onMounted(() => (mocks.sessionPaneMounts += 1));
-    expose({ focusActiveTerminal: vi.fn(), moveSession: mocks.moveSession });
+    expose({ focusActiveTerminal: mocks.focusActiveTerminal, moveSession: mocks.moveSession });
     return () =>
       h("div", { "data-testid": "session-pane" }, [
         h("span", { "data-testid": "pane-active-session" }, props.activeSessionId ?? "none"),
@@ -1472,6 +1474,7 @@ describe("App UI integration", () => {
       options: {
         activeSessionId?: string | null;
         settings?: AppSettings;
+        separateRepos?: Record<string, Repo["kind"]>;
       } = {},
     ): Promise<ReturnType<typeof mountApp> extends Promise<infer T> ? T : never> {
       const checkouts = Object.entries(sessionsByCheckout).map(([id, names]) =>
@@ -1484,6 +1487,13 @@ describe("App UI integration", () => {
         Object.entries(agentTitles).map(([checkoutId, titles]) => [checkoutId, titles.map(agentSession)]),
       );
       const workspace = workspaceWith(...checkouts);
+      for (const [checkoutId, kind] of Object.entries(options.separateRepos ?? {})) {
+        const shared = workspace.repos[0];
+        const moved = shared.checkouts.find((candidate) => candidate.id === checkoutId)!;
+        shared.checkouts = shared.checkouts.filter((candidate) => candidate.id !== checkoutId);
+        moved.repoId = `repo:${checkoutId}`;
+        workspace.repos.push({ ...shared, id: moved.repoId, kind, root: moved.path, checkouts: [moved] });
+      }
       workspace.activeSessionId = options.activeSessionId ?? workspace.activeSessionId;
       const wrapper = await mountApp(workspace, undefined, {
         settings: options.settings,
@@ -1535,22 +1545,6 @@ describe("App UI integration", () => {
       await flushPromises();
 
       expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, false);
-      wrapper.unmount();
-    });
-
-    it("takes the window for a terminal in the background when told to follow every move", async () => {
-      const settings = cloneSettings(DEFAULT_SETTINGS);
-      settings.terminal.followSelection = "always";
-      const wrapper = await mountWithOpenCodeTerminals(
-        { "checkout:one": ["shell", "agent"], "checkout:two": [] },
-        { "checkout:one": ["ship it"] },
-        { activeSessionId: "session:shell", settings },
-      );
-
-      move("ses_ship it");
-      await flushPromises();
-
-      expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, true);
       wrapper.unmount();
     });
 
@@ -1611,9 +1605,9 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
-    it("moves nothing when the agent feature is turned off", async () => {
+    it.each(["off", "cd", "agent", "both"] as const)("gates agent moves with %s", async (mode) => {
       const settings = cloneSettings(DEFAULT_SETTINGS);
-      settings.terminal.followAgentAcrossWorktrees = false;
+      settings.terminal.followWorktree = mode;
       const wrapper = await mountWithOpenCodeTerminals(
         { "checkout:one": ["shell", "agent"], "checkout:two": [] },
         { "checkout:one": ["ship it"] },
@@ -1623,7 +1617,9 @@ describe("App UI integration", () => {
       move("ses_ship it");
       await flushPromises();
 
-      expect(mocks.moveSession).not.toHaveBeenCalled();
+      if (mode === "agent" || mode === "both") {
+        expect(mocks.moveSession).toHaveBeenCalledWith("session:agent", "checkout:two", 0, false, true);
+      } else expect(mocks.moveSession).not.toHaveBeenCalled();
       wrapper.unmount();
     });
 
@@ -1682,6 +1678,81 @@ describe("App UI integration", () => {
       move("ses_ship it");
       await flushPromises();
 
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it("follows attributable tool work while both OpenCode sessions and their shells remain under main", async () => {
+      const settings = cloneSettings(DEFAULT_SETTINGS);
+      settings.terminal.followWorktree = "agent";
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["writer", "other"], "checkout:two": [] },
+        { "checkout:one": ["writing in test", "still in main"] },
+        { activeSessionId: "session:writer", settings },
+      );
+      // The backend reports the writer's tool target, not a session.location.directory change.
+      // Both candidate sessions and the foreground TUIs still belong to the original directory.
+      for (const terminalId of ["session:writer", "session:other"]) {
+        wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionStatusChanged", terminalId, {
+          state: "running",
+          foregroundProcess: true,
+          foregroundApp: "opencode",
+          terminalTitle: terminalId === "session:writer" ? "OC | writing in test" : "OC | still in main",
+          workingDirectory: "/repo/main",
+        });
+      }
+      move("ses_writing in test");
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:writer", "checkout:two", 0, false, true);
+      wrapper.unmount();
+    });
+
+    it.each([
+      ["session:writer", true],
+      ["session:other", false],
+    ] as const)("follows the Home writer into Git with %s active", async (activeSessionId, follow) => {
+      const settings = cloneSettings(DEFAULT_SETTINGS);
+      settings.terminal.followWorktree = "agent";
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:home": ["writer", "other"], "checkout:one": [], "checkout:two": [] },
+        { "checkout:home": ["writing test", "staying home"] },
+        { activeSessionId, settings, separateRepos: { "checkout:home": "plain" } },
+      );
+      // OpenCode still lives in checkout:one; only its write.path names checkout:two.
+      move("ses_writing test");
+      await flushPromises();
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+      expect(mocks.moveSession).toHaveBeenCalledWith("session:writer", "checkout:two", 0, false, follow);
+      expect(mocks.focusActiveTerminal).toHaveBeenCalledTimes(follow ? 1 : 0);
+      wrapper.unmount();
+    });
+
+    it.each(["checkout:one", "checkout:plain"])("rejects a Home match also shown by %s", async (duplicate) => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:home": ["writer"], [duplicate]: ["duplicate"], "checkout:two": [] },
+        { "checkout:home": ["writing test"], [duplicate]: ["writing test"] },
+        {
+          separateRepos: {
+            "checkout:home": "plain",
+            ...(duplicate === "checkout:plain" ? { [duplicate]: "plain" as const } : {}),
+          },
+        },
+      );
+      move("ses_writing test");
+      await flushPromises();
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
+    it.each(["git", "plain"] as const)("never follows a Git terminal into another %s repository", async (kind) => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["writer"], "checkout:two": [] },
+        { "checkout:one": ["writing test"] },
+        { separateRepos: { "checkout:two": kind } },
+      );
+      move("ses_writing test");
+      await flushPromises();
       expect(mocks.moveSession).not.toHaveBeenCalled();
       wrapper.unmount();
     });
@@ -1766,7 +1837,7 @@ describe("App UI integration", () => {
       return wrapper;
     }
 
-    const following = () => ({ ...cloneSettings(DEFAULT_SETTINGS).terminal, followDirectoryAcrossWorktrees: true });
+    const following = () => ({ ...cloneSettings(DEFAULT_SETTINGS).terminal, followWorktree: "cd" as const });
 
     it("moves the terminal to the worktree its shell is now in", async () => {
       const wrapper = await mountWithSettings(following());
@@ -1808,15 +1879,17 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
-    it("moves nothing when the feature is off, which is how it ships", async () => {
-      const wrapper = await mountWithSettings(cloneSettings(DEFAULT_SETTINGS).terminal);
+    it.each(["off", "cd", "agent", "both"] as const)("gates shell moves with %s", async (mode) => {
+      const wrapper = await mountWithSettings({ ...DEFAULT_SETTINGS.terminal, followWorktree: mode });
 
       wrapper
         .getComponent({ name: "SessionPane" })
         .vm.$emit("sessionStatusChanged", "session:one", status("/checkout:two"));
       await flushPromises();
 
-      expect(mocks.moveSession).not.toHaveBeenCalled();
+      if (mode === "cd" || mode === "both") {
+        expect(mocks.moveSession).toHaveBeenCalledWith("session:one", "checkout:two", 0, false, true);
+      } else expect(mocks.moveSession).not.toHaveBeenCalled();
       wrapper.unmount();
     });
 
@@ -3686,6 +3759,39 @@ describe("App UI integration", () => {
       expect(wrapper.get("#settings-editor-fontSize").attributes("disabled")).toBeUndefined();
       wrapper.unmount();
     });
+
+    it.each(["off", "cd", "agent", "both"] as const)(
+      "persists worktree following as %s through Apply",
+      async (mode) => {
+        const wrapper = await openSettings();
+        const controlId = "settings-terminal-followWorktree";
+        const select = wrapper
+          .findAllComponents(SelectControl)
+          .find((control) => control.props("label") === "Follow worktree")!;
+        expect(wrapper.get(`label[for="${controlId}"]`).text()).toContain("Follow worktree");
+        expect(wrapper.get(`#${controlId}`).element.tagName).toBe("BUTTON");
+        expect(select.props("modelValue")).toBe("agent");
+        expect(select.props("options")).toEqual(
+          ["off", "cd", "agent", "both"].map((value) => ({ value, label: value })),
+        );
+        await select.get(`button[data-value="${mode}"]`).trigger("click");
+        await flushPromises();
+        expect(mocks.saveSettings).not.toHaveBeenCalled();
+        await wrapper
+          .findAll("button")
+          .find((button) => button.text() === "Apply")!
+          .trigger("click");
+        await flushPromises();
+        const saved = cloneSettings(DEFAULT_SETTINGS);
+        saved.terminal.followWorktree = mode;
+        expect(mocks.saveSettings).toHaveBeenCalledWith(saved);
+        expect(wrapper.findComponent({ name: "MainPane" }).props("terminalSettings").followWorktree).toBe(mode);
+        wrapper.unmount();
+        const reopened = await openSettings(saved);
+        expect(reopened.get(`#${controlId}`).text()).toContain(mode);
+        reopened.unmount();
+      },
+    );
 
     it("writes the whole set and takes effect at once, without waiting for the file", async () => {
       const wrapper = await openSettings();

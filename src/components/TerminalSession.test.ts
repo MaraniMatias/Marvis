@@ -1347,7 +1347,7 @@ describe("TerminalSession UI", () => {
         activeSessionId: null,
         isOpening: true,
         shellRequest: null,
-        terminalSettings: { ...DEFAULT_SETTINGS.terminal, changeDirectoryOnMove: true },
+        terminalSettings: { ...DEFAULT_SETTINGS.terminal },
       },
     });
     await wrapper.setProps({

@@ -208,7 +208,7 @@ async function requestClose(sessionId: string) {
  * leaves the one it was in and opens as a tab in the one it moved to) because a layout that kept
  * a pane for a session its checkout no longer holds is the layout the backend refuses to save.
  *
- * With `terminal.changeDirectoryOnMove` on, a shell sitting at a prompt is also told to `cd`. A
+ * A manual move always tells a shell sitting at a prompt to `cd`. A
  * shell with something running in front of it is left where it is, and says so: typing `cd` into a
  * build would feed the build. A caller that has already moved the program itself passes false:
  * there is no shell at a prompt to tell, and announcing a `cd` that was never attempted would
@@ -265,7 +265,7 @@ async function moveSession(
     sessionOrder: moveSessionId(orderedSessionIds(target.sessions, targetLayout), moved.id, index),
   });
   emit("workspaceUpdated", workspace);
-  if (!changeDirectory || !props.terminalSettings?.changeDirectoryOnMove) return true;
+  if (!changeDirectory) return true;
   // The pane's own checkout prop is what the session is written under, and the new one only
   // reaches the terminal on the next tick. Writing before that would address the `cd` to the
   // worktree the session just left, which the backend refuses.

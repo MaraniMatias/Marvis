@@ -417,8 +417,8 @@ describe("SessionPane terminal UI", () => {
       target.id,
       expect.objectContaining({ sessionOrder: ["session:live", "session:old"] }),
     );
-    // Off by default: a move is not a `cd`.
-    expect(terminalMock.directoryChanges).toEqual([]);
+    // Manual moves always ask an idle shell to enter the destination.
+    expect(terminalMock.directoryChanges).toEqual([target.path]);
     wrapper.unmount();
   });
 
@@ -582,10 +582,11 @@ describe("SessionPane terminal UI", () => {
       target.id,
       expect.objectContaining({ sessionOrder: ["session:a", "session:live", "session:b"] }),
     );
+    expect(terminalMock.directoryChanges).toEqual([target.path]);
     wrapper.unmount();
   });
 
-  it("changes the directory after a move only when asked, and only for an idle shell", async () => {
+  it("leaves a running command alone on a manual move", async () => {
     terminalMock.autoCreate = true;
     const target: Checkout = { ...checkout, id: "checkout:/work/repo-wt", path: "/work/repo-wt" };
     vi.mocked(moveTerminal).mockResolvedValue({
@@ -600,7 +601,7 @@ describe("SessionPane terminal UI", () => {
         activeSessionId: null,
         isOpening: true,
         shellRequest: null,
-        terminalSettings: { ...DEFAULT_SETTINGS.terminal, changeDirectoryOnMove: true },
+        terminalSettings: { ...DEFAULT_SETTINGS.terminal },
       },
     });
     await wrapper.setProps({

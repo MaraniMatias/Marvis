@@ -1524,7 +1524,7 @@ impl Database {
         self.load_workspace()
     }
 
-    /// Moves a terminal session to another worktree of the same repository.
+    /// Moves a terminal within its Git repository, or from a plain folder into Git.
     ///
     /// The process is not touched: a session is a row, and moving it hands the row to another
     /// checkout so the terminal belongs to the worktree it is listed under. Both layouts are
@@ -1555,25 +1555,26 @@ impl Database {
         if source_checkout_id == target_checkout_id {
             return Err("the terminal session is already in that worktree".into());
         }
-        let target_repo_id: String = transaction
+        let (target_repo_id, target_kind): (String, String) = transaction
             .query_row(
-                "SELECT repo_id FROM checkouts WHERE id = ?1 AND is_missing = 0 AND is_archived = 0",
+                "SELECT c.repo_id, r.kind FROM checkouts c JOIN repos r ON r.id = c.repo_id
+                 WHERE c.id = ?1 AND c.is_missing = 0 AND c.is_archived = 0",
                 [target_checkout_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()
             .map_err(db_error)?
             .ok_or_else(|| "checkout does not exist or is missing".to_string())?;
-        let source_repo_id: String = transaction
+        let (source_repo_id, source_kind): (String, String) = transaction
             .query_row(
-                "SELECT repo_id FROM checkouts WHERE id = ?1",
+                "SELECT c.repo_id, r.kind FROM checkouts c JOIN repos r ON r.id = c.repo_id WHERE c.id = ?1",
                 [&source_checkout_id],
-                |row| row.get(0),
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .map_err(db_error)?;
-        // One repository is one Git directory, so its worktrees are the only checkouts a session
-        // may be handed to; anything else would be a session labelled with a tree it is not in.
-        if source_repo_id != target_repo_id {
+        // A plain-folder terminal can enter a Git checkout. Once it belongs to Git, its
+        // repository boundary applies to automatic and manual moves alike.
+        if source_repo_id != target_repo_id && !(source_kind == "plain" && target_kind == "git") {
             return Err("a terminal session cannot leave the repository it was opened in".into());
         }
         transaction
@@ -4714,6 +4715,131 @@ mod tests {
         // The destination had no stored layout, so it has none to repair: the pane its sessions
         // name is built on the next read, and the session it gained is in it.
         assert_eq!(database.load_terminal_layout(&worktree_id).unwrap(), None);
+    }
+
+    #[test]
+    fn home_terminals_can_enter_git_but_cannot_leave_that_repository_afterwards() {
+        for select_target in [false, true] {
+            let temp = tempdir().unwrap();
+            let home = temp.path().join("home");
+            let plain = temp.path().join("plain");
+            let root = temp.path().join("repo");
+            let worktree = temp.path().join("test");
+            let other = temp.path().join("other");
+            let other_worktree = temp.path().join("other-test");
+            for path in [&home, &plain, &root, &worktree, &other, &other_worktree] {
+                fs::create_dir_all(path).unwrap();
+            }
+            let database = Database::open_in_memory().unwrap();
+            let home_repo = plain_repo(&home, "now");
+            let home_id = home_repo.checkouts[0].id.clone();
+            database.register_plain_repo(home_repo.clone()).unwrap();
+            database.register_home_repo(&home_repo).unwrap();
+            let plain_repo = plain_repo(&plain, "now");
+            let plain_id = plain_repo.checkouts[0].id.clone();
+            database.register_plain_repo(plain_repo).unwrap();
+            let (repo, worktree_id) = git_repo_with_worktree(&root, &worktree);
+            database.register_git_repo(repo, &worktree_id).unwrap();
+            let (other_repo, other_id) = git_repo_with_worktree(&other, &other_worktree);
+            database.register_git_repo(other_repo, &other_id).unwrap();
+            let session = Session {
+                id: "session:home-agent".into(),
+                session_type: SessionType::Shell,
+                checkout_id: home_id.clone(),
+                name: "OpenCode".into(),
+                created_at: "now".into(),
+                status: SessionStatus::Active,
+            };
+            database.add_terminal_session(&session).unwrap();
+            database
+                .save_terminal_layout(
+                    &home_id,
+                    &CheckoutTerminalLayout {
+                        active_tab_id: Some("tab:home".into()),
+                        tabs: vec![TerminalLayoutTab {
+                            id: "tab:home".into(),
+                            root: TerminalLayoutNode::Session {
+                                session_id: session.id.clone(),
+                            },
+                        }],
+                        session_order: vec![session.id.clone()],
+                    },
+                )
+                .unwrap();
+            let before = database.load_workspace().unwrap();
+            for invalid in [&plain_id, &"checkout:unknown".to_string()] {
+                assert!(database
+                    .move_terminal_session(&session.id, invalid, select_target)
+                    .is_err());
+            }
+            // Missing and archived destinations remain refused by the same public move contract.
+            for column in ["is_missing", "is_archived"] {
+                let sql = format!("UPDATE checkouts SET {column} = ?1 WHERE id = ?2");
+                database
+                    .connection
+                    .lock()
+                    .unwrap()
+                    .execute(&sql, params![1, &worktree_id])
+                    .unwrap();
+                assert!(database
+                    .move_terminal_session(&session.id, &worktree_id, select_target)
+                    .is_err());
+                database
+                    .connection
+                    .lock()
+                    .unwrap()
+                    .execute(&sql, params![0, &worktree_id])
+                    .unwrap();
+            }
+            assert_eq!(
+                database.terminal_session_checkout(&session.id).unwrap(),
+                Some(home_id.clone())
+            );
+            let moved = database
+                .move_terminal_session(&session.id, &worktree_id, select_target)
+                .unwrap();
+            assert_eq!(
+                database.terminal_session_checkout(&session.id).unwrap(),
+                Some(worktree_id.clone())
+            );
+            let destination = moved
+                .repos
+                .iter()
+                .flat_map(|repo| &repo.checkouts)
+                .find(|checkout| checkout.id == worktree_id)
+                .unwrap();
+            assert_eq!(destination.sessions[0].id, session.id);
+            assert_eq!(destination.sessions[0].name, session.name);
+            assert_eq!(destination.sessions[0].created_at, session.created_at);
+            assert!(database
+                .load_terminal_layout(&home_id)
+                .unwrap()
+                .unwrap()
+                .tabs
+                .is_empty());
+            if select_target {
+                assert_eq!(
+                    moved.active_checkout_id.as_deref(),
+                    Some(worktree_id.as_str())
+                );
+                assert_eq!(
+                    moved.active_session_id.as_deref(),
+                    Some(session.id.as_str())
+                );
+            } else {
+                assert_eq!(moved.active_checkout_id, before.active_checkout_id);
+                assert_eq!(moved.active_session_id, before.active_session_id);
+            }
+            for invalid in [&home_id, &plain_id, &other_id] {
+                assert!(database
+                    .move_terminal_session(&session.id, invalid, select_target)
+                    .is_err());
+                assert_eq!(
+                    database.terminal_session_checkout(&session.id).unwrap(),
+                    Some(worktree_id.clone())
+                );
+            }
+        }
     }
 
     /// A move that happened on its own moves the row and nothing else: the window stays on the

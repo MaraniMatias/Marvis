@@ -37,7 +37,7 @@ use std::{
         Arc, Condvar, Mutex,
     },
     thread::sleep,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Deserialize;
@@ -166,7 +166,7 @@ struct ApiSession {
     location: Option<ApiLocation>,
     #[serde(default)]
     agent: Option<String>,
-    #[serde(default)]
+    #[serde(default, rename = "parentID")]
     parent_id: Option<String>,
     #[serde(default)]
     outcome: Option<String>,
@@ -535,7 +535,7 @@ impl AgentBridge {
     /// event: a session that just changed worktree is among the newest fifty. A session that moved
     /// and then went quiet long enough to fall out of the page is dropped by
     /// [`SESSION_LOCATION_TTL`] and is only picked up again as new.
-    fn session_locations(&self) -> Result<Vec<(String, PathBuf)>, BridgeError> {
+    fn session_locations(&self) -> Result<Vec<ApiSession>, BridgeError> {
         let url = format!("{}/api/session", self.base_url());
         let envelope: ApiEnvelope<Vec<ApiSession>> = send_json(retry_interrupted(|| {
             with_timeout(self.client.get(&url), JSON_REQUEST_TIMEOUT)
@@ -548,7 +548,7 @@ impl AgentBridge {
         Ok(envelope
             .into_unscoped_data()
             .into_iter()
-            .filter_map(|raw| Some((raw.id, PathBuf::from(raw.location?.directory))))
+            .filter(|raw| raw.parent_id.is_none() && raw.location.is_some())
             .collect())
     }
 
@@ -1867,6 +1867,137 @@ fn read_candidates(bridge: &AgentBridge, budget: Duration) -> Result<CandidateRe
     })
 }
 
+/// Tool work can move between worktrees without moving the OpenCode session itself.
+/// Keep that effective location until newer attributable work or an explicit session move.
+struct SessionWork {
+    origin: PathBuf,
+    effective: PathBuf,
+    targets: Vec<PathBuf>,
+    completed: i64,
+    updated: i64,
+    running: bool,
+    seen: Instant,
+}
+
+/// Only inspect executed tool contracts, never prompts, shell commands or Code Mode source.
+/// These inputs and Code Mode's toolCalls were inspected on OpenCode 2.0.26.
+// lean-ctx: explicit execution/mutation targets only; extend when another tool exposes verified targets.
+fn work_targets(name: &str, input: &serde_json::Value) -> Vec<PathBuf> {
+    let field = match name {
+        "shell" => "workdir",
+        "lean-ctx.ctx_shell" => "cwd",
+        "write" | "lean-ctx.ctx_patch" => "path",
+        "patch" => {
+            return input["patchText"]
+                .as_str()
+                .into_iter()
+                .flat_map(str::lines)
+                .filter_map(|line| {
+                    ["*** Add File: ", "*** Update File: ", "*** Move to: "]
+                        .into_iter()
+                        .find_map(|prefix| line.strip_prefix(prefix))
+                })
+                .map(PathBuf::from)
+                .collect();
+        }
+        _ => return Vec::new(),
+    };
+    let mut paths: Vec<_> = input[field]
+        .as_str()
+        .map(PathBuf::from)
+        .into_iter()
+        .collect();
+    if name == "lean-ctx.ctx_patch" {
+        if let Some(ops) = input["ops"].as_array() {
+            paths.extend(
+                ops.iter()
+                    .filter_map(|op| op["path"].as_str())
+                    .map(PathBuf::from),
+            );
+        }
+    }
+    paths
+}
+
+fn latest_work(messages: &[serde_json::Value], after: i64) -> Option<(i64, Vec<PathBuf>)> {
+    let mut latest: Option<(i64, Vec<PathBuf>)> = None;
+    for tool in messages
+        .iter()
+        .filter(|message| message["type"] == "assistant")
+        .flat_map(|message| message["content"].as_array().into_iter().flatten())
+    {
+        let completed = tool["time"]["completed"].as_i64().unwrap_or(0);
+        if tool["type"] != "tool"
+            || tool["state"]["status"] != "completed"
+            || tool["state"]["metadata"]["error"] == true
+            || tool["state"]["metadata"]["truncated"] == true
+            || completed <= after
+        {
+            continue;
+        }
+        let mut targets =
+            work_targets(tool["name"].as_str().unwrap_or(""), &tool["state"]["input"]);
+        if tool["name"] == "execute" {
+            for call in tool["state"]["metadata"]["toolCalls"]
+                .as_array()
+                .into_iter()
+                .flatten()
+            {
+                if call["status"] == "completed" {
+                    targets.extend(work_targets(
+                        call["tool"].as_str().unwrap_or(""),
+                        &call["input"],
+                    ));
+                }
+            }
+        }
+        if targets.is_empty() {
+            continue;
+        }
+        match &mut latest {
+            Some((time, paths)) if *time == completed => paths.extend(targets),
+            Some((time, _)) if *time > completed => {}
+            _ => latest = Some((completed, targets)),
+        }
+    }
+    latest
+}
+
+/// Canonical paths and the deepest registered checkout prevent nested worktrees or symlinks
+/// from being attributed to their parent. A batch naming several worktrees names none.
+fn work_directory(checkouts: &[(String, PathBuf)], targets: &[PathBuf]) -> Option<PathBuf> {
+    let mut directory = None;
+    for target in targets {
+        if !target.is_absolute() {
+            return None;
+        }
+        let target = target.canonicalize().ok()?;
+        let mut candidates: Vec<_> = checkouts
+            .iter()
+            .filter_map(|(_, path)| path.canonicalize().ok())
+            .filter(|path| target.starts_with(path))
+            .collect();
+        candidates.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        let best = candidates.first()?;
+        // A nested Git checkout not registered yet is not work in its parent checkout.
+        if target
+            .ancestors()
+            .take_while(|path| *path != best)
+            .any(|path| path.join(".git").exists())
+        {
+            return None;
+        }
+        if candidates.get(1) == Some(best) {
+            return None;
+        }
+        if directory.as_ref().is_some_and(|previous| previous != best) {
+            return None;
+        }
+        directory = Some(best.clone());
+    }
+    directory
+}
+
 /// The last worktree this panel could name for a session, and when it was last read.
 ///
 /// `checkout_id` is kept even while the session's directory is one this panel has no checkout for.
@@ -1907,6 +2038,7 @@ pub struct AgentService {
     /// Where each session was at the last relocation read, keyed by session id. See
     /// [`AgentService::relocations`], which is the only thing that reads or writes it.
     session_locations: Mutex<HashMap<String, SessionLocation>>,
+    session_work: Mutex<HashMap<String, SessionWork>>,
     /// Moves that have been reported and might not have arrived. See [`PendingMove`].
     pending_moves: Mutex<HashMap<String, PendingMove>>,
     sink: Mutex<Option<EventSink>>,
@@ -2010,6 +2142,7 @@ impl AgentService {
             removal_state: Arc::new(Mutex::new(RemovalState::default())),
             busy_turns: Arc::new(Mutex::new(HashMap::new())),
             session_locations: Mutex::new(HashMap::new()),
+            session_work: Mutex::new(HashMap::new()),
             pending_moves: Mutex::new(HashMap::new()),
             sink: Mutex::new(None),
             launcher,
@@ -2530,6 +2663,8 @@ impl AgentService {
     }
 
     /// Sessions that are working in a worktree of `checkouts` other than the one they were in.
+    /// The API location remains authoritative for explicit moves; executed tool targets also
+    /// identify work outside that location without changing the running TUI or its shell.
     ///
     /// `checkouts` is every checkout the panel holds with the directory it lives in, and it is
     /// the whole of the world this answer is allowed to talk about: a session in a directory
@@ -2575,8 +2710,102 @@ impl AgentService {
             return Ok(Vec::new());
         };
         let bridge = self.bridge(&anchor_id, &anchor_directory)?;
-        let located = bridge.session_locations()?;
-        self.record_relocations(checkouts, located, Instant::now())
+        // Serialize snapshots as well as their application, so overlapping callers cannot replay
+        // an older session location after a newer tool read.
+        let mut work = self
+            .session_work
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
+        let sessions = bridge.session_locations()?;
+        let now = Instant::now();
+        let observed = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_millis() as i64;
+        work.retain(|_, entry| now.duration_since(entry.seen) <= SESSION_LOCATION_TTL);
+        // One shared budget; a slow tool-history route must not multiply the polling delay.
+        let deadline = now + Duration::from_secs(2);
+        let running: HashMap<String, ApiActiveSession> = if sessions
+            .iter()
+            .any(|session| session.time.updated != 0 && work.contains_key(&session.id))
+        {
+            bridge
+                .get_unscoped_json(
+                    "/api/session/active",
+                    deadline.saturating_duration_since(Instant::now()),
+                )
+                .unwrap_or_default()
+        } else {
+            HashMap::new()
+        };
+        let mut located = Vec::new();
+        for session in sessions {
+            let origin = PathBuf::from(session.location.unwrap().directory);
+            let entry = work
+                .entry(session.id.clone())
+                .or_insert_with(|| SessionWork {
+                    origin: origin.clone(),
+                    effective: origin.clone(),
+                    targets: Vec::new(),
+                    completed: observed,
+                    updated: session.time.updated,
+                    running: false,
+                    seen: now,
+                });
+            entry.seen = now;
+            if !same_directory(&entry.origin, &origin) {
+                entry.origin = origin.clone();
+                entry.effective = origin;
+                entry.targets.clear();
+                entry.completed = observed;
+            }
+            let changed = entry.updated != session.time.updated;
+            let active = running
+                .get(&session.id)
+                .is_some_and(|active| active.kind == "running");
+            let finishing = entry.running;
+            entry.running |= active;
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            if (changed || active || finishing)
+                && !remaining.is_zero()
+                && checkouts
+                    .iter()
+                    .any(|(_, directory)| same_directory(directory, &entry.origin))
+            {
+                validate_session_id(&session.id)?;
+                let messages: Result<Vec<serde_json::Value>, _> = bridge.get_unscoped_json(
+                    &format!(
+                        "/api/session/{}/message?type=assistant&order=desc&limit=10",
+                        session.id
+                    ),
+                    remaining,
+                );
+                if let Ok(messages) = messages {
+                    entry.updated = session.time.updated;
+                    entry.running = active;
+                    if let Some((completed, targets)) = latest_work(&messages, entry.completed) {
+                        entry.completed = completed;
+                        entry.targets = targets;
+                        // An ambiguous target cannot keep offering an older undelivered move.
+                        if work_directory(checkouts, &entry.targets).is_none() {
+                            self.pending_moves
+                                .lock()
+                                .map_err(|_| {
+                                    BridgeError::Failed("the agent service is poisoned".into())
+                                })?
+                                .remove(&session.id);
+                        }
+                    }
+                }
+            }
+            // Resolve again even without new tools: the agent may have created a worktree before
+            // Marvis registered it. The original target is retained, not its parent checkout.
+            if let Some(directory) = work_directory(checkouts, &entry.targets) {
+                entry.effective = directory;
+            }
+            located.push((session.id, entry.effective.clone()));
+        }
+        self.record_relocations(checkouts, located, now)
     }
 
     /// What changed between the last read and this one, together with what is still owed.
@@ -4754,6 +4983,192 @@ mod tests {
             .find(|(name, _)| name.eq_ignore_ascii_case(DIRECTORY_HEADER))
             .expect("every request should name the directory it is scoped to");
         assert_eq!(header.1, path);
+    }
+
+    #[test]
+    fn tool_work_follows_its_session_without_a_location_change_or_worktree_guess() {
+        let home = tempfile::tempdir().unwrap();
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join(".worktrees/test");
+        for args in [
+            vec!["init", "--initial-branch=main"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "fixture",
+            ],
+            vec!["worktree", "add", "-b", "test", nested.to_str().unwrap()],
+        ] {
+            let output = std::process::Command::new("git")
+                .arg("-C")
+                .arg(root.path())
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "{}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+        let file = nested.join("created.txt");
+        std::fs::write(&file, "created by the agent").unwrap();
+        let main = vec![
+            ("home".to_string(), home.path().to_path_buf()),
+            ("main".to_string(), root.path().to_path_buf()),
+        ];
+        let both = vec![
+            ("home".to_string(), home.path().to_path_buf()),
+            ("main".to_string(), root.path().to_path_buf()),
+            ("test".to_string(), nested.clone()),
+        ];
+        let completed = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as i64
+            + 60_000;
+        let session = |id: &str, updated| {
+            serde_json::json!({
+                "id": id, "time": {"updated": updated}, "location": {"directory": root.path()}
+            })
+        };
+        let list = |updated| {
+            serde_json::json!({"data": [session("ses_writer", updated), session("ses_other", 1),
+            {"id": "ses_child", "parentID": "ses_writer", "location": {"directory": nested}}]})
+        };
+        let message = |name: &str, input: serde_json::Value, metadata: serde_json::Value| {
+            serde_json::json!({"data": [{
+                "type": "assistant", "content": [{"type": "tool", "name": name,
+                    "time": {"completed": completed}, "state": {"status": "completed", "input": input, "metadata": metadata}}]
+            }]})
+        };
+        let (port, server) = mock_json_responses(vec![
+            serde_json::json!({"data": [{"id": "build", "name": "Build", "mode": "primary"}]}),
+            list(1),
+            list(2),
+            serde_json::json!({"data": {"ses_writer": {"type": "running"}}}),
+            // The command creates a worktree, but contains no execution directory. No inference.
+            message(
+                "shell",
+                serde_json::json!({"command": "git worktree add .worktrees/test"}),
+                serde_json::json!({}),
+            ),
+            list(2),
+            serde_json::json!({"data": {"ses_writer": {"type": "running"}, "ses_other": {"type": "running"}}}),
+            message(
+                "write",
+                serde_json::json!({"path": file, "content": "console.log(\"Hello, world!\");"}),
+                serde_json::json!({}),
+            ),
+            // Another session's work remains attributable to that session, not the newest worktree.
+            message(
+                "execute",
+                serde_json::json!({"code": "not inspected"}),
+                serde_json::json!({"toolCalls": [
+                    {"tool": "lean-ctx.ctx_shell", "status": "completed", "input": {"cwd": root.path(), "command": "git status"}}
+                ]}),
+            ),
+            list(2),
+            serde_json::json!({"data": {}}),
+            // Read once after running -> idle, even if session.time.updated did not change.
+            message(
+                "patch",
+                serde_json::json!({"patchText": format!("*** Begin Patch\n*** Add File: {}\n+created\n*** End Patch", file.display())}),
+                serde_json::json!({}),
+            ),
+            message(
+                "shell",
+                serde_json::json!({"workdir": root.path(), "command": "git status"}),
+                serde_json::json!({}),
+            ),
+            list(2),
+            serde_json::json!({"data": {}}),
+        ]);
+        let agents = AgentService::with_test_server(port);
+        // The terminal is filed under Home, while the agent session lives in the registered repo.
+        agents.agents("home", home.path()).unwrap();
+        assert!(agents.relocations(&main).unwrap().is_empty());
+        // The worktree and file already exist, which alone must never move a terminal.
+        assert!(agents.relocations(&both).unwrap().is_empty());
+        // File work happened before the worktree was registered. Keep the original target.
+        assert!(agents.relocations(&main).unwrap().is_empty());
+        let moved = vec![AgentRelocation {
+            session_id: "ses_writer".into(),
+            from_checkout_id: "main".into(),
+            to_checkout_id: "test".into(),
+        }];
+        assert_eq!(agents.relocations(&both).unwrap(), moved);
+        // The API still says main, but cannot pull the terminal back after the tool turn ends.
+        assert_eq!(agents.relocations(&both).unwrap(), moved);
+        let requests = server.join().unwrap();
+        let histories: Vec<_> = requests
+            .iter()
+            .filter(|request| request.0.contains("/message?"))
+            .collect();
+        assert_eq!(histories.len(), 5);
+        assert!(histories[0].0.contains("/ses_writer/message?"));
+        assert!(histories[1].0.contains("/ses_writer/message?"));
+        assert!(histories[2].0.contains("/ses_other/message?"));
+        for request in histories {
+            assert_eq!(request.1, crate::services::opencode::authorization("test"));
+            assert!(!request
+                .3
+                .iter()
+                .any(|(name, _)| name.eq_ignore_ascii_case(DIRECTORY_HEADER)));
+        }
+    }
+
+    #[test]
+    fn tool_work_rejects_ambiguous_unexecuted_relative_and_read_only_targets() {
+        use super::{latest_work, work_directory};
+        let first = tempfile::tempdir().unwrap();
+        let second = tempfile::tempdir().unwrap();
+        let checkouts = vec![
+            ("first".into(), first.path().to_path_buf()),
+            ("second".into(), second.path().to_path_buf()),
+        ];
+        assert!(work_directory(&checkouts, &[first.path().into(), second.path().into()]).is_none());
+        assert!(work_directory(&checkouts, &[PathBuf::from("relative")]).is_none());
+        let foreign = tempfile::tempdir().unwrap();
+        assert!(work_directory(&checkouts, &[foreign.path().into()]).is_none());
+        let tool = |status: &str| {
+            serde_json::json!({"type":"assistant", "content": [{
+                "type":"tool", "name":"execute", "time":{"completed":10},
+                "state":{"status":status, "metadata":{"toolCalls":[
+                    {"tool":"lean-ctx.ctx_patch", "status":"completed", "input":{"path":first.path()}},
+                    {"tool":"lean-ctx.ctx_patch", "status":"completed", "input":{"path":second.path()}}
+                ]}}
+            }]})
+        };
+        let (stamp, targets) = latest_work(&[tool("completed")], 9).unwrap();
+        assert_eq!(stamp, 10);
+        assert!(work_directory(&checkouts, &targets).is_none());
+        assert!(latest_work(&[tool("running"), tool("error")], 9).is_none());
+        assert!(latest_work(&[tool("completed")], 10).is_none());
+        let mut single = tool("completed");
+        single["content"][0]["state"]["metadata"]["toolCalls"]
+            .as_array_mut()
+            .unwrap()
+            .truncate(1);
+        let (_, targets) = latest_work(&[single.clone()], 9).unwrap();
+        assert_eq!(
+            work_directory(&checkouts, &targets),
+            Some(first.path().canonicalize().unwrap())
+        );
+        single["content"][0]["state"]["metadata"]["truncated"] = serde_json::json!(true);
+        assert!(latest_work(&[single], 9).is_none());
+        let read = serde_json::json!({"type":"assistant", "content":[{
+            "type":"tool", "name":"execute", "time":{"completed":11}, "state":{"status":"completed",
+            "input":{"code":"ctx_patch at another worktree"}, "metadata":{"toolCalls":[
+                {"tool":"lean-ctx.ctx_read", "status":"completed", "input":{"path":second.path()}}
+            ]}}
+        }]});
+        assert!(latest_work(&[read], 9).is_none());
     }
 
     /// A session that changes directory is the only sign of the move, and it can only be seen by

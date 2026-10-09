@@ -101,8 +101,6 @@ pub struct TerminalSettings {
     /// The shape of the cursor: `block`, `bar` or `underline`.
     pub cursor_style: String,
     pub scrollbar: String,
-    /// Whether moving a terminal to another worktree also moves the shell's working directory.
-    pub change_directory_on_move: bool,
     /// Whether a new terminal is told to report how its commands ended, which is what turns a
     /// failed command's row red.
     ///
@@ -112,22 +110,11 @@ pub struct TerminalSettings {
     /// that failed without ending the shell.
     /// Native shell startup preserves banners and warnings; unsupported shells remain uninstrumented.
     pub shell_integration: bool,
-    /// Whether an OpenCode session that starts working in another worktree takes its terminal with
-    /// it. Mirrors `followAgentAcrossWorktrees` in `src/domain/settings.ts`.
-    pub follow_agent_across_worktrees: bool,
-    /// Whether a shell that changes directory into another worktree moves its terminal to it.
-    /// Mirrors `followDirectoryAcrossWorktrees` in `src/domain/settings.ts`.
-    pub follow_directory_across_worktrees: bool,
-    /// Which moves take the window with them: `visible` or `always`. Mirrors
-    /// `followSelection` in `src/domain/settings.ts`, and the two answers are the only ones that
-    /// name a behaviour, which is why anything else in the file is refused the same way a cursor
-    /// style is.
-    pub follow_selection: String,
+    /// Which activity moves a terminal to its matching worktree: off, cd, agent or both.
+    pub follow_worktree: String,
 }
 
-/// The window answers for a terminal that moved on its own, and this is the whole of the choice:
-/// the terminal on screen, or every terminal whatever the pane is showing.
-const FOLLOW_SELECTIONS: [&str; 2] = ["visible", "always"];
+const WORKTREE_FOLLOW_MODES: [&str; 4] = ["off", "cd", "agent", "both"];
 
 impl Default for TerminalSettings {
     fn default() -> Self {
@@ -137,11 +124,8 @@ impl Default for TerminalSettings {
             cursor_blink: true,
             cursor_style: "block".into(),
             scrollbar: "hidden".into(),
-            change_directory_on_move: false,
             shell_integration: true,
-            follow_agent_across_worktrees: true,
-            follow_directory_across_worktrees: false,
-            follow_selection: "visible".into(),
+            follow_worktree: "agent".into(),
         }
     }
 }
@@ -215,8 +199,8 @@ impl AppSettings {
         ) {
             self.terminal.scrollbar = "hidden".into();
         }
-        if !FOLLOW_SELECTIONS.contains(&self.terminal.follow_selection.as_str()) {
-            self.terminal.follow_selection = "visible".into();
+        if !WORKTREE_FOLLOW_MODES.contains(&self.terminal.follow_worktree.as_str()) {
+            self.terminal.follow_worktree = "agent".into();
         }
         self.editor.font_size = bounded(
             self.editor.font_size,
@@ -394,11 +378,8 @@ mod tests {
                 cursor_blink: false,
                 cursor_style: "bar".into(),
                 scrollbar: "always".into(),
-                change_directory_on_move: true,
                 shell_integration: false,
-                follow_agent_across_worktrees: false,
-                follow_directory_across_worktrees: true,
-                follow_selection: "always".into(),
+                follow_worktree: "both".into(),
             },
             editor: EditorSettings {
                 font_size: 15.0,
@@ -432,11 +413,8 @@ mod tests {
                 "cursorBlink": true,
                 "cursorStyle": "block",
                 "scrollbar": "hidden",
-                "changeDirectoryOnMove": false,
                 "shellIntegration": true,
-                "followAgentAcrossWorktrees": false,
-                "followDirectoryAcrossWorktrees": true,
-                "followSelection": "always"
+                "followWorktree": "cd"
             },
             "editor": {
                 "fontSize": 13.0,
@@ -453,17 +431,8 @@ mod tests {
         .unwrap();
         let loaded = load(&path).unwrap();
 
-        assert!(!loaded.terminal.follow_agent_across_worktrees);
-        assert!(loaded.terminal.follow_directory_across_worktrees);
-        assert_eq!(loaded.terminal.follow_selection, "always");
-        // The same values as the answer the renderer gets back, key for key.
-        let back = serde_json::to_value(&loaded).unwrap();
-        assert_eq!(
-            back["terminal"]["followAgentAcrossWorktrees"], false,
-            "the answer the renderer reads lost a preference"
-        );
-        assert_eq!(back["terminal"]["followDirectoryAcrossWorktrees"], true);
-        assert_eq!(back["terminal"]["followSelection"], "always");
+        assert_eq!(loaded.terminal.follow_worktree, "cd");
+        assert_eq!(serde_json::to_value(&loaded).unwrap(), from_the_dialog);
     }
 
     /// Touching one preference used to write out only the ones this side knew about, so changing
@@ -473,9 +442,7 @@ mod tests {
         let home = settings_dir();
         let path = config_path_in(&home);
         let mut settings = AppSettings::default();
-        settings.terminal.follow_agent_across_worktrees = false;
-        settings.terminal.follow_directory_across_worktrees = true;
-        settings.terminal.follow_selection = "always".into();
+        settings.terminal.follow_worktree = "off".into();
         save(&path, &settings).unwrap();
 
         // A zoom step writes the same file, and it is handed the whole settings, not a patch.
@@ -485,20 +452,48 @@ mod tests {
 
         let loaded = load(&path).unwrap();
         assert_eq!(loaded.ui.zoom, 1.2);
-        assert!(!loaded.terminal.follow_agent_across_worktrees);
-        assert!(loaded.terminal.follow_directory_across_worktrees);
-        assert_eq!(loaded.terminal.follow_selection, "always");
+        assert_eq!(loaded.terminal.follow_worktree, "off");
     }
 
-    /// A word that is not one of the two answers is a hand-edited typo, and it comes back as the
-    /// answer that keeps a reader working rather than as the word.
     #[test]
-    fn a_follow_selection_that_names_no_behaviour_comes_back_as_the_default() {
+    fn deleted_terminal_preferences_are_not_normalized_or_saved() {
         let home = settings_dir();
         let path = config_path_in(&home);
-        std::fs::write(&path, "terminal:\n  followSelection: sometimes\n").unwrap();
+        std::fs::write(&path, "terminal:\n  followAgentAcrossWorktrees: false\n  followDirectoryAcrossWorktrees: true\n  followSelection: always\n  changeDirectoryOnMove: false\n").unwrap();
+        let loaded = load(&path).unwrap();
+        assert_eq!(loaded, AppSettings::default());
+        save(&path, &loaded).unwrap();
+        let terminal = serde_json::to_value(&load(&path).unwrap()).unwrap()["terminal"].clone();
+        assert_eq!(
+            terminal,
+            serde_json::json!({
+                "fontSize": 16.0, "ligatures": true, "cursorBlink": true, "cursorStyle": "block",
+                "scrollbar": "hidden", "shellIntegration": true, "followWorktree": "agent"
+            })
+        );
+        let document = std::fs::read_to_string(&path).unwrap();
+        for key in [
+            "followAgentAcrossWorktrees",
+            "followDirectoryAcrossWorktrees",
+            "followSelection",
+            "changeDirectoryOnMove",
+        ] {
+            assert!(!document.contains(key));
+        }
+    }
 
-        assert_eq!(load(&path).unwrap().terminal.follow_selection, "visible");
+    #[test]
+    fn worktree_follow_modes_round_trip_and_unknown_modes_default_to_agent() {
+        let home = settings_dir();
+        let path = config_path_in(&home);
+        assert_eq!(AppSettings::default().terminal.follow_worktree, "agent");
+        for mode in ["off", "cd", "agent", "both", "sometimes"] {
+            std::fs::write(&path, format!("terminal:\n  followWorktree: {mode}\n")).unwrap();
+            assert_eq!(
+                load(&path).unwrap().terminal.follow_worktree,
+                if mode == "sometimes" { "agent" } else { mode }
+            );
+        }
     }
 
     #[test]
