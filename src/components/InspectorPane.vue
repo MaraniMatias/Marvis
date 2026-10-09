@@ -907,7 +907,6 @@ watch(
   top: -4px;
   z-index: 2;
   background: var(--marvis-bg-0);
-  border-bottom: 1px solid var(--marvis-control-hover);
 }
 
 .details-scroll {
