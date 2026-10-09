@@ -1,261 +1,226 @@
 #!/usr/bin/env bash
-# Ships one release: bumps the version, pushes the commit and the tag, waits for the build and reads
-# back the release the run published.
-#
-# Usage: scripts/release.sh <version> [--dry-run]
-#
-# The version is bumped with scripts/release.mjs, which owns the manifests; this owns git and the
-# GitHub release, which are the two things that cannot be undone from here. That split is why the
-# tag is pushed before the build is known to pass: the alternative is a dance between bumping and
-# tagging, and a dry run cannot even start until the bumped manifests are on the default branch.
-# What this gives up instead is a human pausing between the artifacts being uploaded and the
-# release going live, so the pause is conditional on the run instead: the run publishes only once
-# every matrix job succeeded, which is also the only way a release exists at all. Publishing it there
-# rather than here is what keeps a draft from sitting there holding the previous release as the
-# latest one, and it leaves this script with a read-back where its publish used to be.
-#
-# Every step is skipped when the state already satisfies it, so the same command resumes a release
-# instead of refusing it. That is what makes the two-command release work:
-#
-#   scripts/release.sh 0.2.1 --dry-run   # bump, push main, run the build, no tag
-#   scripts/release.sh 0.2.1             # pushes that tag, waits, publishes
-#
-# The second command finds the manifests already at 0.2.1 and the tag already made, and only has the
-# tag to push. It also resumes a release whose build failed, which `gh run rerun <id>` would also do.
-#
-# Two gates stand between this and a tag, and both are about the tree rather than about the version.
-# The first is local and runs before anything is written: version consistency, formatting, both
-# linters, the type checker and the tests, on this machine. The second waits for the checks workflow
-# on the commit itself, which is the only answer that covers every platform a release is built for.
-# Neither is skippable, because the tag is the one step here that cannot be undone: a version whose
-# checks were never green stays on the remote forever with no release behind it, and every later
-# attempt has to be a new number for a problem that was answerable before the first one.
-#
-# If the build fails after the tag, nothing was published and the run can be retried with
-# `gh run rerun <id>`: the same tag, the same commit, no new version. If the checks fail before it,
-# there is no tag to retry and nothing to clean up.
-#
+# Validate locally, commit/push only the version change, then let GitHub validate and publish.
+# --dry-run may push the prepared commit and build all bundles, but never creates a tag/release.
 set -euo pipefail
 
 cd "$(dirname "$0")/.."
-
 step() { printf '\n\033[1m==> %s\033[0m\n' "$1"; }
-die() { printf '\033[31m%s\033[0m\n' "$1" >&2; exit 1; }
-
-# Waits for the checks run of one commit and says whether it passed.
-#
-# This is the gate that has to exist here. The local gate below answers for this machine, and the
-# machine a release is built for is not it: a commit can be green on a Mac and red on Linux, which
-# is where every release that failed so far failed. Nothing about that is visible before the tag
-# goes out, because nothing else runs the suite on Linux, so this is where that answer is asked for.
-#
-# `gh run watch` is deliberately not used: it ends when the connection to the runner does, and a
-# run that is still going reads as a release that failed. Polling cannot be confused with either --
-# the run's own state is asked for, and a request that fails answers nothing rather than "failed" --
-# so a flaky network costs a few seconds here instead of a version.
-wait_for_checks() {
-  local commit="$1" run="" short jobs reported="" status conclusion deadline
-  short="$(git rev-parse --short "$commit")"
-  for _ in $(seq 1 18); do
-    run="$(gh run list --workflow ci.yml --commit "$commit" --event push --limit 1 \
-      --json databaseId --jq '.[0].databaseId // empty')"
-    [[ -n "$run" ]] && break
-    sleep 5
-  done
-  [[ -n "$run" ]] || return 2
-  echo "run $run: https://github.com/$repository/actions/runs/$run"
-  # Sixty minutes is far longer than these checks take and is here so a runner that wedges cannot
-  # leave this waiting for the rest of the day: the run is still there to be looked at.
-  deadline=$((SECONDS + 3600))
-  while ((SECONDS < deadline)); do
-    status="$(gh run view "$run" --json status --jq .status 2>/dev/null)"
-    if [[ "$status" == "completed" ]]; then
-      break
-    fi
-    jobs="$(gh run view "$run" --json jobs --jq '[.jobs[] | "\(.name): \(.status)"] | join("  ")' 2>/dev/null)"
-    if [[ -n "$jobs" && "$jobs" != "$reported" ]]; then
-      printf '  %s\n' "$jobs"
-      reported="$jobs"
-    fi
-    sleep 20
-  done
-  conclusion="$(gh run view "$run" --json conclusion --jq .conclusion 2>/dev/null)"
-  if [[ "$conclusion" != "success" ]]; then
-    gh run view "$run" --json jobs --jq '.jobs[] | select(.conclusion == "failure") | "  \(.name)"' >&2
-    return 1
-  fi
-  echo "$short passed the checks on every platform"
-}
-
+die() { printf '%s\n' "$1" >&2; exit 1; }
 usage() {
   cat <<'USAGE'
-usage: scripts/release.sh <version> [--dry-run]
-       pnpm release v0.2.0                     # bump, tag, build, publish
-       pnpm release v0.2.0 --dry-run           # bump and build, no tag
-       pnpm release:preview v0.2.0             # report the writes, change nothing
+usage: scripts/release.sh <v0.minor.patch> [--dry-run]
+       bun run release:preview -- v0.minor.patch  # no mutation
+       bun run release:validate                  # local checks + Docker Linux packages
+       bun run release -- v0.minor.patch --dry-run # prepare + GitHub builds; no tag/publish
 USAGE
 }
 
 dry_run=false
-args=()
+version=""
 for argument in "$@"; do
   case "$argument" in
     --dry-run) dry_run=true ;;
-    -h | --help) usage; exit 0 ;;
-    *) args+=("$argument") ;;
+    -h|--help) usage; exit 0 ;;
+    --) ;;
+    -*) die "unknown option: $argument" ;;
+    *) [[ -z "$version" ]] || die "provide only one version"; version="$argument" ;;
   esac
 done
-[[ ${#args[@]} -eq 1 ]] || { usage >&2; exit 1; }
+[[ -n "$version" ]] || { usage >&2; exit 1; }
+version="${version#v}"
+[[ "$version" =~ ^0\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] ||
+  die "\"$version\" is not a v0 version like 0.21.0"
+tag="v$version"
 
-# The tag is `v<version>` and the manifests hold the version bare, so both spellings are accepted
-# here and normalized once.
-requested="${args[0]#v}"
-[[ "$requested" =~ ^[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)*$ ]] ||
-  die "\"${args[0]}\" is not a version like 0.2.0 or v0.2.0"
-tag="v$requested"
-
-step "Checking this repository can take a release"
-for tool in git gh node pnpm; do
-  command -v "$tool" >/dev/null || die "$tool is not installed"
-done
+for tool in git gh node; do command -v "$tool" >/dev/null || die "$tool is not installed"; done
 gh auth status >/dev/null 2>&1 || die "gh is not authenticated; run: gh auth login"
 repository="$(gh repo view --json nameWithOwner --jq .nameWithOwner)"
-
-# A tag from anywhere but the default branch is a commit the gated workflow never validated, and the
-# checks it runs are the ones the branch was protected for.
-[[ "$(git rev-parse --abbrev-ref HEAD)" == "main" ]] ||
-  die "releases are cut from main; you are on $(git rev-parse --abbrev-ref HEAD)"
-[[ -z "$(git status --porcelain)" ]] ||
-  die "the working tree has uncommitted changes; commit or stash them first"
-
-# What the release is resuming from. The manifests are read with node because they are JSON, and
-# reading them any other way is the kind of parsing that breaks on the next format change.
-current="$(node -p "require('./package.json').version")"
-head="$(git rev-parse HEAD)"
-# `set -e` does not fire on a failing left side of `&&`, so these read as questions, not commands.
-tag_local=0
-git rev-parse --verify --quiet "refs/tags/$tag" >/dev/null && tag_local=1
-tag_remote=0
-git ls-remote --exit-code --tags origin "refs/tags/$tag" >/dev/null 2>&1 && tag_remote=1
-
-if ((tag_remote)) && ((!tag_local)); then
-  # A resume from a fresh clone needs the tag before its commit can be read.
-  git fetch -q origin "refs/tags/$tag:refs/tags/$tag"
-  tag_local=1
-fi
-if ((tag_local)) && [[ "$(git rev-parse "$tag^{commit}")" != "$head" ]]; then
-  die "$tag points at $(git rev-parse --short "$tag^{commit}"), not at HEAD ($(git rev-parse --short "$head"))"
-fi
-if [[ "$current" != "$requested" ]] && ((tag_local || tag_remote)); then
-  die "$tag exists and the manifests are at $current, so $requested cannot be a new release of it"
-fi
-printf 'repository %s, branch main, manifests at %s\n' "$repository" "$current"
-
-if ((tag_remote)); then
-  step "Resuming $tag, which is already on the remote"
-  release_commit="$(git rev-parse "$tag^{commit}")"
-else
-  # The gate runs on the tree that is about to be tagged, and only when something is about to be
-  # written: a resume waits for a run and publishes nothing, so it has nothing of its own to prove.
-  # A tag on a tree that fails cannot be taken back, and this is where that is caught rather than
-  # minutes later on a machine that is not this one.
-  #
-  # These are the steps the `checks` workflow runs that answer the same thing on every machine:
-  # version consistency, formatting, both linters, the type checker and the tests. What is left out
-  # is everything whose answer is the machine rather than the tree -- the Linux build, the audits
-  # and the coverage report -- because a network hiccup during an audit should not hold a release,
-  # and none of them can be proved here anyway.
-  for gate in release:check fmt:check lint typecheck lint:rust test; do
-    step "pnpm $gate"
-    pnpm "$gate" || die "pnpm $gate failed here, so nothing was written and no tag was made.
-Fix it, commit, and run this again."
-  done
-
-  if [[ "$current" == "$requested" ]]; then
-    if ((tag_local)); then
-      # What --dry-run leaves behind: the version is committed and the tag was made with it.
-      step "The manifests and the tag are already at $requested"
-    else
-      step "The manifests are already at $requested; tagging this commit"
-      # Someone bumped the version and committed it, without a tag.
-      git tag -a "$tag" -m "Marvis $tag"
+[[ "$(git branch --show-current)" == main ]] || die "releases must be cut from main"
+[[ -z "$(git status --porcelain)" ]] || die "the working tree has uncommitted changes; commit or stash them first"
+wait_for_run() {
+  local run_id="$1" tag_name="$2" validation_only="${3:-false}" resume="${4:-false}"
+  local status conclusion jobs reported="" deadline rerun_attempted=false
+  echo "run $run_id: https://github.com/$repository/actions/runs/$run_id"
+  deadline=$((SECONDS + 3600))
+  while (( SECONDS < deadline )); do
+    status=""
+    if ! status="$(gh run view "$run_id" --json status --jq .status 2>/dev/null)"; then
+      echo "  GitHub status request failed; retrying without treating it as a failed run" >&2
+      sleep 20
+      continue
     fi
-  else
-    step "Writing $tag into the manifests, and committing it"
-    # --no-push: the two pushes below are separate so a failure leaves a commit with no tag rather
-    # than a tag with no commit on the branch that was checked.
-    node scripts/release.mjs --bump "$requested" --no-push
-  fi
+    if [[ "$status" == completed ]]; then
+      conclusion="$(gh run view "$run_id" --json conclusion --jq .conclusion 2>/dev/null)" || { sleep 20; continue; }
+      if [[ "$conclusion" == success ]]; then
+        if [[ "$validation_only" == true ]]; then
+          echo "All validation builds succeeded; no tag or release was requested."
+          return 0
+        fi
+        if ! gh release view "$tag_name" --repo "$repository" --json assets,isDraft >/dev/null 2>&1; then
+          echo "  Release metadata is not available yet; retrying" >&2
+          sleep 20
+          continue
+        fi
+        local is_draft asset_count
+        is_draft="$(gh release view "$tag_name" --repo "$repository" --json isDraft --jq .isDraft)" || { sleep 20; continue; }
+        asset_count="$(gh release view "$tag_name" --repo "$repository" --json assets --jq '.assets | length')" || { sleep 20; continue; }
+        [[ "$is_draft" == false && "$asset_count" == 7 ]] || die "$tag_name release is incomplete; inspect https://github.com/$repository/actions/runs/$run_id"
+        printf 'Published %s with %s assets.\n' "$tag_name" "$asset_count"
+        gh release view "$tag_name" --repo "$repository" --json url --jq .url
+        return 0
+      fi
+      if [[ "$conclusion" == failure ]]; then
+        if [[ "$resume" == true && "$rerun_attempted" == false ]] && git ls-remote --exit-code --tags origin "refs/tags/$tag_name" >/dev/null 2>&1; then
+          echo "  Retrying only failed jobs for the tagged workflow; successful build artifacts are reused."
+          gh run rerun "$run_id" --failed || die "could not retry tagged workflow $run_id; no tag was changed"
+          rerun_attempted=true
+          sleep 5
+          continue
+        fi
+        if git ls-remote --exit-code --tags origin "refs/tags/$tag_name" >/dev/null 2>&1; then
+          die "release run $run_id failed after tagging; retry with: gh run rerun $run_id --failed"
+        fi
+        die "release run $run_id failed before the tag; no release tag was created"
+      fi
+      die "release run $run_id concluded $conclusion; inspect https://github.com/$repository/actions/runs/$run_id"
+    fi
+    jobs="$(gh run view "$run_id" --json jobs --jq '[.jobs[] | [.name,.status] | join(\": \")] | join(\"  \")' 2>/dev/null)" || jobs=""
+    if [[ -n "$jobs" && "$jobs" != "$reported" ]]; then printf '  %s\n' "$jobs"; reported="$jobs"; fi
+    sleep 20
+  done
+  die "timed out waiting for run $run_id; it may still be active: https://github.com/$repository/actions/runs/$run_id"
+}
 
-  step "Pushing the commit"
-  git push origin HEAD:main
-  # HEAD now, and not the one read before the bump: the manifests commit is what the workflow runs
-  # against, and the earlier HEAD is a commit no run is ever made for, so polling for it waits out
-  # the whole timeout and reports a release that is already building.
-  release_commit="$(git rev-parse HEAD)"
+remote_tag_commit() {
+  local refs peeled direct
+  refs="$(git ls-remote --tags origin "refs/tags/$tag" "refs/tags/$tag^{}")" || return 2
+  [[ -n "$refs" ]] || return 1
+  peeled="$(awk -v ref="refs/tags/$tag" '$2 == ref "^{}" { print $1 }' <<< "$refs")"
+  direct="$(awk -v ref="refs/tags/$tag" '$2 == ref { print $1 }' <<< "$refs")"
+  printf '%s\n' "${peeled:-$direct}"
+}
 
-  step "Waiting for the checks on $(git rev-parse --short "$release_commit")"
-  # On the right of || rather than after a semicolon: `set -e` ends the script on a command that
-  # fails on its own, and this one's answer is what decides which of the two failures below it is.
-  checks=0
-  wait_for_checks "$release_commit" || checks=$?
-  case $checks in
-    0) ;;
-    1)
-      die "the checks failed for $(git rev-parse --short "$release_commit") on the jobs named above.
-No tag was pushed, so there is no version to redo: fix it on main and run this again."
-      ;;
-    *)
-      die "no checks run appeared for $(git rev-parse --short "$release_commit").
-Check https://github.com/$repository/actions and run this again."
-      ;;
-  esac
-
-  if $dry_run; then
-    step "Building $tag without tagging it"
-    # The workflow refuses to start on a tag that does not exist, so the dry run is the one that
-    # checks main against the version it claims to be releasing.
-    gh workflow run release.yml -f tag="$tag"
-    echo "When it is green, finish with: pnpm release ${args[0]}"
-    exit 0
-  fi
-
-  step "Pushing the tag"
-  git push origin "refs/tags/$tag"
+local_tag_commit=""
+if git show-ref --verify --quiet "refs/tags/$tag"; then
+  local_tag_commit="$(git rev-parse "$tag^{commit}")"
+fi
+remote_sha=""
+if remote_sha="$(remote_tag_commit)"; then :; else
+  result=$?
+  [[ "$result" == 1 ]] || die "could not query origin for tag $tag"
+fi
+if [[ -n "$local_tag_commit" && -z "$remote_sha" ]]; then
+  die "local tag $tag is not on origin; refusing to push or replace it"
+fi
+if [[ -n "$remote_sha" && -n "$local_tag_commit" && "$remote_sha" != "$local_tag_commit" ]]; then
+  die "$tag differs locally ($local_tag_commit) and remotely ($remote_sha); refusing to move it"
 fi
 
-step "Waiting for the Release workflow"
-# Filtered by the tagged commit rather than by the tag as a ref: `--ref` is not a flag every gh has
-# (`gh run list` takes `--branch` or `--commit`), and the commit is what the run is really about. The
-# event filter keeps the CI runs on the same commit out of the answer.
+current="$(node -p "require('./package.json').version")"
+node scripts/release.mjs --check >/dev/null || die "version files disagree; fix them before releasing"
+if [[ "$current" == "$version" ]]; then
+  node scripts/release.mjs --check "$tag" >/dev/null || die "prepared version does not match $tag"
+fi
+
+if [[ -n "$remote_sha" && "$current" == "$version" && "$dry_run" == false ]]; then
+  step "Resuming the already-tagged $tag without rebuilding it"
+  if [[ -z "$local_tag_commit" ]]; then git fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"; fi
+  tag_subject="$(git for-each-ref --format='%(contents:subject)' "refs/tags/$tag")"
+  [[ "$tag_subject" =~ workflow\ run\ ([0-9]+)$ ]] || die "$tag exists but is not an annotated tag from the release workflow"
+  run="${BASH_REMATCH[1]}"
+  details="$(gh run view "$run" --json event,workflowName,displayTitle --jq '[.event,.workflowName,.displayTitle] | @tsv')" || die "cannot inspect tagged workflow run $run"
+  expected_prefix="Release $tag at $remote_sha publish ["
+  [[ "$details" == *$'workflow_dispatch\tRelease\t'*"$expected_prefix"* ]] || die "tag $tag belongs to a different workflow or source commit"
+  wait_for_run "$run" "$tag" false true
+  exit 0
+fi
+
+if [[ -n "$remote_sha" && "$current" != "$version" ]]; then
+  die "$tag already exists, but the checked-out manifests are $current; refusing to resume a different version"
+fi
+
+if [[ -z "$remote_sha" ]]; then
+  command -v bun >/dev/null || die "Bun is required to run the release validation gate"
+  original_head="$(git rev-parse HEAD)"
+  original_branch="$(git branch --show-current)"
+  [[ "$original_branch" == main ]] || die "releases must be cut from main"
+  step "Preparing version $tag before validation"
+  node scripts/release.mjs --bump "$version" || die "could not prepare version $tag"
+  node scripts/release.mjs --check "$tag" || die "prepared version does not match $tag"
+  expected_status="$(git status --porcelain --untracked-files=all)"
+  allowed_version_status=$' M package.json\n M src-tauri/Cargo.lock\n M src-tauri/Cargo.toml\n M src-tauri/tauri.conf.json'
+  case "$expected_status" in
+    ""|"$allowed_version_status") ;;
+    *) die "version preparation changed files outside the four version manifests; no commit, push, or tag was made" ;;
+  esac
+  expected_diff="$(git diff --binary)"
+  git diff --cached --quiet || die "version preparation unexpectedly staged changes"
+  step "Running local release checks and Linux Docker packaging for $tag"
+  validation_status=0
+  bun run release:validate || validation_status=$?
+  [[ "$(git rev-parse HEAD)" == "$original_head" ]] || die "local validation changed HEAD; prepared version edits remain and no release commit, push, or tag was made"
+  [[ "$(git branch --show-current)" == "$original_branch" ]] || die "local validation changed branches; prepared version edits remain and no release commit, push, or tag was made"
+  [[ "$(git status --porcelain --untracked-files=all)" == "$expected_status" ]] || die "local validation changed files outside the prepared version manifests; no commit, push, or tag was made"
+  [[ "$(git diff --binary)" == "$expected_diff" ]] || die "local validation changed the prepared version diff; no commit, push, or tag was made"
+  git diff --cached --quiet || die "local validation staged changes; no commit, push, or tag was made"
+  if [[ "$validation_status" != 0 ]]; then
+    if [[ -n "$expected_status" ]]; then
+      die "local validation failed; prepared version edits remain in the working tree; no commit, push, or tag was made"
+    else
+      die "local validation failed; the already-prepared version remains unchanged; no commit, push, or tag was made"
+    fi
+  fi
+  if [[ -n "$expected_status" ]]; then
+    step "Committing validated version $tag"
+    git add package.json src-tauri/Cargo.toml src-tauri/Cargo.lock src-tauri/tauri.conf.json
+    git commit -m "chore: release $tag"
+  else
+    step "Resuming the already-prepared untagged version $tag"
+  fi
+  [[ -z "$(git status --porcelain --untracked-files=all)" ]] || die "unexpected changes remain after preparing $tag"
+  release_sha="$(git rev-parse HEAD)"
+  if remote_sha="$(remote_tag_commit)"; then die "$tag appeared on origin during validation; inspect it before retrying"; else
+    result=$?
+    [[ "$result" == 1 ]] || die "could not recheck origin for tag $tag"
+  fi
+  step "Pushing only commit $release_sha to main"
+  git push origin "$release_sha:refs/heads/main" || die "main advanced or push failed; no tag was created"
+else
+  release_sha="$remote_sha"
+fi
+
+request_id="rel_${release_sha:0:12}_$(date +%s)_$$_$RANDOM"
+mode=publish
+$dry_run && mode=validation-only
+run_name="Release $tag at $release_sha $mode [$request_id]"
+step "Dispatching $mode workflow for exact SHA $release_sha"
+gh workflow run release.yml --ref main \
+  -f commit_sha="$release_sha" -f version="$tag" -f validation_only="$dry_run" -f request_id="$request_id"
+
+find_dispatched_run() {
+  gh run list --workflow release.yml --event workflow_dispatch --limit 50 \
+    --json databaseId,displayTitle --jq '.[] | select(.displayTitle == '"'"$run_name"'"') | .databaseId | tostring'
+}
 run=""
-for _ in $(seq 1 18); do
-  run="$(gh run list --workflow release.yml --commit "$release_commit" --event push --limit 1 \
-    --json databaseId --jq '.[0].databaseId // empty')"
+for _ in $(seq 1 36); do
+  candidate=""
+  if candidate="$(find_dispatched_run 2>/dev/null)"; then run="$candidate"; fi
   [[ -n "$run" ]] && break
   sleep 5
 done
-[[ -n "$run" ]] || die "no Release run appeared for $tag; check https://github.com/$repository/actions"
-echo "run $run: https://github.com/$repository/actions/runs/$run"
+[[ -n "$run" ]] || die "no correlated Release run appeared; inspect https://github.com/$repository/actions"
+wait_for_run "$run" "$tag" "$dry_run" false
 
-# --exit-status is the whole point: a run that fails leaves a tag with no release, and this is where
-# the script stops rather than publishing a release built from a job that did not pass.
-if ! gh run watch "$run" --exit-status; then
-  die "the release run failed; nothing was published. Retry it with:
-  gh run rerun $run"
+if $dry_run; then
+  step "Dry run completed; no tag or release was created"
+  printf 'Validated builds for %s at %s.\n' "$tag" "$release_sha"
+  exit 0
 fi
 
-step "Reading the release the run published"
-# The run publishes it, so this is a read-back and not a step. It is still where a tag whose run
-# succeeded ends with no release to read, and the two ways that happens are read apart: a release
-# that is not there at all, and one left as a draft.
-gh release view "$tag" >/dev/null ||
-  die "there is no release for $tag; check https://github.com/$repository/actions/runs/$run"
-[[ "$(gh release view "$tag" --json isDraft --jq .isDraft)" == "false" ]] ||
-  die "$tag is still a draft, so the run did not publish it.
-Check https://github.com/$repository/actions/runs/$run"
-assets="$(gh release view "$tag" --json assets --jq '.assets | length')"
-[[ "$assets" -gt 0 ]] || die "$tag has no assets, so there is nothing to install"
-gh release view "$tag" --json assets --jq '.assets[].name' | sed 's/^/  /'
-# The last line of this script is the link somebody copies.
-gh release view "$tag" --json url --jq .url
+step "Verifying the remote tag created after all builds succeeded"
+pushed_sha="$(remote_tag_commit)" || die "workflow succeeded but tag $tag is not on origin"
+[[ "$pushed_sha" == "$release_sha" ]] || die "$tag points to $pushed_sha, expected $release_sha"
+if ! git show-ref --verify --quiet "refs/tags/$tag"; then git fetch --no-tags origin "refs/tags/$tag:refs/tags/$tag"; fi
+[[ "$(git rev-parse "$tag^{commit}")" == "$release_sha" ]] || die "fetched tag $tag does not match validated SHA"
+gh release view "$tag" --repo "$repository" --json assets,isDraft,url --jq .url
+exit 0

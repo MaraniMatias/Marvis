@@ -1,125 +1,125 @@
 name: Release
+run-name: Release ${{ inputs.version }} at ${{ inputs.commit_sha }} ${{ inputs.validation_only && 'validation-only' || 'publish' }} [${{ inputs.request_id }}]
 
-# Tag releases reuse CI against the tag SHA, then build and publish artifacts for that same SHA.
 on:
-  push:
-    tags:
-      - "v*"
-  # Safe end-to-end check: this runs checks/builds but never publishes.
   workflow_dispatch:
     inputs:
-      tag:
-        description: v-prefixed version to validate without publishing
+      commit_sha:
+        description: Full commit SHA already pushed to main
+        required: true
+        type: string
+      version:
+        description: v0-prefixed release version
+        required: true
+        type: string
+      validation_only:
+        description: Build and validate all bundles without creating a tag or release
+        required: true
+        type: boolean
+        default: false
+      request_id:
+        description: Unique orchestration correlation ID
         required: true
         type: string
 
 permissions:
   contents: read
 
-# One release at a time, and never interrupted halfway: a run that is cancelled after it has
-# created the release leaves a tag with no artifacts.
 concurrency:
-  group: release-${{ github.ref }}
+  group: marvis-release
   cancel-in-progress: false
 
 jobs:
-  version:
-    runs-on: ubuntu-24.04
-    permissions:
-      contents: read
+  validate:
+    runs-on: ubuntu-22.04
     outputs:
       sha: ${{ steps.validate.outputs.sha }}
+      recovery: ${{ steps.validate.outputs.recovery }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.commit_sha }}
+          fetch-depth: 0
       - uses: actions/setup-node@v7
         with:
           node-version: 22
-      - name: Validate tag ref and source commit
+      - name: Validate trusted dispatch and immutable source
         id: validate
         env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          RELEASE_SHA: ${{ inputs.commit_sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          VALIDATION_ONLY: ${{ inputs.validation_only }}
+          REQUEST_ID: ${{ inputs.request_id }}
         run: |
           set -euo pipefail
-          if [[ "$EVENT_NAME" == workflow_dispatch && "$GITHUB_REF" != "refs/heads/$DEFAULT_BRANCH" ]]; then
-            echo "Run the dry run from the default branch ($DEFAULT_BRANCH)." >&2
-            exit 1
-          fi
-          if [[ ! "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+([-+][0-9A-Za-z.-]+)*$ ]]; then
-            echo "Invalid release tag: $RELEASE_TAG" >&2
-            exit 1
-          fi
+          [[ "$EVENT_NAME" == workflow_dispatch && "$DEFAULT_BRANCH" == main && "$EVENT_REF" == "refs/heads/$DEFAULT_BRANCH" ]] || {
+            echo "Release dispatch must run from the trusted default branch (main)." >&2; exit 1;
+          }
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "commit_sha must be a full lowercase SHA." >&2; exit 1; }
+          [[ "$RELEASE_VERSION" =~ ^v0\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] || {
+            echo "Only v0.*.* release versions are allowed." >&2; exit 1;
+          }
+          [[ "$REQUEST_ID" =~ ^[A-Za-z0-9_-]{1,80}$ ]] || { echo "Invalid request_id." >&2; exit 1; }
+          git fetch --no-tags origin "refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+          git merge-base --is-ancestor "$RELEASE_SHA" "origin/$DEFAULT_BRANCH" || {
+            echo "$RELEASE_SHA is not on $DEFAULT_BRANCH." >&2; exit 1;
+          }
+          [[ "$(git rev-parse "$RELEASE_SHA^{commit}")" == "$RELEASE_SHA" ]] || { echo "Commit SHA does not resolve exactly." >&2; exit 1; }
+          node scripts/release.mjs --check "$RELEASE_VERSION"
 
-          local_sha="$(git rev-parse HEAD)"
-          if [[ "$EVENT_NAME" == push ]]; then
-            object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object | [.type, .sha] | @tsv')"
-            IFS=$'\t' read -r object_type object_sha <<< "$object"
-            while [[ "$object_type" == tag ]]; do
-              object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.object | [.type, .sha] | @tsv')"
-              IFS=$'\t' read -r object_type object_sha <<< "$object"
-            done
-
-            if [[ "$object_type" != commit || "$object_sha" != "$local_sha" ]]; then
-              echo "$RELEASE_TAG resolves remotely to $object_type $object_sha, not validated commit $local_sha" >&2
-              exit 1
+          recovery=false
+          remote_tag="$(git ls-remote --tags origin "refs/tags/$RELEASE_VERSION" "refs/tags/$RELEASE_VERSION^{}")"
+          if [[ -n "$remote_tag" ]]; then
+            tagged_sha="$(awk -v ref="refs/tags/$RELEASE_VERSION" '$2 == ref { direct = $1 } $2 == ref "^{}" { peeled = $1 } END { print peeled ? peeled : direct }' <<< "$remote_tag")"
+            [[ "$tagged_sha" == "$RELEASE_SHA" ]] || { echo "$RELEASE_VERSION already points to a different commit." >&2; exit 1; }
+            [[ "$VALIDATION_ONLY" != true ]] || { echo "Validation-only dispatch refuses an already-tagged version; it will not rebuild it." >&2; exit 1; }
+            (( GITHUB_RUN_ATTEMPT > 1 )) || { echo "This version is already tagged; rerun its original workflow to reuse its artifacts." >&2; exit 1; }
+            if ! git show-ref --verify --quiet "refs/tags/$RELEASE_VERSION"; then
+              git fetch --no-tags origin "refs/tags/$RELEASE_VERSION:refs/tags/$RELEASE_VERSION"
             fi
+            [[ "$(git cat-file -t "refs/tags/$RELEASE_VERSION")" == tag ]] || { echo "Existing release tag is not the original annotated tag." >&2; exit 1; }
+            tag_subject="$(git for-each-ref --format='%(contents:subject)' "refs/tags/$RELEASE_VERSION")"
+            expected_tag_subject="Marvis $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"
+            [[ "$tag_subject" == "$expected_tag_subject" ]] || { echo "Existing tag does not belong to this exact workflow run; refusing recovery." >&2; exit 1; }
+            recovery=true
           fi
-
-          echo "sha=$local_sha" >> "$GITHUB_OUTPUT"
-          echo "Validated $RELEASE_TAG at $local_sha"
-      - name: Check tag matches package manifests
-        env:
-          RELEASE_TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref_name }}
-        # The same script CI runs on every pull request, so the manifests cannot drift unnoticed
-        # and only fail here, at the moment a tag cannot be taken back.
-        run: node scripts/release.mjs --check "$RELEASE_TAG"
+          echo "sha=$RELEASE_SHA" >> "$GITHUB_OUTPUT"
+          echo "recovery=$recovery" >> "$GITHUB_OUTPUT"
+          echo "Validated $RELEASE_VERSION at $RELEASE_SHA (tagged recovery: $recovery)"
 
   checks:
-    needs: version
+    needs: validate
+    if: ${{ needs.validate.outputs.recovery != 'true' }}
     uses: ./.github/workflows/ci.yml
     with:
-      ref: ${{ needs.version.outputs.sha }}
+      ref: ${{ needs.validate.outputs.sha }}
     permissions:
       contents: read
 
   build:
-    needs: [checks, version]
-    permissions:
-      contents: read
+    needs: [validate, checks]
+    if: ${{ needs.validate.outputs.recovery != 'true' }}
+    runs-on: ${{ matrix.runner }}
     strategy:
-      # One platform failing must not take the other's artifacts down with it.
       fail-fast: false
       matrix:
         include:
-          # Apple Silicon (aarch64); release builds do not target Intel macOS.
-          - platform: macos-latest
+          - runner: macos-latest
             target: aarch64-apple-darwin
             bundles: dmg
-          # The .deb and the AppImage both come out of the one build; the matrix entry only pins
-          # the runner, since tauri.conf.json already asks for every target the host supports.
-          # Pinned, not ubuntu-latest: AppImage bundling wants the pre-t64 package names, and the
-          # newer images are on the t64 ones.
-          - platform: ubuntu-22.04
+          - runner: ubuntu-22.04
             target: x86_64-unknown-linux-gnu
             bundles: deb,appimage
-          # Arm64 desktop Linux, on GitHub's native arm64 runner, which is free in a public
-          # repository. Same 22.04 image as the job above, so the same pre-t64 package names and
-          # the same prerequisites step cover both.
-          - platform: ubuntu-22.04-arm
+          - runner: ubuntu-22.04-arm
             target: aarch64-unknown-linux-gnu
             bundles: deb,appimage
-    runs-on: ${{ matrix.platform }}
     steps:
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.version.outputs.sha }}
-      # pnpm before node: `cache: pnpm` shells out to pnpm to find the store, so a pnpm that is not
-      # installed yet fails the step instead of skipping the cache.
+          ref: ${{ needs.validate.outputs.sha }}
       - uses: pnpm/action-setup@v6
       - uses: actions/setup-node@v7
         with:
@@ -128,118 +128,132 @@ jobs:
       - uses: dtolnay/rust-toolchain@1.97.1
         with:
           targets: ${{ matrix.target }}
-      # The release is the one build that cannot skip work, and the Rust dependencies are most of
-      # it: they only change when Cargo.lock does, so a warm cache is the difference between a
-      # few minutes and a cold compile of the whole graph.
       - uses: swatinem/rust-cache@v2
         with:
           workspaces: ./src-tauri -> target
-      - name: Install the Tauri Linux prerequisites
-        if: startsWith(matrix.platform, 'ubuntu')
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y \
-            libwebkit2gtk-4.1-dev \
-            build-essential \
-            curl \
-            wget \
-            file \
-            libxdo-dev \
-            libssl-dev \
-            libayatana-appindicator3-dev \
-            librsvg2-dev \
-            libfuse2 \
-            libgtk-3-0
+      - name: Install shared Linux prerequisites
+        if: startsWith(matrix.runner, 'ubuntu-')
+        run: bash scripts/install-linux-deps.sh
       - run: pnpm install --frozen-lockfile
       - run: pnpm run build:app -- --target ${{ matrix.target }} --bundles ${{ matrix.bundles }}
+      - name: Collect and verify this target's final bundles
+        env:
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_TARGET: ${{ matrix.target }}
+        run: node scripts/release-artifacts.mjs collect --root src-tauri/target --target "$RELEASE_TARGET" --version "${RELEASE_VERSION#v}" --sha "$RELEASE_SHA" --out release-target
       - uses: actions/upload-artifact@v7
         with:
-          name: release-${{ matrix.platform }}
-          path: |
-            src-tauri/target/*/release/bundle/**/*.dmg
-            src-tauri/target/*/release/bundle/**/*.deb
-            src-tauri/target/*/release/bundle/**/*.AppImage
+          name: release-${{ matrix.target }}
+          path: release-target/
           if-no-files-found: error
 
-  publish:
-    if: github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v')
-    needs: [build, version]
-    runs-on: ubuntu-24.04
-    permissions:
-      # Only this job creates the GitHub Release and uploads the built artifacts.
-      contents: write
+  validate-artifacts:
+    needs: [validate, build]
+    if: ${{ needs.validate.outputs.recovery != 'true' }}
+    runs-on: ubuntu-22.04
     steps:
-      # Only the changelog, and only to read the notes from it: this job builds nothing.
       - uses: actions/checkout@v7
         with:
-          ref: ${{ needs.version.outputs.sha }}
-          sparse-checkout: /CHANGELOG.md
-          sparse-checkout-cone-mode: false
-      - name: Verify remote release tag still points to validated commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GITHUB_REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
-          VALIDATED_SHA: ${{ needs.version.outputs.sha }}
-        run: |
-          set -euo pipefail
-          object="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" --jq '.object | [.type, .sha] | @tsv')"
-          IFS=$'\t' read -r object_type object_sha <<< "$object"
-          while [[ "$object_type" == tag ]]; do
-            object="$(gh api "repos/$GITHUB_REPOSITORY/git/tags/$object_sha" --jq '.object | [.type, .sha] | @tsv')"
-            IFS=$'\t' read -r object_type object_sha <<< "$object"
-          done
-
-          if [[ "$object_type" != commit || "$object_sha" != "$VALIDATED_SHA" ]]; then
-            echo "$RELEASE_TAG moved: remote resolves to $object_type $object_sha, validated commit is $VALIDATED_SHA" >&2
-            exit 1
-          fi
+          ref: ${{ needs.validate.outputs.sha }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
       - uses: actions/download-artifact@v8
         with:
           pattern: release-*
           path: release-assets
-          merge-multiple: true
-      - name: Publish release
+      - name: Require every target and checksum the exact bundles
+        env:
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: node scripts/release-artifacts.mjs finalize --root release-assets --out release-final --version "${RELEASE_VERSION#v}" --sha "$RELEASE_SHA"
+      - uses: actions/upload-artifact@v7
+        with:
+          name: release-final-assets
+          path: release-final/
+          if-no-files-found: error
+
+  publish:
+    if: ${{ always() && inputs.validation_only == false && needs.validate.result == 'success' && (needs.validate.outputs.recovery == 'true' || needs.validate-artifacts.result == 'success') }}
+    needs: [validate, validate-artifacts]
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.validate.outputs.sha }}
+          fetch-depth: 0
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 22
+      - uses: actions/download-artifact@v8
+        with:
+          name: release-final-assets
+          path: release-final
+      - name: Verify final payload and create the immutable tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_SHA: ${{ needs.validate.outputs.sha }}
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          set -euo pipefail
+          node scripts/release-artifacts.mjs verify --root release-final --version "${RELEASE_VERSION#v}" --sha "$RELEASE_SHA"
+          (cd release-final && sha256sum -c SHA256SUMS)
+          remote_tag="$(git ls-remote --tags origin "refs/tags/$RELEASE_VERSION" "refs/tags/$RELEASE_VERSION^{}")"
+          if [[ -n "$remote_tag" ]]; then
+            tagged_sha="$(awk -v ref="refs/tags/$RELEASE_VERSION" '$2 == ref { direct = $1 } $2 == ref "^{}" { peeled = $1 } END { print peeled ? peeled : direct }' <<< "$remote_tag")"
+            [[ "$tagged_sha" == "$RELEASE_SHA" ]] || { echo "$RELEASE_VERSION already points elsewhere." >&2; exit 1; }
+            if ! git show-ref --verify --quiet "refs/tags/$RELEASE_VERSION"; then
+              git fetch --no-tags origin "refs/tags/$RELEASE_VERSION:refs/tags/$RELEASE_VERSION"
+            fi
+            [[ "$(git cat-file -t "refs/tags/$RELEASE_VERSION")" == tag ]] || { echo "Existing tag is not annotated." >&2; exit 1; }
+            tag_subject="$(git for-each-ref --format='%(contents:subject)' "refs/tags/$RELEASE_VERSION")"
+            expected_tag_subject="Marvis $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"
+            [[ "$tag_subject" == "$expected_tag_subject" ]] || { echo "Existing tag does not belong to this exact workflow run." >&2; exit 1; }
+          else
+            git config user.name "github-actions[bot]"
+            git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+            git tag -a "$RELEASE_VERSION" "$RELEASE_SHA" -m "Marvis $RELEASE_VERSION at $RELEASE_SHA; workflow run $GITHUB_RUN_ID"
+            git push origin "refs/tags/$RELEASE_VERSION"
+          fi
+      - name: Publish the already-validated payload (safe to retry)
         env:
           GH_TOKEN: ${{ github.token }}
           GITHUB_REPOSITORY: ${{ github.repository }}
-          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ inputs.version }}
         run: |
           set -euo pipefail
-          cd release-assets
-          # Excluded by name so re-running this step in the same workspace cannot sum the previous
-          # run's checksums and then upload them twice.
-          mapfile -t assets < <(find . -type f ! -name SHA256SUMS -print | sed 's|^\./||' | sort)
-          if ((${#assets[@]} == 0)); then
-            echo 'No release artifacts were downloaded.' >&2
-            exit 1
+          mapfile -t files < <(find release-final -maxdepth 1 -type f -print | sort)
+          expected_names="$(find release-final -maxdepth 1 -type f -exec basename {} \; | sort)"
+          if gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft)"
+            [[ "$is_draft" == false ]] || { echo "Existing GitHub Release is a draft; refusing to publish into it." >&2; exit 1; }
+            existing="$(gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)"
+            missing=()
+            while IFS= read -r asset; do
+              [[ -n "$asset" ]] || continue
+              if [[ ! -f "release-final/$asset" ]]; then echo "Unexpected existing asset: $asset" >&2; exit 1; fi
+              gh release download "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --pattern "$asset" --dir release-existing
+              cmp -s "release-final/$asset" "release-existing/$asset" || { echo "Existing release asset differs: $asset" >&2; exit 1; }
+            done <<< "$existing"
+            for file in release-final/*; do
+              asset="${file##*/}"
+              if ! grep -Fxq "$asset" <<< "$existing"; then missing+=("$file"); fi
+            done
+            if [[ ${#missing[@]} -gt 0 ]]; then gh release upload "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" "${missing[@]}"; fi
+          else
+            notes=()
+            if [[ -f CHANGELOG.md ]]; then
+              curated="$(awk -v version="${RELEASE_VERSION#v}" '
+                $0 == "## " version { inside = 1; next }
+                inside && /^## / { exit }
+                inside { print }
+              ' CHANGELOG.md)"
+              if [[ -n "$curated" ]]; then notes=(--notes "$curated"); fi
+            fi
+            gh release create "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" "${files[@]}" --verify-tag --title "Marvis $RELEASE_VERSION" --generate-notes "${notes[@]}"
           fi
-          # Summed from inside each file's own directory so the record names the file and not the
-          # build path it happened to sit under: `merge-multiple` keeps the artifact's directories,
-          # and a downloader has a flat folder, so `sha256sum -c SHA256SUMS` has to match that.
-          : > SHA256SUMS
-          for asset in "${assets[@]}"; do
-            (cd "$(dirname "$asset")" && sha256sum "$(basename "$asset")") >> SHA256SUMS
-          done
-          files=(release-assets/SHA256SUMS)
-          for asset in "${assets[@]}"; do files+=("release-assets/$asset"); done
-          cd "$GITHUB_WORKSPACE"
-
-          # The curated section for this version, when there is one. `gh` prepends it to the notes it
-          # generates, so the summary leads and the commit list still follows.
-          notes=()
-          if [[ -f CHANGELOG.md ]]; then
-            curated="$(awk -v version="${RELEASE_TAG#v}" '
-              $0 == "## " version { inside = 1; next }
-              inside && /^## / { exit }
-              inside { print }
-            ' CHANGELOG.md)"
-            if [[ -n "$curated" ]]; then notes=(--notes "$curated"); fi
-          fi
-
-          # Published rather than a draft: a draft never appears in the releases list, so a tag
-          # whose draft is left alone keeps the previous release as the latest one. What could make
-          # these artifacts wrong is already settled above: the tag still resolves to the validated
-          # commit, and every platform in the matrix built them.
-          gh release create --repo "$GITHUB_REPOSITORY" "$RELEASE_TAG" "${files[@]}" \
-            --verify-tag --title "Marvis $RELEASE_TAG" --generate-notes "${notes[@]}"
+          actual="$(gh release view "$RELEASE_VERSION" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | sort)"
+          [[ "$actual" == "$expected_names" ]] || { echo "Published release assets are incomplete or unexpected." >&2; exit 1; }
