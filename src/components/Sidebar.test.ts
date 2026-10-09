@@ -420,6 +420,52 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
   });
 
+  it("makes the whole branch row the click, and leaves its two controls to themselves", async () => {
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            checkouts: [
+              {
+                ...checkout({
+                  id: "checkout:feature",
+                  path: "/feature",
+                  canonicalPath: "/feature",
+                  isPrimary: false,
+                  branch: "feature",
+                }),
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: "checkout:primary",
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    await flushPromises();
+
+    const row = wrapper.get(".workdir-parent");
+
+    // The hover surface is the whole row, so the whole row is the click: the trailing slot with
+    // the counts in it is part of the name's own click rather than dead space beside it.
+    await row.get(".workdir-end").trigger("click");
+    expect(wrapper.emitted("selectCheckout")).toEqual([["checkout:feature", false]]);
+
+    // The name still is the button, and its click still arrives by bubbling up to the row, so the
+    // keyboard path is the same one a pointer takes.
+    await row.get(".workdir-select").trigger("click");
+    expect(wrapper.emitted("selectCheckout")).toHaveLength(2);
+
+    // The chevron and the cross are controls of their own inside the row, and clicking either one
+    // is not also clicking what it sits on.
+    await row.get(".workdir-fold").trigger("click");
+    await row.get(".workdir-close").trigger("click");
+    expect(wrapper.emitted("selectCheckout")).toHaveLength(2);
+    expect(wrapper.emitted("removeWorktree")).toEqual([["checkout:feature"]]);
+    wrapper.unmount();
+  });
+
   it("lists every terminal child, marks the active one and offers a close", async () => {
     const wrapper = mount(Sidebar, {
       props: {

@@ -1318,16 +1318,22 @@ function rowLabel(item: WorkdirItem): string {
           }"
           :data-workdir-checkout="workdir.checkout.id"
         >
+          <!-- The row is the click, all of it: the surface a hover paints is the whole row, so the
+               empty stretch, the chevron's own margin and the trailing slot are the same click as
+               the name. Only the two controls inside it are not — the chevron folds and the cross
+               closes, and both stop the click rather than also selecting what they sit on. The
+               keyboard still arrives through the button inside, whose Enter bubbles up here. -->
           <div
             class="workdir-row workdir-parent"
             :class="{ active: workdir.active, selected: workdir.selected, missing: workdir.missing }"
+            @click="!workdir.missing && emit('selectCheckout', workdir.checkout.id, hasChanges(workdir))"
           >
             <button
               type="button"
               class="workdir-fold"
               :aria-expanded="!isCollapsed(workdir)"
               :aria-label="`${isCollapsed(workdir) ? 'Expand' : 'Collapse'} ${workdir.title}`"
-              @click="toggleGroup(workdir)"
+              @click.stop="toggleGroup(workdir)"
             >
               <ChevronDownIcon class="chv" aria-hidden="true" />
             </button>
@@ -1338,7 +1344,6 @@ function rowLabel(item: WorkdirItem): string {
               :aria-current="workdir.active ? 'page' : undefined"
               :aria-disabled="workdir.missing || undefined"
               :title="workdirTooltip(workdir.checkout)"
-              @click="!workdir.missing && emit('selectCheckout', workdir.checkout.id, hasChanges(workdir))"
             >
               <component :is="workdir.icon" class="workdir-icon" aria-hidden="true" />
               <span class="lbl">
@@ -1377,7 +1382,7 @@ function rowLabel(item: WorkdirItem): string {
                   : `Remove or archive worktree ${workdir.title}`
               "
               :title="workdir.missing ? 'Remove from list' : 'Remove or archive worktree'"
-              @click="
+              @click.stop="
                 workdir.missing
                   ? emit('closeMissing', workdir.checkout.id)
                   : emit('removeWorktree', workdir.checkout.id)
@@ -1965,6 +1970,16 @@ function rowLabel(item: WorkdirItem): string {
   height: 14px;
   flex-shrink: 0;
   color: var(--marvis-text-faint);
+}
+
+/* The whole branch row is one click, so the whole of it says so: the pointer belongs to the row
+   and not only to the name in it, which is what the hover surface already claimed. */
+.workdir-parent {
+  cursor: pointer;
+}
+
+.workdir-parent.missing {
+  cursor: not-allowed;
 }
 
 /* A row whose directory is gone stays listed to say so and to be closed. Its label reads as
