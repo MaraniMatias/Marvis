@@ -108,7 +108,7 @@ export type RendererLevel = "webgl" | "dom";
  * The scale is a parameter because the terminal's cell size has to be the size it is drawn at
  * before it is ever opened: a terminal built at the unscaled cell and scaled afterwards spends
  * its first frame measuring a grid that is already the wrong size. The size and the cursor are
- * preferences from `~/.marvis/config.yml`, read here for the same reason; the ligatures are not,
+ * preferences from `~/.muster/config.yml`, read here for the same reason; the ligatures are not,
  * because the joiner only exists once the terminal is on the page.
  *
  * The cursor's shape is a preference from the same file, and the shape it opens on is a block: a

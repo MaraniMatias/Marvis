@@ -505,7 +505,7 @@ describe("DocumentPane", () => {
       totalLines: 3,
       hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
     });
-    mocks.getReviewRootPath.mockResolvedValue("/Users/dev/.marvis/tmp/code-reviews");
+    mocks.getReviewRootPath.mockResolvedValue("/Users/dev/.muster/tmp/code-reviews");
     vi.stubGlobal("Worker", InlinePrettierWorker);
     for (const toast of [...toasts.value]) dismiss(toast.id);
   });
@@ -663,7 +663,7 @@ describe("DocumentPane", () => {
     await wrapper.get('[aria-label="Copy file path"]').trigger("click");
 
     expect(mocks.getReviewRootPath).toHaveBeenCalledOnce();
-    expect(writeText).toHaveBeenCalledWith("/Users/dev/.marvis/tmp/code-reviews/notes.md");
+    expect(writeText).toHaveBeenCalledWith("/Users/dev/.muster/tmp/code-reviews/notes.md");
     wrapper.unmount();
   });
 

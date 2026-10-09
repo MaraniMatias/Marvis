@@ -164,7 +164,7 @@ function onDialogKeydown(event: KeyboardEvent) {
       <header class="flex items-start justify-between gap-4 px-5 pt-5">
         <div>
           <h2 id="settings-title" class="text-base font-semibold text-(--muster-text)">Settings</h2>
-          <p class="mt-1 text-xs text-(--muster-text-faint)">Saved to ~/.marvis/config.yml</p>
+          <p class="mt-1 text-xs text-(--muster-text-faint)">Saved to ~/.muster/config.yml</p>
         </div>
         <button type="button" aria-label="Close" :disabled="saving" class="muster-icon-control" @click="requestClose">
           ×

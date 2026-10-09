@@ -403,7 +403,7 @@ export function saveAppLayout(layout: AppLayoutState): Promise<void> {
   return invoke<void>("ui_layout_save", { layout });
 }
 
-/** The preferences the Settings dialog owns, from `~/.marvis/config.yml`. */
+/** The preferences the Settings dialog owns, from `~/.muster/config.yml`. */
 export function loadSettings(): Promise<AppSettings> {
   return invoke<AppSettings>("settings_load");
 }

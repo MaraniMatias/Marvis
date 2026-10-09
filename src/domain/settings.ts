@@ -1,5 +1,5 @@
 /**
- * The preferences the Settings dialog owns, in the shape they are written to `~/.marvis/config.yml`.
+ * The preferences the Settings dialog owns, in the shape they are written to `~/.muster/config.yml`.
  *
  * They are preferences rather than layout: a person sets them once and forgets they made them, so
  * they live in a file they can open and edit, not in the database that remembers which checkouts

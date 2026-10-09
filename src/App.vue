@@ -135,7 +135,7 @@ type PanelRef = {
 const sidebarPanel = ref<PanelRef | null>(null);
 const inspectorPanel = ref<PanelRef | null>(null);
 const viewportWidth = ref(window.innerWidth / DEFAULT_ZOOM);
-/** The preferences in `~/.marvis/config.yml`, in the shape the file has them in. */
+/** The preferences in `~/.muster/config.yml`, in the shape the file has them in. */
 const settings = ref<AppSettings>(cloneSettings(DEFAULT_SETTINGS));
 const settingsButton = ref<HTMLButtonElement | null>(null);
 const settingsOpen = ref(false);

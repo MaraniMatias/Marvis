@@ -32,7 +32,7 @@ const PREVIEW_WIDTH_MAX: u32 = 900;
 
 /// The layout row is the window's own shape and nothing else: which mode it is in and how wide
 /// the panes are. The preferences a person sets once (sizes, ligatures, the scale) live in
-/// `~/.marvis/config.yml`.
+/// `~/.muster/config.yml`.
 ///
 /// There is no version in the row. `SCHEMA_VERSION` is the only ladder in this database, and a
 /// per-blob ladder inside it only ever bought a second way to keep reading shapes this build

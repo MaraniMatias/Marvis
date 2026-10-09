@@ -185,7 +185,7 @@ fn main() {
             // Both steps are logged on the way out rather than left to the panic the propagation
             // ends in: a database this build refuses to open, by name, is a question a person can
             // act on, and it has to reach the file support reads to be answered.
-            let database = persistence::Database::open(data_dir.join("marvis.sqlite3"))
+            let database = persistence::Database::open(data_dir.join("muster.sqlite3"))
                 .map_err(|cause| startup_failure(OPENING_THE_WORKSPACE_DATABASE, &cause))?;
             database
                 .set_home_checkout_id(crate::domain::workspace::checkout_id_for_path(

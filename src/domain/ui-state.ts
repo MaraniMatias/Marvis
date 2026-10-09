@@ -5,7 +5,7 @@ import type { MainDocument, MainViewState } from "./main-document";
  *
  * These are the shapes a person arrives at by dragging and then leaves alone, which is why they
  * live in the database next to the workspace they belong to. The preferences (sizes, ligatures,
- * the scale) are in `src/domain/settings.ts`, in `~/.marvis/config.yml`.
+ * the scale) are in `src/domain/settings.ts`, in `~/.muster/config.yml`.
  *
  * No version rides along: `SCHEMA_VERSION` is the only ladder in the database, so a shape this
  * build cannot read is the default window, never a version someone gets to compare.

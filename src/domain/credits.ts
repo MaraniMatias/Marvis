@@ -2,7 +2,7 @@
  * What Marvis is built out of, and the licence each piece travels under.
  *
  * These are not preferences, which is why they are not in `SETTINGS_SECTIONS`: nothing here is
- * written to `~/.marvis/config.yml`, nothing is restored, and changing your mind about it is not
+ * written to `~/.muster/config.yml`, nothing is restored, and changing your mind about it is not
  * what anybody means to do. They are a record of fact about the build, so they live in their own
  * module and the About section draws them.
  *
