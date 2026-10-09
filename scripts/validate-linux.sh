@@ -22,7 +22,7 @@ pnpm_version="${pnpm_version%%+*}"
 
 docker build --platform linux/amd64 --build-arg "PNPM_VERSION=$pnpm_version" -t "$IMAGE" -f "$ROOT/scripts/release-validation.Dockerfile" "$ROOT/scripts"
 
-tar -cf - -C "$ROOT" \
+COPYFILE_DISABLE=1 tar -cf - -C "$ROOT" \
   --exclude='.git' --exclude='node_modules' --exclude='src-tauri/target' --exclude='dist' \
   --exclude='.pnpm-store' --exclude='.env' --exclude='.env.*' --exclude='.npmrc' \
   --exclude='.netrc' --exclude='.ssh' --exclude='.aws' . |
