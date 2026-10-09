@@ -81,7 +81,8 @@ jobs:
             libxdo-dev \
             libssl-dev \
             libayatana-appindicator3-dev \
-            librsvg2-dev
+            librsvg2-dev \
+            zsh
       - run: pnpm install --frozen-lockfile
       - run: pnpm test
       - run: pnpm run build:app -- --bundles deb
