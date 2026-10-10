@@ -1029,6 +1029,18 @@ function hasChanges(workdir: Workdir): boolean {
   return Boolean(workdir.additions || workdir.deletions);
 }
 
+/**
+ * Whether the row carries a cross of its own.
+ *
+ * The template's `v-if` and the stylesheet's rule that opens the cross's strip both ask this, so
+ * they are the same question asked twice rather than two conditions kept in step by hand: a row
+ * that draws no cross must not reserve the strip a cross would stand in, or its counts hover into
+ * a gap nothing is ever drawn in.
+ */
+function hasClose(workdir: Workdir): boolean {
+  return workdir.worktree && !workdir.home;
+}
+
 /** The row's name at full length, which the row cannot fit, and where the checkout lives. */
 function workdirTooltip(checkout: Checkout): string {
   return checkout.branch ? `${checkout.branch} — ${checkout.path}` : checkout.path;
@@ -1403,7 +1415,12 @@ function rowLabel(item: WorkdirItem): string {
                keyboard still arrives through the button inside, whose Enter bubbles up here. -->
           <div
             class="workdir-row workdir-parent"
-            :class="{ active: workdir.active, selected: workdir.selected, missing: workdir.missing }"
+            :class="{
+              active: workdir.active,
+              selected: workdir.selected,
+              missing: workdir.missing,
+              'has-close': hasClose(workdir),
+            }"
             @click="!workdir.missing && emit('selectCheckout', workdir.checkout.id, hasChanges(workdir))"
           >
             <button
@@ -1431,14 +1448,15 @@ function rowLabel(item: WorkdirItem): string {
 
             <!-- The row's own trailing slot. The counts live here and nowhere else, in the
                  monospace the reference draws them in and right against the row's edge. At rest it
-                 holds a bare `+−`, coloured as the figures it stands in for, and on hover it grows
-                 into them, with the cross standing beside them in the strip it opened. -->
+                 holds a bare `+`, `−`, or both, coloured as the figures it stands in for and
+                 carrying only the signs this row actually has, and on hover it grows into them,
+                 with the cross standing beside them in the strip it opened. -->
             <span class="workdir-end" :class="{ 'workdir-end-error': !!workdir.error }">
               <span v-if="workdir.error" class="workdir-end-note">{{ workdir.error }}</span>
               <span v-else-if="workdir.additions || workdir.deletions" class="workdir-diff">
                 <span class="workdir-diff-mark" aria-hidden="true">
-                  <span class="ad">+</span>
-                  <span class="rm">−</span>
+                  <span v-if="workdir.additions" class="ad">+</span>
+                  <span v-if="workdir.deletions" class="rm">−</span>
                 </span>
                 <span class="workdir-diff-nums">
                   <span v-if="workdir.additions" class="ad">+{{ workdir.additions }}</span>
@@ -1451,7 +1469,7 @@ function rowLabel(item: WorkdirItem): string {
                  cannot reflow the name beside it: the counts give up the slot's width instead. A
                  repo root's own actions are in the group header above. -->
             <button
-              v-if="workdir.worktree && !workdir.home"
+              v-if="hasClose(workdir)"
               type="button"
               class="workdir-action workdir-close"
               :aria-label="
@@ -2127,8 +2145,10 @@ function rowLabel(item: WorkdirItem): string {
   display: grid;
   grid-template-columns: 1fr 0px;
   font-family: var(--muster-font);
-  /* The cross's strip — 8px of row padding plus its own 20px — spent out of the figures' box so
-     the name does not have to move for the cross to have somewhere to stand. */
+  /* The cross's strip, held at zero here and opened to 28px by the hover rule below on a row that
+     draws a cross. It is a margin on the figures rather than padding on the slot because the slot
+     also carries a missing-directory note and a terminal's elapsed time, and neither of those is a
+     count with anything to reveal. */
   margin-right: 0;
   transition:
     grid-template-columns 0.18s ease,
@@ -2159,10 +2179,23 @@ function rowLabel(item: WorkdirItem): string {
 /* Hover, and the one other way a keyboard arrives at the same place — the same pairing the cross
    answers to, so a row reveals itself the same way whether the pointer or the Tab key found it. The
    mark closes on a length for the same reason it did at rest: `0fr` here would leave it measuring
-   itself and push the figures right by the width of a mark nobody can see. */
+   itself and push the figures right by the width of a mark nobody can see.
+
+   The strip itself is NOT here. Every row opens into its figures, but only a row that draws a
+   cross has anything standing in the space the figures give up, and on the rest — a repo root, the
+   home checkout, a checkout that is missing — those 28px were an empty gap trailing the numbers for
+   no reason a reader could see. The rule that gives them is the one below. */
 .workdir-row:hover .workdir-diff,
 .workdir-row:focus-within .workdir-diff {
   grid-template-columns: 0px 1fr;
+}
+
+/* The cross's strip, and only on a row that has one: 8px of row padding plus the cross's own 20px,
+   spent out of the figures' box so the name does not have to move for it to have somewhere to
+   stand. `has-close` is the same question the cross's own `v-if` asks, so a row cannot end up
+   holding the space without drawing the thing that fills it, or drawing it without the space. */
+.workdir-row.has-close:hover .workdir-diff,
+.workdir-row.has-close:focus-within .workdir-diff {
   margin-right: 28px;
 }
 

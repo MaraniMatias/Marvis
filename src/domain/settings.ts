@@ -78,6 +78,15 @@ export interface TerminalSettings {
   shellIntegration: boolean;
   /** Follow shell cd, OpenCode agent work, both, or neither. Defaults to agent work only. */
   followWorktree: TerminalWorktreeFollowMode;
+  /**
+   * Whether a selection gesture in the terminal puts what it selected on the clipboard, the way a
+   * text field does.
+   *
+   * On by default, which is the behaviour this preference started as: a drag, or a double or triple
+   * click, copies on release. Off leaves the selection itself untouched, so a terminal can be read
+   * and highlighted without anything landing on the clipboard behind the reader's back.
+   */
+  selectionCopy: boolean;
 }
 
 export interface IndentationSettings {
@@ -134,6 +143,7 @@ export const DEFAULT_SETTINGS: AppSettings = {
     scrollbar: "hidden",
     shellIntegration: true,
     followWorktree: "agent",
+    selectionCopy: true,
   },
   editor: {
     fontSize: 13,
@@ -214,6 +224,7 @@ export function normalizeSettings(value: unknown): AppSettings {
         : DEFAULT_SETTINGS.terminal.cursorStyle,
       scrollbar: isTerminalScrollbarMode(terminal.scrollbar) ? terminal.scrollbar : DEFAULT_SETTINGS.terminal.scrollbar,
       shellIntegration: flag(terminal.shellIntegration, DEFAULT_SETTINGS.terminal.shellIntegration),
+      selectionCopy: flag(terminal.selectionCopy, DEFAULT_SETTINGS.terminal.selectionCopy),
       followWorktree: isTerminalWorktreeFollowMode(terminal.followWorktree)
         ? terminal.followWorktree
         : DEFAULT_SETTINGS.terminal.followWorktree,
@@ -251,6 +262,7 @@ export type SettingsPath =
   | "terminal.cursorStyle"
   | "terminal.scrollbar"
   | "terminal.shellIntegration"
+  | "terminal.selectionCopy"
   | "terminal.followWorktree"
   | "editor.fontSize"
   | "editor.ligatures"
@@ -385,6 +397,13 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
         parse: IDENTIFIER,
       },
       { kind: "toggle", path: "terminal.cursorBlink", label: "Blink cursor" },
+      {
+        kind: "toggle",
+        path: "terminal.selectionCopy",
+        label: "Copy on selection",
+        description:
+          "Puts whatever a selection gesture selects in the terminal on the clipboard, the way a text field does. Turning it off leaves the selection itself alone.",
+      },
       {
         kind: "select",
         path: "terminal.scrollbar",

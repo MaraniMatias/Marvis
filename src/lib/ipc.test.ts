@@ -32,6 +32,7 @@ import {
   getGitDiffPage,
   getGitDiffStats,
   loadTerminalLayout,
+  openExternalFile,
   openExternalUrl,
   openFolder,
   readCheckoutFile,
@@ -75,6 +76,31 @@ describe("web link IPC client", () => {
     await openExternalUrl("https://example.com/guide");
 
     expect(invoke).toHaveBeenCalledExactlyOnceWith("open_url", { url: "https://example.com/guide" });
+  });
+});
+
+describe("external file IPC client", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("sends the checkout and the tree's own spelling of the path, and nothing else", async () => {
+    // A checkout-relative name, because that is what the tree lists and what the other end
+    // resolves against the checkout it belongs to. An absolute path never crosses here.
+    vi.mocked(invoke).mockResolvedValue(undefined);
+
+    await openExternalFile("checkout:repo", "src/lib/ipc.ts");
+
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("file_open_externally", {
+      checkoutId: "checkout:repo",
+      path: "src/lib/ipc.ts",
+    });
+  });
+
+  it("hands back a refusal rather than swallowing it", async () => {
+    // The caller shows it: a tree row that did not open is otherwise indistinguishable from one
+    // that did, and the person who pressed the key is the only one who can tell.
+    vi.mocked(invoke).mockRejectedValueOnce({ code: "path_outside_checkout", message: "outside" });
+
+    await expect(openExternalFile("checkout:repo", "../secrets")).rejects.toBeTruthy();
   });
 });
 

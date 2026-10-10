@@ -43,6 +43,13 @@ const props = withDefaults(
     scrollbar?: TerminalScrollbarMode;
     fontSize?: number;
     ligatures?: boolean;
+    /**
+     * Whether a selection gesture copies what it selected. Read inside the copy callback rather than
+     * at registration, which is what makes it reach the terminals already open, and it is the copy
+     * alone that is gated: the selection gesture itself stays, because reading and highlighting a
+     * line is not something this preference turns off.
+     */
+    selectionCopy?: boolean;
     cursorBlink?: boolean;
     cursorStyle?: TerminalCursorStyle;
     zoom?: number;
@@ -54,6 +61,7 @@ const props = withDefaults(
     scrollbar: "hidden",
     fontSize: 16,
     ligatures: true,
+    selectionCopy: true,
     cursorBlink: true,
     cursorStyle: "block",
     zoom: 1,
@@ -117,7 +125,8 @@ let resizeScheduled = false;
 let disposed = false;
 let started = false;
 let terminalReady = false;
-let selectionCopy: { dispose(): void } | undefined;
+// The registration that copies a selection, and the handle that takes it back off the terminal.
+let selectionCopyDisposer: { dispose(): void } | undefined;
 let fileLinks: { dispose(): void } | undefined;
 let outputWriter: PtyOutputWriter | undefined;
 let rendererRecovery: { dispose(): void } | undefined;
@@ -950,7 +959,10 @@ onMounted(async () => {
   // The renderer that just went on, watched so a context lost to sleep or memory pressure can be
   // put back. Without it a terminal that lost one stays on the fallback for the rest of its life.
   rendererRecovery = watchTerminalRendererRecovery(terminal, attachTerminalRenderer(terminal));
-  selectionCopy = enableTerminalSelectionCopy(terminal, (text) => {
+  selectionCopyDisposer = enableTerminalSelectionCopy(terminal, (text) => {
+    // The setting is read here, on the click, rather than at registration: that is what lets it
+    // reach a terminal that was opened before the change without re-registering anything.
+    if (!props.selectionCopy) return;
     void writeText(text).catch((cause) => {
       pushCause(cause);
     });
@@ -971,7 +983,7 @@ onUnmounted(() => {
   if (scrollbarFadeTimer !== undefined) window.clearTimeout(scrollbarFadeTimer);
   scrollbarDrag = null;
   resizeObserver?.disconnect();
-  selectionCopy?.dispose();
+  selectionCopyDisposer?.dispose();
   fileLinks?.dispose();
   rendererRecovery?.dispose();
   outputWriter?.dispose();

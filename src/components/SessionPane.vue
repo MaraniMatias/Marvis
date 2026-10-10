@@ -392,6 +392,7 @@ watch(
           :scrollbar="terminalSettings?.scrollbar"
           :font-size="terminalSettings?.fontSize ?? 16"
           :ligatures="terminalSettings?.ligatures ?? true"
+          :selection-copy="terminalSettings?.selectionCopy ?? true"
           :cursor-blink="terminalSettings?.cursorBlink ?? true"
           :cursor-style="terminalSettings?.cursorStyle ?? 'block'"
           :zoom="zoom"

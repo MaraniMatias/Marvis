@@ -27,6 +27,8 @@ const props = withDefaults(
 
 const emit = defineEmits<{
   openFile: [value: { checkoutId: string; path: string }];
+  /** Hands the entry to the machine's own application, which is the only place some of them open. */
+  openExternalFile: [value: { checkoutId: string; path: string }];
   openChange: [value: { checkoutId: string; path: string }];
   /** Every changed file in one diff, which is the one view with no path. */
   openAllChanges: [value: { checkoutId: string }];
@@ -356,6 +358,30 @@ function selectFile(entry: FileEntry) {
   if (!checkoutId) return;
   selectedPaths.value = { ...selectedPaths.value, [checkoutId]: entry.path };
   emit("openFile", { checkoutId, path: entry.path });
+}
+
+/**
+ * A row of the tree, where ctrl+click is not the plain click with a key held down.
+ *
+ * Held, it hands the entry to whatever application this machine has for it, which is the only place
+ * a `.psd` or an `.ipynb` opens at all. Not held, it is the row's own action: a file selects, a
+ * folder expands. The two never both happen, because a row that opened somewhere else and also
+ * changed the view here would be answering a gesture nobody asked.
+ *
+ * Meta is accepted beside ctrl because this app runs on both, and on macOS the muscle memory for
+ * "open it in its own window" is cmd rather than ctrl. The chevron and the sticky rows keep their
+ * own clicks: a chevron is a 12px target that is never the thing being pointed at, and a sticky row
+ * is a copy of a row above, not a row of its own.
+ */
+function onEntryRowClick(entry: FileEntry, event: MouseEvent) {
+  const checkoutId = props.checkout?.id;
+  if (!checkoutId) return;
+  if (event.ctrlKey || event.metaKey) {
+    emit("openExternalFile", { checkoutId, path: entry.path });
+    return;
+  }
+  if (entry.kind === "directory") toggleDirectory(entry);
+  else selectFile(entry);
 }
 
 function selectChange(path: string) {
@@ -855,7 +881,7 @@ watch(
                     :title="entryTooltip(item.entry.path)"
                     :aria-label="`${expandedSet.has(item.entry.path) ? 'Collapse' : 'Expand'} ${item.entry.name}`"
                     :aria-current="selectedFolderPath === item.entry.path ? 'true' : undefined"
-                    @click="toggleDirectory(item.entry)"
+                    @click="onEntryRowClick(item.entry, $event)"
                   >
                     {{ item.entry.name }}
                   </button>
@@ -868,7 +894,7 @@ watch(
                   :style="{ paddingLeft: rowIndent(item.depth) }"
                   :title="entryTooltip(item.entry.path)"
                   :aria-current="selectedPath === item.entry.path ? 'true' : undefined"
-                  @click="selectFile(item.entry)"
+                  @click="onEntryRowClick(item.entry, $event)"
                 >
                   <span class="chevron-spacer" aria-hidden="true" />
                   <FileIcon

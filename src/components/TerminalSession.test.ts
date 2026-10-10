@@ -161,7 +161,13 @@ const terminalLib = vi.hoisted(() => ({
   attachTerminalRenderer: vi.fn(),
   watchTerminalRendererRecovery: vi.fn(() => ({ dispose: vi.fn() })),
   setTerminalLigatures: vi.fn(),
-  enableTerminalSelectionCopy: vi.fn(() => ({ dispose: vi.fn() })),
+  // Takes the copy callback so the `selectionCopy` gate can be exercised through the same callback
+  // a real selection gesture would call, rather than by re-implementing the gesture here. The
+  // callback is named for the type only; the test reads it back off `mock.calls`.
+  enableTerminalSelectionCopy: vi.fn((_terminal: unknown, copy: (text: string) => void) => {
+    void copy;
+    return { dispose: vi.fn() };
+  }),
   fitCalls: 0,
   /** Stand-in for the palette the lib reads out of the stylesheet, so a switch is visible here. */
   theme: { background: "#282c33" } as Record<string, string>,
@@ -238,6 +244,17 @@ const appEvents = vi.hoisted(() => ({ emit: vi.fn(async () => {}) }));
 
 vi.mock("@tauri-apps/api/event", () => ({ emit: appEvents.emit }));
 
+// The clipboard is the one thing a selection gesture reaches outside the terminal, so it is the
+// only thing the `selectionCopy` preference is allowed to turn on and off. Mocked here rather than
+// in the lib, which is where the gesture itself lives.
+const clipboard = vi.hoisted(() => ({ writes: [] as string[] }));
+vi.mock("@tauri-apps/plugin-clipboard-manager", () => ({
+  writeText: (text: string) => {
+    clipboard.writes.push(text);
+    return Promise.resolve();
+  },
+}));
+
 const workspace = { repos: [], activeCheckoutId: "checkout:repo", activeSessionId: "session:new" };
 const created = {
   session: {
@@ -265,6 +282,7 @@ function scrollbackTo(viewportY: number, length = 120) {
 describe("TerminalSession UI", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    clipboard.writes.length = 0;
     terminalMock.channel = null;
     terminalMock.input = null;
     terminalMock.resizes = [];
@@ -315,6 +333,34 @@ describe("TerminalSession UI", () => {
     expect(terminalLib.attachTerminalRenderer).toHaveBeenCalledTimes(1);
     expect(writeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", new TextEncoder().encode("λ pasted"));
     expect(resizeTerminal).toHaveBeenCalledWith("checkout:repo", "session:new", 97, 31);
+    wrapper.unmount();
+  });
+
+  it("copies a selection only while the setting says to, and reads it on the click", async () => {
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    // The callback the lib was handed, which is what a selection gesture ends up calling.
+    const copy = vi.mocked(terminalLib.enableTerminalSelectionCopy).mock.calls[0]![1]!;
+    copy("selected while on");
+    await flushPromises();
+    expect(clipboard.writes).toEqual(["selected while on"]);
+
+    // The setting is read on the click and not at registration, so it reaches a terminal that was
+    // already open: the same callback, a prop change, no new registration.
+    await wrapper.setProps({ selectionCopy: false });
+    expect(terminalLib.enableTerminalSelectionCopy).toHaveBeenCalledTimes(1);
+    copy("selected while off");
+    await flushPromises();
+    // Nothing new reached the clipboard, and the selection itself was never the component's to take
+    // away — only the copy of it is gated.
+    expect(clipboard.writes).toEqual(["selected while on"]);
+
+    // And back on, so the setting is a switch rather than a one-way door.
+    await wrapper.setProps({ selectionCopy: true });
+    copy("selected again");
+    await flushPromises();
+    expect(clipboard.writes).toEqual(["selected while on", "selected again"]);
     wrapper.unmount();
   });
 

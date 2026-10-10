@@ -71,6 +71,18 @@ export function probeCheckoutFile(checkoutId: string, path: string): Promise<Fil
   return invoke<FileProbe | null>("file_probe", { checkoutId, path });
 }
 
+/**
+ * Hands a file or a folder of a checkout to the application this machine has for it.
+ *
+ * The path is the checkout-relative one the tree already lists. The other end resolves it against
+ * the checkout and refuses anything that leaves it, so nothing here can name a file on the rest of
+ * the disk — and it waits for the opener's answer rather than spawning and forgetting, because a
+ * file that did not open has to be sayable.
+ */
+export function openExternalFile(checkoutId: string, path: string): Promise<void> {
+  return invoke<void>("file_open_externally", { checkoutId, path });
+}
+
 export function writeCheckoutFile(
   checkoutId: string,
   path: string,

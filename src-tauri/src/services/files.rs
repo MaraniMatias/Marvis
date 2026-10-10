@@ -451,6 +451,29 @@ pub fn probe(
     }))
 }
 
+/// Hands a file or a folder of this checkout to the application this machine has for it.
+///
+/// The tree spells a path relative to its checkout, so this is the same chain `probe` walks and in
+/// the same order: the checkout has to be registered and present, the name has to be relative and
+/// inside it, and what comes out the other side has to still be inside it once every symlink on
+/// the way has been resolved. Only then does it reach the opener, which is handed a path and
+/// decides nothing about what may be named.
+///
+/// A refusal here is not swallowed: the person who ctrl-clicked a row is told that the file did not
+/// open, because a row that stayed where it was looks exactly like one that opened something.
+pub fn open_externally(database: &Database, checkout_id: &str, path: &str) -> Result<(), IpcError> {
+    let (repo, checkout) = registered_checkout(database, checkout_id)?;
+    ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
+    // The same refusals a preview read answers with, and for the same reasons: `..` and an
+    // absolute spelling are not a name inside a checkout, and `.git` is not a file this tree lists
+    // and therefore not one it may hand to another application either.
+    let relative_path = parse_relative_path(path)?;
+    let resolved =
+        crate::services::checkout::resolve_checkout_path(&repo, checkout_id, &relative_path)?;
+    crate::services::opener::open_path(&resolved)
+        .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
+}
+
 /// The checkout-relative form of a path a terminal printed, or `None` when it names nothing this
 /// checkout holds.
 ///
@@ -1570,9 +1593,9 @@ mod tests {
     };
 
     use super::{
-        clear_review_folder, export_review_markdown, list, probe, read, read_markdown_image,
-        read_prettier_config, review_folder, review_root_for, write, FileContent, IpcError,
-        ReviewPlaces, MAX_ROUND_PROMPT_BYTES, REVIEW_DIR_IN_CHECKOUT,
+        clear_review_folder, export_review_markdown, list, open_externally, probe, read,
+        read_markdown_image, read_prettier_config, review_folder, review_root_for, write,
+        FileContent, IpcError, ReviewPlaces, MAX_ROUND_PROMPT_BYTES, REVIEW_DIR_IN_CHECKOUT,
     };
 
     fn git(cwd: &Path, args: &[&str]) {
@@ -1768,6 +1791,50 @@ mod tests {
             assert!(probe(&database, id, name).unwrap().is_none());
         }
         assert!(read_media(&database, id, ".").is_err());
+    }
+
+    /// The chain that decides what may leave the app, in the order it decides it, with the opener
+    /// itself stubbed by the fact that nothing here reaches it: every case below is refused before
+    /// the spawn, which is the property worth pinning, because a case that got past the boundary
+    /// would put a real `open` on the real machine rather than fail a test.
+    #[test]
+    fn opening_a_file_outside_refuses_what_a_read_also_refuses() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("repo");
+        fs::create_dir(&root).unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let id = &state.repos[0].checkouts[0].id;
+        fs::write(root.join("notes.txt"), "hello\n").unwrap();
+        fs::create_dir(root.join("src")).unwrap();
+
+        // A name that is not this checkout's to name. `.git` is here because it is the one name
+        // `parse_relative_path` refuses that a tree could otherwise have listed.
+        for path in ["../notes.txt", ".git/config", "/etc/passwd", ""] {
+            assert!(
+                open_externally(&database, id, path).is_err(),
+                "{path} was opened"
+            );
+        }
+        // A checkout this database does not have, and one whose directory is gone.
+        assert!(open_externally(&database, "unknown", "notes.txt").is_err());
+
+        // A link inside the checkout that leaves it is a way out of the checkout, and this is the
+        // last place that is still knowable: the opener would be handed the real path behind it.
+        #[cfg(unix)]
+        {
+            let outside = temp.path().join("outside.txt");
+            fs::write(&outside, "secret\n").unwrap();
+            std::os::unix::fs::symlink(&outside, root.join("escape.txt")).unwrap();
+            let error = open_externally(&database, id, "escape.txt").unwrap_err();
+            assert_eq!(error.code, IpcErrorCode::PathOutsideCheckout);
+        }
+
+        // A name that is inside the checkout and is not there. It never reaches the opener either,
+        // and it does not have to: the resolution canonicalizes the path, so a name with nothing
+        // behind it is already an answer about the checkout rather than one about the machine.
+        let missing = open_externally(&database, id, "gone.txt").unwrap_err();
+        assert_eq!(missing.code, IpcErrorCode::FolderMissing);
     }
 
     #[test]

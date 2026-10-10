@@ -12,8 +12,17 @@
 //! characters is one the shell's word splitting has no business keeping intact. Both are refused
 //! here, and the scheme check is also what guarantees the argument can never start with a `-`, so
 //! there is no flag for a document to smuggle through.
+//!
+//! A path is the other kind of question, and it is not the same one. A path does not arrive from a
+//! document: it is resolved here, through the checkout it belongs to, before this is reached, so
+//! what has to be refused was already refused where the checkout's own boundary is enforced. What
+//! is left to check here is the argument itself, and the one that matters is that it is absolute:
+//! a relative spelling can begin with `-` and be read as a flag of the opener rather than as a
+//! file, and an absolute one cannot. There is no shell in between either way, and the exit status
+//! is read either way, because `open` and `xdg-open` both answer a file they could not show by
+//! exiting non-zero.
 
-use std::process::Command;
+use std::{path::Path, process::Command};
 
 /// Long enough for the deepest link anybody writes, short enough that a document cannot hand the
 /// platform a megabyte of its own text.
@@ -63,10 +72,46 @@ fn open_url_with(opener: &str, url: &str) -> Result<(), String> {
     if !is_web_url(url) {
         return Err("only an http or https link can be opened in the browser".into());
     }
+    run(opener, "the link", url)
+}
+
+/// Hands a file or a folder to the application this machine has for it.
+///
+/// `path` is the canonical path of something inside a registered checkout, already resolved by the
+/// caller: this is the last step of that chain, not the part that decides what may be opened.
+pub fn open_path(path: &Path) -> Result<(), String> {
+    open_path_with(OPENER, path)
+}
+
+/// The opening of a path, with the opener as an argument so a test can run a process whose ending
+/// it decides. Nothing here names a program: production goes through `open_path`.
+fn open_path_with(opener: &str, path: &Path) -> Result<(), String> {
+    // Absolute, which is what keeps the argument from being read as a flag of the opener, and
+    // present, which is what keeps a process from being started for a name nothing is behind.
+    // A `Path` on the platforms this runs on cannot hold a NUL, and a relative one is the only
+    // spelling that could arrive here looking like a flag.
+    if path.as_os_str().is_empty() {
+        return Err("there is no path to open".into());
+    }
+    if !path.is_absolute() {
+        return Err("only an absolute path can be opened".into());
+    }
+    if !path.exists() {
+        return Err(format!("{} is not there to open", path.display()));
+    }
+    run(opener, "the file", &path.to_string_lossy())
+}
+
+/// Spawns the opener on one argument and waits for it, reporting what the process said.
+///
+/// Both entry points share this so a file and a link are read the same way: each caller's own
+/// refusal is settled before this is reached, and everything from the spawn onwards is one reading
+/// of what the platform answered.
+fn run(opener: &str, subject: &str, argument: &str) -> Result<(), String> {
     let status = Command::new(opener)
-        .arg(url)
+        .arg(argument)
         .status()
-        .map_err(|error| format!("{opener} could not open the link: {error}"))?;
+        .map_err(|error| format!("{opener} could not open {subject}: {error}"))?;
     // Starting the opener is not the link having opened, which is the whole reason the status is
     // read at all: `open` and `xdg-open` answer a page they could not show by exiting non-zero --
     // no display, no handler registered, a profile another process holds, a sandbox refusing -- and
@@ -78,15 +123,15 @@ fn open_url_with(opener: &str, url: &str) -> Result<(), String> {
     // Spelled the way Git's own failures name an exit, so a machine that could not open and a Git
     // that could not answer read as the same kind of fact: about here, not about the link.
     Err(match status.code() {
-        Some(code) => format!("{opener} did not open the link (exit code {code})"),
+        Some(code) => format!("{opener} did not open {subject} (exit code {code})"),
         // Killed by a signal, which is not an exit code and has none to quote.
-        None => format!("{opener} did not open the link (terminated without an exit code)"),
+        None => format!("{opener} did not open {subject} (terminated without an exit code)"),
     })
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{is_web_url, open_url_with};
+    use super::{is_web_url, open_path_with, open_url_with};
     use std::{
         fs,
         os::unix::fs::PermissionsExt,
@@ -227,6 +272,84 @@ mod tests {
         assert!(
             !ran.exists(),
             "the opener ran for a link that is not a page"
+        );
+    }
+
+    /// `open_path_with` on a file that is there, waiting out the one refusal that belongs to
+    /// another thread, for the same reason `open_page` does.
+    fn open_file(opener: &str, path: &Path) -> Result<(), String> {
+        let deadline = Instant::now() + Duration::from_secs(10);
+        loop {
+            let outcome = open_path_with(opener, path);
+            let another_threads_fork = outcome
+                .as_ref()
+                .is_err_and(|message| message.ends_with("(os error 26)"));
+            if !another_threads_fork || Instant::now() >= deadline {
+                return outcome;
+            }
+            thread::sleep(Duration::from_millis(20));
+        }
+    }
+
+    #[test]
+    fn a_file_that_is_there_is_opened_and_an_opener_that_exits_non_zero_is_said_to_have_exited() {
+        let temp = tempdir().expect("a directory for the opener");
+        let file = temp.path().join("notes.txt");
+        fs::write(&file, "hello\n").expect("a file to open");
+
+        assert_eq!(open_file(&opener_in(temp.path(), "exit 0"), &file), Ok(()));
+        assert_eq!(
+            open_file(&opener_in(temp.path(), "exit 17"), &file)
+                .expect_err("exit 17 opened nothing"),
+            format!(
+                "{} did not open the file (exit code 17)",
+                temp.path().join("opener").display()
+            )
+        );
+    }
+
+    #[test]
+    fn a_path_that_cannot_be_a_flag_is_refused_before_a_process_is_started() {
+        let temp = tempdir().expect("a directory for the opener");
+        let ran = temp.path().join("ran");
+        let opener = opener_in(temp.path(), &format!("touch {}", ran.display()));
+
+        // The absolute check is the argument's safety, and it is the one that stays ahead of the
+        // spawn: a relative spelling beginning with `-` would be read as a flag of the opener
+        // rather than as a file, and a file appearing is the only witness that it was not.
+        for refused in [Path::new("-a"), Path::new("relative/file.txt")] {
+            assert_eq!(
+                open_path_with(&opener, refused).expect_err("a relative path is not a file"),
+                "only an absolute path can be opened"
+            );
+        }
+        // An empty path is refused on its own terms: there is nothing there to name.
+        assert_eq!(
+            open_path_with(&opener, Path::new("")).expect_err("an empty path opened nothing"),
+            "there is no path to open"
+        );
+        // And a name nothing is behind is refused on the same footing: starting a process to be
+        // told by it that there is nothing there is one round trip spent saying nothing.
+        assert!(open_path_with(&opener, Path::new("/nope/not-here"))
+            .expect_err("an absent path opened nothing")
+            .ends_with("is not there to open"));
+        assert!(
+            !ran.exists(),
+            "the opener ran for a path it was never handed"
+        );
+    }
+
+    #[test]
+    fn a_folder_is_opened_the_way_a_file_is() {
+        let temp = tempdir().expect("a directory for the opener");
+        let folder = temp.path().join("src");
+        fs::create_dir(&folder).expect("a folder to open");
+
+        // A row of the tree can name a directory as easily as a file, and the platform answers a
+        // folder by showing it rather than by refusing it, so nothing here asks which of the two it is.
+        assert_eq!(
+            open_file(&opener_in(temp.path(), "exit 0"), &folder),
+            Ok(())
         );
     }
 }

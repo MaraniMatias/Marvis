@@ -48,6 +48,7 @@ import {
   getReviewFolder,
   getTerminalStatus,
   loadReviewTarget,
+  openExternalFile as requestExternalFile,
   openExternalUrl as requestExternalUrl,
   renameTerminal,
   restoreArchivedWorktrees as persistArchivedRestore,
@@ -672,6 +673,17 @@ async function activateTerminalSession(sessionId: string) {
  */
 function openExternalUrl(url: string) {
   void requestExternalUrl(url).catch(reportCause);
+}
+
+/**
+ * ctrl+click in the Files tree goes to whatever application this machine has for the file.
+ *
+ * A refusal is reported rather than swallowed, for the reason the URL above gives: a row that did
+ * not open and a row that opened something look identical from here, and the person who pressed
+ * the key is the only one who can tell.
+ */
+function openExternalFile(selection: { checkoutId: string; path: string }) {
+  void requestExternalFile(selection.checkoutId, selection.path).catch(reportCause);
 }
 
 function toggleLayoutMode() {
@@ -2208,6 +2220,7 @@ function reportWarning(message: string) {
             :font-scale="fontScale"
             :tree-sticky-scroll="settings.ui.treeStickyScroll"
             @open-file="openFileDocument"
+            @open-external-file="openExternalFile"
             @open-change="openChangedDocument"
             @open-all-changes="openAllChanges"
             @update-ui-state="activeCheckout && updateInspectorUiState(activeCheckout.id, $event)"

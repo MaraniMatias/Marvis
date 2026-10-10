@@ -1347,7 +1347,13 @@ describe("Sidebar workdir rows", () => {
     // a count that has anything to reveal.
     const hovered = sidebarStyles().match(/\.workdir-row:hover[^{]*\.workdir-diff,[^{]*\{([^}]*)\}/)?.[1] ?? "";
     expect(hovered).toContain("grid-template-columns: 0px 1fr;");
-    expect(hovered).toContain("margin-right: 28px;");
+    // The strip is NOT in this rule: only a row that draws a cross has anything standing in the
+    // space its figures give up. On every other row those 28px were a gap trailing the numbers with
+    // nothing drawn in it, which is what made a hovered repo root look like it was padded wrong.
+    expect(hovered).not.toContain("margin-right");
+    const stripped =
+      sidebarStyles().match(/\.workdir-row\.has-close:hover[^{]*\.workdir-diff,[^{]*\{([^}]*)\}/)?.[1] ?? "";
+    expect(stripped).toContain("margin-right: 28px;");
     expect(sidebarStyles()).not.toMatch(/\.workdir-row:hover[^{]*workdir-end[^{]*\{[^}]*padding/);
     expect(sidebarStyles()).not.toMatch(/\.workdir-row:focus-within[^{]*workdir-end[^{]*\{[^}]*padding/);
     // The slot's own minimum is still the cross's width, and it never grows one: nothing is reserved
@@ -1404,6 +1410,10 @@ describe("Sidebar workdir rows", () => {
     await flushPromises();
 
     const row = wrapper.get(".workdir-parent");
+    // The row says it has a cross, and it does. The class and the button are the same question, so
+    // the strip the hover rule opens is standing in exactly the row that draws the thing in it.
+    expect(row.classes()).toContain("has-close");
+    expect(row.find(".workdir-close").exists()).toBe(true);
     // The slot and the cross are siblings inside the row, in that order, so the cross is drawn over
     // the slot and over nothing else on the row.
     const children = [...row.element.children];
@@ -1435,6 +1445,34 @@ describe("Sidebar workdir rows", () => {
     const atRest = title.element.getBoundingClientRect().width;
     await title.trigger("mouseenter");
     expect(title.element.getBoundingClientRect().width).toBe(atRest);
+    wrapper.unmount();
+  });
+
+  it("gives a row with no cross of its own no strip to give up on hover", async () => {
+    // The same counts on the same slot, on the row that is not a worktree. The figures still
+    // arrive on hover — that is every row's behaviour and none of it changed — but the 28px the
+    // cross stands in are not opened, because a repo root never draws one and was leaving an
+    // empty band between its numbers and the edge of the panel.
+    mocks.getGitCheckoutDiffStats.mockResolvedValue({ "checkout:primary": { additions: 1944, deletions: 265 } });
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [repo({ checkouts: [checkout({ id: "checkout:primary", isPrimary: true, branch: "main" })] })],
+        activeCheckoutId: "checkout:primary",
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    await flushPromises();
+
+    const row = wrapper.get(".workdir-parent");
+    expect(row.find(".workdir-close").exists()).toBe(false);
+    expect(row.classes()).not.toContain("has-close");
+    // The counts themselves are untouched: the mark at rest, the figures one pointer away.
+    expect(row.get(".workdir-end .workdir-diff-mark").text()).toBe("+\u2212");
+    expect(row.get(".workdir-end .workdir-diff-nums").text()).toBe("+1944\u2212265");
+    // And the rule that would open the strip does not name this row.
+    const general = sidebarStyles().match(/\.workdir-row:hover[^{]*\.workdir-diff,[^{]*\{([^}]*)\}/)?.[1] ?? "";
+    expect(general).not.toContain("margin-right");
     wrapper.unmount();
   });
 
@@ -2943,9 +2981,15 @@ describe("Sidebar workdir rows", () => {
     expect(base.get(".workdir-diff-nums .rm").text()).toBe("\u22124");
     // A zero addition has nothing to draw, and the deletion stands on its own. The `.ad` and the `.rm`
     // are read inside the figures and not inside the whole slot, because the mark above them is
-    // drawn in the same two colours and carries a bare `+` and `−` of its own.
+    // drawn in the same two colours and carries a bare sign of its own for each count the row has.
     expect(feature.find(".workdir-diff-nums .ad").exists()).toBe(false);
     expect(feature.get(".workdir-diff-nums .rm").text()).toBe("\u22127");
+    // And the resting mark claims the same: a checkout that only lost lines has no `+` to draw, so
+    // drawing one would be a claim about a change set this row does not have. A checkout that has
+    // both keeps both, which is the case the mark was drawn for.
+    expect(feature.find(".workdir-diff-mark .ad").exists()).toBe(false);
+    expect(feature.get(".workdir-diff-mark .rm").text()).toBe("\u2212");
+    expect(base.get(".workdir-diff-mark").text()).toBe("+\u2212");
     wrapper.unmount();
   });
 

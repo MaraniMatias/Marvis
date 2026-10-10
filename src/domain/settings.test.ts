@@ -42,6 +42,7 @@ describe("the settings file", () => {
         scrollbar: "hidden",
         shellIntegration: true,
         followWorktree: "agent" as const,
+        selectionCopy: true,
       },
       editor: { fontSize: 13, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
       reviews: { storage: "default" },
@@ -65,6 +66,7 @@ describe("the settings file", () => {
         scrollbar: "always" as const,
         shellIntegration: false,
         followWorktree: "both" as const,
+        selectionCopy: false,
       },
       editor: { fontSize: 15, ligatures: false, cursorBlink: false, indentation: { useSpaces: false, size: 4 } },
       reviews: { storage: "workdir" as const },
@@ -136,6 +138,19 @@ describe("the settings file", () => {
     expect(normalizeSettings({ terminal: { cursorStyle: "beam" } }).terminal.cursorStyle).toBe("block");
   });
 
+  it("keeps copy-on-selection as the boolean it is and defaults anything else to on", () => {
+    expect(normalizeSettings({ terminal: { selectionCopy: false } }).terminal.selectionCopy).toBe(false);
+    expect(normalizeSettings({ terminal: { selectionCopy: true } }).terminal.selectionCopy).toBe(true);
+    // A file that never heard of the preference keeps the behaviour this build opens with, and a
+    // string where a boolean belongs is a mistake rather than a reason to refuse the whole file.
+    expect(normalizeSettings({}).terminal.selectionCopy).toBe(true);
+    for (const invalid of ["yes", 1, null, {}]) {
+      expect(normalizeSettings({ terminal: { selectionCopy: invalid } }).terminal.selectionCopy, String(invalid)).toBe(
+        true,
+      );
+    }
+  });
+
   it("keeps the four worktree follow modes and defaults invalid values to agent", () => {
     expect(DEFAULT_SETTINGS.terminal.followWorktree).toBe("agent");
     for (const mode of ["off", "cd", "agent", "both"]) {
@@ -185,6 +200,7 @@ describe("the form's schema", () => {
       "terminal.ligatures",
       "terminal.cursorStyle",
       "terminal.cursorBlink",
+      "terminal.selectionCopy",
       "terminal.scrollbar",
       "terminal.followWorktree",
       "terminal.shellIntegration",
@@ -222,6 +238,19 @@ describe("the form's schema", () => {
     expect(description).toMatch(/without clearing shell startup output/i);
     expect(description).not.toMatch(/discarded/i);
     expect(description).toMatch(/new terminals only/i);
+  });
+
+  it("offers copy-on-selection as a toggle that is on by default", () => {
+    const field = SETTINGS_SECTIONS.flatMap((section) => section.fields).find(
+      (candidate) => candidate.path === "terminal.selectionCopy",
+    );
+    expect(field?.kind).toBe("toggle");
+    // On is the behaviour this build opens with: a selection gesture copying what it selected is
+    // what a terminal has always done here, so the preference describes it rather than adding it.
+    expect(DEFAULT_SETTINGS.terminal.selectionCopy).toBe(true);
+    expect(normalizeSettings(undefined).terminal.selectionCopy).toBe(true);
+    expect(withValue(DEFAULT_SETTINGS, "terminal.selectionCopy", false).terminal.selectionCopy).toBe(false);
+    expect(valueAt(DEFAULT_SETTINGS, "terminal.selectionCopy")).toBe(true);
   });
 
   it("turns a select's string back into the value it stands for", () => {

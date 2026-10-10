@@ -99,6 +99,26 @@ pub async fn file_probe(
     .map_err(operation_error)?
 }
 
+/// Opens a file or a folder of a checkout in the application this machine has for it, which is the
+/// only place one can be opened: this window is a preview, not the program that draws a `.psd`.
+///
+/// The name is checkout-relative and is resolved on this side, where the checkout's own boundary
+/// is enforced, rather than handed to the opener as it arrived. The opener is a process and its
+/// status is read, so the call waits on a blocking thread for the same reason `open_url` does.
+#[tauri::command]
+pub async fn file_open_externally(
+    checkout_id: String,
+    path: String,
+    database: State<'_, Database>,
+) -> Result<(), IpcError> {
+    let database = database.inner().clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        services::files::open_externally(&database, &checkout_id, &path)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
 #[tauri::command]
 pub async fn file_write(
     checkout_id: String,

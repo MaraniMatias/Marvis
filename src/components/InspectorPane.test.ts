@@ -639,6 +639,62 @@ describe("InspectorPane", () => {
     wrapper.unmount();
   });
 
+  it("hands a file or a folder to the system on ctrl or cmd, and to the preview otherwise", async () => {
+    mocks.listCheckoutFiles.mockResolvedValue({
+      entries: [
+        { name: "src", path: "src", kind: "directory" },
+        { name: "notes.txt", path: "notes.txt", kind: "file" },
+      ],
+      truncated: false,
+    });
+    const wrapper = mountInspector({ checkout: checkout("checkout:one") });
+    await flushPromises();
+
+    const file = () => wrapper.get(".file-row:not(.file-folder)");
+    const folder = () => wrapper.get('.folder-name[aria-label="Expand src"]');
+
+    // Held, both rows go out to the machine and nothing here moves: no selection, no expansion, no
+    // view change. A row that opened somewhere else and also changed the preview would be
+    // answering a gesture nobody asked.
+    for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+      await file().trigger("click", modifier);
+      expect(wrapper.emitted("openExternalFile")?.at(-1)?.[0]).toEqual({
+        checkoutId: "checkout:one",
+        path: "notes.txt",
+      });
+    }
+    expect(wrapper.emitted("openFile")).toBeFalsy();
+
+    await folder().trigger("click", { ctrlKey: true });
+    expect(wrapper.emitted("openExternalFile")?.at(-1)?.[0]).toEqual({ checkoutId: "checkout:one", path: "src" });
+    // The folder did not expand either: it is the same one gesture, not two.
+    expect(folder().attributes("aria-label")).toBe("Expand src");
+
+    // Not held, each row is the action it always was.
+    await file().trigger("click");
+    expect(wrapper.emitted("openFile")?.at(-1)?.[0]).toEqual({ checkoutId: "checkout:one", path: "notes.txt" });
+    await folder().trigger("click");
+    await flushPromises();
+    expect(wrapper.find('.folder-name[aria-label="Collapse src"]').exists()).toBe(true);
+    wrapper.unmount();
+  });
+
+  it("leaves the chevron and a sticky row out of the external gesture", async () => {
+    // The chevron is a twelve-pixel target that is never the thing being pointed at, and a sticky
+    // row is a copy of a row further down rather than a row of its own. Neither grows a second
+    // meaning for the same click.
+    mocks.listCheckoutFiles.mockResolvedValue({
+      entries: [{ name: "src", path: "src", kind: "directory" }],
+      truncated: false,
+    });
+    const wrapper = mountInspector({ checkout: checkout("checkout:one") });
+    await flushPromises();
+
+    await wrapper.get(".file-folder .folder-toggle").trigger("click", { ctrlKey: true });
+    expect(wrapper.emitted("openExternalFile")).toBeFalsy();
+    wrapper.unmount();
+  });
+
   /** What one character is worth, in a font that is only that. happy-dom has no text metrics at
    *  all, so the panel's measurers answer with this instead: what is being checked here is which row
    *  the width comes from, not how many pixels a glyph is. */

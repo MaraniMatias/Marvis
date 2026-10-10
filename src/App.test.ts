@@ -50,6 +50,7 @@ const mocks = vi.hoisted(() => ({
   listRecentPaths: vi.fn(),
   openPath: vi.fn(),
   openExternalUrl: vi.fn(),
+  openExternalFile: vi.fn(),
   selectCheckout: vi.fn(),
   restoreWorkspace: vi.fn(),
   toggleMaximize: vi.fn(),
@@ -294,6 +295,7 @@ vi.mock("./lib/ipc", () => ({
   selectCheckout: mocks.selectCheckout,
   restoreWorkspace: mocks.restoreWorkspace,
   openExternalUrl: mocks.openExternalUrl,
+  openExternalFile: mocks.openExternalFile,
 }));
 vi.mock("./presentation/workspace", async () => {
   const { computed, ref } = await import("vue");
@@ -482,7 +484,7 @@ const SessionPaneStub = defineComponent({
 const InspectorPaneStub = defineComponent({
   name: "InspectorPane",
   props: { checkout: Object },
-  emits: ["openFile", "openAllChanges", "updateUiState"],
+  emits: ["openFile", "openExternalFile", "openAllChanges", "updateUiState"],
   setup(props, { emit }) {
     return () =>
       h("div", [
@@ -4358,6 +4360,28 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
+    it("says so when a file the tree offered would not open, rather than leaving the row be", async () => {
+      // A row that did not open and a row that opened something are the same picture from here,
+      // and the person who pressed ctrl is the only one who can tell which happened.
+      mocks.openExternalFile.mockRejectedValueOnce(new Error("no application is registered for it"));
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one")),
+        { ...DEFAULT_APP_LAYOUT },
+        { settings: cloneSettings(DEFAULT_SETTINGS) },
+      );
+      await flushPromises();
+
+      await wrapper
+        .findComponent({ name: "InspectorPane" })
+        .vm.$emit("openExternalFile", { checkoutId: "checkout:one", path: "design.psd" });
+      await flushPromises();
+
+      expect(mocks.openExternalFile).toHaveBeenCalledWith("checkout:one", "design.psd");
+      const { toasts } = useToasts();
+      expect(toasts.value.at(-1)?.message).toContain("no application is registered");
+      wrapper.unmount();
+    });
+
     it("paints the window in the theme the preference names, and in the system's while it does not", async () => {
       const listeners: Array<() => void> = [];
       const system = {
@@ -4503,6 +4527,36 @@ describe("App UI integration", () => {
         reopened.unmount();
       },
     );
+
+    it("turns copy-on-selection off through Apply, and the terminal is told at once", async () => {
+      // On by default, so the dialog opens showing the behaviour this build has always had, and
+      // turning it off is a preference like any other: written whole, adopted at once.
+      const wrapper = await openSettings();
+      const toggle = wrapper.get("#settings-terminal-selectionCopy");
+      expect((toggle.element as HTMLInputElement).checked).toBe(true);
+
+      await toggle.setValue(false);
+      expect(mocks.saveSettings).not.toHaveBeenCalled();
+      await wrapper
+        .findAll("button")
+        .find((button) => button.text() === "Apply")!
+        .trigger("click");
+      await flushPromises();
+
+      const saved = cloneSettings(DEFAULT_SETTINGS);
+      saved.terminal.selectionCopy = false;
+      expect(mocks.saveSettings).toHaveBeenCalledWith(saved);
+      // Adopted without a restart and without waiting for the file to come back, which is what
+      // makes it reach the terminals that are already open.
+      expect(wrapper.findComponent({ name: "MainPane" }).props("terminalSettings")).toMatchObject({
+        selectionCopy: false,
+      });
+      wrapper.unmount();
+
+      const reopened = await openSettings(saved);
+      expect((reopened.get("#settings-terminal-selectionCopy").element as HTMLInputElement).checked).toBe(false);
+      reopened.unmount();
+    });
 
     it("writes the whole set and takes effect at once, without waiting for the file", async () => {
       const wrapper = await openSettings();

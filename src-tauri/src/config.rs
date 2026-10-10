@@ -147,6 +147,13 @@ pub struct TerminalSettings {
     pub shell_integration: bool,
     /// Which activity moves a terminal to its matching worktree: off, cd, agent or both.
     pub follow_worktree: String,
+    /// Whether a selection gesture in the terminal puts what it selected on the clipboard, the way
+    /// a text field does. On by default, which is the behaviour this preference started as; off
+    /// leaves the selection itself alone so nothing lands on the clipboard behind the reader's back.
+    ///
+    /// Read when the copy callback runs rather than when a terminal is created, so it applies to the
+    /// terminals already open and not only to the ones opened after the change.
+    pub selection_copy: bool,
 }
 
 const WORKTREE_FOLLOW_MODES: [&str; 4] = ["off", "cd", "agent", "both"];
@@ -161,6 +168,7 @@ impl Default for TerminalSettings {
             scrollbar: "hidden".into(),
             shell_integration: true,
             follow_worktree: "agent".into(),
+            selection_copy: true,
         }
     }
 }
@@ -421,6 +429,7 @@ mod tests {
                 scrollbar: "always".into(),
                 shell_integration: false,
                 follow_worktree: "both".into(),
+                selection_copy: false,
             },
             editor: EditorSettings {
                 font_size: 15.0,
@@ -468,7 +477,8 @@ mod tests {
                 "cursorStyle": "block",
                 "scrollbar": "hidden",
                 "shellIntegration": true,
-                "followWorktree": "cd"
+                "followWorktree": "cd",
+                "selectionCopy": true
             },
             "editor": {
                 "fontSize": 13.0,
@@ -524,7 +534,7 @@ mod tests {
             terminal,
             serde_json::json!({
                 "fontSize": 16.0, "ligatures": true, "cursorBlink": true, "cursorStyle": "block",
-                "scrollbar": "hidden", "shellIntegration": true, "followWorktree": "agent"
+                "scrollbar": "hidden", "shellIntegration": true, "followWorktree": "agent", "selectionCopy": true
             })
         );
         let document = std::fs::read_to_string(&path).unwrap();
