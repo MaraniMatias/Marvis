@@ -203,6 +203,94 @@ describe("Sidebar workdir rows", () => {
     expect(wrapper.emitted("newTerminal")).toEqual([["checkout:primary"]]);
   });
 
+  it("greys the terminal it moved off once a file is what the panel is showing", async () => {
+    // The session stays the checkout's active one while a document is open over it — that is a
+    // fact about the checkout, and nothing about opening a file rewrites it. The row used to read
+    // its selection off that session alone, so it went on claiming to be what was being read.
+    const repos = [
+      repo({
+        checkouts: [
+          {
+            ...checkout({ id: "checkout:reader" }),
+            sessions: [
+              session("session:read", "zsh", "checkout:reader"),
+              session("session:other", "zsh", "checkout:reader"),
+            ],
+          },
+          {
+            ...checkout({
+              id: "checkout:beside",
+              path: "/test-beside",
+              canonicalPath: "/test-beside",
+              isPrimary: false,
+              branch: "feature",
+            }),
+            sessions: [session("session:elsewhere", "zsh", "checkout:beside")],
+          },
+        ],
+      }),
+    ];
+    const props = {
+      repos,
+      activeCheckoutId: "checkout:reader",
+      activeSessionId: "session:read",
+      isOpening: false,
+    };
+    const wrapper = mount(Sidebar, { props });
+
+    // The terminal on screen wears the accent, and it is the only row in the panel that does.
+    expect(wrapper.findAll(".workdir-row.selected")).toHaveLength(1);
+    expect(wrapper.get('[data-session-id="session:read"]').classes()).toContain("selected");
+    expect(wrapper.findAll(".workdir-row.dimmed")).toHaveLength(0);
+
+    // A file open in the main panel takes the selection with it, and the file wears it on its own
+    // row in the inspector beside this one. Nothing here claims it: a row that says "this is what
+    // you are reading" while the middle of the window is showing a document is the bug itself.
+    await wrapper.setProps({ mainViewKind: "document" });
+    expect(wrapper.findAll(".workdir-row.selected")).toHaveLength(0);
+    // The row is greyed rather than dropped, because the terminal is still this checkout's and is
+    // still on the panel: `active` is what says so, and it is untouched by the view.
+    const row = wrapper.get('[data-session-id="session:read"]');
+    expect(row.classes()).toContain("dimmed");
+    expect(row.classes()).toContain("active");
+    // Its sibling is not the row that was moved off, so it gets neither class.
+    expect(wrapper.get('[data-session-id="session:other"]').classes()).not.toContain("dimmed");
+    // A branch that holds the dimmed terminal does not take the selection up: the selection did
+    // not move within this panel, it left it. Both rows of this checkout stay `active`, which is
+    // context and was never the accent.
+    expect(wrapper.find(".workdir-parent.selected").exists()).toBe(false);
+    expect(wrapper.findAll(".workdir-row.active")).toHaveLength(2);
+
+    // A whole change set is the same claim as a single file: a diff of every changed file has no
+    // path, and nothing in here is what is on screen either.
+    await wrapper.setProps({ mainViewKind: "diff" });
+    expect(wrapper.findAll(".workdir-row.selected")).toHaveLength(0);
+    expect(wrapper.get('[data-session-id="session:read"]').classes()).toContain("dimmed");
+
+    // Back to the terminal and the edge comes back with it. The session was never re-selected in
+    // between, which is the point: the rule reads the panel, not the session.
+    await wrapper.setProps({ mainViewKind: "terminal" });
+    expect(wrapper.findAll(".workdir-row.selected")).toHaveLength(1);
+    expect(wrapper.get('[data-session-id="session:read"]').classes()).toContain("selected");
+    expect(wrapper.findAll(".workdir-row.dimmed")).toHaveLength(0);
+    wrapper.unmount();
+  });
+
+  it("draws the dimmed row in neutral ink, and leaves its glyph saying what it says", () => {
+    // The accent edge with the accent taken out of it, and a neutral surface: blue is what a
+    // selection looks like, and nothing in the panel is selected while a file is. There is
+    // deliberately no rule for the glyph, for the same reason there is none for a selected row —
+    // a rule here would outrank every `.state-*` rule below it and a terminal with a process in it
+    // would go grey while still running.
+    expect(rule(".workdir-row.dimmed")).toContain("background: var(--muster-el-active);");
+    expect(rule(".workdir-row.dimmed")).toContain("box-shadow: inset 2px 0 0 var(--muster-border-strong);");
+    expect(rule(".workdir-row.dimmed")).not.toContain("var(--muster-accent)");
+    expect(rule(".workdir-row.dimmed .nm")).toContain("color: var(--muster-text-secondary);");
+    expect(rule(".workdir-row.dimmed .workdir-icon")).toBe("");
+    // The cross sits on the row's own surface, so a dimmed row's is the dimmed one.
+    expect(rule(".workdir-row.dimmed > .workdir-close")).toContain("background: var(--muster-el-active);");
+  });
+
   it("keeps the plain name for a git root Git has no branch to name it by", () => {
     // A detached HEAD is the only checkout Git reports without a branch, so its root is "Base".
     const wrapper = mount(Sidebar, {

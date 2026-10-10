@@ -2113,6 +2113,7 @@ function reportWarning(message: string) {
           :home-checkout-id="workspace.homeCheckoutId"
           :active-checkout-id="workspace.activeCheckoutId"
           :active-session-id="activeSessionId"
+          :main-view-kind="activeMainView.kind"
           :session-runtime-statuses="sessionRuntimeStatuses"
           :session-order="sessionOrder"
           :agent-rows="terminalAgents.byCheckout"

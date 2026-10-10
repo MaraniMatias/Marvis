@@ -28,6 +28,7 @@ import type { ArchivedCheckout, Checkout, Repo, Session, TerminalSessionStatus }
 import { AGENT_APP, agentSessionTitle, sessionRowTitle, workdirIconKind, workdirTitle } from "../domain/workspace";
 import type { AgentAttention } from "../domain/agent";
 import { matchAgentSessionTitle } from "../domain/agent";
+import type { MainView } from "../domain/main-document";
 import type { TerminalAgentRow } from "../presentation/agent-sessions";
 import { useDiffStats } from "../presentation/diff-stats";
 import { WORKDIR_ICONS } from "../presentation/workdir-icons";
@@ -41,6 +42,21 @@ const props = withDefaults(
     repos: Repo[];
     activeCheckoutId: string | null;
     activeSessionId: string | null;
+    /**
+     * What the main panel is showing for the active checkout, which is what the accent edge in
+     * this panel is worn for.
+     *
+     * `activeSessionId` answers which terminal the checkout has open and is therefore the row that
+     * wears the selection while the panel shows that terminal. It is not enough on its own: opening
+     * a file leaves the checkout's session selected in the persistence while the panel is showing
+     * the document, and the sidebar went on claiming that the terminal was what was being read.
+     *
+     * So the panel's own view comes in as well, and the two together are the rule. It is one value
+     * for the whole panel rather than one per checkout because only the active checkout can have a
+     * view open: the main panel shows one checkout at a time, and every other row in here is
+     * context.
+     */
+    mainViewKind?: MainView["kind"];
     homeCheckoutId?: string | null;
     isOpening: boolean;
     sessionRuntimeStatuses?: Record<string, TerminalSessionStatus>;
@@ -78,6 +94,7 @@ const props = withDefaults(
     fontScale?: number;
   }>(),
   {
+    mainViewKind: "terminal",
     homeCheckoutId: null,
     sessionRuntimeStatuses: () => ({}),
     sessionOrder: () => ({}),
@@ -576,7 +593,23 @@ interface WorkdirItem {
    * to draw a list that is closed.
    */
   canMove: boolean;
+  /**
+   * The terminal this checkout has open, which is context rather than selection.
+   *
+   * It is what the row reports about itself, and it does not say that the terminal is what the
+   * main panel is showing: a file opened over it leaves this session the checkout's active one.
+   */
   active: boolean;
+  /**
+   * The terminal the panel has moved off, while it is still the checkout's own.
+   *
+   * It is drawn grey and without the accent, and this is what says why: the file the panel went to
+   * is selected in the file tree beside this panel, and a row still wearing the accent would be a
+   * second claim about the same selection in a list that has one. The row keeps its shape rather
+   * than losing it, because the terminal is still there and still belongs to this checkout — it is
+   * simply not what is being read.
+   */
+  dimmed: boolean;
   /**
    * The row's own name: the agent session's own title where this terminal's title names one, and
    * the program in front of the shell or the session's own name otherwise. See `toWorkdir`, which
@@ -660,8 +693,14 @@ interface Workdir {
    * That conjunction is what makes the invariant hold without a rule that has to be defended. A
    * terminal row is selected by its own session, so while one of this checkout's terminals is
    * selected the branch row gives the selection up and the terminal wears it alone; when none is, the
-   * branch is what is selected and takes it. Either way exactly one row in the panel carries the
+   * branch is what is selected and takes it. Either way at most one row in the panel carries the
    * accent edge, which is the only thing the edge is allowed to mean.
+   *
+   * "At most" rather than "exactly one" because the panel is also showing something that is not a
+   * terminal: a file or a diff takes the selection with it, and it wears it on its own row in the
+   * inspector beside this one. A checkout with a document open selects nothing here rather than
+   * selecting the nearest row it can find, because a row that claims a selection nothing in the panel
+   * agrees with is worse than a panel that says nothing.
    */
   selected: boolean;
   items: WorkdirItem[];
@@ -693,6 +732,21 @@ interface Group {
 // call rather than per row. The active checkout is named too, so the Changes tab of the
 // inspector shares the same refresh instead of running a second listener.
 const diffStats = useDiffStats(toRef(props, "repos"), toRef(props, "activeCheckoutId"));
+
+/**
+ * Whether the terminal is the thing the main panel is showing, which is what the accent edge in
+ * this panel is for.
+ *
+ * The selection is a claim about what is on screen in the middle, and the middle is the only place
+ * that knows. `activeSessionId` cannot answer it on its own because it is a fact about the checkout
+ * rather than about the panel: a terminal stays the active session while a document is open over it,
+ * which is what left a terminal row wearing the accent next to a file being read.
+ *
+ * A split layout does not get its own answer. The terminal is on screen there too, but it is on
+ * screen *beside* the document rather than instead of it, and the row is one row: a panel where the
+ * edge meant "this is what you are reading" cannot wear it for one of two things and stay honest.
+ */
+const showingTerminal = computed(() => props.mainViewKind === "terminal");
 
 /** How many worktrees each repo archived, counted once so no row walks the list itself. */
 const archivedByRepo = computed(() => {
@@ -1097,10 +1151,13 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
     missing: checkout.isMissing,
     home: checkout.id === props.homeCheckoutId,
     active: checkout.id === props.activeCheckoutId,
-    // Exactly one row in the panel wears the accent edge. A terminal row is selected by its own
-    // session, so a branch that holds the selected terminal gives the selection up; a branch with
-    // no selected terminal of its own takes it, and that is the branch being what is open.
+    // At most one row in the panel wears the accent edge, and only while a terminal is what the
+    // main panel is showing. A branch that holds the selected terminal gives the selection up; a
+    // branch with no selected terminal of its own takes it, and that is the branch being what is
+    // open. With a document or a diff on screen there is no selection to give here: the file that is
+    // open wears it in the inspector, and this branch stays context, which `active` already says.
     selected:
+      showingTerminal.value &&
       checkout.id === props.activeCheckoutId &&
       !checkout.sessions.some((session) => session.id === props.activeSessionId),
     items: orderedSessions(checkout).map((session) => {
@@ -1150,6 +1207,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
         session,
         canMove: canMoveTo(session),
         active: session.id === props.activeSessionId,
+        dimmed: session.id === props.activeSessionId && !showingTerminal.value,
         /**
          * The row's name, which `sessionRowTitle` writes: the session this terminal is showing when
          * its own title names one, the program in front of the shell otherwise, and the name it was
@@ -1521,7 +1579,8 @@ function rowLabel(item: WorkdirItem): string {
                   `state-${item.state}`,
                   {
                     active: item.active,
-                    selected: item.active,
+                    selected: item.active && showingTerminal,
+                    dimmed: item.dimmed,
                     'agent-tinted': item.tint !== null,
                     'is-being-dragged': pointerDrag?.started && pointerDrag.session.id === item.session.id,
                   },
@@ -1893,14 +1952,34 @@ function rowLabel(item: WorkdirItem): string {
   background: var(--muster-el-hover);
 }
 
-/* Selection is one row in the whole panel, and it is whichever row carries `selected`: the terminal
-   being read, or the branch when no terminal of it is selected. A checkout that merely HOLDS the
-   selected terminal is context, and it used to wear the same tint and the same blue edge, so the
-   panel showed two rows claiming the selection at once. */
+/* Selection is at most one row in the whole panel, and it is whichever row carries `selected`: the
+   terminal being read, or the branch when no terminal of it is selected. A checkout that merely
+   HOLDS the selected terminal is context, and it used to wear the same tint and the same blue edge,
+   so the panel showed two rows claiming the selection at once. */
 .workdir-row.selected {
   background: var(--muster-el-selected);
   color: var(--muster-text);
   box-shadow: inset 2px 0 0 var(--muster-accent);
+}
+
+/* A terminal the panel has read something else in front of is greyed rather than deselected: same
+   row, same box, the selection drawn in neutral ink. The edge is the accent's own shape with the
+   accent taken out of it, because that is what changed — the row is still the terminal this checkout
+   has, and it is still there; it is just not what the middle of the window is showing. The surface
+   is the neutral one rather than the selected one for the same reason: blue is what a selection
+   looks like, and nothing in this panel is selected while a file is. */
+.workdir-row.dimmed {
+  background: var(--muster-el-active);
+  box-shadow: inset 2px 0 0 var(--muster-border-strong);
+}
+
+/* The name gives way on a dimmed row, and only the name. `.nm` carries its own colour, so a colour
+   on the row alone would leave the label at full strength over a grey surface, which reads as a
+   hover rather than as a row the panel has moved off. The glyph is left alone on purpose, exactly as
+   it is on a selected row below: it says what is running in that terminal, and nothing about what
+   the main panel happens to be showing changes that. */
+.workdir-row.dimmed .nm {
+  color: var(--muster-text-secondary);
 }
 
 /* There is deliberately NO rule here for the selected row's glyph. A rule would outrank every
@@ -2250,6 +2329,12 @@ function rowLabel(item: WorkdirItem): string {
 
 .workdir-row.selected > .workdir-close {
   background: var(--muster-el-selected);
+}
+
+/* The cross on a dimmed row follows that row's surface, for the same reason the selected one does:
+   an opaque fill is what makes it read as a menu opening *on* the row. */
+.workdir-row.dimmed > .workdir-close {
+  background: var(--muster-el-active);
 }
 
 /* Visible whenever it is pointed at or focused — three ways, and no fourth. */
