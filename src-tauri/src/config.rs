@@ -54,6 +54,16 @@ pub fn dir_of(config_file: &ConfigFile) -> Option<&Path> {
     config_file.0.parent()
 }
 
+/// The home the settings file sits in, derived the same way `dir_of` is.
+///
+/// `~/.muster` is the app's folder in a home, so its parent is that home. Callers that need both
+/// — anything deciding where the app keeps its own files — already hold the settings file, and a
+/// second copy of "where this person's home is" in every one of those signatures is a second thing
+/// to keep in step with the first.
+pub fn home_of(config_file: &ConfigFile) -> Option<&Path> {
+    dir_of(config_file)?.parent()
+}
+
 /// Every field defaults, unlike the rows in the database: this file is written by a person as
 /// well as by the dialog, and a line they deleted is a preference they did not set, not a shape
 /// this build cannot read.
@@ -68,6 +78,31 @@ pub struct AppSettings {
     pub ui: UiSettings,
     pub terminal: TerminalSettings,
     pub editor: EditorSettings,
+    pub reviews: ReviewSettings,
+}
+
+/// Where an exported review round is written: `default` is the app's own folder in the user's
+/// home, `workdir` is a folder inside the checkout the review was made in.
+///
+/// Two, and only two, because the two questions behind it have different answers. The home folder
+/// is the app's business: notes nobody asked to keep, in a place no repository can reach. The
+/// working directory is the project's business: notes that belong to the code they are about, next
+/// to it, where a diff, a commit or a teammate can find them.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ReviewSettings {
+    pub storage: String,
+}
+
+pub const REVIEW_STORAGE_DEFAULT: &str = "default";
+pub const REVIEW_STORAGE_WORKDIR: &str = "workdir";
+
+impl Default for ReviewSettings {
+    fn default() -> Self {
+        Self {
+            storage: REVIEW_STORAGE_DEFAULT.into(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
@@ -213,6 +248,12 @@ impl AppSettings {
             .indentation
             .size
             .clamp(INDENTATION_SIZE_MIN, INDENTATION_SIZE_MAX);
+        if !matches!(
+            self.reviews.storage.as_str(),
+            REVIEW_STORAGE_DEFAULT | REVIEW_STORAGE_WORKDIR
+        ) {
+            self.reviews.storage = REVIEW_STORAGE_DEFAULT.into();
+        }
         self
     }
 }
@@ -390,9 +431,22 @@ mod tests {
                     size: 4,
                 },
             },
+            reviews: ReviewSettings {
+                storage: REVIEW_STORAGE_WORKDIR.into(),
+            },
         };
         save(&path, &written).unwrap();
         assert_eq!(load(&path).unwrap(), written);
+    }
+
+    /// An export has exactly two homes, so a third name in a hand-edited file is a typo rather than
+    /// a mode, and the folder in the app's own directory is the answer that is never a surprise.
+    #[test]
+    fn an_unknown_review_storage_reads_as_the_app_folder() {
+        let home = settings_dir();
+        let path = config_path_in(&home);
+        std::fs::write(&path, "reviews:\n  storage: somewhere-else\n").unwrap();
+        assert_eq!(load(&path).unwrap().reviews.storage, REVIEW_STORAGE_DEFAULT);
     }
 
     /// A preference the renderer owns crosses the bridge as JSON, lands in this struct and goes back
@@ -421,7 +475,8 @@ mod tests {
                 "ligatures": true,
                 "cursorBlink": true,
                 "indentation": { "useSpaces": true, "size": 2 }
-            }
+            },
+            "reviews": { "storage": "workdir" }
         });
 
         save(
@@ -432,6 +487,7 @@ mod tests {
         let loaded = load(&path).unwrap();
 
         assert_eq!(loaded.terminal.follow_worktree, "cd");
+        assert_eq!(loaded.reviews.storage, REVIEW_STORAGE_WORKDIR);
         assert_eq!(serde_json::to_value(&loaded).unwrap(), from_the_dialog);
     }
 

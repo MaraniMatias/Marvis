@@ -179,7 +179,6 @@ fn main() {
             let data_dir = app.path().app_data_dir()?;
             let home = app.path().home_dir()?;
             let home_directory = services::workspace::HomeDirectory(std::fs::canonicalize(&home)?);
-            let review_root = services::files::review_root(&home);
             let config_file = config::config_file(&home);
             std::fs::create_dir_all(&data_dir)?;
             // Both steps are logged on the way out rather than left to the panic the propagation
@@ -256,7 +255,6 @@ fn main() {
             }
             app.manage(database);
             app.manage(home_directory);
-            app.manage(review_root);
             app.manage(config_file);
             app.manage(std::sync::Arc::new(terminal::TerminalBackend::default()));
             app.manage(std::sync::Arc::new(
@@ -307,7 +305,8 @@ fn main() {
             commands::files::file_write,
             commands::files::file_read_prettier_config,
             commands::files::review_export_markdown,
-            commands::files::review_root_path,
+            commands::files::review_folder,
+            commands::files::review_folder_clear,
             commands::files::file_read_markdown_image,
             commands::git::git_status,
             commands::git::git_diff_stats,

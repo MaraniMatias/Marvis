@@ -1,3 +1,41 @@
+import type { ReviewStorageMode } from "./settings";
+
+/**
+ * The folder exported reviews are kept in, as the settings dialog describes it.
+ *
+ * The path is absolute and is the folder exports are written to rather than one that had to
+ * exist: the dialog asks where reviews go in order to change where they go, so it has to be able
+ * to answer before anything has been written.
+ */
+export interface ReviewFolder {
+  path: string;
+  storage: ReviewStorageMode;
+  files: number;
+  bytes: number;
+}
+
+/** What a clear removed. Reported rather than assumed: the app's own folder may hold other things. */
+export interface ReviewFolderCleared {
+  files: number;
+  bytes: number;
+}
+
+/**
+ * A byte count at the size a person reads it: whole bytes below a kilobyte, then one decimal and
+ * the unit. "34 KB" answers whether a folder is getting out of hand; an exact figure does not.
+ */
+export function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  const units = ["KB", "MB", "GB"];
+  let value = bytes / 1024;
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(value < 10 ? 1 : 0)} ${units[unit]}`;
+}
+
 export type FileEntryKind = "file" | "directory" | "symlink";
 
 export interface FileEntry {

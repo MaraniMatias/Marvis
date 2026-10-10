@@ -3,12 +3,16 @@ use std::path::PathBuf;
 use tauri::State;
 
 use crate::{
+    config::{ConfigFile, REVIEW_STORAGE_WORKDIR},
     domain::{
-        files::{CheckoutImage, FileContent, FileProbe, FileTree, PrettierConfig},
+        files::{
+            CheckoutImage, FileContent, FileProbe, FileTree, PrettierConfig, ReviewFolder,
+            ReviewFolderCleared,
+        },
         ipc::IpcError,
     },
     persistence::Database,
-    services::{self, files::ReviewRoot},
+    services,
 };
 
 #[tauri::command]
@@ -45,12 +49,13 @@ pub async fn file_read(
     path: PathBuf,
     origin: String,
     database: State<'_, Database>,
-    review_root: State<'_, ReviewRoot>,
+    config_file: State<'_, ConfigFile>,
 ) -> Result<FileContent, IpcError> {
     let database = database.inner().clone();
-    let review_root = review_root.0.clone();
+    let config_file = config_file.inner().0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::files::read(&database, &checkout_id, &origin, &path, &review_root)
+        let places = services::files::ReviewPlaces::load(&config_file)?;
+        services::files::read(&database, &checkout_id, &origin, &path, &places)
     })
     .await
     .map_err(operation_error)?
@@ -65,12 +70,13 @@ pub async fn file_read_prettier_config(
     path: String,
     origin: String,
     database: State<'_, Database>,
-    review_root: State<'_, ReviewRoot>,
+    config_file: State<'_, ConfigFile>,
 ) -> Result<Option<PrettierConfig>, IpcError> {
     let database = database.inner().clone();
-    let review_root = review_root.0.clone();
+    let config_file = config_file.inner().0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::files::read_prettier_config(&database, &checkout_id, &origin, &path, &review_root)
+        let places = services::files::ReviewPlaces::load(&config_file)?;
+        services::files::read_prettier_config(&database, &checkout_id, &origin, &path, &places)
     })
     .await
     .map_err(operation_error)?
@@ -101,11 +107,12 @@ pub async fn file_write(
     expected_content: String,
     origin: String,
     database: State<'_, Database>,
-    review_root: State<'_, ReviewRoot>,
+    config_file: State<'_, ConfigFile>,
 ) -> Result<(), IpcError> {
     let database = database.inner().clone();
-    let review_root = review_root.0.clone();
+    let config_file = config_file.inner().0.clone();
     tauri::async_runtime::spawn_blocking(move || {
+        let places = services::files::ReviewPlaces::load(&config_file)?;
         services::files::write(
             &database,
             &checkout_id,
@@ -113,34 +120,78 @@ pub async fn file_write(
             &path,
             &content,
             &expected_content,
-            &review_root,
+            &places,
         )
     })
     .await
     .map_err(operation_error)?
 }
 
+/// Writes one exported review round and answers the file it wrote.
+///
+/// The folder is the one the preference names for this checkout, so an export is a decision made
+/// once rather than a question asked per round.
 #[tauri::command]
 pub async fn review_export_markdown(
+    checkout_id: String,
     date: String,
     timestamp: String,
     markdown: String,
-    review_root: State<'_, ReviewRoot>,
+    database: State<'_, Database>,
+    config_file: State<'_, ConfigFile>,
 ) -> Result<String, IpcError> {
-    let review_root = review_root.0.clone();
+    let database = database.inner().clone();
+    let config_file = config_file.inner().0.clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::files::export_review_markdown(&review_root, &date, &timestamp, &markdown)
+        let places = services::files::ReviewPlaces::load(&config_file)?;
+        let root = services::files::review_root_for(&database, &checkout_id, &places)?;
+        services::files::export_review_markdown(&root, &date, &timestamp, &markdown)
     })
     .await
     .map_err(operation_error)?
 }
 
+/// Where exported reviews are kept and what is in there, for the settings dialog.
+///
+/// `storage` is the mode the row is showing rather than the one on file, so a person changing the
+/// selector sees the folder they are choosing before they Apply. It is read as a mode and not as a
+/// path: an answer that is neither of the two is the saved one.
 #[tauri::command]
-pub async fn review_root_path(review_root: State<'_, ReviewRoot>) -> Result<String, IpcError> {
-    let review_root = review_root.0.clone();
-    tauri::async_runtime::spawn_blocking(move || services::files::review_root_path(&review_root))
-        .await
-        .map_err(operation_error)?
+pub async fn review_folder(
+    checkout_id: String,
+    storage: Option<String>,
+    database: State<'_, Database>,
+    config_file: State<'_, ConfigFile>,
+) -> Result<ReviewFolder, IpcError> {
+    let database = database.inner().clone();
+    let config_file = config_file.inner().0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let mut places = services::files::ReviewPlaces::load(&config_file)?;
+        if storage.as_deref() == Some(REVIEW_STORAGE_WORKDIR) {
+            places.set_storage(REVIEW_STORAGE_WORKDIR);
+        }
+        services::files::review_folder(&database, &checkout_id, &places)
+    })
+    .await
+    .map_err(operation_error)?
+}
+
+/// Deletes the exported reviews in the app's own folder. Refused for a working directory: those
+/// notes belong to the repository, and the button that asks for this is not drawn there.
+#[tauri::command]
+pub async fn review_folder_clear(
+    checkout_id: String,
+    database: State<'_, Database>,
+    config_file: State<'_, ConfigFile>,
+) -> Result<ReviewFolderCleared, IpcError> {
+    let database = database.inner().clone();
+    let config_file = config_file.inner().0.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        let places = services::files::ReviewPlaces::load(&config_file)?;
+        services::files::clear_review_folder(&database, &checkout_id, &places)
+    })
+    .await
+    .map_err(operation_error)?
 }
 
 #[tauri::command]

@@ -20,7 +20,7 @@ import { isIpcError } from "../domain/ipc";
 import { absoluteFilePath } from "../domain/files";
 import { mediaKind, sameMediaBytes, svgBlob } from "../domain/media";
 import {
-  getReviewRootPath,
+  getReviewFolder,
   readCheckoutFile,
   readCheckoutMedia,
   readPrettierConfig,
@@ -383,10 +383,14 @@ function errorText(error: unknown): string {
 
 async function copyFilePath() {
   const checkoutPath = props.checkout?.canonicalPath;
+  const checkoutId = props.checkout?.id;
   const path = props.path;
   if (path === null || (props.origin === "checkout" && !checkoutPath)) return;
+  // A review file lives outside the checkout, and where it lives is a preference: the folder is
+  // asked of the backend rather than assembled here, so the path copied is the one it was read from.
+  if (props.origin === "review" && !checkoutId) return;
   try {
-    const reviewRoot = props.origin === "review" ? await getReviewRootPath() : undefined;
+    const reviewRoot = props.origin === "review" ? (await getReviewFolder(checkoutId!)).path : undefined;
     await writeText(absoluteFilePath(checkoutPath ?? "", path, props.origin, reviewRoot));
     pushToast("File path copied.", "info");
   } catch (error) {

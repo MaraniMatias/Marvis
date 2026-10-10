@@ -52,6 +52,28 @@ pub struct FileProbe {
     pub path: String,
 }
 
+/// The folder exported reviews are kept in, as the settings dialog describes it: where it is, which
+/// of the two answers put it there, and what it currently holds.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFolder {
+    /// Absolute, and the path the exports are written to rather than one that had to exist.
+    pub path: String,
+    /// `default` or `workdir`, so the dialog knows what it is describing without reading the file.
+    pub storage: String,
+    pub files: usize,
+    pub bytes: u64,
+}
+
+/// What a clear removed. Reported rather than assumed: the folder is the app's, and a person may
+/// have put things in it that this did not touch.
+#[derive(Debug, Clone, Default, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ReviewFolderCleared {
+    pub files: usize,
+    pub bytes: u64,
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct CheckoutImage {

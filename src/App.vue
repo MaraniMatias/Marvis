@@ -41,9 +41,11 @@ import type { TerminalSessionStatus, WorkspaceState } from "./domain/workspace";
 import { workdirTitle } from "./domain/workspace";
 import { carriesAppModifier } from "./domain/shortcuts";
 import {
+  clearReviewFolder,
   closeCheckout as persistCheckoutClose,
   closeMissingCheckout as persistMissingCheckoutClose,
   exportReviewMarkdown,
+  getReviewFolder,
   getTerminalStatus,
   loadReviewTarget,
   openExternalUrl as requestExternalUrl,
@@ -85,7 +87,9 @@ import {
 } from "./domain/ui-state";
 import type { AppLayoutState, CheckoutUiState } from "./domain/ui-state";
 import { DEFAULT_SETTINGS, cloneSettings, normalizeSettings, uiFontScale } from "./domain/settings";
-import type { AppSettings } from "./domain/settings";
+import type { AppSettings, ReviewStorageMode } from "./domain/settings";
+import type { ReviewFolder } from "./domain/files";
+import { formatBytes } from "./domain/files";
 import { loadAppLayout, loadCheckoutUiState, loadSettings, prepareAppExit, saveSettings } from "./lib/ipc";
 import { reportFrontendDiagnostic } from "./lib/diagnostics";
 import type { DiagnosticCategory } from "./lib/diagnostics";
@@ -909,6 +913,62 @@ function closeSettings() {
   restoreSettingsFocus();
 }
 
+/**
+ * Where exported reviews go for the mode the row is showing, and what is in there.
+ *
+ * Asked of the backend every time rather than held: the folder is on disk and a round exported
+ * from another window lands in it, so a number held across the session is the one thing on that
+ * row that could be wrong.
+ */
+const reviewFolder = ref<ReviewFolder | null>(null);
+
+async function loadReviewFolder(storage: ReviewStorageMode) {
+  const checkoutId = activeCheckout.value?.id;
+  if (!checkoutId) {
+    reviewFolder.value = null;
+    return;
+  }
+  try {
+    reviewFolder.value = await getReviewFolder(checkoutId, storage);
+  } catch {
+    // A folder that cannot be read is not a reason to refuse the dialog. The row then shows
+    // nothing rather than a number, and the preference beside it stays editable either way.
+    reviewFolder.value = null;
+  }
+}
+
+function openSettings() {
+  settingsOpen.value = true;
+  void loadReviewFolder(settings.value.reviews.storage);
+}
+
+/**
+ * Deletes the exported reviews in the app's own folder.
+ *
+ * It is asked about rather than done: the folder is in the person's home and a clear cannot be
+ * taken back, so the question names the folder and says what it leaves alone.
+ */
+function requestClearReviewFolder() {
+  const folder = reviewFolder.value;
+  if (!folder || folder.storage !== "default") return;
+  askConfirm({
+    title: "Delete exported review notes",
+    message: `${folder.files} exported ${folder.files === 1 ? "note" : "notes"} (${formatBytes(folder.bytes)}) in ${folder.path} are deleted. Anything else in that folder is left alone.`,
+    confirmLabel: "Delete",
+    destructive: true,
+    run: async () => {
+      const checkoutId = activeCheckout.value?.id;
+      if (!checkoutId) return;
+      const cleared = await clearReviewFolder(checkoutId);
+      pushToast(
+        `Deleted ${cleared.files} exported ${cleared.files === 1 ? "note" : "notes"} (${formatBytes(cleared.bytes)}).`,
+        "info",
+      );
+      await loadReviewFolder("default");
+    },
+  });
+}
+
 /** The dialog's own Apply: the one place that decides whether the dialog closes. */
 async function applyFromDialog(next: AppSettings) {
   settingsSaving.value = true;
@@ -1566,6 +1626,8 @@ const pendingConfirm = ref<{
   title: string;
   message: string;
   confirmLabel: string;
+  /** The questions whose answer cannot be taken back are drawn in the failure colour. */
+  destructive?: boolean;
   run(): Promise<void>;
 } | null>(null);
 
@@ -1657,7 +1719,7 @@ async function sendReviewToAgent(ids: string[], queue = false) {
   sendingReview.value = true;
   try {
     if (destination === "markdown") {
-      const path = await exportReviewMarkdown(localTime.date, localTime.timestamp, markdown);
+      const path = await exportReviewMarkdown(checkout.id, localTime.date, localTime.timestamp, markdown);
       showView(checkout.id, { kind: "document", path, mode: "view", origin: "review" });
       return;
     }
@@ -1982,7 +2044,7 @@ function reportWarning(message: string) {
         aria-label="Settings"
         data-testid="settings-button"
         class="icon-button shrink-0 text-(--muster-text-secondary) hover:text-(--muster-text)"
-        @click="settingsOpen = true"
+        @click="openSettings"
       >
         <SettingsIcon class="icon-xs" aria-hidden="true" />
       </button>
@@ -2163,14 +2225,6 @@ function reportWarning(message: string) {
       @pointerenter="enterSplitStrip"
       @pointerleave="leaveSplitStrip"
     />
-    <ConfirmDialog
-      :open="!!pendingConfirm"
-      :title="pendingConfirm?.title ?? ''"
-      :message="pendingConfirm?.message ?? ''"
-      :confirm-label="pendingConfirm?.confirmLabel ?? 'Confirm'"
-      @confirm="answerConfirm(true)"
-      @close="answerConfirm(false)"
-    />
     <!-- The one the window close asks, which is asked before anything is written or stopped. -->
     <ConfirmDialog
       :open="closeQuestion !== null"
@@ -2196,9 +2250,24 @@ function reportWarning(message: string) {
       :settings="settings"
       :saving="settingsSaving"
       :version="appVersion"
+      :review-folder="reviewFolder"
       @close="closeSettings"
       @apply="applyFromDialog"
       @open-external-url="openExternalUrl"
+      @review-storage-changed="loadReviewFolder"
+      @clear-review-folder="requestClearReviewFolder"
+    />
+    <!-- After the settings dialog, because it is the only question asked from inside one, and two
+         surfaces at the same height are painted in the order they are written: the answer has to
+         land on top of the question that asked it. -->
+    <ConfirmDialog
+      :open="!!pendingConfirm"
+      :title="pendingConfirm?.title ?? ''"
+      :message="pendingConfirm?.message ?? ''"
+      :confirm-label="pendingConfirm?.confirmLabel ?? 'Confirm'"
+      :destructive="pendingConfirm?.destructive ?? false"
+      @confirm="answerConfirm(true)"
+      @close="answerConfirm(false)"
     />
     <ToastStack />
   </div>

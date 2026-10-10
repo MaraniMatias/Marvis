@@ -65,7 +65,7 @@ const mocks = vi.hoisted(() => ({
   readCheckoutMedia: vi.fn(),
   writeCheckoutFile: vi.fn(),
   readPrettierConfig: vi.fn(),
-  getReviewRootPath: vi.fn(),
+  getReviewFolder: vi.fn(),
   readCheckoutMarkdownImage: vi.fn(),
   getGitDiff: vi.fn(),
   getGitDiffPage: vi.fn(),
@@ -81,7 +81,7 @@ vi.mock("../lib/ipc", () => ({
   readCheckoutMedia: mocks.readCheckoutMedia,
   writeCheckoutFile: mocks.writeCheckoutFile,
   readPrettierConfig: mocks.readPrettierConfig,
-  getReviewRootPath: mocks.getReviewRootPath,
+  getReviewFolder: mocks.getReviewFolder,
   readCheckoutMarkdownImage: mocks.readCheckoutMarkdownImage,
   getGitDiff: mocks.getGitDiff,
   getGitDiffPage: mocks.getGitDiffPage,
@@ -644,7 +644,12 @@ describe("DocumentPane", () => {
       totalLines: 3,
       hunks: [{ startLine: 0, endLine: 3, title: "@@ -1 +1 @@" }],
     });
-    mocks.getReviewRootPath.mockResolvedValue("/Users/dev/.muster/tmp/code-reviews");
+    mocks.getReviewFolder.mockResolvedValue({
+      path: "/Users/dev/.muster/tmp/reviews",
+      storage: "default",
+      files: 0,
+      bytes: 0,
+    });
     vi.stubGlobal("Worker", InlinePrettierWorker);
     for (const toast of [...toasts.value]) dismiss(toast.id);
   });
@@ -801,8 +806,8 @@ describe("DocumentPane", () => {
 
     await wrapper.get('[aria-label="Copy file path"]').trigger("click");
 
-    expect(mocks.getReviewRootPath).toHaveBeenCalledOnce();
-    expect(writeText).toHaveBeenCalledWith("/Users/dev/.muster/tmp/code-reviews/notes.md");
+    expect(mocks.getReviewFolder).toHaveBeenCalledOnce();
+    expect(writeText).toHaveBeenCalledWith("/Users/dev/.muster/tmp/reviews/notes.md");
     wrapper.unmount();
   });
 

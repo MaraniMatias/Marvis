@@ -4,7 +4,7 @@
   "version": "0.20.1",
   "license": "MIT",
   "type": "module",
-  "packageManager": "pnpm@12.5.1",
+  "packageManager": "pnpm@12.10.1",
   "scripts": {
     "dev": "vite --host 127.0.0.1 --port 1420",
     "build": "vue-tsc --noEmit && vite build && node scripts/build-third-party-notices.mjs",

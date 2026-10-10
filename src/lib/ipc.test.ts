@@ -22,6 +22,8 @@ import {
   requeueReviewRounds,
   resolveReviewNote,
   exportReviewMarkdown,
+  getReviewFolder,
+  clearReviewFolder,
   loadReviewTarget,
   stopAgent,
   updateReviewNote,
@@ -113,7 +115,7 @@ describe("workspace IPC client", () => {
 
   it("threads file origin and review export metadata through IPC", async () => {
     await readCheckoutFile("checkout:one", "notes.md", "review");
-    await exportReviewMarkdown("2026-03-14", "2026-03-14-1532", "# Review");
+    await exportReviewMarkdown("checkout:one", "2026-03-14", "2026-03-14-1532", "# Review");
     await loadReviewTarget("checkout:one");
     await saveReviewTarget("checkout:one", "opencode");
 
@@ -123,6 +125,7 @@ describe("workspace IPC client", () => {
       origin: "review",
     });
     expect(invoke).toHaveBeenNthCalledWith(2, "review_export_markdown", {
+      checkoutId: "checkout:one",
       date: "2026-03-14",
       timestamp: "2026-03-14-1532",
       markdown: "# Review",
@@ -132,6 +135,28 @@ describe("workspace IPC client", () => {
       checkoutId: "checkout:one",
       target: "opencode",
     });
+  });
+
+  /// The folder is asked for the mode the row is showing, and for the saved one when the caller has
+  /// no mode to show: `null` is the saved preference, not a third folder.
+  it("asks for the review folder of one checkout, in the mode being shown", async () => {
+    await getReviewFolder("checkout:one", "workdir");
+    await getReviewFolder("checkout:one");
+
+    expect(invoke).toHaveBeenNthCalledWith(1, "review_folder", {
+      checkoutId: "checkout:one",
+      storage: "workdir",
+    });
+    expect(invoke).toHaveBeenNthCalledWith(2, "review_folder", {
+      checkoutId: "checkout:one",
+      storage: null,
+    });
+  });
+
+  it("asks to clear the review folder of one checkout", async () => {
+    await clearReviewFolder("checkout:one");
+
+    expect(invoke).toHaveBeenCalledWith("review_folder_clear", { checkoutId: "checkout:one" });
   });
 });
 

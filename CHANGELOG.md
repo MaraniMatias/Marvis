@@ -8,6 +8,15 @@ here still gets its generated notes.
 
 ## Unreleased
 
+- **Where an exported review round lands is a preference.** Settings has a "Review notes" section
+  with a selector for it: `Default` keeps them in `~/.muster/tmp/reviews`, and `Work directory`
+  keeps them in `.muster/reviews` inside the checkout the review was made in — the repository or
+  worktree in front of you. The folder the selector names is written out underneath it, with how
+  many exported notes it holds and how much they weigh, and in the default folder there is a button
+  that deletes them: it asks first, and it removes only the files an export wrote, so anything else
+  you have put in that folder stays. A working directory's notes belong to the repository, so there
+  is no button there and the command refuses one anyway.
+
 - **The app is called Muster.** The name changed together with everything that carries it: the
   product, the release artifacts, the paths on disk and the data behind them. The bundle identifier
   went from `dev.marvis.workspace` to `dev.muster.workspace`, and that is what moves the app-data
@@ -15,8 +24,11 @@ here still gets its generated notes.
   and `Muster_<version>_.AppImage`.
 
 - **Preferences move by hand; the workspace does not move at all.** Settings live in
-  `~/.muster/config.yml` now and exported review rounds in `~/.muster/tmp/code-reviews/`, so copy
-  across whatever is worth keeping — nothing reads the old folders. The database is
+  `~/.muster/config.yml` now and exported review rounds in `~/.muster/tmp/reviews/`, so copy
+  across whatever is worth keeping — nothing reads the old folders. Reviews already exported under
+  the `code-reviews` name this section used to carry stay there and are not moved or read: at
+  `0.x` a path change is made in place, and the ones still worth having are worth copying by hand.
+  The database is
   `muster.sqlite3` and it starts empty: no migration runs in either direction, so the repositories
   you registered, your review notes and your rounds stay in the old `marvis.sqlite3` on disk. That
   file is still an ordinary SQLite database if you need anything out of it; this build only refuses

@@ -1,14 +1,22 @@
 import { invoke } from "@tauri-apps/api/core";
 import type { Channel } from "@tauri-apps/api/core";
 import type { OpenedFolder } from "../domain/folder";
-import type { CheckoutImage, FileContent, FileProbe, FileTree, PrettierConfig } from "../domain/files";
+import type {
+  CheckoutImage,
+  FileContent,
+  FileProbe,
+  FileTree,
+  PrettierConfig,
+  ReviewFolder,
+  ReviewFolderCleared,
+} from "../domain/files";
 import type { GitCheckoutDiffStats, GitDiffPage, GitFileDiff, GitFileDiffStats, GitStatus } from "../domain/git";
 import type { ReviewAnchorCheck, ReviewNote, ReviewRound, ReviewSide, ReviewTarget } from "../domain/review";
 import type { RecentPath, Session, TerminalSessionStatus, WorkspaceState } from "../domain/workspace";
 import type { CreatedWorktree, RemovedWorktree, WorktreeDefaults, WorktreeRemovalInfo } from "../domain/worktree";
 import type { CheckoutTerminalLayout } from "../domain/terminal-layout";
 import type { AppLayoutState, CheckoutUiState } from "../domain/ui-state";
-import type { AppSettings } from "../domain/settings";
+import type { AppSettings, ReviewStorageMode } from "../domain/settings";
 import type { AgentAgent, AgentRelocation, AgentSession } from "../domain/agent";
 import type { DocumentOrigin } from "../domain/main-document";
 
@@ -85,12 +93,39 @@ export function readPrettierConfig(
   return invoke<PrettierConfig | null>("file_read_prettier_config", { checkoutId, path, origin });
 }
 
-export function exportReviewMarkdown(date: string, timestamp: string, markdown: string): Promise<string> {
-  return invoke<string>("review_export_markdown", { date, timestamp, markdown });
+/**
+ * Writes one exported review round and answers the file it wrote.
+ *
+ * The folder is the one the preference names for this checkout, so it is a decision made once
+ * rather than a question asked per round — which is why the checkout travels with it.
+ */
+export function exportReviewMarkdown(
+  checkoutId: string,
+  date: string,
+  timestamp: string,
+  markdown: string,
+): Promise<string> {
+  return invoke<string>("review_export_markdown", { checkoutId, date, timestamp, markdown });
 }
 
-export function getReviewRootPath(): Promise<string> {
-  return invoke<string>("review_root_path");
+/**
+ * Where exported reviews are kept for this checkout, and what is in there.
+ *
+ * `storage` is the mode the settings row is showing rather than the one on file, so a person
+ * changing the selector reads the folder they are choosing before they Apply it.
+ */
+export function getReviewFolder(checkoutId: string, storage?: ReviewStorageMode): Promise<ReviewFolder> {
+  return invoke<ReviewFolder>("review_folder", { checkoutId, storage: storage ?? null });
+}
+
+/**
+ * Deletes the exported reviews in the app's own folder, and answers what it removed.
+ *
+ * Refused for a working directory: those notes belong to the repository, and the button that asks
+ * for this is not drawn there either.
+ */
+export function clearReviewFolder(checkoutId: string): Promise<ReviewFolderCleared> {
+  return invoke<ReviewFolderCleared>("review_folder_clear", { checkoutId });
 }
 
 export function loadReviewTarget(checkoutId: string): Promise<ReviewTarget> {

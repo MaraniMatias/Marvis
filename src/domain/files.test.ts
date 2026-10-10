@@ -16,8 +16,8 @@ describe("absoluteFilePath", () => {
   });
 
   it("uses the review root for exported files", () => {
-    expect(absoluteFilePath("/repo", "notes.md", "review", "/Users/dev/.muster/tmp/code-reviews/")).toBe(
-      "/Users/dev/.muster/tmp/code-reviews/notes.md",
+    expect(absoluteFilePath("/repo", "notes.md", "review", "/Users/dev/.muster/tmp/reviews/")).toBe(
+      "/Users/dev/.muster/tmp/reviews/notes.md",
     );
   });
 });

@@ -31,6 +31,18 @@ export const TERMINAL_WORKTREE_FOLLOW_MODES = ["off", "cd", "agent", "both"] as 
 
 export type TerminalWorktreeFollowMode = (typeof TERMINAL_WORKTREE_FOLLOW_MODES)[number];
 
+/**
+ * Where an exported review round is written: in the app's own folder, or inside the checkout it
+ * was made in.
+ *
+ * Two, because the two questions behind it have different answers. The home folder is the app's
+ * business — reviews nobody asked to keep, where no repository can reach them. The working
+ * directory is the project's: notes about that code, next to it, where a diff can show them.
+ */
+export const REVIEW_STORAGE_MODES = ["default", "workdir"] as const;
+
+export type ReviewStorageMode = (typeof REVIEW_STORAGE_MODES)[number];
+
 export interface UiSettings {
   /** CSS pixels. The whole interface's type scale is a ratio of this one number. */
   fontSize: number;
@@ -86,6 +98,11 @@ export interface AppSettings {
   ui: UiSettings;
   terminal: TerminalSettings;
   editor: EditorSettings;
+  reviews: ReviewSettings;
+}
+
+export interface ReviewSettings {
+  storage: ReviewStorageMode;
 }
 
 /**
@@ -124,6 +141,9 @@ export const DEFAULT_SETTINGS: AppSettings = {
     cursorBlink: true,
     indentation: { useSpaces: true, size: 2 },
   },
+  reviews: {
+    storage: "default",
+  },
 };
 
 export function isTerminalScrollbarMode(value: unknown): value is TerminalScrollbarMode {
@@ -136,6 +156,10 @@ export function isTerminalCursorStyle(value: unknown): value is TerminalCursorSt
 
 export function isTerminalWorktreeFollowMode(value: unknown): value is TerminalWorktreeFollowMode {
   return TERMINAL_WORKTREE_FOLLOW_MODES.some((mode) => mode === value);
+}
+
+export function isReviewStorageMode(value: unknown): value is ReviewStorageMode {
+  return REVIEW_STORAGE_MODES.some((mode) => mode === value);
 }
 
 export function isThemePreference(value: unknown): value is ThemePreference {
@@ -168,6 +192,7 @@ export function normalizeSettings(value: unknown): AppSettings {
   const ui = (raw.ui ?? {}) as Partial<UiSettings>;
   const terminal = (raw.terminal ?? {}) as Partial<TerminalSettings>;
   const editor = (raw.editor ?? {}) as Partial<EditorSettings>;
+  const reviews = (raw.reviews ?? {}) as Partial<ReviewSettings>;
   const indentation = (editor.indentation ?? {}) as Partial<IndentationSettings>;
   return {
     ui: {
@@ -202,6 +227,9 @@ export function normalizeSettings(value: unknown): AppSettings {
         size: boundedInteger(indentation.size, INDENTATION_SIZE_LIMITS, DEFAULT_SETTINGS.editor.indentation.size),
       },
     },
+    reviews: {
+      storage: isReviewStorageMode(reviews.storage) ? reviews.storage : DEFAULT_SETTINGS.reviews.storage,
+    },
   };
 }
 
@@ -228,7 +256,8 @@ export type SettingsPath =
   | "editor.ligatures"
   | "editor.cursorBlink"
   | "editor.indentation.useSpaces"
-  | "editor.indentation.size";
+  | "editor.indentation.size"
+  | "reviews.storage";
 
 /** What a field reads and writes: the three kinds of value a preference holds. */
 export type SettingsValue = string | number | boolean;
@@ -418,6 +447,24 @@ export const SETTINGS_SECTIONS: SettingsSection[] = [
       },
     ],
   },
+  {
+    id: "reviews",
+    title: "Review notes",
+    fields: [
+      {
+        kind: "select",
+        path: "reviews.storage",
+        label: "Exported notes",
+        description:
+          "Where a review round is written when it is sent as a file rather than to an agent. The folder is named under this row.",
+        options: [
+          { value: "default", label: "Default" },
+          { value: "workdir", label: "Work directory" },
+        ],
+        parse: IDENTIFIER,
+      },
+    ],
+  },
 ];
 
 /**
@@ -436,6 +483,7 @@ export function cloneSettings(settings: AppSettings): AppSettings {
       ...settings.editor,
       indentation: { ...settings.editor.indentation },
     },
+    reviews: { ...settings.reviews },
   };
 }
 

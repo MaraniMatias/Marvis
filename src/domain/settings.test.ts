@@ -44,6 +44,7 @@ describe("the settings file", () => {
         followWorktree: "agent" as const,
       },
       editor: { fontSize: 13, ligatures: true, cursorBlink: true, indentation: { useSpaces: true, size: 2 } },
+      reviews: { storage: "default" },
     });
   });
 
@@ -66,6 +67,7 @@ describe("the settings file", () => {
         followWorktree: "both" as const,
       },
       editor: { fontSize: 15, ligatures: false, cursorBlink: false, indentation: { useSpaces: false, size: 4 } },
+      reviews: { storage: "workdir" as const },
     };
     expect(normalizeSettings(JSON.parse(JSON.stringify(written)))).toEqual(written);
     // A file somebody edited by hand is allowed to be partial: a line they deleted is a preference
@@ -75,6 +77,9 @@ describe("the settings file", () => {
       ui: { ...DEFAULT_SETTINGS.ui, fontSize: 18 },
     });
     expect(normalizeSettings(undefined)).toEqual(DEFAULT_SETTINGS);
+    // A storage mode is one of two names, so a third in a hand-edited file is the app's folder
+    // rather than a folder the app would have to invent.
+    expect(normalizeSettings({ reviews: { storage: "elsewhere" } }).reviews.storage).toBe("default");
   });
 
   it("clamps a size outside the range and answers 100% for a scale it cannot draw", () => {

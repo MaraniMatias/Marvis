@@ -14,8 +14,10 @@
 import { computed, nextTick, ref, watch } from "vue";
 import { ChevronRight as ChevronRightIcon } from "@lucide/vue";
 import { ACKNOWLEDGEMENT, CREDITS, CREDITS_TITLE, REPOSITORY } from "../domain/credits";
+import { formatBytes } from "../domain/files";
+import type { ReviewFolder } from "../domain/files";
 import { DEFAULT_SETTINGS, SETTINGS_SECTIONS, cloneSettings, valueAt, withValue } from "../domain/settings";
-import type { AppSettings, SettingsField, SettingsPath, SettingsValue } from "../domain/settings";
+import type { AppSettings, ReviewStorageMode, SettingsField, SettingsPath, SettingsValue } from "../domain/settings";
 import { SHORTCUT_GROUPS, shortcutChord } from "../domain/shortcuts";
 import { trapDialogTab } from "../lib/dialog-focus";
 import Button from "./ui/button/Button.vue";
@@ -34,6 +36,15 @@ const props = defineProps<{
    * its own version shows no version rather than one that is nearly right.
    */
   version?: string | null;
+  /**
+   * Where exported reviews go for the mode the storage selector is showing, and what is in there.
+   *
+   * A prop rather than something this dialog fetches, for the same reason the version is: the row
+   * describes a folder on disk, and a second read of it from here would be a second answer to the
+   * same question. `null` is a folder that could not be read, which is drawn as nothing rather
+   * than as a number that might be wrong.
+   */
+  reviewFolder?: ReviewFolder | null;
 }>();
 
 const emit = defineEmits<{
@@ -42,6 +53,15 @@ const emit = defineEmits<{
   apply: [settings: AppSettings];
   /** A web link to hand to the browser the machine has. The dialog opens no window of its own. */
   openExternalUrl: [url: string];
+  /**
+   * The storage mode the selector was moved to, before it is saved.
+   *
+   * The folder a mode writes to is on disk and is not in the file, so the row asks for it rather
+   * than predicting it — which is what makes the selector answer where reviews go rather than only
+   * naming two options.
+   */
+  reviewStorageChanged: [storage: ReviewStorageMode];
+  clearReviewFolder: [];
 }>();
 
 const draft = ref<AppSettings>(props.settings);
@@ -74,6 +94,13 @@ watch(
     if (open) draft.value = cloneSettings(props.settings);
   },
   { immediate: true },
+);
+
+// Asked on every move of the selector rather than on open only: the row under it names the folder
+// the chosen mode writes to, and that folder is not in this file.
+watch(
+  () => draft.value.reviews.storage,
+  (storage) => emit("reviewStorageChanged", storage),
 );
 
 const isDefault = computed(() => JSON.stringify(draft.value) === JSON.stringify(DEFAULT_SETTINGS));
@@ -250,6 +277,39 @@ function onDialogKeydown(event: KeyboardEvent) {
                   @update:model-value="change(field.path, field.parse($event))"
                 />
               </div>
+            </template>
+          </div>
+
+          <!-- Where the exported notes go and what is in there. Drawn rather than generated from
+               the schema for the reason Shortcuts is: the folder is on disk, its size moves, and
+               the one action here deletes files in the person's home, so it is not a preference
+               the schema could describe. It reads nothing itself — the window asks and passes the
+               answer down, so there is one answer and this is where it is drawn. -->
+          <div v-if="section.id === 'reviews'" class="mt-3" data-testid="review-folder">
+            <!-- Nothing at all while the answer is not in: an empty row is the honest state for a
+                 folder this window could not read, and a number it guessed would not be. -->
+            <template v-if="reviewFolder">
+              <p class="text-xs text-(--muster-text-secondary)">{{ reviewFolder.path }}</p>
+              <p class="mt-1 text-[0.6875rem] text-(--muster-text-faint)">
+                <template v-if="reviewFolder.storage === 'default'">
+                  {{ reviewFolder.files }} {{ reviewFolder.files === 1 ? "note" : "notes" }},
+                  {{ formatBytes(reviewFolder.bytes) }}.
+                </template>
+                <template v-else>Kept with the working directory, not in the app's folder.</template>
+              </p>
+              <!-- Only the app's own folder: notes inside a working directory belong to the
+                   repository, so there is nothing here a delete could be honest about. -->
+              <Button
+                v-if="reviewFolder.storage === 'default'"
+                variant="ghost"
+                size="sm"
+                class="mt-2"
+                :disabled="saving"
+                :aria-label="`Delete ${reviewFolder.files === 1 ? 'the exported review note' : 'the exported review notes'} in ${reviewFolder.path}`"
+                @click="emit('clearReviewFolder')"
+              >
+                Delete notes
+              </Button>
             </template>
           </div>
         </section>
