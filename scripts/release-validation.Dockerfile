@@ -1,7 +1,7 @@
 FROM ubuntu:22.04
 ARG PNPM_VERSION
 ENV DEBIAN_FRONTEND=noninteractive
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg git \
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl gnupg \
     && rm -rf /var/lib/apt/lists/*
 COPY install-linux-deps.sh /usr/local/bin/install-linux-deps
 RUN bash /usr/local/bin/install-linux-deps \

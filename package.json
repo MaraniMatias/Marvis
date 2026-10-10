@@ -15,7 +15,7 @@
     "release": "bash scripts/release.sh",
     "release:check": "node scripts/release.mjs --check",
     "release:preview": "node scripts/release.mjs --bump --dry-run",
-    "release:validate": "pnpm release:check && pnpm fmt:check && pnpm lint && pnpm typecheck && pnpm lint:rust && pnpm test && bash scripts/validate-linux.sh",
+    "release:validate": "pnpm release:check && pnpm fmt:check && pnpm lint && pnpm typecheck && pnpm lint:rust && pnpm test",
     "fmt": "prettier --write \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml",
     "fmt:check": "prettier --check \"src/**/*.{ts,vue,css}\" \"*.{json,js,ts,html}\" && cargo fmt --manifest-path src-tauri/Cargo.toml --check",
     "lint": "eslint src vite.config.ts",

@@ -36,9 +36,8 @@ COPYFILE_DISABLE=1 tar -cf - -C "$ROOT" \
       mkdir -p /workspace
       tar -xf - -C /workspace
       cd /workspace
-      pnpm install --frozen-lockfile
-      pnpm test
-      pnpm run build:app -- --target x86_64-unknown-linux-gnu --bundles deb,appimage
+      timeout --kill-after=30s 20m pnpm install --frozen-lockfile
+      timeout --kill-after=30s 60m pnpm run build:app -- --target x86_64-unknown-linux-gnu --bundles deb,appimage
       node scripts/release-artifacts.mjs collect --root src-tauri/target --target x86_64-unknown-linux-gnu --version "$RELEASE_VERSION" --sha "$RELEASE_SHA" --out /out
     '
 

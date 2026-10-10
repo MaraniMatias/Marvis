@@ -10,7 +10,7 @@ usage() {
   cat <<'USAGE'
 usage: scripts/release.sh <v0.minor.patch> [--dry-run]
        bun run release:preview -- v0.minor.patch  # no mutation
-       bun run release:validate                  # local checks + Docker Linux packages
+       bun run release:validate                  # local checks and tests
        bun run release -- v0.minor.patch --dry-run # prepare + GitHub builds; no tag/publish
 USAGE
 }
@@ -155,7 +155,7 @@ if [[ -z "$remote_sha" ]]; then
   esac
   expected_diff="$(git diff --binary)"
   git diff --cached --quiet || die "version preparation unexpectedly staged changes"
-  step "Running local release checks and Linux Docker packaging for $tag"
+  step "Running local release checks for $tag"
   validation_status=0
   bun run release:validate || validation_status=$?
   [[ "$(git rev-parse HEAD)" == "$original_head" ]] || die "local validation changed HEAD; prepared version edits remain and no release commit, push, or tag was made"

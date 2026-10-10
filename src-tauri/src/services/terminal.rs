@@ -525,9 +525,11 @@ mod tests {
             .map(|(name, _)| fs::read(directory.path().join(name)).unwrap())
             .collect();
 
+        // Skip distro-global rc files; the test asserts the user startup files are preserved.
         let args = inherited_shell_args(Path::new("zsh"));
         let output = Command::new("zsh")
             .args(&args)
+            .arg("-d")
             .args([
                 "-i",
                 "-c",
@@ -578,6 +580,11 @@ mod tests {
         check: impl Fn(&str),
     ) {
         let mut integration = script_in(script_dir, shell);
+        // These tests cover user startup; distro-global compinit can prompt on insecure fpath
+        // entries and consume the first command sent through the test PTY.
+        if shell.ends_with("zsh") {
+            integration.args.insert(0, "-d".into());
+        }
         let home = tempdir().unwrap();
         integration.env.extend([
             ("HOME".into(), home.path().as_os_str().into()),
@@ -1139,6 +1146,10 @@ user_prompt_three() { printf '[THREE:%s]' \"$?\"; }
         extra_env: &[(std::ffi::OsString, std::ffi::OsString)],
     ) -> String {
         let mut integration = script_in(scripts, shell);
+        // Isolate user startup from distro-global interactive completion setup.
+        if shell.ends_with("zsh") {
+            integration.args.insert(0, "-d".into());
+        }
         integration.env.extend([
             ("HOME".into(), home.as_os_str().into()),
             ("__MUSTER_ZDOTDIR_SET".into(), "0".into()),
