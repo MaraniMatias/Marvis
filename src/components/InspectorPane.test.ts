@@ -639,52 +639,207 @@ describe("InspectorPane", () => {
     wrapper.unmount();
   });
 
-  it("sizes all expanded rows independently of the virtual window and sticky stack", async () => {
-    const name = "a-very-long-file-name-".repeat(8) + "RIGHT-END.txt";
-    mocks.listCheckoutFiles.mockImplementation(async (_id: string, path: string) => ({
-      entries:
-        path === "."
-          ? [{ name: "folder", path: "folder", kind: "directory" }]
-          : Array.from({ length: 200 }, (_, index) => ({
-              name: index === 100 ? name : `f${index}`,
-              path: `folder/${index}`,
-              kind: "file",
-            })),
-      truncated: false,
-    }));
-    const wrapper = mountInspector({
-      checkout: checkout("width"),
-      savedState: {
-        ...DEFAULT_CHECKOUT_UI_STATE,
-        expandedDirectories: ["folder"],
-      },
+  /** What one character is worth, in a font that is only that. happy-dom has no text metrics at
+   *  all, so the panel's measurers answer with this instead: what is being checked here is which row
+   *  the width comes from, not how many pixels a glyph is. */
+  const CHAR_PX = 7;
+  /** The sizer row's own box around a row's words: the depth indent, the padding, the gutter that
+   *  stands in for the chevron and the icon, and the gap beside it. */
+  const boxedWidth = (depth: number, text: string) => 8 + depth * 14 + 8 + 37 + 7 + text.length * CHAR_PX;
+
+  function measuredWidth(sizerRow: { attributes(name: string): string | undefined }): number {
+    return Number.parseFloat(/width:\s*([\d.]+)px/.exec(sizerRow.attributes("style") ?? "")?.[1] ?? "0");
+  }
+
+  describe("the tree is sized without a node per row", () => {
+    beforeEach(() => {
+      // Only the measurers answer a width, exactly as in the sidebar's own weighing tests.
+      Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+        configurable: true,
+        get(this: HTMLElement) {
+          return this.closest(".tree-width-probe") ? (this.textContent?.length ?? 0) * CHAR_PX : 0;
+        },
+      });
     });
-    await flushPromises();
-    const tree = wrapper.get('[aria-label="Checkout files"]');
-    const sizer = tree.get(".tree-width-sizer");
-    expect(sizer.attributes("aria-hidden")).toBe("true");
-    expect(sizer.attributes("inert")).toBeDefined();
-    expect(sizer.findAll("button, svg")).toHaveLength(0);
-    expect(sizer.findAll(".tree-width-row")).toHaveLength(201);
-    const sizingMarkup = sizer.html();
-    expect(sizer.text()).toContain(name);
-    expect(tree.get(".file-tree-window").text()).not.toContain(name);
-    for (const top of [100 * ROW_HEIGHT, 180 * ROW_HEIGHT, 0]) {
-      (tree.element as HTMLElement).scrollTop = top;
-      await tree.trigger("scroll");
-      expect(sizer.html()).toBe(sizingMarkup);
-      expect(tree.get(".file-tree-window").findAll(".file-row")).toHaveLength(WINDOW_SIZE);
-      const sticky = tree.find(".sticky-folders");
-      if (sticky.exists()) {
-        expect(sticky.element.parentElement).toBe(tree.get(".file-tree-content").element);
-        expect(sticky.attributes("style")).not.toContain("width");
-      }
+    afterEach(() => Reflect.deleteProperty(HTMLElement.prototype, "scrollWidth"));
+
+    /** The name that decides the width, and the file carrying it is the last one: at ten thousand
+     *  rows it is as far from the viewport as the tree goes. */
+    const longest = "a-very-long-file-name-".repeat(8) + "RIGHT-END.txt";
+
+    /** One folder holding `count` files, the one at `widest` carrying that name. The other names are
+     *  all the same length, so the row that decides the width is the same one at any size. */
+    function treeOf(count: number, widest = count - 1) {
+      mocks.listCheckoutFiles.mockImplementation(async (_id: string, path: string) => ({
+        entries:
+          path === "."
+            ? [{ name: "folder", path: "folder", kind: "directory" }]
+            : Array.from({ length: count }, (_, index) => ({
+                name: index === widest ? longest : `f${String(index).padStart(6, "0")}`,
+                path: `folder/${index}`,
+                kind: "file",
+              })),
+        truncated: false,
+      }));
+      return mountInspector({
+        checkout: checkout("width"),
+        savedState: { ...DEFAULT_CHECKOUT_UI_STATE, expandedDirectories: ["folder"] },
+      });
     }
-    await tree.get(".folder-toggle").trigger("click");
-    await flushPromises();
-    expect(sizer.findAll(".tree-width-row")).toHaveLength(1);
-    expect(sizer.text()).not.toContain(name);
-    wrapper.unmount();
+
+    it("sizes the whole tree from its widest row, whatever the virtual window holds", async () => {
+      const wrapper = treeOf(200, 100);
+      await flushPromises();
+      const tree = wrapper.get('[aria-label="Checkout files"]');
+      const sizer = tree.get(".tree-width-sizer");
+      expect(sizer.attributes("aria-hidden")).toBe("true");
+      expect(sizer.attributes("inert")).toBeDefined();
+      expect(sizer.findAll("button, svg")).toHaveLength(0);
+      // One row, and it is the one that decides: the file that is nowhere near the viewport.
+      expect(sizer.findAll(".tree-width-row")).toHaveLength(1);
+      expect(sizer.text()).toContain(longest);
+      expect(measuredWidth(sizer.get(".tree-width-row"))).toBe(boxedWidth(1, longest));
+      expect(tree.get(".file-tree-window").text()).not.toContain(longest);
+      for (const top of [100 * ROW_HEIGHT, 180 * ROW_HEIGHT, 0]) {
+        (tree.element as HTMLElement).scrollTop = top;
+        await tree.trigger("scroll");
+        expect(measuredWidth(sizer.get(".tree-width-row"))).toBe(boxedWidth(1, longest));
+        expect(tree.get(".file-tree-window").findAll(".file-row")).toHaveLength(WINDOW_SIZE);
+        const sticky = tree.find(".sticky-folders");
+        if (sticky.exists()) {
+          expect(sticky.element.parentElement).toBe(tree.get(".file-tree-content").element);
+          expect(sticky.attributes("style")).not.toContain("width");
+        }
+      }
+      await tree.get(".folder-toggle").trigger("click");
+      await flushPromises();
+      expect(measuredWidth(sizer.get(".tree-width-row"))).toBe(boxedWidth(0, "folder"));
+      expect(sizer.text()).not.toContain(longest);
+      wrapper.unmount();
+    });
+
+    it("measures proportional canvas text and invalidates it when fonts load", async () => {
+      let fontSize = 10;
+      let scrollReads = 0;
+      let styleReads = 0;
+      let assignedFont = "10px Test";
+      const context = {
+        set font(value: string) {
+          assignedFont = value;
+        },
+        measureText(text: string) {
+          const size = Number.parseFloat(assignedFont);
+          return { width: [...text].reduce((sum, char) => sum + size * (char === "W" ? 1 : 0.2), 0) };
+        },
+      };
+      const originalGetContext = HTMLCanvasElement.prototype.getContext;
+      const originalFonts = Object.getOwnPropertyDescriptor(document, "fonts");
+      const realStyle = window.getComputedStyle;
+      HTMLCanvasElement.prototype.getContext = (() =>
+        context) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+      Object.defineProperty(document, "fonts", {
+        configurable: true,
+        value: Object.assign(new EventTarget(), { ready: new Promise<void>(() => undefined) }),
+      });
+      Object.defineProperty(HTMLElement.prototype, "scrollWidth", {
+        configurable: true,
+        get() {
+          scrollReads += 1;
+          return 0;
+        },
+      });
+      window.getComputedStyle = ((element: Element, pseudo?: string | null) => {
+        if (element.classList.contains("tree-width-name") || element.classList.contains("file-status")) {
+          styleReads += 1;
+          return {
+            ...realStyle.call(window, element, pseudo),
+            font: `${fontSize}px Test`,
+            letterSpacing: "0px",
+          } as CSSStyleDeclaration;
+        }
+        return realStyle.call(window, element, pseudo);
+      }) as typeof window.getComputedStyle;
+
+      try {
+        mocks.listCheckoutFiles.mockResolvedValue({
+          entries: [{ name: "folder", path: "folder", kind: "directory" }],
+          truncated: false,
+        });
+        mocks.listCheckoutFiles.mockImplementation(async (_id: string, path: string) => ({
+          entries:
+            path === "."
+              ? [{ name: "folder", path: "folder", kind: "directory" }]
+              : Array.from({ length: 200 }, (_, index) => ({
+                  name: index === 150 ? "WWWW" : index === 100 ? "iiii" : `f${index}`,
+                  path: `folder/${index}`,
+                  kind: "file",
+                })),
+          truncated: false,
+        }));
+        const wrapper = mountInspector({
+          checkout: checkout("canvas-width"),
+          savedState: { ...DEFAULT_CHECKOUT_UI_STATE, expandedDirectories: ["folder"] },
+        });
+        await flushPromises();
+        const tree = wrapper.get('[aria-label="Checkout files"]');
+        const sizer = tree.get(".tree-width-sizer");
+        expect(sizer.text()).toContain("WWWW");
+        expect(sizer.text()).not.toContain("iiii");
+        expect(sizer.findAll(".tree-width-row")).toHaveLength(1);
+        const firstWidth = measuredWidth(sizer.get(".tree-width-row"));
+        expect(scrollReads).toBe(0);
+        expect(styleReads).toBe(1);
+
+        fontSize = 20;
+        document.fonts.dispatchEvent(new Event("loadingdone"));
+        await flushPromises();
+        const secondWidth = measuredWidth(sizer.get(".tree-width-row"));
+        expect(secondWidth).toBeGreaterThan(firstWidth);
+        expect(styleReads).toBe(2);
+        expect(scrollReads).toBe(0);
+        wrapper.unmount();
+      } finally {
+        HTMLCanvasElement.prototype.getContext = originalGetContext;
+        window.getComputedStyle = realStyle;
+        if (originalFonts) Object.defineProperty(document, "fonts", originalFonts);
+        else Reflect.deleteProperty(document, "fonts");
+      }
+    });
+
+    it("keeps sizing nodes constant at one, ten, and fifty thousand rows", async () => {
+      const counts: { rows: number; nodes: number; width: number }[] = [];
+      for (const size of [1_000, 10_000, 50_000]) {
+        const wrapper = treeOf(size);
+        await flushPromises();
+        const tree = wrapper.get('[aria-label="Checkout files"]');
+        const sizer = tree.get(".tree-width-sizer");
+        const widest = sizer.get(".tree-width-row");
+        // Every node the sizing machinery costs, the measurers included.
+        const sizingNodes = () =>
+          tree
+            .get(".file-tree-content")
+            .element.querySelectorAll(".tree-width-sizer, .tree-width-sizer *, .tree-width-probe, .tree-width-probe *")
+            .length;
+        counts.push({
+          rows: sizer.findAll(".tree-width-row").length,
+          nodes: sizingNodes(),
+          width: measuredWidth(widest),
+        });
+        // Scrolling through it keeps the same width and the same nodes.
+        (tree.element as HTMLElement).scrollTop = Math.floor(size / 2) * ROW_HEIGHT;
+        await tree.trigger("scroll");
+        expect(measuredWidth(widest)).toBe(counts.at(-1)!.width);
+        expect(sizingNodes()).toBe(counts.at(-1)!.nodes);
+        expect(tree.get(".file-tree-window").findAll(".file-row")).toHaveLength(WINDOW_SIZE);
+        wrapper.unmount();
+      }
+      // Width follows the whole tree, while sizing DOM stays independent of its row count.
+      expect(counts[1]).toEqual(counts[0]);
+      expect(counts[2]).toEqual(counts[0]);
+      expect(counts[0]!.rows).toBe(1);
+      expect(counts[0]!.width).toBe(boxedWidth(1, longest));
+      expect(counts[0]!.nodes).toBe(7);
+    });
   });
 
   it("uses the default sticky setting and tracks ancestors through a nested branch", async () => {
@@ -725,6 +880,15 @@ describe("InspectorPane", () => {
       "~/sticky/src/nested",
     ]);
     expect(tree.find(".sticky-folders").attributes("style")).toContain(`-${2 * ROW_HEIGHT}px`);
+    // The row the stack sits over is itself an open folder: it is drawn where it is and stays out
+    // of the stack, and the folder above it is in.
+    (tree.element as HTMLElement).scrollTop = ROW_HEIGHT;
+    await tree.trigger("scroll");
+    expect(tree.findAll(".sticky-folders .folder-name").map((button) => button.attributes("aria-label"))).toEqual([
+      "Show src in tree",
+    ]);
+    (tree.element as HTMLElement).scrollTop = 5 * ROW_HEIGHT;
+    await tree.trigger("scroll");
     document.body.append(tree.element.parentElement!);
     await tree.find('.sticky-folders .folder-name[aria-label="Show src in tree"]').trigger("click");
     await flushPromises();
@@ -742,6 +906,112 @@ describe("InspectorPane", () => {
       originalName.element.closest(".file-row")?.querySelector(".folder-toggle")?.getAttribute("aria-expanded"),
     ).toBe("false");
     expect(wrapper.emitted("updateUiState")?.at(-1)?.[0]).toMatchObject({ expandedDirectories: ["src/nested"] });
+    wrapper.unmount();
+  });
+
+  it("matches the prefix-scan sticky stack on randomized expanded trees", async () => {
+    let seed = 31;
+    const random = () => (seed = (seed * 1664525 + 1013904223) >>> 0) / 2 ** 32;
+    const directories = new Map<string, { name: string; path: string; kind: "directory" | "file" }[]>();
+    const expanded: string[] = [];
+    function build(path: string, depth: number) {
+      const entries = Array.from({ length: 5 }, (_, index) => {
+        const childPath = path === "." ? `d${index}` : `${path}/d${index}`;
+        if (depth < 3 && random() < 0.42) {
+          expanded.push(childPath);
+          return { name: `d${index}`, path: childPath, kind: "directory" as const };
+        }
+        return { name: `f${index}`, path: `${path}/f${index}`, kind: "file" as const };
+      });
+      directories.set(path, entries);
+      for (const entry of entries) if (entry.kind === "directory") build(entry.path, depth + 1);
+      return entries;
+    }
+    build(".", 0);
+    mocks.listCheckoutFiles.mockImplementation(async (_id: string, path: string) => ({
+      entries: directories.get(path) ?? [],
+      truncated: false,
+    }));
+    const rows: { entry: { name: string; path: string; kind: "directory" | "file" }; depth: number }[] = [];
+    function flatten(path: string, depth: number) {
+      for (const entry of directories.get(path) ?? []) {
+        rows.push({ entry, depth });
+        if (entry.kind === "directory") flatten(entry.path, depth + 1);
+      }
+    }
+    flatten(".", 0);
+    const wrapper = mountInspector({
+      checkout: checkout("random-tree"),
+      savedState: { ...DEFAULT_CHECKOUT_UI_STATE, expandedDirectories: expanded },
+    });
+    await flushPromises();
+    const tree = wrapper.get('[aria-label="Checkout files"]');
+    Object.defineProperty(tree.element, "clientHeight", { configurable: true, value: 60 });
+    const maxStack = Math.floor((60 - 8) / ROW_HEIGHT);
+    for (let pixelTop = ROW_HEIGHT; pixelTop < rows.length * ROW_HEIGHT; pixelTop += 7 * ROW_HEIGHT) {
+      (tree.element as HTMLElement).scrollTop = pixelTop;
+      await tree.trigger("scroll");
+      let top = Math.floor(pixelTop / ROW_HEIGHT);
+      let ancestors: { entry: (typeof rows)[number]["entry"]; depth: number }[] = [];
+      for (let pass = 0; pass <= maxStack; pass++) {
+        ancestors = [];
+        for (const row of rows.slice(0, top)) {
+          while (ancestors.length && ancestors.at(-1)!.depth >= row.depth) ancestors.pop();
+          if (row.entry.kind === "directory") ancestors.push(row);
+        }
+        const nextTop = Math.floor((pixelTop + (Math.min(maxStack, ancestors.length) + 1) * ROW_HEIGHT) / ROW_HEIGHT);
+        if (nextTop <= top) break;
+        top = nextTop;
+      }
+      expect(
+        tree.findAll(".sticky-folders .folder-name").map((button) => button.attributes("aria-label")),
+        `scroll ${pixelTop}, actual ${tree.element.scrollTop}`,
+      ).toEqual(ancestors.slice(-maxStack).map(({ entry }) => `Show ${entry.name} in tree`));
+    }
+    wrapper.unmount();
+  });
+
+  it("keeps a deep stack in a tree far larger than the window, and bounds the stack to what fits", async () => {
+    mocks.listCheckoutFiles.mockImplementation(async (_id: string, path: string) => {
+      if (path === ".")
+        return { entries: [{ name: "src", path: "src", kind: "directory" as const }], truncated: false };
+      if (path === "src")
+        return { entries: [{ name: "nested", path: "src/nested", kind: "directory" as const }], truncated: false };
+      if (path === "src/nested")
+        return { entries: [{ name: "deep", path: "src/nested/deep", kind: "directory" as const }], truncated: false };
+      return {
+        entries: Array.from({ length: 10_000 }, (_, i) => ({
+          name: `f${String(i).padStart(5, "0")}`,
+          path: `${path}/f${i}`,
+          kind: "file" as const,
+        })),
+        truncated: false,
+      };
+    });
+    const wrapper = mountInspector({ checkout: { ...checkout("big"), canonicalPath: "/Users/test/big" } });
+    await flushPromises();
+    for (const folder of ["src", "nested", "deep"]) {
+      await wrapper
+        .get(`.file-folder:has(.folder-name[aria-label="Expand ${folder}"]) .folder-toggle`)
+        .trigger("click");
+      await flushPromises();
+    }
+    const tree = wrapper.get('[aria-label="Checkout files"]');
+    // A viewport with room for two rows of stack, in a tree of ten thousand.
+    Object.defineProperty(tree.element, "clientHeight", { configurable: true, value: 2 * ROW_HEIGHT + 8 });
+
+    for (const fraction of [0.1, 0.5, 0.9]) {
+      (tree.element as HTMLElement).scrollTop = Math.floor(10_003 * fraction) * ROW_HEIGHT;
+      await tree.trigger("scroll");
+      // The stack is the folders open above the row under it, trimmed to what the viewport holds.
+      expect(tree.findAll(".sticky-folders .folder-name").map((button) => button.attributes("aria-label"))).toEqual([
+        "Show nested in tree",
+        "Show deep in tree",
+      ]);
+      // And none of it costs a node per row: the window is the window and the sizer is one row.
+      expect(tree.get(".file-tree-window").findAll(".file-row")).toHaveLength(WINDOW_SIZE);
+      expect(tree.get(".tree-width-sizer").findAll(".tree-width-row")).toHaveLength(1);
+    }
     wrapper.unmount();
   });
 });

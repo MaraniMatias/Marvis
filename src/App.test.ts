@@ -1973,6 +1973,38 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
+    it("acknowledges a moved relocation even when the window does not follow", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": ["agent"], "checkout:two": [] },
+        { "checkout:one": ["ship it"] },
+      );
+      const observedAt = Date.now();
+
+      move("ses_ship it", "checkout:one", "checkout:two", observedAt);
+      await flushPromises();
+      move("ses_ship it", "checkout:one", "checkout:two", observedAt);
+      await flushPromises();
+
+      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+      wrapper.unmount();
+    });
+
+    it("acknowledges a relocation whose terminal is already in the destination", async () => {
+      const wrapper = await mountWithOpenCodeTerminals(
+        { "checkout:one": [], "checkout:two": ["agent"] },
+        { "checkout:two": ["ship it"] },
+      );
+      const observedAt = Date.now();
+
+      move("ses_ship it", "checkout:one", "checkout:two", observedAt);
+      await flushPromises();
+      move("ses_ship it", "checkout:one", "checkout:two", observedAt);
+      await flushPromises();
+
+      expect(mocks.moveSession).not.toHaveBeenCalled();
+      wrapper.unmount();
+    });
+
     it("rejects the same OpenCode session shown by terminals in different repositories", async () => {
       const wrapper = await mountWithOpenCodeTerminals(
         { "checkout:one": ["writer"], "checkout:foreign": ["duplicate"], "checkout:two": [] },
@@ -2123,7 +2155,7 @@ describe("App UI integration", () => {
       wrapper.unmount();
     });
 
-    it("cleans up a failed automatic move and accepts a newer relocation", async () => {
+    it("retries the same relocation after an automatic move fails", async () => {
       const wrapper = await mountWithOpenCodeTerminals(
         { "checkout:one": ["agent"], "checkout:two": [], "checkout:three": [] },
         { "checkout:one": ["ship it"] },
@@ -2135,11 +2167,12 @@ describe("App UI integration", () => {
       await flushPromises();
       move("ses_ship it", "checkout:one", "checkout:two", firstObservedAt);
       await flushPromises();
-      expect(mocks.moveSession).toHaveBeenCalledTimes(1);
+      expect(mocks.moveSession).toHaveBeenCalledTimes(2);
+      expect(mocks.moveSession).toHaveBeenLastCalledWith("session:agent", "checkout:two", 0, false, false);
 
       move("ses_ship it", "checkout:one", "checkout:three", firstObservedAt + 1_000);
       await flushPromises();
-      expect(mocks.moveSession).toHaveBeenCalledTimes(2);
+      expect(mocks.moveSession).toHaveBeenCalledTimes(3);
       expect(mocks.moveSession).toHaveBeenLastCalledWith("session:agent", "checkout:three", 0, false, false);
       wrapper.unmount();
     });

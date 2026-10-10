@@ -370,28 +370,47 @@ function openAllChanges() {
   if (checkoutId) emit("openAllChanges", { checkoutId });
 }
 
-const visibleEntries = computed<VisibleEntry[]>(() => {
-  const result: VisibleEntry[] = [];
-  function append(path: string, depth: number) {
+/** One open folder on the way to a row: the sticky stack a row under it is drawn from. */
+type Ancestor = { entry: FileEntry; depth: number };
+type AncestorStack = { ancestor: Ancestor; parent: AncestorStack | null } | null;
+
+/** A `Set` because the question is asked once per row of the tree, and an array answers it in the
+ *  length of the tree. */
+const expandedSet = computed(() => new Set(expanded.value));
+
+/** Flatten expanded rows and index each row's open ancestors for O(depth) sticky queries. */
+const tree = computed(() => {
+  const rows: VisibleEntry[] = [];
+  const stacks: AncestorStack[] = [];
+  const push = (item: VisibleEntry, open: AncestorStack) => {
+    rows.push(item);
+    stacks.push(open);
+  };
+  function append(path: string, depth: number, ancestors: AncestorStack) {
     for (const entry of directories.value[path] ?? []) {
-      result.push({ entry, depth });
-      if (entry.kind !== "directory" || !expanded.value.includes(entry.path)) continue;
+      const open =
+        entry.kind === "directory" && expandedSet.value.has(entry.path)
+          ? { ancestor: { entry, depth }, parent: ancestors }
+          : null;
+      push({ entry, depth }, open ?? ancestors);
+      if (!open) continue;
       const state = directoryStates.value[entry.path];
-      if (state === "loading") result.push({ depth: depth + 1, message: "Loading folder…" });
+      if (state === "loading") push({ depth: depth + 1, message: "Loading folder…" }, open);
       else if (state === "error")
-        result.push({ depth: depth + 1, message: folderError.value || "Could not load folder." });
+        push({ depth: depth + 1, message: folderError.value || "Could not load folder." }, open);
       // An empty folder says nothing: it stays, and a line of prose under every one of them
       // is noise on a real tree.
       else {
-        if (state === "truncated")
-          result.push({ depth: depth + 1, message: "Some entries omitted (folder is large)." });
-        append(entry.path, depth + 1);
+        if (state === "truncated") push({ depth: depth + 1, message: "Some entries omitted (folder is large)." }, open);
+        append(entry.path, depth + 1, open);
       }
     }
   }
-  append(".", 0);
-  return result;
+  append(".", 0, null);
+  return { rows, stacks };
 });
+
+const visibleEntries = computed<VisibleEntry[]>(() => tree.value.rows);
 
 const changedFiles = computed(() => props.gitSnapshot.status?.files ?? []);
 const changedFileCount = computed(() => changedFiles.value.length);
@@ -450,9 +469,84 @@ function entryTooltip(path: string): string {
 }
 
 /** The gutter, and one 14px step per level: the sidebar's own indent, at its own 8px base. */
-function rowIndent(depth: number): string {
-  return `${8 + depth * 14}px`;
+function indentOf(depth: number): number {
+  return 8 + depth * 14;
 }
+
+function rowIndent(depth: number): string {
+  return `${indentOf(depth)}px`;
+}
+
+/**
+ * What a row is worth across, from `.tree-width-row`'s own numbers: the padding it is drawn with,
+ * the gutter that stands in for the chevron and the icon, and the gap that separates them.
+ */
+const ROW_PADDING = 8;
+const ROW_GAP = 7;
+const SIZER_GUTTER = 37;
+
+const rowTextProbe = ref<HTMLElement | null>(null);
+const statusTextProbe = ref<HTMLElement | null>(null);
+const measuredTexts = new Map<string, number>();
+const measuredFonts = new Map<"row" | "status", { font: string; letterSpacing: number }>();
+const fontMetricsRevision = ref(0);
+const textCanvas = document.createElement("canvas");
+const textContext = textCanvas.getContext("2d");
+
+function textWidth(style: "row" | "status", text: string): number {
+  const probe = style === "row" ? rowTextProbe.value : statusTextProbe.value;
+  if (!probe || !text) return 0;
+  const key = `${props.fontScale} ${style} ${text}`;
+  const known = measuredTexts.get(key);
+  if (known !== undefined) return known;
+
+  let width = 0;
+  if (textContext) {
+    let metrics = measuredFonts.get(style);
+    if (!metrics) {
+      const computed = window.getComputedStyle(probe);
+      metrics = { font: computed.font, letterSpacing: Number.parseFloat(computed.letterSpacing) || 0 };
+      measuredFonts.set(style, metrics);
+    }
+    textContext.font = metrics.font;
+    width = Math.ceil(textContext.measureText(text).width + metrics.letterSpacing * Math.max(0, [...text].length - 1));
+  } else {
+    probe.textContent = text;
+    width = probe.scrollWidth;
+  }
+  if (width > 0) measuredTexts.set(key, width);
+  return width;
+}
+
+function sizerWidth(item: VisibleEntry): number {
+  const entry = item.entry;
+  if (!entry) return indentOf(item.depth) + ROW_PADDING + textWidth("row", item.message ?? "");
+  let width = indentOf(item.depth) + ROW_PADDING + SIZER_GUTTER + ROW_GAP + textWidth("row", entry.name);
+  const status = rowStatus(entry.path);
+  if (status) width += ROW_GAP + textWidth("status", status);
+  if (item.additions) width += ROW_GAP + textWidth("row", `+${item.additions}`);
+  if (item.deletions) width += ROW_GAP + textWidth("row", `-${item.deletions}`);
+  return width;
+}
+
+/** Whether the tree is on screen, because a row that is not laid out has no width to read. */
+const treeVisible = ref(true);
+
+/** Preserve full-tree horizontal width while keeping the sizing DOM constant-sized. */
+const treeWidth = computed(() => {
+  void fontMetricsRevision.value;
+  if (!treeVisible.value) return { px: 0, rows: [] as VisibleEntry[] };
+  let px = 0;
+  let widest: VisibleEntry | undefined;
+  for (const item of visibleEntries.value) {
+    const width = sizerWidth(item);
+    if (width > px) {
+      px = width;
+      widest = item;
+    }
+  }
+  return { px, rows: widest ? [widest] : [] };
+});
 
 /** Both lists are flat and every row is rowHeight tall, so one window serves both. */
 function virtualWindow<T>(rows: T[], scrollTop: number, rowHeight: number) {
@@ -469,22 +563,24 @@ function virtualWindow<T>(rows: T[], scrollTop: number, rowHeight: number) {
 /** The row height this font size draws at. See TREE_ROW_HEIGHT. */
 const rowHeight = computed(() => Math.round(TREE_ROW_HEIGHT * (props.fontScale ?? 1)));
 
-const stickyFolders = computed(() => {
+const stickyFolders = computed<Ancestor[]>(() => {
   if (!props.treeStickyScroll) return [];
   const viewport = treeViewport.value;
   const rowHeightPx = rowHeight.value;
   // Account for the rows hidden beneath the sticky stack when anticipating ancestors.
   const maxStack = Math.max(0, Math.floor(((viewport?.clientHeight ?? rowHeightPx) - 8) / rowHeightPx));
-  const ancestors: { entry: FileEntry; depth: number }[] = [];
+  const { rows, stacks } = tree.value;
   const bannerOffset = directoryStates.value["."] === "truncated" ? rowHeightPx : 0;
   let top = Math.floor(Math.max(0, treeScrollTop.value - bannerOffset) / rowHeightPx);
+  let ancestors: Ancestor[] = [];
   for (let pass = 0; pass <= maxStack; pass++) {
-    ancestors.length = 0;
-    for (const row of visibleEntries.value.slice(0, top)) {
-      while (ancestors.length && ancestors.at(-1)!.depth >= row.depth) ancestors.pop();
-      if (row.entry?.kind === "directory" && expanded.value.includes(row.entry.path))
-        ancestors.push({ entry: row.entry, depth: row.depth });
+    let stack = stacks[Math.min(top, rows.length) - 1] ?? null;
+    ancestors = [];
+    while (stack) {
+      ancestors.push(stack.ancestor);
+      stack = stack.parent;
     }
+    ancestors.reverse();
     const nextTop = Math.floor(
       Math.max(0, treeScrollTop.value + (Math.min(maxStack, ancestors.length) + 1) * rowHeightPx - bannerOffset) /
         rowHeightPx,
@@ -538,6 +634,9 @@ onMounted(() => {
       const visible = entry.contentRect.height > 0;
       const hadBeenVisible = wasVisible.get(viewport) ?? false;
       wasVisible.set(viewport, visible);
+      // The tree's own width is measured from rows that only have boxes while they are on screen,
+      // so this is what says the next time they do.
+      if (isTree) treeVisible.value = visible;
       if (!visible || hadBeenVisible) continue;
 
       viewport.scrollTop = isTree ? treeScrollTop.value : changesScrollTop.value;
@@ -548,6 +647,26 @@ onMounted(() => {
   observeScrollViewports();
 });
 onUnmounted(() => scrollRestoreObserver?.disconnect());
+watch(visibleEntries, () => measuredTexts.clear(), { flush: "sync" });
+watch(
+  () => props.fontScale,
+  () => {
+    measuredTexts.clear();
+    measuredFonts.clear();
+  },
+);
+
+function onFontsLoaded() {
+  measuredTexts.clear();
+  measuredFonts.clear();
+  fontMetricsRevision.value += 1;
+}
+
+onMounted(() => {
+  document.fonts?.addEventListener("loadingdone", onFontsLoaded);
+  void document.fonts?.ready.then(onFontsLoaded);
+});
+onUnmounted(() => document.fonts?.removeEventListener("loadingdone", onFontsLoaded));
 
 watch(
   () => [props.checkout?.id, props.gitSnapshot.statusState] as const,
@@ -593,14 +712,15 @@ watch(
     >
       <div ref="treeViewport" class="details-scroll" aria-label="Checkout files" @scroll="onTreeScroll">
         <div class="file-tree-content">
-          <!-- Intrinsic sizing uses every expanded row, not the changing virtual window.
-               Only text is duplicated; interactive rows and icons stay virtualized. -->
+          <!-- Intrinsic sizing uses every expanded row, not the changing virtual window. The words
+               are measured instead of drawn, so this is the row that sets the width rather than
+               one per row; interactive rows and icons stay virtualized. -->
           <div class="tree-width-sizer" aria-hidden="true" inert>
             <div
-              v-for="(item, index) in visibleEntries"
-              :key="item.entry?.path ?? index"
+              v-for="item in treeWidth.rows"
+              :key="item.entry?.path ?? item.message"
               class="tree-width-row"
-              :style="{ paddingLeft: rowIndent(item.depth) }"
+              :style="{ paddingLeft: rowIndent(item.depth), width: `${treeWidth.px}px` }"
             >
               <template v-if="item.entry">
                 <span class="tree-width-gutter" />
@@ -612,6 +732,13 @@ watch(
               <span v-else>{{ item.message }}</span>
             </div>
           </div>
+          <!-- The two measurers, one per type a row's words are drawn at. They carry the classes of
+               the spans they stand in for, because a word weighed in another type is a width the row
+               does not draw. Out of the flow, so they contribute nothing to the scroller. -->
+          <span class="tree-width-probe" aria-hidden="true">
+            <span ref="rowTextProbe" class="tree-width-name" />
+            <span ref="statusTextProbe" class="file-status" />
+          </span>
           <div
             v-if="stickyFolders.length"
             class="sticky-folders"
@@ -703,13 +830,13 @@ watch(
                   <button
                     type="button"
                     class="folder-toggle"
-                    :aria-label="`${expanded.includes(item.entry.path) ? 'Collapse' : 'Expand'} ${item.entry.name}`"
-                    :aria-expanded="expanded.includes(item.entry.path)"
+                    :aria-label="`${expandedSet.has(item.entry.path) ? 'Collapse' : 'Expand'} ${item.entry.name}`"
+                    :aria-expanded="expandedSet.has(item.entry.path)"
                     @click="toggleDirectory(item.entry)"
                   >
                     <ChevronRightIcon
                       class="icon-xxs chevron"
-                      :class="{ expanded: expanded.includes(item.entry.path) }"
+                      :class="{ expanded: expandedSet.has(item.entry.path) }"
                       aria-hidden="true"
                     />
                   </button>
@@ -726,7 +853,7 @@ watch(
                     :class="`file-name-${prominenceOf(item.entry)}`"
                     :data-folder-path="item.entry.path"
                     :title="entryTooltip(item.entry.path)"
-                    :aria-label="`${expanded.includes(item.entry.path) ? 'Collapse' : 'Expand'} ${item.entry.name}`"
+                    :aria-label="`${expandedSet.has(item.entry.path) ? 'Collapse' : 'Expand'} ${item.entry.name}`"
                     :aria-current="selectedFolderPath === item.entry.path ? 'true' : undefined"
                     @click="toggleDirectory(item.entry)"
                   >
@@ -895,6 +1022,20 @@ watch(
   height: 0;
   overflow: hidden;
   visibility: hidden;
+}
+
+/* The measurer. Absolutely positioned, so it is out of the scroll container's flow whatever the
+   tree holds, and carrying the row's own type, so what it reports is what a row is drawn at. */
+.tree-width-probe {
+  position: absolute;
+  top: 0;
+  left: 0;
+  display: flex;
+  visibility: hidden;
+  pointer-events: none;
+  font-family: inherit;
+  font-size: 13px;
+  white-space: nowrap;
 }
 
 .tree-width-gutter {

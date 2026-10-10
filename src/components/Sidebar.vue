@@ -193,7 +193,7 @@ function cancelRename() {
   editingId.value = null;
 }
 
-/** The one session whose destination list is open. */
+/** The one session whose destination list is open, which is also what builds that list. */
 const moveMenuFor = ref<string | null>(null);
 
 /**
@@ -257,6 +257,55 @@ function moveDestination(session: Session, target: Checkout, index: number): str
   }
   return target.id;
 }
+
+interface Destination {
+  id: string;
+  label: string;
+  title: string;
+}
+
+/**
+ * Every registered, live checkout, in the order the panel lists them.
+ *
+ * The list does not depend on which terminal is asking, so it is built once per pass rather than
+ * walked once per terminal: that walk was the whole checkout list again for every candidate of
+ * every row, on every pass, to draw a list that was almost always closed.
+ */
+const moveCandidates = computed(() =>
+  props.repos.flatMap((repo) =>
+    repo.checkouts
+      .filter((checkout) => !checkout.isMissing)
+      .map((checkout) => ({ checkout, label: workdirTitle(repo, checkout) })),
+  ),
+);
+
+/**
+ * Whether a terminal has anywhere to go, which is what the row's menu is for.
+ *
+ * The same question `moveDestination` answers for each candidate, asked once: a terminal's own
+ * worktree is not one of them, so with more than one candidate there is always a checkout that is
+ * not this row's own, and with a single one the answer is whether that checkout is its own.
+ */
+function canMoveTo(session: Session): boolean {
+  const candidates = moveCandidates.value;
+  if (!candidates.length) return false;
+  return candidates.length > 1 || candidates[0]!.checkout.id !== session.checkoutId;
+}
+
+/** Destinations use the current row session, not a stale snapshot. */
+const moveMenuItems = computed<Destination[]>(() => {
+  const sessionId = moveMenuFor.value;
+  if (!sessionId) return [];
+  const session = groups.value
+    .flatMap((group) => group.workdirs.flatMap((workdir) => workdir.items))
+    .find((item) => item.session.id === sessionId)?.session;
+  if (!session) return [];
+  return moveCandidates.value.flatMap(({ checkout, label }) =>
+    checkout.id !== session.checkoutId && moveDestination(session, checkout, 0)
+      ? [{ id: checkout.id, label, title: checkout.path }]
+      : [],
+  );
+});
 
 function selectSession(sessionId: string, event: MouseEvent) {
   if (event.detail > 0 && suppressedClickSessionId === sessionId) {
@@ -448,12 +497,13 @@ function autoScroll() {
 onUnmounted(() => {
   finishPointerDrag();
   if (suppressedClickTimer !== undefined) window.clearTimeout(suppressedClickTimer);
+  document.fonts?.removeEventListener("loadingdone", onFontsLoaded);
   detachLabelObserver();
 });
 
 /** Opens the list without a button: the context-menu key, or the same gesture with a pointer. */
-function openMoveMenu(sessionId: string) {
-  moveMenuFor.value = moveMenuFor.value === sessionId ? null : sessionId;
+function openMoveMenu(session: Session) {
+  moveMenuFor.value = moveMenuFor.value === session.id ? null : session.id;
 }
 
 /**
@@ -518,8 +568,14 @@ const AMBIGUOUS_AGENT_SESSION = "varias con este nombre";
 
 interface WorkdirItem {
   session: Session;
-  /** The registered, non-missing checkouts this terminal can move to. */
-  destinations: { id: string; label: string; title: string }[];
+  /**
+   * Whether this terminal has anywhere to move to, which is what the row's menu is for.
+   *
+   * The menu's own list is built when the menu opens (`moveMenuItems`): a panel with a hundred
+   * terminals would otherwise walk every registered checkout for every one of them on every pass,
+   * to draw a list that is closed.
+   */
+  canMove: boolean;
   active: boolean;
   /**
    * The row's own name: the agent session's own title where this terminal's title names one, and
@@ -692,6 +748,8 @@ const probes: Record<FitStyle, Readonly<Ref<HTMLElement | null>>> = {
 
 /** What each word is worth, kept per specimen because the type is not the same in every one. */
 const fitWidths = new Map<string, number>();
+/** How many words that book holds before it is emptied, which bounds what a long session keeps. */
+const MAX_MEASURED_WORDS = 4_000;
 /** Every row of one kind, keyed by the id the row carries, for the pass that weighs them. */
 const blockCache = new Map<string, Map<string, HTMLElement>>();
 
@@ -824,6 +882,9 @@ function widthOf(style: FitStyle, text: string): number {
   if (known !== undefined) return known;
   specimen.textContent = text;
   const width = specimen.scrollWidth;
+  // A panel left open through a session's worth of renames would otherwise keep every word it ever
+  // saw, so past this many the pass starts the book again rather than growing it.
+  if (fitWidths.size >= MAX_MEASURED_WORDS) fitWidths.clear();
   fitWidths.set(key, width);
   return width;
 }
@@ -901,11 +962,39 @@ function scheduleMeasureLabels() {
   });
 }
 
-onMounted(attachLabelObserver);
+/** Text and row identities that affect fitted label geometry, excluding runtime-only status. */
+const weighedWords = computed(() => {
+  const words: string[] = [];
+  for (const group of groups.value) {
+    words.push(group.id, group.label, ...group.pathSteps, String(group.hasMenu));
+    for (const workdir of group.workdirs) {
+      words.push(
+        workdir.checkout.id,
+        workdir.title,
+        workdir.error ?? "",
+        String(workdir.worktree),
+        String(workdir.home),
+        String(workdir.missing),
+      );
+      for (const item of workdir.items) words.push(item.session.id, item.title, item.detail ?? "");
+    }
+  }
+  return JSON.stringify(words);
+});
 
-// What the panel lists, and the type it is drawn in: either one changes a row's words or a word's
+function onFontsLoaded() {
+  fitWidths.clear();
+  scheduleMeasureLabels();
+}
+
+onMounted(() => {
+  attachLabelObserver();
+  document.fonts?.addEventListener("loadingdone", onFontsLoaded);
+});
+
+// What the panel says, and the type it is drawn in: either one changes a row's words or a word's
 // width without the panel moving a pixel, so nothing else would ask for the pass they need.
-watch([groups, () => props.fontScale], scheduleMeasureLabels, { flush: "post" });
+watch([weighedWords, () => props.fontScale], scheduleMeasureLabels, { flush: "post" });
 watch(
   () => props.fontScale,
   () => fitWidths.clear(),
@@ -1047,15 +1136,7 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
           : null;
       return {
         session,
-        destinations: props.repos.flatMap((candidateRepo) =>
-          candidateRepo.checkouts
-            .filter((candidate) => candidate.id !== checkout.id && moveDestination(session, candidate, 0))
-            .map((candidate) => ({
-              id: candidate.id,
-              label: workdirTitle(candidateRepo, candidate),
-              title: candidate.path,
-            })),
-        ),
+        canMove: canMoveTo(session),
         active: session.id === props.activeSessionId,
         /**
          * The row's name, which `sessionRowTitle` writes: the session this terminal is showing when
@@ -1174,6 +1255,8 @@ function toggleRepo(group: Group) {
   if (!next.delete(group.id)) next.add(group.id);
   collapsedRepos.value = next;
 }
+
+watch([collapsedGroups, collapsedRepos, editingId], scheduleMeasureLabels, { flush: "post" });
 
 /**
  * What the row announces: its name, its detail, and the state in words.
@@ -1452,14 +1535,14 @@ function rowLabel(item: WorkdirItem): string {
                   class="workdir-select"
                   :aria-current="item.active ? 'page' : undefined"
                   :aria-label="`Terminal session: ${rowLabel(item)}`"
-                  :aria-haspopup="item.destinations.length ? 'menu' : undefined"
-                  :aria-expanded="item.destinations.length ? moveMenuFor === item.session.id : undefined"
+                  :aria-haspopup="item.canMove ? 'menu' : undefined"
+                  :aria-expanded="item.canMove ? moveMenuFor === item.session.id : undefined"
                   :title="rowLabel(item)"
                   @pointerdown="startPointerDrag(item.session, $event)"
                   @lostpointercapture="onLostPointerCapture"
                   @click="selectSession(item.session.id, $event)"
                   @dblclick="startRename(item.session)"
-                  @contextmenu.prevent="item.destinations.length && openMoveMenu(item.session.id)"
+                  @contextmenu.prevent="item.canMove && openMoveMenu(item.session)"
                 >
                   <!-- The glyph carries the state, in colour and in motion: a spinner while a turn
                      runs, the sparkles while it waits for a reply or after a turn failed, a
@@ -1498,13 +1581,13 @@ function rowLabel(item: WorkdirItem): string {
                    row rather than pushing it, so a list of worktrees never changes the panel it is
                    read from. -->
                 <ul
-                  v-if="item.destinations.length && moveMenuFor === item.session.id"
+                  v-if="item.canMove && moveMenuFor === item.session.id"
                   class="muster-menu move-menu"
                   role="menu"
                   :aria-label="`Move ${item.title} to`"
                   @keydown.esc.prevent="moveMenuFor = null"
                 >
-                  <li v-for="destination in item.destinations" :key="destination.id" role="none">
+                  <li v-for="destination in moveMenuItems" :key="destination.id" role="none">
                     <button
                       type="button"
                       role="menuitem"

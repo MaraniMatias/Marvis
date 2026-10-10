@@ -42,6 +42,8 @@ use std::{
 
 use serde::Deserialize;
 
+mod relocation;
+
 use crate::{
     domain::{
         agent::{agent_event_kind, AgentAgent, AgentRelocation, AgentSession},
@@ -483,12 +485,13 @@ impl AgentBridge {
         timeout: Duration,
     ) -> Result<T, BridgeError> {
         let url = format!("{}{path}", self.base_url());
-        let envelope: ApiEnvelope<T> = send_json(retry_interrupted(|| {
-            with_timeout(self.client.get(&url), timeout)
+        let response = retry_interrupted_until(Instant::now() + timeout, |remaining| {
+            with_timeout(self.client.get(&url), remaining)
                 .header("authorization", self.auth_header())
                 .header("accept", "application/json")
                 .call()
-        }))?;
+        })?;
+        let envelope: ApiEnvelope<T> = send_json(response)?;
         Ok(envelope.into_unscoped_data())
     }
 
@@ -535,16 +538,17 @@ impl AgentBridge {
     /// event: a session that just changed worktree is among the newest fifty. A session that moved
     /// and then went quiet long enough to fall out of the page is dropped by
     /// [`SESSION_LOCATION_TTL`] and is only picked up again as new.
-    fn session_locations(&self) -> Result<Vec<ApiSession>, BridgeError> {
+    fn session_locations_until(&self, deadline: Instant) -> Result<Vec<ApiSession>, BridgeError> {
         let url = format!("{}/api/session", self.base_url());
-        let envelope: ApiEnvelope<Vec<ApiSession>> = send_json(retry_interrupted(|| {
-            with_timeout(self.client.get(&url), JSON_REQUEST_TIMEOUT)
+        let response = retry_interrupted_until(deadline, |timeout| {
+            with_timeout(self.client.get(&url), timeout)
                 .query("parentID", "null")
                 .query("limit", SESSION_LIST_LIMIT)
                 .header("authorization", self.auth_header())
                 .header("accept", "application/json")
                 .call()
-        }))?;
+        })?;
+        let envelope: ApiEnvelope<Vec<ApiSession>> = send_json(response)?;
         Ok(envelope
             .into_unscoped_data()
             .into_iter()
@@ -559,8 +563,14 @@ impl AgentBridge {
     /// covers a turn a person started in their own TUI. It answers for the whole service, so the
     /// caller is what narrows it to one directory.
     fn running_sessions(&self) -> Result<HashSet<String>, BridgeError> {
-        let active: HashMap<String, ApiActiveSession> =
-            self.get_json_with_timeout("/api/session/active", JSON_REQUEST_TIMEOUT)?;
+        self.running_sessions_until(Instant::now() + JSON_REQUEST_TIMEOUT)
+    }
+
+    fn running_sessions_until(&self, deadline: Instant) -> Result<HashSet<String>, BridgeError> {
+        let active: HashMap<String, ApiActiveSession> = self.get_json_with_timeout(
+            "/api/session/active",
+            deadline.saturating_duration_since(Instant::now()),
+        )?;
         Ok(active
             .into_iter()
             .filter(|(_, session)| session.kind == "running")
@@ -1769,12 +1779,8 @@ const CANDIDATE_READ_WAIT: Duration =
 /// enough for no healthy location to wait on a slow one, which is the whole point.
 const PENDING_READ_CONCURRENCY: usize = 4;
 
-/// The total deadline shared by per-location form and permission reads.
-///
-/// It starts after the service-wide session and activity reads, so it bounds neither those reads nor
-/// the complete candidate snapshot. Every pending endpoint at every candidate location uses only
-/// the time left on this one deadline. Kept under `CANDIDATE_READ_WAIT` so the owner still publishes
-/// before a coalesced caller gives up on it.
+/// The total deadline for a candidate snapshot, including its service-wide list, activity and pending reads.
+/// Kept under `CANDIDATE_READ_WAIT` so the owner finishes before a coalesced caller gives up.
 const PENDING_READ_BUDGET: Duration = JSON_REQUEST_TIMEOUT;
 
 /// Every candidate location's pending sessions, locations that could not say, and safe failure kinds.
@@ -1788,13 +1794,12 @@ const PENDING_READ_BUDGET: Duration = JSON_REQUEST_TIMEOUT;
 fn read_pending(
     bridge: &AgentBridge,
     directories: &HashSet<PathBuf>,
-    budget: Duration,
+    deadline: Instant,
 ) -> (HashSet<String>, HashSet<PathBuf>, Vec<PendingReadFailure>) {
     let queue: Vec<&Path> = directories.iter().map(PathBuf::as_path).collect();
     // Shared rather than partitioned: a worker stuck on a slow location must not also hold the
     // healthy ones it would otherwise have picked up after it.
     let cursor = AtomicUsize::new(0);
-    let deadline = Instant::now() + budget;
     let (answered, awaiting, mut failures) = std::thread::scope(|scope| {
         let workers: Vec<_> = (0..PENDING_READ_CONCURRENCY.min(queue.len()))
             .map(|_| {
@@ -1842,11 +1847,12 @@ fn read_pending(
 
 /// The service-wide candidate list, running state and pending requests at its candidate locations.
 fn read_candidates(bridge: &AgentBridge, budget: Duration) -> Result<CandidateRead, BridgeError> {
+    let deadline = Instant::now() + budget;
     let sessions: Vec<ApiSession> = bridge.get_unscoped_json(
         &format!("/api/session?limit={CANDIDATE_SESSION_LIMIT}"),
-        JSON_REQUEST_TIMEOUT,
+        deadline.saturating_duration_since(Instant::now()),
     )?;
-    let running = bridge.running_sessions()?;
+    let running = bridge.running_sessions_until(deadline)?;
     let directories: HashSet<PathBuf> = sessions
         .iter()
         .map(|session| {
@@ -1857,7 +1863,8 @@ fn read_candidates(bridge: &AgentBridge, budget: Duration) -> Result<CandidateRe
                 .unwrap_or_else(|| bridge.directory().to_path_buf())
         })
         .collect();
-    let (awaiting, unknown_pending, pending_failures) = read_pending(bridge, &directories, budget);
+    let (awaiting, unknown_pending, pending_failures) =
+        read_pending(bridge, &directories, deadline);
     Ok(CandidateRead {
         sessions: Arc::new(sessions),
         running: Arc::new(running),
@@ -1869,6 +1876,7 @@ fn read_candidates(bridge: &AgentBridge, budget: Duration) -> Result<CandidateRe
 
 /// Tool work can move between worktrees without moving the OpenCode session itself.
 /// Keep that effective location until newer attributable work or an explicit session move.
+#[derive(Clone)]
 struct SessionWork {
     origin: PathBuf,
     effective: Option<PathBuf>,
@@ -1879,114 +1887,6 @@ struct SessionWork {
     seen: Instant,
 }
 
-/// Only inspect completed tool contracts, never prompts, shell commands or Code Mode source.
-/// OpenCode 2.0.26 documents edit/write/patch as Location-relative; only absolute shell.workdir is attributed.
-/// Its Code Mode transcript stores calls as metadata.toolCalls[{tool,status,input}].
-// lean-ctx: explicit execution/mutation targets only; extend when another tool exposes verified targets.
-fn work_targets(name: &str, input: &serde_json::Value, origin: &Path) -> Vec<PathBuf> {
-    let resolve = |value: &str| {
-        (!value.is_empty()).then(|| {
-            let path = PathBuf::from(value);
-            if path.is_absolute() || !matches!(name, "edit" | "write" | "patch") {
-                path
-            } else {
-                origin.join(path)
-            }
-        })
-    };
-    let field = match name {
-        "shell" => "workdir",
-        "lean-ctx.ctx_shell" => "cwd",
-        "edit" | "write" | "lean-ctx.ctx_patch" => "path",
-        "patch" => {
-            return input["patchText"]
-                .as_str()
-                .into_iter()
-                .flat_map(str::lines)
-                .filter_map(|line| {
-                    [
-                        "*** Add File: ",
-                        "*** Update File: ",
-                        "*** Delete File: ",
-                        "*** Move to: ",
-                    ]
-                    .into_iter()
-                    .find_map(|prefix| line.strip_prefix(prefix))
-                })
-                .filter_map(resolve)
-                .collect();
-        }
-        _ => return Vec::new(),
-    };
-    let mut paths: Vec<_> = input[field]
-        .as_str()
-        .and_then(resolve)
-        .into_iter()
-        .collect();
-    if name == "lean-ctx.ctx_patch" {
-        if let Some(ops) = input["ops"].as_array() {
-            paths.extend(
-                ops.iter()
-                    .filter_map(|op| op["path"].as_str())
-                    .filter_map(resolve),
-            );
-        }
-    }
-    paths
-}
-
-fn latest_work(
-    messages: &[serde_json::Value],
-    after: i64,
-    origin: &Path,
-) -> Option<(i64, Vec<PathBuf>)> {
-    let mut latest: Option<(i64, Vec<PathBuf>)> = None;
-    for tool in messages
-        .iter()
-        .filter(|message| message["type"] == "assistant")
-        .flat_map(|message| message["content"].as_array().into_iter().flatten())
-    {
-        let completed = tool["time"]["completed"].as_i64().unwrap_or(0);
-        if tool["type"] != "tool"
-            || tool["state"]["status"] != "completed"
-            || tool["state"]["metadata"]["error"] == true
-            || tool["state"]["metadata"]["truncated"] == true
-            || completed <= after
-        {
-            continue;
-        }
-        let mut targets = work_targets(
-            tool["name"].as_str().unwrap_or(""),
-            &tool["state"]["input"],
-            origin,
-        );
-        if tool["name"] == "execute" {
-            for call in tool["state"]["metadata"]["toolCalls"]
-                .as_array()
-                .into_iter()
-                .flatten()
-            {
-                if call["status"] == "completed" {
-                    targets.extend(work_targets(
-                        call["tool"].as_str().unwrap_or(""),
-                        &call["input"],
-                        origin,
-                    ));
-                }
-            }
-        }
-        if targets.is_empty() {
-            continue;
-        }
-        match &mut latest {
-            Some((time, paths)) if *time == completed => paths.extend(targets),
-            Some((time, _)) if *time > completed => {}
-            _ => latest = Some((completed, targets)),
-        }
-    }
-    latest
-}
-
 /// Keep history reads moving through the bounded newest-session page across polling ticks.
 fn rotate_sessions_after(sessions: &mut [ApiSession], cursor: Option<&str>) {
     if let Some(index) = cursor.and_then(|cursor| sessions.iter().position(|s| s.id == cursor)) {
@@ -1994,55 +1894,11 @@ fn rotate_sessions_after(sessions: &mut [ApiSession], cursor: Option<&str>) {
     }
 }
 
-/// Resolve existing targets canonically. A deleted target's leaf can still be attributed through
-/// its canonical existing parent; missing ancestors and all other resolution errors are rejected.
-fn canonical_work_target(target: &Path) -> Option<PathBuf> {
-    match target.canonicalize() {
-        Ok(target) => Some(target),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            let leaf = match target.components().next_back()? {
-                std::path::Component::Normal(leaf) => leaf,
-                _ => return None,
-            };
-            Some(target.parent()?.canonicalize().ok()?.join(leaf))
-        }
-        Err(_) => None,
-    }
-}
+use relocation::{latest_work, CheckoutIndex};
 
-/// Canonical paths and the deepest registered checkout prevent nested worktrees or symlinks
-/// from being attributed to their parent. A batch naming several worktrees names none.
+#[cfg(test)]
 fn work_directory(checkouts: &[(String, PathBuf)], targets: &[PathBuf]) -> Option<PathBuf> {
-    let mut directory = None;
-    for target in targets {
-        if !target.is_absolute() {
-            return None;
-        }
-        let target = canonical_work_target(target)?;
-        let mut candidates: Vec<_> = checkouts
-            .iter()
-            .filter_map(|(_, path)| path.canonicalize().ok())
-            .filter(|path| target.starts_with(path))
-            .collect();
-        candidates.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
-        let best = candidates.first()?;
-        // A nested Git checkout not registered yet is not work in its parent checkout.
-        if target
-            .ancestors()
-            .take_while(|path| *path != best)
-            .any(|path| path.join(".git").exists())
-        {
-            return None;
-        }
-        if candidates.get(1) == Some(best) {
-            return None;
-        }
-        if directory.as_ref().is_some_and(|previous| previous != best) {
-            return None;
-        }
-        directory = Some(best.clone());
-    }
-    directory
+    CheckoutIndex::new(checkouts).work_directory(targets)
 }
 
 /// The last worktree this panel could name for a session, and when it was last read.
@@ -2086,6 +1942,7 @@ pub struct AgentService {
     /// [`AgentService::relocations`], which is the only thing that reads or writes it.
     session_locations: Mutex<HashMap<String, SessionLocation>>,
     session_work: Mutex<HashMap<String, SessionWork>>,
+    relocation_snapshot: Mutex<()>,
     /// Last session whose history was read, for fair reads across the newest-page limit.
     relocation_history_cursor: Mutex<Option<String>>,
     /// Moves that have been reported and might not have arrived. See [`PendingMove`].
@@ -2192,6 +2049,7 @@ impl AgentService {
             busy_turns: Arc::new(Mutex::new(HashMap::new())),
             session_locations: Mutex::new(HashMap::new()),
             session_work: Mutex::new(HashMap::new()),
+            relocation_snapshot: Mutex::new(()),
             relocation_history_cursor: Mutex::new(None),
             pending_moves: Mutex::new(HashMap::new()),
             sink: Mutex::new(None),
@@ -2749,6 +2607,33 @@ impl AgentService {
         checkouts: &[(String, PathBuf)],
         baseline: bool,
     ) -> Result<Vec<AgentRelocation>, BridgeError> {
+        self.relocations_with_budget(checkouts, baseline, Duration::from_secs(2))
+    }
+
+    fn relocations_with_budget(
+        &self,
+        checkouts: &[(String, PathBuf)],
+        baseline: bool,
+        budget: Duration,
+    ) -> Result<Vec<AgentRelocation>, BridgeError> {
+        let deadline = Instant::now() + budget;
+        // Serialize snapshots without holding state locks across transport I/O.
+        let _snapshot = match self.relocation_snapshot.try_lock() {
+            Ok(snapshot) => snapshot,
+            Err(std::sync::TryLockError::WouldBlock) if baseline => {
+                return Err(BridgeError::Unavailable(
+                    "could not establish the agent relocation baseline".into(),
+                ))
+            }
+            Err(std::sync::TryLockError::WouldBlock) => {
+                return self.offer_pending_moves(Instant::now())
+            }
+            Err(std::sync::TryLockError::Poisoned(_)) => {
+                return Err(BridgeError::Failed(
+                    "the agent relocation snapshot is poisoned".into(),
+                ))
+            }
+        };
         // Any live bridge reads every location, so the read is asked of one that is already
         // connected rather than of one this call would connect. A bridge is opened for a
         // checkout the panel is already talking to, which is also the only kind of checkout a
@@ -2778,44 +2663,66 @@ impl AgentService {
                     .lock()
                     .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?
                     .clear();
+            } else if !checkouts.is_empty() {
+                return self.offer_pending_moves(Instant::now());
             }
             return Ok(Vec::new());
         };
-        let bridge = self.bridge(&anchor_id, &anchor_directory)?;
-        // Serialize snapshots as well as their application, so overlapping callers cannot replay
-        // an older session location after a newer tool read.
-        let mut work = self
-            .session_work
-            .lock()
-            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
-        let mut sessions = bridge.session_locations()?;
+        let bridge = match self.bridge(&anchor_id, &anchor_directory) {
+            Ok(bridge) => bridge,
+            Err(error) if baseline => return Err(error),
+            Err(_) => return self.offer_pending_moves(Instant::now()),
+        };
+        let mut sessions = match bridge.session_locations_until(deadline) {
+            Ok(sessions) => sessions,
+            Err(error) if baseline => return Err(error),
+            Err(_) => return self.offer_pending_moves(Instant::now()),
+        };
+        let checkout_index = CheckoutIndex::new(checkouts);
         let now = Instant::now();
         let observed = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap_or_default()
             .as_millis() as i64;
+        let mut work = self
+            .session_work
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?
+            .clone();
         work.retain(|_, entry| now.duration_since(entry.seen) <= SESSION_LOCATION_TTL);
-        // One shared budget; a slow tool-history route must not multiply the polling delay.
-        let deadline = now + Duration::from_secs(2);
+        // One deadline covers initial lists, activity and all session histories.
+        if deadline <= Instant::now() {
+            return if baseline {
+                Err(BridgeError::Unavailable(
+                    "could not establish the agent relocation baseline".into(),
+                ))
+            } else {
+                self.offer_pending_moves(Instant::now())
+            };
+        }
         let running: HashMap<String, ApiActiveSession> = if sessions
             .iter()
             .any(|session| session.time.updated != 0 && work.contains_key(&session.id))
         {
-            bridge
-                .get_unscoped_json(
-                    "/api/session/active",
-                    deadline.saturating_duration_since(Instant::now()),
-                )
-                .unwrap_or_default()
+            match bridge.get_unscoped_json(
+                "/api/session/active",
+                deadline.saturating_duration_since(Instant::now()),
+            ) {
+                Ok(running) => running,
+                Err(error) if baseline => return Err(error),
+                Err(_) => return self.offer_pending_moves(Instant::now()),
+            }
         } else {
             HashMap::new()
         };
         let mut history_cursor = self
             .relocation_history_cursor
             .lock()
-            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?
+            .clone();
         rotate_sessions_after(&mut sessions, history_cursor.as_deref());
         let mut located = Vec::new();
+        let mut clear_pending = Vec::new();
         for session in sessions {
             let origin = PathBuf::from(session.location.unwrap().directory);
             let entry = work
@@ -2863,7 +2770,7 @@ impl AgentService {
                         ),
                         remaining,
                     );
-                    *history_cursor = Some(session.id.clone());
+                    history_cursor = Some(session.id.clone());
                     match messages {
                         Ok(messages) => {
                             entry.updated = session.time.updated;
@@ -2874,26 +2781,20 @@ impl AgentService {
                                 entry.completed = completed;
                                 entry.targets = targets;
                                 // An ambiguous target cannot keep offering an older undelivered move.
-                                if work_directory(checkouts, &entry.targets).is_none() {
-                                    self.pending_moves
-                                        .lock()
-                                        .map_err(|_| {
-                                            BridgeError::Failed(
-                                                "the agent service is poisoned".into(),
-                                            )
-                                        })?
-                                        .remove(&session.id);
+                                if checkout_index.work_directory(&entry.targets).is_none() {
+                                    clear_pending.push(session.id.clone());
                                 }
                             }
                         }
                         Err(error) if baseline => return Err(error),
+                        // Keep this session's prior verified cursor/targets and continue other sessions.
                         Err(_) => {}
                     }
                 }
             }
             // Resolve again even without new tools: the agent may have created a worktree before
             // Muster registered it. The original target is retained, not its parent checkout.
-            if let Some(directory) = work_directory(checkouts, &entry.targets) {
+            if let Some(directory) = checkout_index.work_directory(&entry.targets) {
                 entry.effective = Some(directory);
             } else if baseline && !entry.targets.is_empty() {
                 // An unresolved target has no checkout to seed; retaining an old effective dir
@@ -2902,7 +2803,42 @@ impl AgentService {
             }
             located.push((session.id, entry.effective.clone()));
         }
+        if deadline <= Instant::now() && baseline {
+            return Err(BridgeError::Unavailable(
+                "could not establish the agent relocation baseline".into(),
+            ));
+        }
+        if !clear_pending.is_empty() {
+            let mut pending = self
+                .pending_moves
+                .lock()
+                .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
+            for session_id in clear_pending {
+                pending.remove(&session_id);
+            }
+        }
+        *self
+            .session_work
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))? = work;
+        *self
+            .relocation_history_cursor
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))? =
+            history_cursor;
         self.record_relocations_with_baseline(checkouts, located, now, baseline)
+    }
+
+    fn offer_pending_moves(&self, now: Instant) -> Result<Vec<AgentRelocation>, BridgeError> {
+        let mut pending = self
+            .pending_moves
+            .lock()
+            .map_err(|_| BridgeError::Failed("the agent service is poisoned".into()))?;
+        pending.retain(|_, entry| now.duration_since(entry.since) <= PENDING_MOVES_TTL);
+        Ok(pending
+            .values()
+            .map(|entry| entry.relocation.clone())
+            .collect())
     }
 
     /// What changed between the last read and this one, together with what is still owed.
@@ -3473,12 +3409,13 @@ mod tests {
 
     use super::{
         event_from_payload, event_stream, generation_scoped_sink, is_interrupted, join_reader,
-        read_bounded_line, read_events, read_sse_frame, ready, remove_slot_if_current,
-        report_stream_loss, retry_interrupted, retry_interrupted_until, same_directory, send_json,
-        status_detail, validate_session_id, AgentBridge, AgentEvent, AgentService, ApiAgent,
-        ApiModel, ApiSession, BridgeError, BridgeState, BridgeStopper, CandidateSlot, EventSink,
-        PendingReadFailure, RemovalState, ServerCredentials, StreamLoss, CANDIDATE_SESSION_LIMIT,
-        DIRECTORY_HEADER, INTERRUPTED_READ_ATTEMPTS, INTERRUPTED_REQUEST, JSON_REQUEST_TIMEOUT,
+        read_bounded_line, read_candidates, read_events, read_sse_frame, ready,
+        remove_slot_if_current, report_stream_loss, retry_interrupted, retry_interrupted_until,
+        same_directory, send_json, status_detail, validate_session_id, AgentBridge, AgentEvent,
+        AgentService, ApiAgent, ApiModel, ApiSession, BridgeError, BridgeState, BridgeStopper,
+        CandidateSlot, EventSink, PendingMove, PendingReadFailure, RemovalState, ServerCredentials,
+        SessionLocation, SessionWork, StreamLoss, CANDIDATE_SESSION_LIMIT, DIRECTORY_HEADER,
+        INTERRUPTED_READ_ATTEMPTS, INTERRUPTED_REQUEST, JSON_REQUEST_TIMEOUT,
         MAX_EVENT_HEADERS_BYTES, MAX_EVENT_HEADER_LINE_BYTES, MAX_PROMPT_BYTES,
         MAX_SSE_FRAME_BYTES, MAX_SSE_FRAME_LINES, PENDING_MOVES_TTL, PENDING_READ_CONCURRENCY,
         SESSION_LIST_LIMIT,
@@ -4596,6 +4533,89 @@ mod tests {
     }
 
     #[test]
+    fn candidate_budget_covers_slow_initial_session_list() {
+        let (port, _, arrived) =
+            serving_candidate_reads(Vec::new(), &[], Duration::from_millis(300));
+        let agents = AgentService::with_test_server(port);
+        let bridge = agents.bridge("local", Path::new("/")).unwrap();
+        let budget = Duration::from_millis(100);
+
+        let started = Instant::now();
+        let result = read_candidates(&bridge, budget);
+        let elapsed = started.elapsed();
+
+        assert!(arrived.recv_timeout(Duration::from_secs(1)).is_ok());
+        assert!(
+            result.is_err(),
+            "a partial candidate snapshot was published"
+        );
+        assert!(
+            elapsed < Duration::from_millis(250),
+            "initial list exceeded total budget: {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn overlapping_relocation_poll_reoffers_pending_moves_and_expires_them() {
+        let agents = AgentService::with_test_server(0);
+        let move_ = AgentRelocation {
+            session_id: "ses_pending".into(),
+            from_checkout_id: "origin".into(),
+            to_checkout_id: "destination".into(),
+            observed_at: 1,
+        };
+        agents.pending_moves.lock().unwrap().insert(
+            move_.session_id.clone(),
+            PendingMove {
+                relocation: move_.clone(),
+                since: Instant::now(),
+            },
+        );
+        let guard = agents.relocation_snapshot.lock().unwrap();
+        assert_eq!(agents.relocations(&[]).unwrap(), vec![move_.clone()]);
+        drop(guard);
+        assert!(agents
+            .offer_pending_moves(Instant::now() + PENDING_MOVES_TTL + Duration::from_millis(1))
+            .unwrap()
+            .is_empty());
+
+        let poisoned = Arc::new(AgentService::with_test_server(0));
+        let service = Arc::clone(&poisoned);
+        let _ = std::thread::spawn(move || {
+            let _guard = service.relocation_snapshot.lock().unwrap();
+            panic!("poison snapshot lock for test");
+        })
+        .join();
+        assert!(matches!(
+            poisoned.relocations(&[]),
+            Err(BridgeError::Failed(_))
+        ));
+    }
+
+    #[test]
+    fn slow_relocation_list_does_not_hold_state_lock_or_queue_a_stale_snapshot() {
+        let (port, _, arrived) =
+            serving_candidate_reads(Vec::new(), &[], Duration::from_millis(300));
+        let agents = Arc::new(AgentService::with_test_server(port));
+        let checkout = tempfile::tempdir().unwrap();
+        agents.bridge("local", checkout.path()).unwrap();
+        let worker = Arc::clone(&agents);
+        let checkouts = vec![("local".to_string(), checkout.path().to_path_buf())];
+        let poll = std::thread::spawn(move || worker.relocations(&checkouts).unwrap());
+
+        assert!(arrived.recv_timeout(Duration::from_secs(1)).is_ok());
+        assert!(
+            agents.session_work.try_lock().is_ok(),
+            "network I/O held the relocation state lock"
+        );
+        assert!(agents
+            .relocations(&[("local".into(), checkout.path().to_path_buf())])
+            .unwrap()
+            .is_empty());
+        assert!(poll.join().unwrap().is_empty());
+    }
+
+    #[test]
     fn pending_request_deadline_covers_a_stalled_response_body() {
         let directory = tempfile::tempdir().unwrap();
         let listed = serde_json::json!({"data": [{
@@ -5084,6 +5104,141 @@ mod tests {
         assert_eq!(second_requests.len(), 1);
         assert_eq!(route(&second_requests[0].0), "GET /api/session/ses_owned");
         assert_eq!(second_requests[0].1, first_authorization);
+    }
+
+    #[test]
+    fn failed_history_advances_fair_cursor_and_keeps_other_session_progress() {
+        let origin = tempfile::tempdir().unwrap();
+        let destination = tempfile::tempdir().unwrap();
+        let origin_path = origin.path().to_path_buf();
+        let destination_path = destination.path().to_path_buf();
+        let listed_sessions = ["ses_bad", "ses_good"].map(|id| {
+            serde_json::json!({
+                "id": id,
+                "time": {"updated": 2},
+                "location": {"directory": origin_path}
+            })
+        });
+        let listed = Arc::new(serde_json::json!({"data": listed_sessions}));
+        let good_history = Arc::new(serde_json::json!({"data": [{
+            "type": "assistant",
+            "content": [{
+                "type": "tool", "name": "shell", "time": {"completed": 10},
+                "state": {"status": "completed", "input": {"workdir": destination_path}, "metadata": {}}
+            }]
+        }]}));
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for incoming in listener.incoming() {
+                let Ok(mut stream) = incoming else { break };
+                let listed = Arc::clone(&listed);
+                let good_history = Arc::clone(&good_history);
+                std::thread::spawn(move || {
+                    let mut reader = BufReader::new(stream.try_clone().unwrap());
+                    let mut request = String::new();
+                    if reader.read_line(&mut request).unwrap_or(0) == 0 {
+                        return;
+                    }
+                    loop {
+                        let mut header = String::new();
+                        if reader.read_line(&mut header).unwrap_or(0) == 0 || header == "\r\n" {
+                            break;
+                        }
+                    }
+                    let (status, body, delay) = if request.starts_with("GET /api/session/active") {
+                        (
+                            "200 OK",
+                            serde_json::json!({"data": {}}),
+                            Duration::from_millis(150),
+                        )
+                    } else if request.starts_with("GET /api/session?") {
+                        ("200 OK", (*listed).clone(), Duration::from_millis(50))
+                    } else if request.starts_with("GET /api/session/ses_bad/message") {
+                        (
+                            "503 Service Unavailable",
+                            serde_json::json!({"data": []}),
+                            Duration::from_millis(600),
+                        )
+                    } else if request.starts_with("GET /api/session/ses_good/message") {
+                        ("200 OK", (*good_history).clone(), Duration::ZERO)
+                    } else {
+                        ("200 OK", serde_json::json!({"data": []}), Duration::ZERO)
+                    };
+                    sleep(delay);
+                    let body = serde_json::to_vec(&body).unwrap();
+                    let _ = write!(stream, "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n", body.len());
+                    let _ = stream.write_all(&body);
+                });
+            }
+        });
+
+        let agents = AgentService::with_test_server(port);
+        agents.bridge("origin", &origin_path).unwrap();
+        let now = Instant::now();
+        let previous_target = origin_path.join("verified-before-failure");
+        {
+            let mut work = agents.session_work.lock().unwrap();
+            for id in ["ses_bad", "ses_good"] {
+                work.insert(
+                    id.into(),
+                    SessionWork {
+                        origin: origin_path.clone(),
+                        effective: Some(origin_path.clone()),
+                        targets: if id == "ses_bad" {
+                            vec![previous_target.clone()]
+                        } else {
+                            Vec::new()
+                        },
+                        completed: 1,
+                        updated: 1,
+                        running: false,
+                        seen: now,
+                    },
+                );
+            }
+            *agents.relocation_history_cursor.lock().unwrap() = Some("ses_good".into());
+        }
+        for id in ["ses_bad", "ses_good"] {
+            agents.session_locations.lock().unwrap().insert(
+                id.into(),
+                SessionLocation {
+                    checkout_id: Some("origin".into()),
+                    seen: now,
+                },
+            );
+        }
+        let checkouts = vec![
+            ("origin".into(), origin_path.clone()),
+            ("destination".into(), destination_path.clone()),
+        ];
+        let budget = Duration::from_millis(350);
+
+        let started = Instant::now();
+        let first = agents
+            .relocations_with_budget(&checkouts, false, budget)
+            .unwrap();
+        assert!(started.elapsed() < Duration::from_millis(500));
+        assert!(first.is_empty());
+        let after_first = agents.session_work.lock().unwrap();
+        assert_eq!(
+            after_first["ses_bad"].updated, 1,
+            "failed history was acknowledged"
+        );
+        assert_eq!(after_first["ses_bad"].targets, vec![previous_target]);
+        assert_eq!(
+            *agents.relocation_history_cursor.lock().unwrap(),
+            Some("ses_bad".into())
+        );
+        drop(after_first);
+
+        let second = agents
+            .relocations_with_budget(&checkouts, false, budget)
+            .unwrap();
+        assert!(second
+            .iter()
+            .any(|move_| move_.session_id == "ses_good" && move_.to_checkout_id == "destination"));
+        assert!(agents.session_work.lock().unwrap()["ses_good"].completed == 10);
     }
 
     #[test]

@@ -145,11 +145,12 @@ mod imp {
         // buffer it was handed, so every byte up to the terminator is a byte of that path.
         let bytes: &[u8] =
             unsafe { std::slice::from_raw_parts(info.pvi_cdir.vip_path.as_ptr().cast(), path) };
-        std::str::from_utf8(bytes)
-            .ok()
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(PathBuf::from)
+        path_from_bytes(bytes)
+    }
+
+    pub(super) fn path_from_bytes(bytes: &[u8]) -> Option<PathBuf> {
+        let path = std::str::from_utf8(bytes).ok()?;
+        (!path.is_empty()).then(|| PathBuf::from(path))
     }
 }
 
@@ -255,6 +256,18 @@ mod tests {
             actual.canonicalize().unwrap_or(actual)
         );
         assert_eq!(super::current_directory(u32::MAX), None);
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn preserves_trailing_space_in_a_directory_path() {
+        let path = std::env::temp_dir().join(format!("muster-cwd-{} ", std::process::id()));
+        std::fs::create_dir_all(&path).expect("create temporary directory");
+        let decoded = super::imp::path_from_bytes(path.to_str().unwrap().as_bytes());
+        std::fs::remove_dir(&path).expect("remove temporary directory");
+        assert_eq!(decoded.as_deref(), Some(path.as_path()));
+        assert_eq!(super::imp::path_from_bytes(b""), None);
+        assert_eq!(super::imp::path_from_bytes(&[0xff]), None);
     }
 
     /// The one thing that would break silently if this machine's C headers ever disagreed with us:

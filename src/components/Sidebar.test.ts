@@ -4,7 +4,7 @@ import { resolve } from "node:path";
 import { flushPromises, mount } from "@vue/test-utils";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { nextTick } from "vue";
-import type { ArchivedCheckout, Checkout, Repo, Session } from "../domain/workspace";
+import type { ArchivedCheckout, Checkout, Repo, Session, TerminalSessionStatus } from "../domain/workspace";
 
 const mocks = vi.hoisted(() => ({
   getGitCheckoutDiffStats: vi.fn(),
@@ -3715,6 +3715,23 @@ async function weighed() {
   await nextTick();
 }
 
+/**
+ * Counts the readings a weighing pass makes of a row's own box, which is what the pass costs.
+ *
+ * `contentWidth` and `gapOf` both ask the browser what a row is drawn at, once per row, so the
+ * count of those readings is the count of rows weighed — and a pass that changed nothing is a pass
+ * the panel does not have to make.
+ */
+function countRowMeasurements() {
+  const real = window.getComputedStyle;
+  let readings = 0;
+  window.getComputedStyle = ((element: Element, pseudo?: string | null) => {
+    if (element.classList.contains("workdir-select")) readings += 1;
+    return real.call(window, element, pseudo);
+  }) as typeof window.getComputedStyle;
+  return Object.assign(() => readings, { restore: () => (window.getComputedStyle = real) });
+}
+
 describe("a label is weighed against its row rather than cut between its halves", () => {
   beforeEach(() => {
     fitObservers.length = 0;
@@ -3964,5 +3981,175 @@ describe("a label is weighed against its row rather than cut between its halves"
     expect(styles).toContain('class="fit-probe group-path"');
     expect(styles).toContain('class="fit-probe nm"');
     expect(styles).toContain('class="fit-probe dm"');
+  });
+
+  it("re-weighs labels when collapsed or edited rows become visible again", async () => {
+    const measures = countRowMeasurements();
+    const wrapper = await mountWebapp();
+    const before = measures();
+
+    await wrapper.get(".workdir-fold").trigger("click");
+    await wrapper.setProps({ fontScale: 1.25 });
+    await weighed();
+    const hidden = measures();
+    expect(hidden).toBeGreaterThan(before);
+    await wrapper.get(".workdir-fold").trigger("click");
+    await weighed();
+    expect(measures()).toBeGreaterThan(hidden);
+
+    const row = wrapper.get(".workdir-child .workdir-select");
+    await row.trigger("dblclick");
+    await wrapper.setProps({ fontScale: 1.5 });
+    await weighed();
+    const editing = measures();
+    await wrapper.get(".workdir-rename").trigger("keydown.esc");
+    await weighed();
+    expect(measures()).toBeGreaterThan(editing);
+    measures.restore();
+    wrapper.unmount();
+  });
+
+  it("does not weigh the panel again when a terminal only reports its status", async () => {
+    // A running terminal publishes a fresh status on every poll, whether or not anything about it
+    // changed, and the panel's rows are rebuilt from it every time. What a weighing pass reads is the
+    // words of the rows and the panel's own box, so a poll that changes neither is not a reason to
+    // walk every row's layout again — which is what the pass costs.
+    const measures = countRowMeasurements();
+    // The row's time is read from the clock each time the rows are rebuilt, and the rows are rebuilt
+    // on every poll: that is where this row's time comes from, and it keeps coming from there.
+    let now = 1_000_000;
+    const dateNow = vi.spyOn(Date, "now").mockImplementation(() => now);
+    const runtime: TerminalSessionStatus = {
+      state: "running",
+      foregroundProcess: true,
+      foregroundApp: "opencode",
+      terminalTitle: "OC | Review the duplicated rows",
+    };
+    const wrapper = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:webapp",
+            name: "webapp",
+            root: "/webapp",
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:webapp", repoId: "repo:webapp", path: "/webapp" }),
+                sessions: [session("a", "zsh", "checkout:webapp")],
+              },
+              checkout({ id: "checkout:other", repoId: "repo:webapp", path: "/other", isPrimary: false }),
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+        agentRows: {
+          "checkout:webapp": {
+            sessions: [
+              {
+                id: "ses_row_24",
+                title: "Review the duplicated rows",
+                agent: { label: "plan", color: null, attention: "none" },
+                running: false,
+                awaitingReply: false,
+                updatedAt: now - 5_000,
+              },
+            ],
+          },
+        },
+        sessionRuntimeStatuses: { a: runtime },
+      },
+    });
+    await weighed();
+    const afterMount = measures();
+    expect(wrapper.get(".workdir-end-time").text()).toBe("5s");
+
+    // The same terminal, saying the same thing in a new object a second later: the rows are rebuilt,
+    // the words are identical and the clock still moves, so nothing is weighed.
+    now += 1_000;
+    await wrapper.setProps({ sessionRuntimeStatuses: { a: { ...runtime } } });
+    await weighed();
+    expect(measures()).toBe(afterMount);
+    expect(wrapper.get(".workdir-end-time").text()).toBe("6s");
+
+    // A different word is a different width, and that is a reason.
+    await wrapper.setProps({ sessionRuntimeStatuses: { a: { ...runtime, foregroundApp: "vim" } } });
+    await weighed();
+    expect(measures()).toBeGreaterThan(afterMount);
+    measures.restore();
+    dateNow.mockRestore();
+    wrapper.unmount();
+  });
+
+  it("offers the move menu only where there is somewhere to move to", async () => {
+    // The row asks whether it can move at all, and a panel of one checkout has nowhere to send any of
+    // its terminals: its own worktree is not a destination. A second checkout is, so the same panel
+    // does offer one — which is why the answer is asked once per pass and not once per candidate.
+    const one = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:solo",
+            name: "solo",
+            root: "/solo",
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:solo", repoId: "repo:solo", path: "/solo" }),
+                sessions: [session("one", "zsh", "checkout:solo"), session("two", "zsh", "checkout:solo")],
+              },
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    expect(
+      one.findAll('button[aria-label^="Terminal session:"]').map((row) => row.attributes("aria-haspopup")),
+    ).toEqual([undefined, undefined]);
+    await one.get('[data-session-id="one"] .workdir-select').trigger("contextmenu");
+    expect(one.find(".move-menu").exists()).toBe(false);
+    one.unmount();
+
+    const two = mount(Sidebar, {
+      props: {
+        repos: [
+          repo({
+            id: "repo:solo",
+            name: "solo",
+            root: "/solo",
+            checkouts: [
+              {
+                ...checkout({ id: "checkout:solo", repoId: "repo:solo", path: "/solo" }),
+                sessions: [session("one", "zsh", "checkout:solo")],
+              },
+              checkout({ id: "checkout:other", repoId: "repo:solo", path: "/other", isPrimary: false, branch: "y" }),
+            ],
+          }),
+        ],
+        activeCheckoutId: null,
+        activeSessionId: null,
+        isOpening: false,
+      },
+    });
+    expect(two.get('button[aria-label^="Terminal session:"]').attributes("aria-haspopup")).toBe("menu");
+    // The list is built when the menu opens, and it is the other checkout and nothing else.
+    await two.get('[data-session-id="one"] .workdir-select').trigger("contextmenu");
+    expect(two.findAll(".move-menu [role=menuitem]").map((item) => item.text())).toEqual(["y"]);
+
+    const movedRepos = (two.props("repos") as Repo[]).map((item) => ({
+      ...item,
+      checkouts: item.checkouts.map((checkout, index) => ({
+        ...checkout,
+        sessions: index === 0 ? [] : [session("one", "zsh", "checkout:other")],
+      })),
+    }));
+    await two.setProps({ repos: movedRepos });
+    expect(two.findAll(".move-menu [role=menuitem]").map((item) => item.text())).toEqual(["main"]);
+    await two.find(".move-menu [role=menuitem]").trigger("click");
+    expect(two.emitted("moveSession")).toEqual([["one", "checkout:solo", 0]]);
+    two.unmount();
   });
 });

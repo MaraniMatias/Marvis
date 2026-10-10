@@ -45,7 +45,10 @@ export async function readCheckoutMedia(checkoutId: string, path: string): Promi
   ) {
     throw new Error("Invalid media type.");
   }
-  return new Blob([bytes.slice(separator + 1)], { type: mime });
+  // A view, not a copy. The Blob constructor takes these bytes once, into the blob it builds; `slice`
+  // would have made a second array of the whole payload before it. The cap on the payload is not a
+  // memory guarantee either way — this only removes a copy this line did not need.
+  return new Blob([bytes.subarray(separator + 1)], { type: mime });
 }
 
 export function readCheckoutFile(checkoutId: string, path: string, origin: DocumentOrigin): Promise<FileContent> {

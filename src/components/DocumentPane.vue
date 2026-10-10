@@ -18,7 +18,7 @@ import { useMarkdownPreview } from "../presentation/markdown-preview";
 import { useSourceHighlight } from "../presentation/source-highlight";
 import { isIpcError } from "../domain/ipc";
 import { absoluteFilePath } from "../domain/files";
-import { mediaKind, svgBlob } from "../domain/media";
+import { mediaKind, sameMediaBytes, svgBlob } from "../domain/media";
 import {
   getReviewRootPath,
   readCheckoutFile,
@@ -137,15 +137,35 @@ const binaryMedia = computed(() => kind.value === "image" || kind.value === "vid
 const mediaUrl = ref("");
 const mediaError = ref("");
 const video = ref<HTMLVideoElement | null>(null);
+/** The blob behind `mediaUrl`, kept so a refresh that reads the same bytes can leave both alone. */
+let mediaBlob: Blob | null = null;
 function clearMedia() {
   video.value?.pause();
   if (mediaUrl.value) URL.revokeObjectURL(mediaUrl.value);
   mediaUrl.value = "";
+  mediaBlob = null;
   mediaError.value = "";
 }
 function showMedia(blob: Blob) {
   clearMedia();
   mediaUrl.value = URL.createObjectURL(blob);
+  mediaBlob = blob;
+}
+
+/**
+ * One media load at a time, and a load is the read, the comparison and the commit together: a
+ * queue that let the next read start while the last comparison still held its payload would bound
+ * reads without bounding media memory. An operation that no longer names what is on screen is not
+ * started. The chain carries no blob.
+ */
+let mediaLoads: Promise<void> = Promise.resolve();
+function queueMediaLoad(operation: () => Promise<void>): Promise<void> {
+  const next = mediaLoads.then(operation);
+  mediaLoads = next.then(
+    () => undefined,
+    () => undefined,
+  );
+  return next;
 }
 function renderSvg() {
   clearMedia();
@@ -678,13 +698,27 @@ async function loadFile(preservePosition = false, touchedPaths: readonly string[
   if (touchedPaths !== null) holdImagePaths(touchedPaths);
   try {
     if (binaryMedia.value) {
-      const blob = await readCheckoutMedia(checkoutId, path);
-      if (request !== requestGeneration || props.checkout?.id !== checkoutId || identity.value !== fileIdentity) return;
-      showMedia(blob);
-      content.value = "";
-      contentIdentity.value = fileIdentity;
-      contentState.value = "ready";
-      loadedIdentity = fileIdentity;
+      const isCurrent = () =>
+        request === requestGeneration && props.checkout?.id === checkoutId && identity.value === fileIdentity;
+      // The whole load is queued, so a burst of file events never has more than the payload being
+      // committed and the one being compared in hand at once. Text and Markdown are untouched.
+      await queueMediaLoad(async () => {
+        if (!isCurrent()) return;
+        const blob = await readCheckoutMedia(checkoutId, path);
+        if (!isCurrent()) return;
+        // The same bytes keep the object URL that is already installed. Replacing it revokes the
+        // URL under a `<video>` that is playing and sends it back to the first frame, which is what
+        // a refresh of a batch that named this file, or of one that named nothing, used to do.
+        const unchanged =
+          mediaBlob !== null && loadedIdentity === fileIdentity && (await sameMediaBytes(mediaBlob, blob, isCurrent));
+        if (unchanged === null || !isCurrent()) return;
+        if (unchanged) return;
+        showMedia(blob);
+        content.value = "";
+        contentIdentity.value = fileIdentity;
+        contentState.value = "ready";
+        loadedIdentity = fileIdentity;
+      });
       return;
     }
     const result = await readCheckoutFile(checkoutId, path, props.origin);

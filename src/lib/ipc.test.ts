@@ -141,16 +141,19 @@ describe("media IPC client", () => {
     vi.mocked(invoke).mockResolvedValue(kind === "buffer" ? bytes.buffer : Array.from(bytes));
     const blob = await readCheckoutMedia("checkout:one", "image.png");
     expect(blob.type).toBe("image/png");
+    // The payload is a view of the response handed straight to the Blob: one copy, and the bytes
+    // after the header exactly.
+    expect(blob.size).toBe(3);
     expect(new Uint8Array(await blob.arrayBuffer())).toEqual(new Uint8Array([0, 128, 255]));
     expect(invoke).toHaveBeenLastCalledWith("file_read_media", { checkoutId: "checkout:one", path: "image.png" });
   });
-  it.each(["image/svg+xml\n", "text/html\n", "image/png".repeat(10)])(
-    "refuses untrusted or unbounded MIME: %s",
-    async (header) => {
-      vi.mocked(invoke).mockResolvedValue(new TextEncoder().encode(header).buffer);
+  it.each(["buffer", "array"])("refuses an untrusted or unbounded MIME from a %s response", async (kind) => {
+    for (const header of ["image/svg+xml\n", "text/html\n", "image/png".repeat(10)]) {
+      const bytes = new TextEncoder().encode(header);
+      vi.mocked(invoke).mockResolvedValue(kind === "buffer" ? bytes.buffer : Array.from(bytes));
       await expect(readCheckoutMedia("checkout:one", "file.png")).rejects.toThrow("Invalid media");
-    },
-  );
+    }
+  });
 });
 
 describe("terminal IPC client", () => {

@@ -244,7 +244,13 @@ pub fn probe(
         Err(_) => return Ok(None),
     };
     let readable = if media_limit(&relative_path).is_some() {
-        read_media_file(&resolved, &relative_path, MAX_MEDIA_HEADER_BYTES).map(|_| ())
+        read_media_file(
+            &resolved,
+            &relative_path,
+            MAX_MEDIA_HEADER_BYTES,
+            &mut Vec::new(),
+        )
+        .map(|_| ())
     } else {
         read_preview_text(&resolved).and_then(|text| {
             if extension(&relative_path) == "svg" {
@@ -980,25 +986,46 @@ fn media_limit(path: &Path) -> Option<u64> {
     }
 }
 
+/// The longest MIME `media_mime` returns plus its newline, reserved in front of the payload so the
+/// response is one buffer. `media_mime` is the only thing that decides the header, and the media
+/// tests assert every MIME it can return fits here.
+const MEDIA_HEADER_HEADROOM: usize = 16;
+
 /// MIME is assigned here, never by the caller. No asset protocol or filesystem permission.
 pub fn read_media(database: &Database, checkout_id: &str, path: &str) -> Result<Vec<u8>, IpcError> {
     let (repo, checkout) = registered_checkout(database, checkout_id)?;
     ensure_checkout_available(checkout.is_missing, &checkout.canonical_path)?;
     let relative = parse_relative_path(path)?;
     let resolved = crate::services::checkout::resolve_checkout_path(&repo, checkout_id, &relative)?;
-    let (mime, bytes) = read_media_file(&resolved, &relative, u64::MAX)?;
-    let mut response = Vec::with_capacity(mime.len() + 1 + bytes.len());
-    response.extend_from_slice(mime.as_bytes());
-    response.push(b'\n');
-    response.extend_from_slice(&bytes);
+    // One buffer, not two, inside this reader: the payload is read behind the reserved header and
+    // then moved to sit right behind it, so it is not held twice here. What the IPC transport and
+    // the webview do with the response afterwards is outside what this measures.
+    let mut response = vec![0u8; MEDIA_HEADER_HEADROOM];
+    let (mime, offset) = read_media_file(&resolved, &relative, u64::MAX, &mut response)?;
+    let header = mime.len() + 1;
+    if header > offset {
+        return Err(invalid_media());
+    }
+    let payload = response.len() - offset;
+    response.copy_within(offset.., header);
+    response.truncate(header + payload);
+    response[..header - 1].copy_from_slice(mime.as_bytes());
+    response[header - 1] = b'\n';
     Ok(response)
 }
 
+/// Reads one media file's payload into `out`, appended after whatever `out` already holds, and
+/// answers with the MIME and the offset the payload starts at.
+///
+/// The payload is validated where it lands: `read_limit` caps how much of it is read (the probe
+/// asks for a header and never the payload), the extension's cap still applies either way, and the
+/// MIME is decided from the bytes actually read and returned.
 fn read_media_file(
     path: &Path,
     relative: &Path,
     read_limit: u64,
-) -> Result<(&'static str, Vec<u8>), IpcError> {
+    out: &mut Vec<u8>,
+) -> Result<(&'static str, usize), IpcError> {
     let limit = media_limit(relative).ok_or_else(invalid_media)?;
     let metadata =
         fs::metadata(path).map_err(|e| filesystem_error("could not inspect media", e))?;
@@ -1008,15 +1035,19 @@ fn read_media_file(
     if metadata.len() > limit {
         return Err(too_large());
     }
-    let mut bytes = Vec::with_capacity(metadata.len().min(read_limit) as usize);
+    let offset = out.len();
+    // Reserved up front: `read_to_end` grows what it is given, and a buffer growing from nothing
+    // to 64 MiB holds the old and the new one at once on the way there.
+    out.reserve(metadata.len().min(read_limit) as usize);
     File::open(path)
-        .and_then(|f| f.take((limit + 1).min(read_limit)).read_to_end(&mut bytes))
+        .and_then(|f| f.take((limit + 1).min(read_limit)).read_to_end(out))
         .map_err(|e| filesystem_error("could not read media", e))?;
+    let bytes = &out[offset..];
     if bytes.len() as u64 > limit {
         return Err(too_large());
     }
-    let mime = media_mime(&extension(relative), &bytes).ok_or_else(invalid_media)?;
-    Ok((mime, bytes))
+    let mime = media_mime(&extension(relative), bytes).ok_or_else(invalid_media)?;
+    Ok((mime, offset))
 }
 
 /// An ftyp atom's declared brands, not an arbitrary string elsewhere in the file.
@@ -1444,6 +1475,9 @@ mod tests {
             ("ogv", ogg.clone(), "video/ogg"),
         ] {
             assert_eq!(media_mime(ext, &bytes), Some(mime), "{ext}");
+            // The response reserves this much in front of the payload, and moves the payload to
+            // fit: a MIME that outgrew it would be refused rather than served.
+            assert!(mime.len() < super::MEDIA_HEADER_HEADROOM, "{mime}");
             assert_eq!(media_mime("txt", &bytes), None);
             for length in 0..bytes.len() {
                 assert_eq!(
@@ -1488,6 +1522,15 @@ mod tests {
             [b"image/png\n".as_slice(), png].concat()
         );
         assert!(probe(&database, id, "image.PNG").unwrap().is_some());
+        // The longest MIME the reader can assign, whose header fills the space reserved in front of the
+        // payload exactly. image/png above is the other end of the same move: a shorter header
+        // pulls the payload up behind it.
+        let mov = b"\0\0\0\x10ftypqt  \0\0\0\0";
+        fs::write(root.join("clip.MOV"), mov).unwrap();
+        assert_eq!(
+            read_media(&database, id, "clip.MOV").unwrap(),
+            [b"video/quicktime\n".as_slice(), mov].concat()
+        );
         assert!(read_media(&database, "unknown", "image.PNG").is_err());
         for path in ["../image.PNG", ".git/image.PNG", "/image.PNG"] {
             assert!(read_media(&database, id, path).is_err());
@@ -1535,10 +1578,16 @@ mod tests {
             .unwrap()
             .set_len(64 * 1024 * 1024)
             .unwrap();
-        let (mime, header) =
-            read_media_file(&path, Path::new("large.mp4"), MAX_MEDIA_HEADER_BYTES).unwrap();
+        let mut header = Vec::new();
+        let (mime, offset) = read_media_file(
+            &path,
+            Path::new("large.mp4"),
+            MAX_MEDIA_HEADER_BYTES,
+            &mut header,
+        )
+        .unwrap();
         assert_eq!(mime, "video/mp4");
-        assert_eq!(header.len() as u64, MAX_MEDIA_HEADER_BYTES);
+        assert_eq!((header.len() - offset) as u64, MAX_MEDIA_HEADER_BYTES);
         assert!(probe(&database, id, "large.mp4").unwrap().is_some());
     }
 

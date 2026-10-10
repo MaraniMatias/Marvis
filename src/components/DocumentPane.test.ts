@@ -3,7 +3,7 @@
 /* eslint-disable vue/one-component-per-file */
 import { flushPromises, mount } from "@vue/test-utils";
 import type { VueWrapper } from "@vue/test-utils";
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { writeText } from "@tauri-apps/plugin-clipboard-manager";
 import { defineComponent, reactive, ref } from "vue";
 import type { VNodeChild } from "vue";
@@ -299,6 +299,10 @@ describe("media documents", () => {
     vi.spyOn(URL, "revokeObjectURL").mockImplementation(() => undefined);
     mocks.readCheckoutMedia.mockResolvedValue(new Blob([new Uint8Array([0, 255])], { type: "image/png" }));
   });
+  // Several tests here take over Blob.prototype.slice to watch how the payload is read. Restored
+  // after each one so the next test spies on the real method: a second spy over a live one is the
+  // same spy, and an implementation delegating to what it replaced calls itself.
+  afterEach(() => vi.restoreAllMocks());
 
   it.each(["png", "jpg", "jpeg", "gif", "webp", "avif", "ico", "bmp", "mp4", "webm", "mov", "ogv"])(
     "opens %s as media even with restored Code mode",
@@ -324,19 +328,154 @@ describe("media documents", () => {
   );
 
   it("refreshes only named media (or unknown batches), revokes replacements and surfaces decoding errors", async () => {
+    let payload = new Uint8Array([0, 255]);
+    mocks.readCheckoutMedia.mockImplementation(async () => new Blob([payload], { type: "image/png" }));
     const wrapper = mount(DocumentPane, { props: documentPaneProps("asset.png", "view") });
     await flushPromises();
     await wrapper.setProps({ refreshRevision: 1, refreshPaths: ["unrelated.ts"] });
     expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(1);
+    // The same bytes again: there is nothing to reinstall, so nothing is revoked.
     await wrapper.setProps({ refreshRevision: 2, refreshPaths: ["asset.png"] });
     await flushPromises();
     expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(2);
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:media-1");
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    // One byte different, same length and same type. Only reading the payload says so.
+    payload = new Uint8Array([0, 254]);
     await wrapper.setProps({ refreshRevision: 3, refreshPaths: [] });
     await flushPromises();
     expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(3);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:media-1");
     await wrapper.get(".media-preview img").trigger("error");
     expect(wrapper.get('[role="alert"]').text()).toContain("could not be decoded");
+    wrapper.unmount();
+  });
+
+  it("keeps the object URL and the playback when a refresh reads the same bytes", async () => {
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("clip.mp4", "view") });
+    await flushPromises();
+    const pause = vi.spyOn(wrapper.get("video").element as HTMLVideoElement, "pause");
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: [] });
+    await flushPromises();
+    // The file was read again — that is how it is known to be unchanged — and the video is still
+    // the one that was playing, on the URL it was already playing from.
+    expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(2);
+    expect(wrapper.get("video").attributes("src")).toBe("blob:media-1");
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    expect(URL.revokeObjectURL).not.toHaveBeenCalled();
+    expect(pause).not.toHaveBeenCalled();
+    wrapper.unmount();
+  });
+
+  it("reads one near-cap payload at a time, in slices no larger than the compare chunk", async () => {
+    const cap = 64 * 1024 * 1024 - 1;
+    const bytes = new Uint8Array(cap);
+    bytes[cap - 1] = 7;
+    mocks.readCheckoutMedia.mockResolvedValue(new Blob([bytes], { type: "video/mp4" }));
+    const slice = Blob.prototype.slice;
+    let largest = 0;
+    vi.spyOn(Blob.prototype, "slice").mockImplementation(function (this: Blob, start, end, type) {
+      largest = Math.max(largest, (end ?? this.size) - (start ?? 0));
+      return slice.call(this, start, end, type);
+    });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("clip.mp4", "view") });
+    await flushPromises();
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: [] });
+    await flushPromises();
+    // The payload is nearly the whole video cap, and deciding whether it changed never asks for
+    // more than one chunk of it at a time.
+    expect(largest).toBeLessThanOrEqual(1024 * 1024);
+    expect(largest).toBeGreaterThan(0);
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    wrapper.unmount();
+  });
+
+  it("holds a burst behind the comparison in flight, abandons it, and commits only the newest", async () => {
+    const slice = Blob.prototype.slice;
+    const arrayBuffer = Blob.prototype.arrayBuffer;
+    let arm = false;
+    let held = 0;
+    let chunks = 0;
+    const release: (() => void)[] = [];
+    vi.spyOn(Blob.prototype, "slice").mockImplementation(function (this: Blob, start, end, type) {
+      const part = slice.call(this, start, end, type);
+      part.arrayBuffer = () => {
+        const read = arrayBuffer.call(part);
+        chunks += 1;
+        if (!arm) return read;
+        held += 1;
+        return new Promise<ArrayBuffer>((done) => release.push(() => void read.then(done)));
+      };
+      return part;
+    });
+    // Four chunks, and the payloads differ only in the last one: a comparison that stops early
+    // stops on something other than the answer.
+    let reads = 0;
+    mocks.readCheckoutMedia.mockImplementation(async () => {
+      reads += 1;
+      const bytes = new Uint8Array(4 * 1024 * 1024);
+      bytes[bytes.length - 1] = reads;
+      return new Blob([bytes], { type: "image/png" });
+    });
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("asset.png", "view") });
+    await flushPromises();
+    arm = true;
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: [] });
+    await flushPromises();
+    // The second load has read the file and is comparing it, its first chunk held open.
+    expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(2);
+    expect(held).toBe(1);
+    for (const revision of [2, 3, 4]) {
+      await wrapper.setProps({ refreshRevision: revision, refreshPaths: revision === 4 ? ["asset.png"] : [] });
+      await flushPromises();
+    }
+    // Three more loads were asked for and not one of them started: the queue covers the comparison
+    // too, so a burst cannot stack a payload per refresh behind the one being checked.
+    expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(2);
+    arm = false;
+    release.splice(0).forEach((open) => open());
+    await flushPromises();
+    // The superseded comparison read the chunk it was held on, its partner, and then stopped at the
+    // next position instead of reading the other three: four reads rather than the sixteen two
+    // full comparisons of a four-chunk payload would take. The two loads after it were abandoned
+    // without reading at all, and the one that names the file read last and is what is installed.
+    expect(chunks).toBe(10);
+    expect(mocks.readCheckoutMedia).toHaveBeenCalledTimes(3);
+    const installed = vi.mocked(URL.createObjectURL).mock.calls.at(-1)![0] as Blob;
+    expect(new Uint8Array(await installed.arrayBuffer()).at(-1)).toBe(3);
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith("blob:media-1");
+    wrapper.unmount();
+  });
+
+  it("discards a media comparison that lands after the reader moved on", async () => {
+    const slice = Blob.prototype.slice;
+    const arrayBuffer = Blob.prototype.arrayBuffer;
+    let release!: () => void;
+    const gate = new Promise<void>((done) => (release = done));
+    vi.spyOn(Blob.prototype, "slice").mockImplementation(function (this: Blob, start, end, type) {
+      const part = slice.call(this, start, end, type);
+      // The comparison reads its chunks through here, and here one is held open across a
+      // navigation so it finishes against a pane that is showing something else.
+      part.arrayBuffer = () => gate.then(() => arrayBuffer.call(part));
+      return part;
+    });
+    mocks.readCheckoutMedia.mockImplementation(async (_id: string, path: string) =>
+      path.endsWith(".mp4")
+        ? new Blob([new Uint8Array([2])], { type: "video/mp4" })
+        : new Blob([new Uint8Array([1])], { type: "image/png" }),
+    );
+    const wrapper = mount(DocumentPane, { props: documentPaneProps("asset.png", "view") });
+    await flushPromises();
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(1);
+    await wrapper.setProps({ refreshRevision: 1, refreshPaths: [] });
+    await flushPromises();
+    await wrapper.setProps({ path: "clip.mp4" });
+    release();
+    await flushPromises();
+    // The comparison that named asset.png answered after clip.mp4 took the pane: it is thrown away,
+    // so the video is the second URL and not the third.
+    expect(URL.createObjectURL).toHaveBeenCalledTimes(2);
+    expect(wrapper.get("video").attributes("src")).toBe("blob:media-2");
+    expect(wrapper.find(".media-preview img").exists()).toBe(false);
     wrapper.unmount();
   });
 
