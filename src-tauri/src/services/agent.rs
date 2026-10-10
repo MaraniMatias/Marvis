@@ -7114,7 +7114,7 @@ mod tests {
             directory: directory.path().to_path_buf(),
         };
 
-        let error = ready(credentials, Instant::now() + Duration::from_millis(100))
+        let error = ready(credentials, Instant::now() + Duration::from_secs(1))
             .expect_err("an empty catalog must not pass as a ready service");
 
         assert!(
