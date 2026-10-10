@@ -5146,14 +5146,16 @@ mod tests {
                             break;
                         }
                     }
+                    // Only the failing history read is meant to outlast the budget; the fixed
+                    // costs stay small so a loaded runner cannot spend it before that read.
                     let (status, body, delay) = if request.starts_with("GET /api/session/active") {
                         (
                             "200 OK",
                             serde_json::json!({"data": {}}),
-                            Duration::from_millis(150),
+                            Duration::from_millis(10),
                         )
                     } else if request.starts_with("GET /api/session?") {
-                        ("200 OK", (*listed).clone(), Duration::from_millis(50))
+                        ("200 OK", (*listed).clone(), Duration::from_millis(10))
                     } else if request.starts_with("GET /api/session/ses_bad/message") {
                         (
                             "503 Service Unavailable",
