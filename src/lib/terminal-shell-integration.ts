@@ -14,9 +14,11 @@
  * exit code is a fact about the shell, not about the session's process, which is the same reasoning
  * that keeps `terminalTitle` in the component rather than in the IPC contract.
  *
- * `A` and `B` are prompt boundaries; this integration does not emit or consume them. `C` is the
- * command-start marker emitted from zsh's `preexec_functions` and bash's `PS0`. See
- * `services/terminal.rs` and its shell-level ordering tests.
+ * `B` is the end of the prompt, which is where the shell's line editor starts: it rides at the
+ * tail of `PS1` rather than being printed from the prompt hook, because a prompt is the last thing
+ * a shell prints before the next line is typed. `C` is the command-start marker emitted from zsh's
+ * `preexec_functions` and bash's `PS0`. See `services/terminal.rs` and its shell-level ordering
+ * tests.
  *
  * No Vue, so the parsing is testable on its own: what is worth pinning here is the payload grammar,
  * which the shell decides and this code only reads.
@@ -40,7 +42,17 @@ export type ShellIntegrationEvent =
    *
    * From the OSC 133 `C` command-execution marker; see the note at the top of this file.
    */
-  | { kind: "command-started" };
+  | { kind: "command-started" }
+  /**
+   * The prompt ended and the shell is reading a line again.
+   *
+   * This is the half of OSC 133's `A`/`B` pair that is worth having, and it is worth having for one
+   * reason: everything before it is a prompt or output, which is text nobody is editing. Nothing is
+   * said about *where* it landed, and that is deliberate — whoever wants the cell has to read it
+   * off the terminal from inside this handler, because by the time the call returns the prompt has
+   * finished printing and the cursor has moved.
+   */
+  | { kind: "input-started" };
 
 /**
  * Reads the shell's exit codes out of the terminal's output.
@@ -53,12 +65,16 @@ export function registerShellIntegration(
   onEvent: (event: ShellIntegrationEvent) => void,
 ): IDisposable {
   return terminal.parser.registerOscHandler(OSC_SHELL_INTEGRATION, (data) => {
-    // `D;<code>` and `C` are the markers the hook writes. Anything else on this ident belongs
+    // `D;<code>`, `C` and `B` are the markers the hook writes. Anything else on this ident belongs
     // to some other producer, so it is reported as unhandled rather than guessed at.
     const [marker, code] = data.split(";");
     // `C` may carry the command text; the text says nothing this needs.
     if (marker === "C") {
       onEvent({ kind: "command-started" });
+      return true;
+    }
+    if (marker === "B") {
+      onEvent({ kind: "input-started" });
       return true;
     }
     if (marker !== "D" || !/^\d+$/.test(code)) return false;

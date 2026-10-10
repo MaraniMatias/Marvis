@@ -209,8 +209,9 @@ fn inherited_shell_args(program: &Path) -> Vec<String> {
 /// ships no handler for it, so nothing else contends for these bytes.
 ///
 /// The hooks emit `C` from zsh's `preexec_functions` and bash's `PS0`, both of which fire immediately
-/// before command execution. `A`/`B` are prompt boundaries and are deliberately not emitted; this
-/// consumer needs the command start, not prompt state. This is not the full OSC 133 prompt lifecycle.
+/// before command execution. `B` is the prompt end, which says where the next line begins being
+/// editable, and `A` — the prompt start — is the half of that boundary this consumer has no use
+/// for, so it is still not emitted. This is not the full OSC 133 prompt lifecycle.
 ///
 /// `the_started_marker_fires_for_builtins_and_before_their_output` pins the timing for zsh; the bash
 /// test does the same where that bash supports `PS0`.
@@ -222,6 +223,21 @@ const OSC_STARTED: &str = r"\e]133;C\a";
 /// The same two markers for bash, which has no `print` and so spells the escapes the long way.
 const OSC_EXIT_BASH: &str = r"\033]133;D;%s\007";
 const OSC_STARTED_BASH: &str = r"\033]133;C\007";
+
+/// Where the shell's line editor starts, which is the *end* of the prompt rather than its beginning:
+/// everything from here to the cursor is what the person typed, and a click outside that is a click
+/// on a prompt or on output.
+///
+/// It rides at the tail of `PS1` because the prompt is the last thing a shell prints before the next
+/// line is typed, and a prompt is the only thing it expands on its way out. Printing it from
+/// `precmd` or `PROMPT_COMMAND` would put it *before* the prompt, which is the other boundary, and
+/// the tail of a wrapped prompt is the only place the cell it names is right.
+const OSC_INPUT_STARTED_ZSH: &str = r"\e]133;B\a";
+
+/// The same marker for bash, already wearing the `\[` … `\]` that tell it to count for no columns.
+/// Without them the shell's prompt believes it is two cells wider than it looks, and every cell
+/// after it is two columns left of where it was drawn — which moves the cursor to the wrong place.
+const OSC_INPUT_STARTED_BASH: &str = r"\\[\033]133;B\007\\]";
 
 /// Hooks run after user startup, before the first prompt; no PTY input is injected.
 fn shell_integration_script(program: &Path) -> Option<(&'static str, String)> {
@@ -237,6 +253,17 @@ if [[ -z ${{__muster_integrated-}} ]]; then
     (( __muster_pending )) || __muster_status=0
     __muster_pending=0
     printf '{OSC_EXIT_BASH}' "$__muster_status"
+    # The prompt is printed after this hook and never before it, so the marker goes on the end of
+    # the prompt rather than being printed here. Guarded because this runs once per prompt, and a
+    # second copy would start the input one cell short of where it really begins. The literal
+    # string around it says the bytes take up no columns, which is the difference between a prompt
+    # that looks right and one whose line editor believes it is eight columns wider than it is.
+    #
+    # It is left unterminated on purpose. With the closing sequence written out, this shell prints a
+    # brace after the marker instead of consuming it, at the end of every prompt.
+    # the_prompt_end_marker_rides_at_the_end_of_the_prompt is what fails if that ever comes back.
+    local __muster_input=$'{OSC_INPUT_STARTED_ZSH}'
+    [[ $PS1 == *"$__muster_input"* ]] || PS1="$PS1%{{$__muster_input"
   }}
   muster_px() {{ __muster_pending=1; print -Pn "{OSC_STARTED}"; }}
   precmd_functions=(muster_pc ${{precmd_functions:#muster_pc}})
@@ -261,6 +288,10 @@ if [[ -z ${{__muster_integrated-}} ]]; then
       __muster_first_prompt=0
     fi
     printf '{OSC_EXIT_BASH}' "$__muster_status"
+    # The same marker the zsh script appends, appended the same way and for the same reason: PS1 is
+    # printed after every prompt command, and nothing after this one runs until a line is typed.
+    local __muster_input=$'{OSC_INPUT_STARTED_BASH}'
+    [[ $PS1 == *"$__muster_input"* ]] || PS1="${{PS1-}}$__muster_input"
     return "$__muster_status"
   }}
   if [[ ${{BASH_VERSINFO[0]}} -gt 5 || ${{BASH_VERSINFO[0]}} -eq 5 && ${{BASH_VERSINFO[1]}} -ge 1 ]] && [[ $(declare -p PROMPT_COMMAND 2>/dev/null) == 'declare -a'* ]]; then
@@ -688,6 +719,111 @@ mod tests {
                          so it is not marking the command starting:\n{stream}"
                     );
                 },
+            );
+        }
+    }
+
+    #[test]
+    fn the_prompt_end_marker_rides_at_the_end_of_the_prompt() {
+        const INPUT_STARTED: &str = "\x1b]133;B\x07";
+        for shell in ["/bin/zsh"] {
+            if Command::new(shell).arg("--version").output().is_err() {
+                continue;
+            }
+            shell_stream(
+                shell,
+                "prompt-end:zsh",
+                tempdir().unwrap().path(),
+                &[
+                    b"false\n".as_slice(),
+                    b"echo muster-prompt-end-probe\n".as_slice(),
+                ],
+                b"\x1b]133;D;0\x07",
+                |stream| {
+                    // One marker for every prompt, which is what catches the hook appending to PS1
+                    // again on every prompt instead of checking whether it has already done so: a
+                    // second copy says the input starts one cell before it really does, and a
+                    // prompt drawn without one is a shell whose line cannot be clicked into.
+                    // Either count, because the stream is read as soon as the last command reported
+                    // and the prompt drawn after it may not have been written yet. Twice either
+                    // count is the failure worth catching, and neither is a multiple.
+                    let (prompts, reported) = (
+                        stream.matches(INPUT_STARTED).count(),
+                        stream.matches("\x1b]133;D;").count(),
+                    );
+                    assert!(
+                        prompts == reported || prompts == reported + 1,
+                        "{shell}: {prompts} markers for {reported} prompts, so a prompt is missing \
+                         one or carries more:\n{stream}"
+                    );
+                    // And it is the end of the prompt rather than its beginning. A prompt is drawn
+                    // after the previous command reported and before the next one starts, and the
+                    // line is typed in between, so a marker inside that window is one that names
+                    // the cell the first keystroke of the next command is written to.
+                    let finished = stream.find("\x1b]133;D;1\x07").unwrap_or_else(|| {
+                        panic!("{shell}: the failing command reported nothing:\n{stream}")
+                    });
+                    let ended = stream[finished..]
+                        .find(INPUT_STARTED)
+                        .map(|at| finished + at)
+                        .unwrap_or_else(|| {
+                            panic!(
+                                "{shell}: the prompt drawn after that command has no end marker:\n{stream}"
+                            )
+                        });
+                    let typed = stream[ended..].find("\x1b]133;C\x07").map(|at| ended + at);
+                    assert!(
+                        typed.is_some_and(|started| finished < ended && ended < started),
+                        "{shell}: the marker is not between the prompt being drawn and the line \
+                         being typed, so it is not marking where the input begins:\n{stream}"
+                    );
+                    assert_no_prompt_leftovers(stream, INPUT_STARTED);
+                },
+            );
+        }
+        for bash in bashes() {
+            // A prompt of a known shape, so the marker can be looked for after its last character.
+            // Looking for it in the stream rather than in PS1 is the point: it is what says the
+            // marker did not move the prompt two columns to the left, which is what happens without
+            // the `\[` and `\]` that make it take up no room.
+            let stream = bash_session_after_install(
+                &bash,
+                "PS1='MUSTER_PROMPT> '",
+                &[b"false\n"],
+                b"\x1b]133;D;1\x07",
+            );
+            assert!(
+                stream.contains(&format!("MUSTER_PROMPT> {INPUT_STARTED}")),
+                "{bash}: the marker is not at the end of the prompt, or it moved the prompt:\n{stream}"
+            );
+            // One per prompt, or one fewer if the stream was read before the last prompt was
+            // written; twice either count is the failure worth catching, and neither is a multiple.
+            let (prompts, reported) = (
+                stream.matches(INPUT_STARTED).count(),
+                stream.matches("\x1b]133;D;").count(),
+            );
+            assert!(
+                prompts == reported || prompts == reported + 1,
+                "{bash}: {prompts} markers for {reported} prompts, so a prompt is missing one or \
+                 carries more:\n{stream}"
+            );
+            assert_no_prompt_leftovers(&stream, INPUT_STARTED);
+        }
+    }
+
+    /// Asserts that no part of the marker survives into the prompt as text.
+    ///
+    /// Wrapping the marker in the prompt escape that says it takes up no room is what keeps the
+    /// line editor's idea of the prompt width right, and a shell that does not recognise the pair
+    /// prints the closing half of it instead of consuming it: a brace at the end of every prompt,
+    /// and a prompt one character wider than the one on screen.
+    fn assert_no_prompt_leftovers(stream: &str, marker: &str) {
+        for (at, _) in stream.match_indices(marker) {
+            let after = &stream[at + marker.len()..];
+            assert!(
+                !after.starts_with('}'),
+                "a brace follows the marker, so the closing half of the prompt escape was printed \
+                 rather than consumed:\n{stream}"
             );
         }
     }

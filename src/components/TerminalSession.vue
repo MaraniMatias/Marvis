@@ -22,6 +22,8 @@ import {
   watchTerminalRendererRecovery,
 } from "../lib/muster-terminal";
 import { registerFilePathLinks } from "../lib/terminal-file-links";
+import { enableClickToMoveCursor } from "../lib/terminal-click-cursor";
+import type { ClickToMoveCursor } from "../lib/terminal-click-cursor";
 import { watchKeyboardProtocol } from "../lib/terminal-keys";
 import { createPtyOutputWriter } from "../lib/terminal-renderer";
 import type { PtyOutputWriter } from "../lib/terminal-renderer";
@@ -127,6 +129,9 @@ let started = false;
 let terminalReady = false;
 // The registration that copies a selection, and the handle that takes it back off the terminal.
 let selectionCopyDisposer: { dispose(): void } | undefined;
+// The click that moves the shell's own cursor. Created in `onMounted` and told about the prompt by
+// the shell-integration callback, which is registered before it and fires for the very first prompt.
+let clickCursor: ClickToMoveCursor | undefined;
 let fileLinks: { dispose(): void } | undefined;
 let outputWriter: PtyOutputWriter | undefined;
 let rendererRecovery: { dispose(): void } | undefined;
@@ -852,6 +857,11 @@ terminal.onResize(({ cols, rows }) => queueResize(cols, rows));
 // moment the session is created: a handler registered after the first paint would miss the exit code
 // of whatever ran first.
 shellIntegration = registerShellIntegration(terminal, (event) => {
+  // The prompt boundaries are what say whether anything on screen is editable, and they are answered
+  // from inside this handler on purpose: the cell a prompt ended on is the one the terminal's cursor
+  // was on as that marker was parsed, and every later read of it is a cursor that has moved on.
+  if (event.kind === "input-started") clickCursor?.inputStarted();
+  if (event.kind === "command-started") clickCursor?.commandStarted();
   // A command starting clears the failure on purpose: red means "the last command you ran failed",
   // and once another command is in front of you that is no longer what the row is telling you. The
   // field is always assigned, including as `undefined`, because the merge spreads the previous state
@@ -971,6 +981,9 @@ onMounted(async () => {
   // path a person might want to select, and the click that opens it is already narrowed to
   // ctrl+click, so the two do not contend for the same gesture.
   registerFileLinks();
+  // The last registration that owns the mouse, and only once there is a terminal to put it on: it
+  // answers the clicks the other two leave alone, which are the ones on the command being typed.
+  clickCursor = enableClickToMoveCursor(terminal, queueInput);
   fitActiveView();
   resizeObserver = new ResizeObserver(() => fitActiveView());
   resizeObserver.observe(terminalElement.value);
@@ -984,6 +997,7 @@ onUnmounted(() => {
   scrollbarDrag = null;
   resizeObserver?.disconnect();
   selectionCopyDisposer?.dispose();
+  clickCursor?.dispose();
   fileLinks?.dispose();
   rendererRecovery?.dispose();
   outputWriter?.dispose();

@@ -67,14 +67,24 @@ describe("shell integration", () => {
     expect(events).toEqual([{ kind: "command-finished", exitCode: 1 }, { kind: "command-started" }]);
   });
 
-  it("reports command execution start and leaves prompt markers alone", () => {
+  it("reports command execution start, and the prompt ending where editing starts", () => {
+    const stub = stubTerminal();
+    const events: ShellIntegrationEvent[] = [];
+    registerShellIntegration(stub.terminal, (event) => events.push(event));
+
+    expect(stub.send("C")).toBe(true);
+    expect(stub.send("B")).toBe(true);
+    expect(events).toEqual([{ kind: "command-started" }, { kind: "input-started" }]);
+  });
+
+  it("reports command execution start and leaves the prompt start alone", () => {
     const stub = stubTerminal();
     const onEvent = vi.fn();
     registerShellIntegration(stub.terminal, onEvent);
 
-    // `C` means command execution start; `A`/`B` describe prompt boundaries and are not our events.
+    // `C` means command execution start and `B` the end of the prompt. `A` is the other end of that
+    // prompt, and nothing here has a use for it, so it is left for whatever else wants it.
     expect(stub.send("A")).toBe(false);
-    expect(stub.send("B")).toBe(false);
     expect(stub.send("C;pnpm test")).toBe(true);
     expect(onEvent).toHaveBeenCalledWith({ kind: "command-started" });
   });
