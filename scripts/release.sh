@@ -199,7 +199,7 @@ gh workflow run release.yml --ref main \
 
 find_dispatched_run() {
   gh run list --workflow release.yml --event workflow_dispatch --limit 50 \
-    --json databaseId,displayTitle --jq '.[] | select(.displayTitle == '"'"$run_name"'"') | .databaseId | tostring'
+    --json databaseId,displayTitle --jq ".[] | select(.displayTitle | contains(\"$request_id\")) | .databaseId | tostring"
 }
 run=""
 for _ in $(seq 1 36); do

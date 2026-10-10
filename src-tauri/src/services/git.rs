@@ -5202,7 +5202,7 @@ line.txt";
         let git_pid = temp.path().join("git-pid");
         let helper_pid = temp.path().join("helper-pid");
         let script = format!(
-            "set -m; echo $$ > \"{git}\"; sleep 30 & echo $! > \"{helper}\"; exit 0",
+            "set -m; echo $$ > \"{git}\"; trap '' HUP; sleep 30 & echo $! > \"{helper}\"; exit 0",
             git = git_pid.display(),
             helper = helper_pid.display()
         );

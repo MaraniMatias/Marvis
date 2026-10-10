@@ -397,6 +397,7 @@ test("dry-run dispatches the exact prepared SHA and never tags, even if main adv
   const log = readFileSync(f.ghLog, "utf8");
   assert.match(log, /workflow_dispatch/);
   assert.match(log, new RegExp(requestId));
+  assert.ok(log.includes(`contains("${requestId}")`), "correlate the run by its safe unique request id");
   assert.doesNotMatch(log, /release create|release upload/);
 });
 
