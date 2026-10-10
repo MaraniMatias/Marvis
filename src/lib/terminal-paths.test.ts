@@ -22,17 +22,26 @@ describe("terminalPathIn", () => {
     expect(terminalPathIn("weird:name/file.ts")).toBe("weird:name/file.ts");
   });
 
-  it("refuses what is not a path", () => {
-    expect(terminalPathIn("error:")).toBeNull();
-    expect(terminalPathIn("error: something broke")).toBeNull();
+  it("refuses what cannot name a file", () => {
     expect(terminalPathIn("...")).toBeNull();
     expect(terminalPathIn("..")).toBeNull();
+    // A flag is an argument rather than a name, and `ls -la` is full of them.
     expect(terminalPathIn("--verbose")).toBeNull();
+    expect(terminalPathIn("-Wl,-x")).toBeNull();
     // A URL is a link, not a file: nothing on this disk is named that.
     expect(terminalPathIn("https://example.com/a.ts")).toBeNull();
-    // A word with no separator and no extension is indistinguishable from prose.
-    expect(terminalPathIn("error")).toBeNull();
-    expect(terminalPathIn("Makefile")).toBeNull();
+  });
+
+  it("offers a bare name on a line that is a listing", () => {
+    // Half of what `ls` prints has no separator and no extension in it, and refusing those is
+    // refusing the listing. Whether the name is a file is the probe's answer, not this one's.
+    expect(terminalPathIn("Makefile")).toBe("Makefile");
+    expect(terminalPathIn("LICENSE")).toBe("LICENSE");
+    // A word of prose is a name on a line of its own too, and the probe is what drops it: one
+    // lookup that finds nothing, rather than a guess that could never change.
+    expect(terminalPathIn("error")).toBe("error");
+    // A sentence is not a listing, so its words are not names.
+    expect(terminalPathIn("error: something broke")).toBeNull();
   });
 });
 
@@ -62,9 +71,25 @@ describe("terminalPathsIn", () => {
     expect(terminalPathsIn("writing ./src/App.vue")).toEqual([{ path: "./src/App.vue", start: 8, end: 21 }]);
   });
 
-  it("finds nothing on a line that mentions no file", () => {
-    expect(terminalPathsIn("Compiling 3 files, nothing to report")).toEqual([]);
+  it("offers the bare names on a listing and not the words on a sentence", () => {
+    // What `ls` prints in columns: the extension-less names are the ones that used to be
+    // unopenable, and the probe says which of them are files.
+    const columns = "AGENTS.md   CHANGELOG.md   LICENSE   TODO.md   src";
+    expect(terminalPathsIn(columns).map((candidate) => candidate.path)).toEqual([
+      "AGENTS.md",
+      "CHANGELOG.md",
+      "LICENSE",
+      "TODO.md",
+      "src",
+    ]);
+
+    // What `ls -1` prints: one name on a line of its own, which is a listing too.
+    expect(terminalPathsIn("Makefile").map((candidate) => candidate.path)).toEqual(["Makefile"]);
+
+    // A sentence is not a listing, so none of its words cost a lookup.
+    expect(terminalPathsIn("error: something broke")).toEqual([]);
     expect(terminalPathsIn("")).toEqual([]);
+    expect(terminalPathsIn("....")).toEqual([]);
   });
 });
 

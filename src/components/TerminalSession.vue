@@ -714,6 +714,11 @@ function registerFileLinks() {
     get checkoutId() {
       return props.checkoutId;
     },
+    // The shell's own directory, which is what a bare name off an `ls` is relative to. A terminal
+    // that has not reported one yet answers from the root, which is where it starts.
+    get workingDirectory() {
+      return state.value.workingDirectory;
+    },
     open: (path) => emit("openFile", path),
     // A page is the browser's to open, which is where `curl`'s own output goes: the webview is
     // not a browser, so the address travels back over the bridge like the preview's links do.
@@ -749,6 +754,19 @@ watch(
   () => {
     if (terminalReady) registerFileLinks();
     if (!closing.value && state.value.state === "running") void pollStatus();
+  },
+);
+
+/**
+ * A shell that `cd`s keeps the terminal and changes what a bare name on a line means, so the
+ * links are put back on the directory it is in now rather than the one it was in when the screen
+ * was last drawn. xterm holds on to the links it has already been given until the provider changes,
+ * and a `LICENSE` underlined under the old directory is a name that opens the wrong file.
+ */
+watch(
+  () => state.value.workingDirectory,
+  (directory, was) => {
+    if (terminalReady && directory !== was) registerFileLinks();
   },
 );
 

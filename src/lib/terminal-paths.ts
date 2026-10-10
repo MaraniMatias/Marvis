@@ -9,9 +9,9 @@
  *
  * A URL is offered here too, and it is offered as what it is rather than as a path: `https://…`
  * names a page, not a file in this checkout, so it goes to the browser instead of the preview and
- * is never asked about on disk. The two are kept apart by one rule each — a path needs a
- * separator or an extension and refuses a scheme, a link needs an `http` or `https` one — which is
- * the same pair `DocumentPane` and the backend's opener already decide on.
+ * is never asked about on disk. The two are kept apart by one rule each — a name is anything that
+ * could be a file, and a link needs an `http` or `https` scheme — which is the same pair
+ * `DocumentPane` and the backend's opener already decide on.
  *
  * Nothing here decides whether a file exists: `../` and `/etc/hosts` come out of this just fine
  * and are refused later, by the one component that knows the checkout. Keeping the guess (what
@@ -44,23 +44,52 @@ const LINE_AND_COLUMN = /:\d+(?::\d+)?$/;
 const WEB_URL = /^https?:\/\/\S+$/i;
 
 /**
- * Whether a token could name a file, judged by its shape alone.
+ * Whether a token could name a file, judged by its shape and by the line it sits on.
  *
- * The test is a separator or an extension: a path has a directory part or a dot in its last one.
- * That is what keeps `error` in `error: something broke` from being offered as a file, and what
- * keeps `--verbose` from costing a filesystem lookup on every line the mouse crosses. A file
- * with no extension at all (`Makefile`, `LICENSE`) is not offered, and that is the trade: it
- * is the one file a line mentions that this cannot tell apart from a word.
+ * A name with a separator or an extension in it is one wherever it appears: that is what a
+ * compiler prints and what a path-shaped thing in a log always looks like.
+ *
+ * A bare name is a different question, and the answer belongs to the line rather than to the
+ * word. `ls` prints `LICENSE` and `Makefile` — half a listing carries neither a separator nor an
+ * extension — but a build log is mostly prose, and every word of it would cost a lookup that finds
+ * nothing. A listing is told apart from a sentence by what separates its parts: names stand alone
+ * on their line under `ls -1`, and `ls` sets them in columns more than one space apart, and a
+ * sentence does neither. So a bare name is offered on a listing and nowhere else.
+ *
+ * Whether the name is a file this checkout holds is not decided here and never was: the probe asks
+ * the disk, and it asks the disk before it asks the database, so what survives the guess costs one
+ * lookup rather than a wrong answer drawn on screen.
  */
-function looksLikePath(token: string): boolean {
+function couldNameFile(token: string, line: string): boolean {
   if (token.length < 3 || token.length > 4096) return false;
   // A URL is a link, not a file: `https://host/a.ts` names nothing on this disk.
   if (/^[a-z][a-z0-9+.-]*:\/\//i.test(token)) return false;
+  // An argument is not a name, however the line is set: `--verbose` and `-la` are what a command
+  // was given rather than what it printed.
+  if (token.startsWith("-")) return false;
+  // Nothing but punctuation names nothing at all: `=>`, `1/7]`, `...`.
+  if (!/[\p{L}\p{N}]/u.test(token)) return false;
   const last = token.slice(token.lastIndexOf("/") + 1);
-  return token.includes("/") || last.includes(".");
+  return token.includes("/") || last.includes(".") || isListing(line);
 }
 
-/** One path a line offers, and the characters of the line it spans. */
+/**
+ * Whether a line is a listing rather than a sentence.
+ *
+ * Both halves of what `ls` prints land here: one name on a line of its own, and a row of columns
+ * set more than one space apart, which is how a terminal aligns them and how no sentence does it.
+ */
+function isListing(line: string): boolean {
+  const trimmed = line.trim();
+  if (!trimmed) return false;
+  return !/\s/.test(trimmed) || /\S {2,}\S/.test(trimmed);
+}
+
+/**
+ * One name a line offers, and the characters of the line it spans.
+ *
+ * Whether the name is a file this checkout holds is the probe's answer, not this one's.
+ */
 export interface TerminalPath {
   path: string;
   /** The character the path starts at, which is where the underline begins. */
@@ -129,15 +158,19 @@ function trimmedToken(token: string): { body: string; offset: number } | null {
  * The offset is only the leading punctuation, because that is the only thing trimmed off the
  * front: what the trailing trimmers and the `:42:10` remove is at the end, and it shortens the
  * token rather than moving where the path begins.
+ *
+ * `line` is the whole line rather than this token alone, because whether a bare name could be a
+ * file is a question about the line it was printed on. `terminalPathIn` answers the same question
+ * for a token that is a line of its own.
  */
-function terminalPathInToken(token: string): { path: string; offset: number } | null {
+function terminalPathInToken(token: string, line: string): { path: string; offset: number } | null {
   const trimmed = trimmedToken(token);
   if (!trimmed) return null;
   // A path that lost everything to the trimmers was never one: `.` and `..` land here.
   if (trimmed.body === "." || trimmed.body === "..") return null;
   const path = trimmed.body.replace(LINE_AND_COLUMN, "");
   if (!path || path === "." || path === "..") return null;
-  if (!looksLikePath(path)) return null;
+  if (!couldNameFile(path, line)) return null;
   return { path, offset: trimmed.offset };
 }
 
@@ -169,21 +202,27 @@ function terminalUrlInToken(token: string): { url: string; offset: number } | nu
   return { url, offset: trimmed.offset };
 }
 
-/** The path a token names, or `null` when the token names none. */
+/**
+ * The name a token offers when it is a line of its own, or `null` when it cannot be one.
+ *
+ * Whether the name is a file this checkout holds is the probe's answer, and the probe is the only
+ * thing here that knows the checkout.
+ */
 export function terminalPathIn(token: string): string | null {
-  return terminalPathInToken(token)?.path ?? null;
+  return terminalPathInToken(token, token)?.path ?? null;
 }
 
 /**
- * Every path a line offers, in the order the line prints them, with the characters each covers.
+ * Every name a line offers, in the order the line prints them, with the characters each covers.
  *
- * A token that names a page rather than a file is not one of these, and `terminalUrlsIn` is where
- * it goes instead.
+ * A name here is a candidate and not a verdict: the probe is what tells a file from a word, and
+ * nothing in this pass has asked the disk. A token that names a page rather than a file is not one
+ * of these, and `terminalUrlsIn` is where it goes instead.
  */
 export function terminalPathsIn(line: string): TerminalPath[] {
   const found: TerminalPath[] = [];
   for (const span of tokenSpans(line)) {
-    const parsed = terminalPathInToken(span.token);
+    const parsed = terminalPathInToken(span.token, line);
     if (!parsed) continue;
     const start = span.offset + parsed.offset;
     found.push({ path: parsed.path, start, end: start + parsed.path.length });

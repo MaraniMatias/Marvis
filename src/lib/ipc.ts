@@ -66,9 +66,20 @@ export function readCheckoutFile(checkoutId: string, path: string, origin: Docum
 /**
  * Whether a path a terminal printed names a file the preview can open, resolved to its
  * checkout-relative spelling. `null` is the ordinary answer for a path that names nothing here.
+ *
+ * `workingDirectory` is where that terminal's shell is, and a bare name is relative to it rather
+ * than to the root of the checkout: `ls` prints `LICENSE`, and `LICENSE` means the one in the
+ * directory it was run in. It is a hint about where to look — the other end refuses anything that
+ * lands outside the checkout whichever directory it was sent — and a terminal that has not reported
+ * one yet falls back to the root, which is where a terminal starts. Sent as `null` rather than
+ * left out, because absent is what the argument is when nobody has reported a directory yet.
  */
-export function probeCheckoutFile(checkoutId: string, path: string): Promise<FileProbe | null> {
-  return invoke<FileProbe | null>("file_probe", { checkoutId, path });
+export function probeCheckoutFile(
+  checkoutId: string,
+  path: string,
+  workingDirectory?: string,
+): Promise<FileProbe | null> {
+  return invoke<FileProbe | null>("file_probe", { checkoutId, path, workingDirectory: workingDirectory ?? null });
 }
 
 /**

@@ -13,7 +13,9 @@ import { registerFilePathLinks } from "./terminal-file-links";
  * cursor rather than a row, a wide glyph occupying two cells — are exactly the ones a hand-written
  * mock gets wrong in the direction that looks fine, so they are read off a real buffer instead.
  */
-const probe = vi.hoisted(() => vi.fn<(checkoutId: string, path: string) => Promise<{ path: string } | null>>());
+const probe = vi.hoisted(() =>
+  vi.fn<(checkoutId: string, path: string, workingDirectory?: string) => Promise<{ path: string } | null>>(),
+);
 
 vi.mock("./ipc", () => ({ probeCheckoutFile: probe }));
 
@@ -23,6 +25,8 @@ let decorations: { x: number; width: number; foregroundColor?: string }[] = [];
 let markerOffsets: number[] = [];
 let open: ReturnType<typeof vi.fn<(path: string) => void>>;
 let openUrl: ReturnType<typeof vi.fn<(url: string) => void>>;
+/** The directory the fake terminal is sitting in, which is what a bare name is read against. */
+let shellDirectory: string | undefined;
 
 async function write(text: string) {
   await new Promise<void>((resolve) => terminal.write(text, resolve));
@@ -48,7 +52,16 @@ function mount() {
     decorations.push(options);
     return { dispose: () => (decorations = decorations.filter((item) => item !== options)) };
   };
-  return registerFilePathLinks(terminal as never, { checkoutId: "checkout:one", open, openUrl });
+  return registerFilePathLinks(terminal as never, {
+    get checkoutId() {
+      return "checkout:one";
+    },
+    get workingDirectory() {
+      return shellDirectory;
+    },
+    open,
+    openUrl,
+  });
 }
 
 /** What the provider offers for one 1-based row, which is what xterm underlines. */
@@ -63,6 +76,7 @@ beforeEach(async () => {
   terminal = new Headless({ allowProposedApi: true, cols: 80, rows: 40 });
   probe.mockReset();
   probe.mockResolvedValue(null);
+  shellDirectory = undefined;
   document.documentElement.style.setProperty("--muster-accent", "#74ade8");
   // An empty write is still a write: it is what flushes xterm's parser, so the rows a test writes
   // after it start at row 1 rather than after whatever the last one left on the screen.
@@ -156,6 +170,49 @@ describe("registerFilePathLinks behaviour", () => {
     await linksOn(1);
 
     expect(probe).toHaveBeenCalledTimes(1);
+  });
+
+  /// The listing: `ls` prints names with no directory on them, so the backend is told where the
+  /// shell is, because that is what a bare name is relative to.
+  it("asks about a bare name against the directory the shell is in", async () => {
+    await write("LICENSE   src/lib/foo.ts\r\n");
+    shellDirectory = "/work/plain/src/lib";
+    probe.mockImplementation(async (_checkoutId, path, directory) =>
+      path === "LICENSE" && directory === "/work/plain/src/lib" ? { path } : null,
+    );
+    mount();
+
+    const [link] = (await linksOn(1))!;
+
+    expect(link.text).toBe("LICENSE");
+    expect(probe).toHaveBeenCalledWith("checkout:one", "LICENSE", "/work/plain/src/lib");
+    link.activate({ ctrlKey: true } as MouseEvent, link.text);
+    expect(open).toHaveBeenCalledWith("LICENSE");
+  });
+
+  it("asks again once the shell has moved, rather than answering from where it was", async () => {
+    await write("LICENSE\r\n");
+    probe.mockImplementation(async (_checkoutId, path) => ({ path }));
+    shellDirectory = "/work/plain/src";
+    mount();
+    expect((await linksOn(1))?.[0].text).toBe("LICENSE");
+
+    // The same name in another directory is another file, so an answer cached for the directory
+    // the shell has just left is not the answer to this one.
+    shellDirectory = "/work/plain/docs";
+    const links = registerFilePathLinks(terminal as never, {
+      checkoutId: "checkout:one",
+      get workingDirectory() {
+        return shellDirectory;
+      },
+      open,
+      openUrl,
+    });
+    await linksOn(1);
+
+    expect(probe.mock.calls.filter(([, , directory]) => directory === "/work/plain/docs")).toHaveLength(1);
+    expect(probe.mock.calls.filter(([, , directory]) => directory === "/work/plain/src")).toHaveLength(1);
+    links.dispose();
   });
 
   it("opens nothing on a plain click and the file on ctrl+click", async () => {

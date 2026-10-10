@@ -85,15 +85,20 @@ pub async fn file_read_prettier_config(
 /// Whether a path a terminal printed opens in the preview, with the checkout-relative path to
 /// open. `None` is the common answer and not an error: the path may name nothing, or name a file
 /// the preview cannot draw, and a hover has to be able to hear that without being told it failed.
+///
+/// `working_directory` is where that terminal's shell is, so that a bare name off an `ls` is read
+/// against the directory the command ran in. It is a hint about where to look and nothing else: the
+/// service refuses anything that resolves outside the checkout whichever directory it was sent.
 #[tauri::command]
 pub async fn file_probe(
     checkout_id: String,
     path: String,
+    working_directory: Option<String>,
     database: State<'_, Database>,
 ) -> Result<Option<FileProbe>, IpcError> {
     let database = database.inner().clone();
     tauri::async_runtime::spawn_blocking(move || {
-        services::files::probe(&database, &checkout_id, &path)
+        services::files::probe(&database, &checkout_id, &path, working_directory.as_deref())
     })
     .await
     .map_err(operation_error)?

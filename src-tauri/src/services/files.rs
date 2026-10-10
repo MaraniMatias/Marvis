@@ -397,58 +397,126 @@ pub fn read(
 /// hover: the answer has to be cheap and it has to agree with the reader, or a link would
 /// underline itself for a file that then refuses to open. So it is the same limits, the same
 /// containment, and text checks. Media classification reads at most 64 KiB, never the payload.
+///
+/// `working_directory` is where the terminal's shell is, and it is the whole difference between an
+/// `ls` whose entries open and one that does nothing: a listing prints bare names, and a bare name
+/// is relative to the directory the command ran in rather than to the root of the checkout. It is
+/// only ever a base for a relative name — an absolute spelling is already what it says it is — and
+/// it is never what decides containment, which is asked of the checkout below.
 pub fn probe(
     database: &Database,
     checkout_id: &str,
     path: &str,
+    working_directory: Option<&str>,
 ) -> Result<Option<FileProbe>, IpcError> {
-    let (repo, checkout) = registered_checkout(database, checkout_id)?;
+    let Some(requested) = printed_path(path) else {
+        return Ok(None);
+    };
+    // A terminal starts in its checkout and moves when its shell is told to, so the shell's own
+    // directory is the base a relative name is read against. With no directory to read, the root
+    // of the checkout is the only base there is, and it is a thing only the database can say —
+    // which is why this is the one branch that asks before it looks.
+    let base = match absolute_directory(working_directory) {
+        Some(base) => base,
+        None => {
+            let (_, checkout) = registered_checkout(database, checkout_id)?;
+            if checkout.is_missing {
+                return Ok(None);
+            }
+            PathBuf::from(checkout.canonical_path)
+        }
+    };
+    // The name as printed is what the extension is read from, and an absolute spelling is already
+    // the whole of what it says, so the base only ever joins onto a relative one.
+    let target = if requested.is_absolute() {
+        requested.clone()
+    } else {
+        base.join(&requested)
+    };
+    // Asked of the disk before the database, on purpose. A hover asks about every name on a line
+    // and most of a build log is prose, and the checkout is a query under the connection every
+    // other read in the app queues behind: a name that is not a file here must never take it. What
+    // decides what a path may name is untouched by the order, and still runs before an answer.
+    let Ok(target) = fs::canonicalize(&target) else {
+        return Ok(None);
+    };
+    if !preview_can_draw(&target, &requested) {
+        return Ok(None);
+    }
+    let (_, checkout) = registered_checkout(database, checkout_id)?;
     if checkout.is_missing {
         return Ok(None);
     }
-    // A terminal prints what the shell hands it, so the same file arrives as `src/lib/x.ts`,
-    // `./src/lib/x.ts` and `/Users/me/work/src/lib/x.ts`. All three name one path, and only the
-    // relative form is what the preview's own reader takes.
-    let relative_path = match checkout_relative_path(&checkout.canonical_path, path) {
-        Some(relative) => relative,
-        None => return Ok(None),
+    let Some(relative) = relative_to_checkout(&checkout.canonical_path, &target) else {
+        return Ok(None);
     };
-    let relative_path = match parse_relative_path(&relative_path) {
+    // `..` cannot survive the canonicalization above, but `.git` can, and it is a directory this
+    // tree never lists and so never a file it may hand to the preview.
+    let relative_path = match parse_relative_path(&relative) {
         Ok(relative_path) => relative_path,
         Err(_) => return Ok(None),
     };
-    let resolved = match crate::services::checkout::resolve_checkout_path(
-        &repo,
-        checkout_id,
-        &relative_path,
-    ) {
-        Ok(resolved) => resolved,
-        Err(_) => return Ok(None),
-    };
-    let readable = if media_limit(&relative_path).is_some() {
-        read_media_file(
-            &resolved,
-            &relative_path,
-            MAX_MEDIA_HEADER_BYTES,
-            &mut Vec::new(),
-        )
-        .map(|_| ())
-    } else {
-        read_preview_text(&resolved).and_then(|text| {
-            if extension(&relative_path) == "svg" {
-                validate_svg(&text)?;
-            }
-            Ok(())
-        })
-    };
-    if readable.is_err() {
-        return Ok(None);
-    }
     Ok(Some(FileProbe {
         path: relative_path
             .to_string_lossy()
             .replace(std::path::MAIN_SEPARATOR, "/"),
     }))
+}
+
+/// What a terminal printed, or `None` for the two things that name no file: an empty run of
+/// characters, and one carrying a NUL, which is not a path any filesystem can answer for.
+fn printed_path(path: &str) -> Option<PathBuf> {
+    let path = path.trim();
+    if path.is_empty() || path.contains('\0') {
+        return None;
+    }
+    Some(PathBuf::from(path))
+}
+
+/// The directory a relative name is read against, when the terminal knows one.
+///
+/// A relative answer is refused rather than joined onto anything: resolving it here would resolve
+/// it against whichever directory this process is in, which has nothing to do with the terminal
+/// that printed the path.
+fn absolute_directory(working_directory: Option<&str>) -> Option<PathBuf> {
+    let directory = working_directory
+        .map(str::trim)
+        .filter(|directory| !directory.is_empty() && !directory.contains('\0'))?;
+    let directory = Path::new(directory);
+    directory.is_absolute().then(|| directory.to_path_buf())
+}
+
+/// The checkout-relative spelling of a file inside it, or `None` for one that is not.
+///
+/// `target` has to be the canonical file and the root is canonicalized beside it, because
+/// containment is asked about the real thing and not about the spelling: a checkout reached through
+/// a symlink, and a path printed through the same one, are one directory and have to be recognized
+/// as it. A file that cannot be canonicalized does not exist, so there is nothing to place.
+fn relative_to_checkout(root: &str, target: &Path) -> Option<String> {
+    let root = fs::canonicalize(root).ok()?;
+    Some(
+        target
+            .strip_prefix(root)
+            .ok()?
+            .to_string_lossy()
+            .into_owned(),
+    )
+}
+
+/// Whether the preview can draw this file, which is what a probe confirms and what `read` then
+/// does. The limits are the reader's own, so a link can never underline itself for a file that
+/// would refuse to open the moment it was clicked.
+///
+/// `spelling` is the name the line printed rather than the file's own, because the extension is
+/// the only thing either of them is read for and both spellings of one file end in the same one.
+fn preview_can_draw(target: &Path, spelling: &Path) -> bool {
+    if media_limit(spelling).is_some() {
+        return read_media_file(target, spelling, MAX_MEDIA_HEADER_BYTES, &mut Vec::new()).is_ok();
+    }
+    let Ok(text) = read_preview_text(target) else {
+        return false;
+    };
+    extension(spelling) != "svg" || validate_svg(&text).is_ok()
 }
 
 /// Hands a file or a folder of this checkout to the application this machine has for it.
@@ -472,38 +540,6 @@ pub fn open_externally(database: &Database, checkout_id: &str, path: &str) -> Re
         crate::services::checkout::resolve_checkout_path(&repo, checkout_id, &relative_path)?;
     crate::services::opener::open_path(&resolved)
         .map_err(|error| IpcError::new(IpcErrorCode::OperationFailed, error))
-}
-
-/// The checkout-relative form of a path a terminal printed, or `None` when it names nothing this
-/// checkout holds.
-///
-/// An absolute path is only this checkout's when it sits under its root, and the root is
-/// canonicalized first because that is how it is stored, while a symlinked or relative
-/// `./`-prefixed spelling of the same file is not. Nothing outside the root is resolved at all,
-/// which is what keeps a path printed by a program the terminal happens to be running from
-/// reading the rest of the disk.
-fn checkout_relative_path(root: &str, path: &str) -> Option<String> {
-    let path = path.trim();
-    if path.is_empty() || path.contains('\0') {
-        return None;
-    }
-    let requested = Path::new(path);
-    if requested.is_absolute() {
-        // Both sides are canonicalized because containment is asked about the real file, not
-        // about the spelling: a checkout reached through a symlink, and a path printed through
-        // the same one, are the same directory and have to be recognized as it. A path that
-        // cannot be canonicalized does not exist, so there is nothing here to resolve.
-        let requested = fs::canonicalize(requested).ok()?;
-        let root = fs::canonicalize(root).ok()?;
-        return Some(
-            requested
-                .strip_prefix(root)
-                .ok()?
-                .to_string_lossy()
-                .into_owned(),
-        );
-    }
-    Some(path.strip_prefix("./").unwrap_or(path).to_string())
 }
 
 /// Returns a per-path lock shared by writes in this process. Dead entries are pruned on lookup.
@@ -1753,7 +1789,7 @@ mod tests {
             read_media(&database, id, "image.PNG").unwrap(),
             [b"image/png\n".as_slice(), png].concat()
         );
-        assert!(probe(&database, id, "image.PNG").unwrap().is_some());
+        assert!(probe(&database, id, "image.PNG", None).unwrap().is_some());
         // The longest MIME the reader can assign, whose header fills the space reserved in front of the
         // payload exactly. image/png above is the other end of the same move: a shorter header
         // pulls the payload up behind it.
@@ -1769,14 +1805,16 @@ mod tests {
         }
         fs::write(root.join("mismatch.jpg"), png).unwrap();
         assert!(read_media(&database, id, "mismatch.jpg").is_err());
-        assert!(probe(&database, id, "mismatch.jpg").unwrap().is_none());
+        assert!(probe(&database, id, "mismatch.jpg", None)
+            .unwrap()
+            .is_none());
         #[cfg(unix)]
         {
             let outside = temp.path().join("outside.png");
             fs::write(&outside, png).unwrap();
             std::os::unix::fs::symlink(outside, root.join("escape.png")).unwrap();
             assert!(read_media(&database, id, "escape.png").is_err());
-            assert!(probe(&database, id, "escape.png").unwrap().is_none());
+            assert!(probe(&database, id, "escape.png", None).unwrap().is_none());
         }
         for (name, cap) in [
             ("large.png", 16 * 1024 * 1024),
@@ -1788,7 +1826,7 @@ mod tests {
                 read_media(&database, id, name).unwrap_err().code,
                 IpcErrorCode::FileTooLarge
             ));
-            assert!(probe(&database, id, name).unwrap().is_none());
+            assert!(probe(&database, id, name, None).unwrap().is_none());
         }
         assert!(read_media(&database, id, ".").is_err());
     }
@@ -1864,7 +1902,7 @@ mod tests {
         .unwrap();
         assert_eq!(mime, "video/mp4");
         assert_eq!((header.len() - offset) as u64, MAX_MEDIA_HEADER_BYTES);
-        assert!(probe(&database, id, "large.mp4").unwrap().is_some());
+        assert!(probe(&database, id, "large.mp4", None).unwrap().is_some());
     }
 
     #[test]
@@ -1881,7 +1919,7 @@ mod tests {
             read_checkout(&database, id, "icon.svg").unwrap().content,
             svg
         );
-        assert!(probe(&database, id, "icon.svg").unwrap().is_some());
+        assert!(probe(&database, id, "icon.svg", None).unwrap().is_some());
         let next = "<s:svg xmlns:s='http://www.w3.org/2000/svg'><s:rect/></s:svg>";
         write_checkout(&database, id, "icon.svg", next, svg).unwrap();
         write_checkout(&database, id, "icon.svg", "<svg", next).unwrap();
@@ -1890,7 +1928,7 @@ mod tests {
         for invalid in ["<html><!-- <svg> --></html>", "<svg>", "<svg/>", "<svg xmlns='wrong'/>", "<!DOCTYPE svg [<!ENTITY x SYSTEM 'file:///etc/passwd'>]><svg xmlns='http://www.w3.org/2000/svg'>&x;</svg>"] {
             fs::write(root.join("bad.svg"), invalid).unwrap();
             assert_eq!(read_checkout(&database, id, "bad.svg").unwrap().content, invalid);
-            assert!(probe(&database, id, "bad.svg").unwrap().is_none());
+            assert!(probe(&database, id, "bad.svg", None).unwrap().is_none());
             write_checkout(&database, id, "bad.svg", "<svg", invalid).unwrap();
         }
         let file = fs::File::create(root.join("large.svg")).unwrap();
@@ -2639,7 +2677,7 @@ mod tests {
         let checkout_id = &state.repos[0].checkouts[0].id;
 
         assert_eq!(
-            probe(&database, checkout_id, "notes.txt")
+            probe(&database, checkout_id, "notes.txt", None)
                 .unwrap()
                 .map(|hit| hit.path),
             Some("notes.txt".to_string())
@@ -2652,7 +2690,9 @@ mod tests {
             root.join("notes.txt").to_string_lossy().as_ref(),
         ] {
             assert!(
-                probe(&database, checkout_id, printed).unwrap().is_some(),
+                probe(&database, checkout_id, printed, None)
+                    .unwrap()
+                    .is_some(),
                 "{printed} should name a file the preview can open"
             );
         }
@@ -2670,8 +2710,103 @@ mod tests {
             "",
         ] {
             assert!(
-                probe(&database, checkout_id, printed).unwrap().is_none(),
+                probe(&database, checkout_id, printed, None)
+                    .unwrap()
+                    .is_none(),
                 "{printed} should not be offered as a file"
+            );
+        }
+    }
+
+    /// The bug this exists for: `ls` prints bare names, and a bare name is relative to the
+    /// directory the command ran in. Without the terminal's own directory they were read against
+    /// the root of the checkout, so nothing below the root could ever open.
+    #[test]
+    fn probe_reads_a_bare_name_against_the_directory_the_terminal_is_in() {
+        let temp = tempdir().unwrap();
+        let root = temp.path().join("plain");
+        fs::create_dir_all(root.join("src/lib")).unwrap();
+        fs::write(root.join("LICENSE"), "terms").unwrap();
+        fs::write(root.join("src/lib/muster-terminal.ts"), "export {};").unwrap();
+        fs::write(root.join("src/lib/LICENSE"), "terms").unwrap();
+        fs::write(root.join("notes.txt"), "hello").unwrap();
+        let database = db(temp.path());
+        let state = workspace::register_folder(&database, &root).unwrap();
+        let checkout_id = &state.repos[0].checkouts[0].id;
+        let below = root.join("src/lib");
+
+        for (printed, expected) in [
+            ("muster-terminal.ts", "src/lib/muster-terminal.ts"),
+            ("./muster-terminal.ts", "src/lib/muster-terminal.ts"),
+            ("../lib/muster-terminal.ts", "src/lib/muster-terminal.ts"),
+            // A name with no extension and no directory on it, which is what half of an `ls` is.
+            ("LICENSE", "src/lib/LICENSE"),
+        ] {
+            assert_eq!(
+                probe(
+                    &database,
+                    checkout_id,
+                    printed,
+                    Some(below.to_string_lossy().as_ref())
+                )
+                .unwrap()
+                .map(|hit| hit.path),
+                Some(expected.to_string()),
+                "{printed} should be read from the terminal's own directory"
+            );
+        }
+
+        // A terminal in the root resolves the same bare names against the root, which is where it
+        // starts, so an `ls` there opens too — including the one name with no extension in it,
+        // which is what an `ls` of a checkout is full of.
+        assert_eq!(
+            probe(
+                &database,
+                checkout_id,
+                "LICENSE",
+                Some(root.to_string_lossy().as_ref())
+            )
+            .unwrap()
+            .map(|hit| hit.path),
+            Some("LICENSE".to_string())
+        );
+
+        // The directory is a hint about where to look and nothing else: `..` out of it, a file
+        // beside it, Git's own directory and a directory rather than a file are all still refused.
+        fs::create_dir_all(root.join(".git")).unwrap();
+        fs::write(root.join(".git/config"), "[core]").unwrap();
+        let outside = temp.path().join("outside");
+        fs::create_dir_all(&outside).unwrap();
+        fs::write(outside.join("secret.txt"), "not yours").unwrap();
+        for (directory, printed) in [
+            (root.join("src"), "../outside/secret.txt"),
+            (below.clone(), "secret.txt"),
+            (below.clone(), ".."),
+            (root.clone(), ".git/config"),
+        ] {
+            assert!(
+                probe(
+                    &database,
+                    checkout_id,
+                    printed,
+                    Some(directory.to_string_lossy().as_ref())
+                )
+                .unwrap()
+                .is_none(),
+                "{printed} should not be offered as a file of this checkout"
+            );
+        }
+
+        // A directory this side cannot join onto is not a base, so the bare name falls back to the
+        // root rather than to something guessed. A terminal that reported nothing at all is the
+        // same case and answers the same way.
+        for reported in [Some("relative/"), Some(""), None] {
+            assert_eq!(
+                probe(&database, checkout_id, "notes.txt", reported)
+                    .unwrap()
+                    .map(|hit| hit.path),
+                Some("notes.txt".to_string()),
+                "{reported:?} is no base, so the name is read from the root"
             );
         }
     }

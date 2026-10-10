@@ -9,6 +9,11 @@
  * checkout holds and the preview can draw, and only hands xterm the ones that are. A path that
  * does not exist is never underlined, which is the whole behaviour.
  *
+ * The backend is told where the terminal's shell is, because that is what a bare name means: an
+ * `ls` prints `README.md` and `LICENSE` with no directory on them, and they name the files where
+ * the shell is sitting. Every relative name is therefore read from there, which is why a listing
+ * opens at the root of a checkout and below it alike.
+ *
  * A URL is the other half of the same feature and needs none of that: it names a page rather
  * than a file, so there is nothing to confirm and nothing to ask the disk about. It is offered
  * from the text itself and can be underlined on the same tick the mouse arrives. `https` or
@@ -67,6 +72,19 @@ export interface FileLinkOptions {
    * worktree, not of the moment it was opened.
    */
   readonly checkoutId: string;
+  /**
+   * Where this terminal's shell is, which is what a bare name on a line is relative to.
+   *
+   * An `ls` prints names with no directory on them, so `README.md` and `LICENSE` name the files
+   * where the shell is sitting rather than the ones at the root of the checkout. Without this the
+   * probe reads every relative name from the root, which is right for a terminal that never moved
+   * and wrong for every one that did — and a listing is nothing but bare names.
+   *
+   * Read through a getter because it changes under a terminal that keeps its process: a shell
+   * that `cd`s is the same terminal pointing somewhere else, and an answer resolved against where
+   * it used to be would underline a name that is no longer the one on screen.
+   */
+  readonly workingDirectory?: string;
   /** Opens a confirmed file in the preview. */
   open: (path: string) => void;
   /**
@@ -131,16 +149,19 @@ export function registerFilePathLinks(terminal: Terminal, options: FileLinkOptio
   const cache = new Map<string, CachedProbe>();
   // One probe per path however many lines are waiting on it: the same path is usually the same
   // path, and asking twice for one answer is one IPC too many on the line the mouse crosses most.
+  // Keyed by the directory as well as the name, because the same name in two directories is two
+  // different files and the second one must not be answered with the first one's.
   const inFlight = new Map<string, Promise<string | null>>();
   let disposed = false;
 
   const probe = (raw: string): Promise<string | null> => {
-    const cached = cache.get(raw);
+    const key = `${options.workingDirectory ?? ""}\0${raw}`;
+    const cached = cache.get(key);
     if (cached && Date.now() - cached.at < PROBE_TTL_MS) return Promise.resolve(cached.path);
-    const pending = inFlight.get(raw);
+    const pending = inFlight.get(key);
     if (pending) return pending;
 
-    const request = probeCheckoutFile(options.checkoutId, raw)
+    const request = probeCheckoutFile(options.checkoutId, raw, options.workingDirectory)
       .then((probed) => probed?.path ?? null)
       .catch(() => {
         // A failed probe is a path this cannot open, which is the same answer a missing file gets
@@ -148,7 +169,7 @@ export function registerFilePathLinks(terminal: Terminal, options: FileLinkOptio
         return null;
       })
       .then((path) => {
-        inFlight.delete(raw);
+        inFlight.delete(key);
         // A terminal that is gone does not need the answer, and a map that outlives it would keep
         // every path the panel ever saw.
         if (disposed) return path;
@@ -156,10 +177,10 @@ export function registerFilePathLinks(terminal: Terminal, options: FileLinkOptio
           const oldest = cache.keys().next();
           if (!oldest.done) cache.delete(oldest.value);
         }
-        cache.set(raw, { path, at: Date.now() });
+        cache.set(key, { path, at: Date.now() });
         return path;
       });
-    inFlight.set(raw, request);
+    inFlight.set(key, request);
     return request;
   };
 

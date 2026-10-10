@@ -35,6 +35,7 @@ import {
   openExternalFile,
   openExternalUrl,
   openFolder,
+  probeCheckoutFile,
   readCheckoutFile,
   readCheckoutMedia,
   saveReviewTarget,
@@ -101,6 +102,38 @@ describe("external file IPC client", () => {
     vi.mocked(invoke).mockRejectedValueOnce({ code: "path_outside_checkout", message: "outside" });
 
     await expect(openExternalFile("checkout:repo", "../secrets")).rejects.toBeTruthy();
+  });
+});
+
+describe("file probe IPC client", () => {
+  beforeEach(() => vi.clearAllMocks());
+
+  it("sends the directory the terminal is in, because a bare name is relative to it", async () => {
+    // `ls` prints `LICENSE` with no directory on it, and the only thing that says which one it
+    // means is where the shell is. A terminal that has not reported one sends `null` rather than
+    // leaving the argument out, because "the terminal has not said" and "there was nothing to
+    // say" are the same absence.
+    vi.mocked(invoke).mockResolvedValue({ path: "src/lib/LICENSE" });
+
+    await expect(probeCheckoutFile("checkout:repo", "LICENSE", "/work/feature/src/lib")).resolves.toEqual({
+      path: "src/lib/LICENSE",
+    });
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("file_probe", {
+      checkoutId: "checkout:repo",
+      path: "LICENSE",
+      workingDirectory: "/work/feature/src/lib",
+    });
+
+    vi.mocked(invoke).mockClear();
+    vi.mocked(invoke).mockResolvedValue(null);
+
+    await probeCheckoutFile("checkout:repo", "LICENSE");
+
+    expect(invoke).toHaveBeenCalledExactlyOnceWith("file_probe", {
+      checkoutId: "checkout:repo",
+      path: "LICENSE",
+      workingDirectory: null,
+    });
   });
 });
 

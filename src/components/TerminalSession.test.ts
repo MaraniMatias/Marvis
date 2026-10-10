@@ -244,6 +244,26 @@ const appEvents = vi.hoisted(() => ({ emit: vi.fn(async () => {}) }));
 
 vi.mock("@tauri-apps/api/event", () => ({ emit: appEvents.emit }));
 
+/**
+ * The file-link registration, recorded rather than performed: what matters to a terminal is the
+ * directory its links are looked up in, and the provider is the only thing that turns one into a
+ * path the backend can resolve.
+ */
+const fileLinks = vi.hoisted(() => ({
+  registrations: [] as Array<{
+    options: { checkoutId: string; workingDirectory?: string };
+    dispose: ReturnType<typeof vi.fn>;
+  }>,
+}));
+
+vi.mock("../lib/terminal-file-links", () => ({
+  registerFilePathLinks: (_terminal: unknown, options: { checkoutId: string; workingDirectory?: string }) => {
+    const registration = { options, dispose: vi.fn() };
+    fileLinks.registrations.push(registration);
+    return registration;
+  },
+}));
+
 // The clipboard is the one thing a selection gesture reaches outside the terminal, so it is the
 // only thing the `selectionCopy` preference is allowed to turn on and off. Mocked here rather than
 // in the lib, which is where the gesture itself lives.
@@ -304,6 +324,7 @@ describe("TerminalSession UI", () => {
     terminalMock.fontLoadPromise = null;
     terminalMock.builtAt = { fontSize: 16, cursorBlink: true, cursorStyle: "block", zoom: 1 };
     terminalMock.terminal = null;
+    fileLinks.registrations.length = 0;
     terminalLib.fitCalls = 0;
     vi.mocked(createTerminal).mockResolvedValue(created);
     vi.mocked(getTerminalStatus).mockResolvedValue({ state: "running" });
@@ -447,6 +468,40 @@ describe("TerminalSession UI", () => {
     terminalMock.titles[0]?.("  ");
     expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({ terminalTitle: null });
     wrapper.unmount();
+  });
+
+  it("hands the link provider the directory the shell is in, and re-registers it on a cd", async () => {
+    // A listing prints bare names, so what a name means depends on where the shell is sitting: the
+    // provider has to be told, and it has to be told again when the shell moves, because a
+    // `LICENSE` underlined under the directory it left is a name that opens the wrong file.
+    vi.useFakeTimers();
+    vi.mocked(getTerminalStatus).mockResolvedValue({
+      state: "running",
+      workingDirectory: "/work/feature/src/lib",
+    });
+    const wrapper = mount(TerminalSession, { props: { checkoutId: "checkout:repo", active: true } });
+    await flushPromises();
+
+    const first = fileLinks.registrations.at(-1)!;
+    expect(first.options.workingDirectory).toBe("/work/feature/src/lib");
+    expect(first.options.checkoutId).toBe("checkout:repo");
+
+    vi.mocked(getTerminalStatus).mockResolvedValue({
+      state: "running",
+      workingDirectory: "/work/feature/docs",
+    });
+    await vi.advanceTimersByTimeAsync(750);
+    await flushPromises();
+
+    const second = fileLinks.registrations.at(-1)!;
+    expect(fileLinks.registrations.length).toBeGreaterThan(1);
+    expect(second.options.workingDirectory).toBe("/work/feature/docs");
+    // The old provider is taken back rather than left asking the same question twice.
+    expect(first.dispose).toHaveBeenCalled();
+    second.dispose.mockClear();
+    wrapper.unmount();
+    expect(second.dispose).toHaveBeenCalled();
+    vi.useRealTimers();
   });
 
   it("publishes the shell's last command exit code, and keeps it across the status poll", async () => {
