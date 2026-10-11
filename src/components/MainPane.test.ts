@@ -109,4 +109,15 @@ describe("MainPane", () => {
     expect(terminal.classes()).toContain("absolute");
     expect(terminal.classes()).toContain("inset-0");
   });
+
+  it("passes the terminal order up, because the sidebar draws this list and nothing else", () => {
+    // The pane below is the only place a checkout's terminal order is decided. This component did
+    // not carry the event any further, so the sidebar fell back to the order the database hands out
+    // forever: a reorder was saved to the layout, and then drawn from somewhere else entirely —
+    // persisted, correct, and a drag that did not move anything.
+    const wrapper = mountPanel("terminal");
+    wrapper.getComponent({ name: "SessionPane" }).vm.$emit("sessionOrder", "checkout:one", ["b", "a"]);
+
+    expect(wrapper.emitted("sessionOrder")).toEqual([["checkout:one", ["b", "a"]]]);
+  });
 });

@@ -62,6 +62,15 @@ const emit = defineEmits<{
   workspaceUpdated: [workspace: WorkspaceState, shellRequestToken?: number];
   shellCreated: [token: number, checkoutId: string, sessionId: string];
   sessionStatusChanged: [sessionId: string, status: TerminalSessionStatus | null];
+  /**
+   * The order a checkout's terminals are now listed in, re-emitted untouched from the pane below.
+   *
+   * The pane is the only place that order is decided, and the sidebar draws this list and nothing
+   * else — so the event has to cross this component rather than being stopped by it. It did not,
+   * and a reorder was persisted, invisible and unusable: the sidebar fell back to the order the
+   * database hands out forever.
+   */
+  sessionOrder: [checkoutId: string, order: string[]];
   updateDocumentMode: [mode: DocumentMode];
   readingPositionChanged: [position: { top: number; left: number }];
   diffPositionChanged: [top: number];
@@ -141,6 +150,7 @@ function finishPreviewResize(event: PointerEvent) {
         @workspace-updated="(workspace, shellRequestToken) => $emit('workspaceUpdated', workspace, shellRequestToken)"
         @shell-created="(token, checkoutId, sessionId) => $emit('shellCreated', token, checkoutId, sessionId)"
         @session-status-changed="(sessionId, status) => $emit('sessionStatusChanged', sessionId, status)"
+        @session-order="(checkoutId, order) => $emit('sessionOrder', checkoutId, order)"
         @open-file="$emit('openFile', $event)"
         @open-external-url="$emit('openExternalUrl', $event)"
       />

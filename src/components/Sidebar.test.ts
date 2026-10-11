@@ -1282,7 +1282,7 @@ describe("Sidebar workdir rows", () => {
     wrapper.unmount();
   });
 
-  it("tints idle agents but keeps waiting, failures, and other harnesses unchanged", () => {
+  it("tints idle and asking agents but keeps failures and other harnesses unchanged", () => {
     const checkoutId = "checkout:agent-colors";
     const sessions = [
       { id: "idle", title: "Idle agent", attention: "none" },
@@ -1341,7 +1341,18 @@ describe("Sidebar workdir rows", () => {
     expect(row("idle").attributes("style")).toContain("--agent-color: #4ED6BF");
     expect(row("idle").get(".workdir-icon").classes()).toContain("lucide-sparkles");
     expect(row("waiting").classes()).toContain("state-waiting");
-    expect(row("waiting").classes()).not.toContain("agent-tinted");
+    // A turn that stopped to ask is the agent at work, not a row going bad: it asks with a question
+    // mark and it asks in the agent's own colour, which is what says *which* agent is waiting.
+    expect(row("waiting").get(".workdir-icon").classes()).toContain("lucide-circle-question-mark");
+    expect(row("waiting").classes()).toContain("agent-tinted");
+    expect(row("waiting").attributes("style")).toContain("--agent-color: #4ED6BF");
+    // Three classes against two, so the agent's colour wins the warning rule above without either
+    // rule having to know about the other.
+    expect(rule(".state-waiting.agent-tinted .workdir-icon")).toContain(
+      "color: color-mix(in srgb, var(--agent-color) 75%, var(--muster-text-muted));",
+    );
+    // An agent with no colour of its own never reaches that rule, so the warning is all it has left.
+    expect(rule(".state-waiting .workdir-icon")).toContain("color: var(--muster-warning);");
     expect(row("failed").classes()).toContain("state-failed");
     expect(row("failed").classes()).not.toContain("agent-tinted");
     expect(row("nvim").classes()).toContain("state-running");
@@ -2292,9 +2303,12 @@ describe("Sidebar workdir rows", () => {
 
     const [waiting, failed] = wrapper.findAll(".workdir-kids");
     // A turn stuck on this server version is not a reply the row can ask for, so it says it is
-    // waiting rather than working, and the glyph says it in amber.
+    // waiting rather than working — and it asks with a question mark rather than with the amber the
+    // other rows' failure wears, because the two are not the same kind of news.
     expect(waiting!.get(".workdir-child").classes()).toContain("state-waiting");
+    expect(waiting!.get(".workdir-child .workdir-icon").classes()).toContain("lucide-circle-question-mark");
     expect(rule(".state-waiting .workdir-icon")).toContain("color: var(--muster-warning);");
+    expect(waiting!.get(".workdir-child").classes()).toContain("agent-tinted");
     // A red glyph on a row that is not merely idle, and a last turn that ended badly, which is a
     // different sentence from the one a waiting turn gets.
     expect(failed!.get(".workdir-child").classes()).toContain("state-failed");
@@ -2643,8 +2657,8 @@ describe("Sidebar workdir rows", () => {
     expect(rows.map((row) => row.classes().find((name) => states.some((state) => name === `state-${state}`)))).toEqual(
       states.map((state) => `state-${state}`),
     );
-    // The glyph follows the state too: a spinner only while a turn is running, and a terminal's
-    // square only for a process that is up.
+    // The glyph follows the state too: a spinner only while a turn is running, a question mark only
+    // while one is asking, and a terminal's square only for a process that is up.
     expect(
       rows.map((row) =>
         row
@@ -2654,7 +2668,7 @@ describe("Sidebar workdir rows", () => {
       ),
     ).toEqual([
       "lucide-loader-circle",
-      "lucide-sparkles",
+      "lucide-circle-question-mark",
       "lucide-sparkles",
       "lucide-sparkles",
       "lucide-square-terminal",

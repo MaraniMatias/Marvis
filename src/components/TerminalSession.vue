@@ -880,11 +880,16 @@ shellIntegration = registerShellIntegration(terminal, (event) => {
   // was on as that marker was parsed, and every later read of it is a cursor that has moved on.
   if (event.kind === "input-started") clickCursor?.inputStarted();
   if (event.kind === "command-started") clickCursor?.commandStarted();
-  // A command starting clears the failure on purpose: red means "the last command you ran failed",
-  // and once another command is in front of you that is no longer what the row is telling you. The
-  // field is always assigned, including as `undefined`, because the merge spreads the previous state
-  // and a stale exit code left in it would keep the bar red for a command that never failed.
-  lastCommandExit = event.kind === "command-finished" ? event.exitCode : undefined;
+  // Only a command starting clears the failure: red means "the last command you ran failed", and
+  // once another command is in front of you that is no longer what the row is telling you.
+  //
+  // A prompt arriving does NOT clear it, which is the whole point of naming the event rather than
+  // clearing on everything that is not a finish. The prompt is printed the moment the command ends —
+  // before the next line can be typed — so clearing there wiped the exit code a failing command had
+  // just reported, every single time, and the row could never be red. The prompt says the shell is
+  // ready for the next line; it says nothing about the line that just ran.
+  if (event.kind === "command-started") lastCommandExit = undefined;
+  if (event.kind === "command-finished") lastCommandExit = event.exitCode;
   state.value = { ...state.value, lastCommandExit };
   emit("statusChanged", state.value);
 });

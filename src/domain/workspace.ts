@@ -231,11 +231,12 @@ export function sessionRowTitle(session: Session, status: TerminalSessionStatus 
  *
  * The sidebar row that lists a workdir and the rule that names it are one thing split in two, so
  * the word is written here and the row asks for it: nothing about the glyph belongs to the panel
- * that happens to be showing it. `terminal`, `agent` and `working` are in the set because the row of
- * a session asks for one too, but they are not what a checkout answers: they name an item open
- * inside a workdir, not the workdir itself.
+ * that happens to be showing it. `terminal`, `agent`, `asking` and `working` are in the set because
+ * the row of a session asks for one too, but they are not what a checkout answers: they name an item
+ * open inside a workdir, not the workdir itself.
  */
-export type WorkdirIconKind = "git" | "worktree" | "folder" | "home" | "missing" | "terminal" | "agent" | "working";
+export type WorkdirIconKind =
+  "git" | "worktree" | "folder" | "home" | "missing" | "terminal" | "agent" | "asking" | "working";
 
 /**
  * Which icon a checkout wears: a directory that is gone before anything else, the home one, a
@@ -249,7 +250,7 @@ export function workdirIconKind(
   repo: Repo | null,
   checkout: Checkout,
   homeCheckoutId?: string | null,
-): Exclude<WorkdirIconKind, "terminal" | "agent" | "working"> {
+): Exclude<WorkdirIconKind, "terminal" | "agent" | "asking" | "working"> {
   if (checkout.isMissing) return "missing";
   if (checkout.id === homeCheckoutId) return "home";
   if (repo?.kind !== "git") return "folder";

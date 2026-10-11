@@ -1199,10 +1199,17 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
         : "none";
       const pendingUnknown = identified?.awaitingReply === null;
       const agent = identified && !pendingUnknown ? AGENT_STATE[attention] : undefined;
+      /**
+       * OpenCode's colour for this session's agent, on every state but a failed turn.
+       *
+       * A blocked session is the one that asks, and the question belongs to the agent: painting it in
+       * the panel's warning said something about this row's health rather than about who is waiting,
+       * and it cost the agent its colour on the one state where the agent is doing its job. The glyph
+       * says what happened and the colour says who. A failed turn is the exception, because that one
+       * is the row's own news and stays in the danger colour.
+       */
       const tint =
-        !pendingUnknown && identified?.agent?.color && (attention === "busy" || attention === "none")
-          ? identified.agent.color
-          : null;
+        !pendingUnknown && identified?.agent?.color && attention !== "failed" ? identified.agent.color : null;
       return {
         session,
         canMove: canMoveTo(session),
@@ -1219,9 +1226,9 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
         /**
          * The glyph and its colour, which between them are the whole of the row's state.
          *
-         * - An identified OpenCode session wears its own agent colour while working or idle. The
-         *   spinner still moves while it works; waiting and a failed turn keep their warning and
-         *   danger colours, because those states need to stay unmistakable.
+         * - An identified OpenCode session wears its own agent colour while working, idle or asking.
+         *   The spinner still moves while it works and the question mark says what a waiting turn is
+         *   doing; a failed turn keeps its danger colour, because that one is the row's own news.
          * - A plain terminal with something in front of the shell is a process that is up, which is
          *   green and which nothing else in the panel is.
          * - A plain terminal whose last command failed is red. The backend cannot see that at all: the
@@ -1240,7 +1247,9 @@ function toWorkdir(repo: Repo, checkout: Checkout): Workdir {
         icon: agentTerminal
           ? agent?.state === "working"
             ? WORKDIR_ICONS.working
-            : WORKDIR_ICONS.agent
+            : agent?.state === "waiting"
+              ? WORKDIR_ICONS.asking
+              : WORKDIR_ICONS.agent
           : WORKDIR_ICONS.terminal,
         // An OpenCode whose session nobody identified has no state to draw, so it is idle rather
         // than green: `running` on a row with an agent glyph in front would claim a process that
@@ -2377,8 +2386,15 @@ function rowLabel(item: WorkdirItem): string {
   color: var(--muster-text-muted);
 }
 
+/* The agent's own colour, on every state that is the agent's: idle, working, and asking. Asking is
+   here rather than left in the warning colour above because a question is not this row being unwell
+   — it is the agent at work, and the warning took away the one colour that says which agent it is.
+   An agent with no colour of its own never reaches this rule and keeps the warning, which is all
+   that is left to say anything with. Three classes against two, so this outranks the state rules
+   without depending on where it sits among them. */
 .state-idle.agent-tinted .workdir-icon,
-.state-working.agent-tinted .workdir-icon {
+.state-working.agent-tinted .workdir-icon,
+.state-waiting.agent-tinted .workdir-icon {
   color: color-mix(in srgb, var(--agent-color) 75%, var(--muster-text-muted));
 }
 

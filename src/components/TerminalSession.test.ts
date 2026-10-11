@@ -537,6 +537,14 @@ describe("TerminalSession UI", () => {
     expect(getTerminalStatus).toHaveBeenCalled();
     expect(wrapper.emitted("statusChanged")?.at(-1)?.[0]).toMatchObject({ lastCommandExit: 2 });
 
+    // A failing command emits its exit code, and then the shell goes on to print the next prompt.
+    // The row has to still be red once that prompt is on screen: the prompt arrives immediately
+    // after the command, every single time, so clearing on it would mean the row is never red.
+    terminalMock.oscHandlers.get(133)?.("D;1");
+    terminalMock.oscHandlers.get(133)?.("B");
+    const afterPrompt = wrapper.emitted("statusChanged")?.at(-1)?.[0] as { lastCommandExit?: number };
+    expect(afterPrompt.lastCommandExit).toBe(1);
+
     // A command starting clears it, and the clear survives the poll too rather than coming back.
     terminalMock.oscHandlers.get(133)?.("C");
     await vi.advanceTimersByTimeAsync(750);

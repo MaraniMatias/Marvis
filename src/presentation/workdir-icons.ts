@@ -1,5 +1,6 @@
 import type { Component } from "vue";
 import {
+  CircleQuestionMark as CircleQuestionMarkIcon,
   Folder as FolderIcon,
   FolderGit2 as FolderGit2Icon,
   FolderX as FolderXIcon,
@@ -31,6 +32,12 @@ export const WORKDIR_ICONS: Record<WorkdirIconKind, Component> = {
    * place the row names the program, so it replaces a prefix in the text rather than joining it.
    */
   agent: SparklesIcon,
+  /**
+   * A turn that stopped to ask something. A question is not the agent at work and not the agent at
+   * rest: it is the one state where the shape itself has to say what happened, because a colour
+   * cannot — and what it wears is the agent's own colour, which names *who* is asking.
+   */
+  asking: CircleQuestionMarkIcon,
   /**
    * A turn that is running. A spinner rather than the agent's sparkles, because it is the one state
    * that moves: "a turn is open somewhere" is the one thing a static list cannot say about itself.

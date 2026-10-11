@@ -424,7 +424,7 @@ import App from "./App.vue";
 
 const SidebarStub = defineComponent({
   name: "SidebarStub",
-  props: { activeSessionId: String },
+  props: { activeSessionId: String, sessionOrder: Object as () => Record<string, string[]> },
   emits: [
     "selectCheckout",
     "selectSession",
@@ -440,6 +440,7 @@ const SidebarStub = defineComponent({
     return () =>
       h("div", [
         h("span", { "data-testid": "sidebar-active-session" }, props.activeSessionId ?? "none"),
+        h("span", { "data-testid": "sidebar-session-order" }, JSON.stringify(props.sessionOrder ?? {})),
         h("button", { "data-testid": "select-checkout-two", onClick: () => emit("selectCheckout", "checkout:two") }),
         h("button", { "data-testid": "select-session-one", onClick: () => emit("selectSession", "session:one") }),
         h("button", { "data-testid": "select-session-two", onClick: () => emit("selectSession", "session:two") }),
@@ -469,7 +470,7 @@ const SidebarStub = defineComponent({
 const SessionPaneStub = defineComponent({
   name: "SessionPane",
   props: { activeSessionId: String },
-  emits: ["sessionStatusChanged", "workspaceUpdated", "shellCreated"],
+  emits: ["sessionStatusChanged", "workspaceUpdated", "shellCreated", "sessionOrder"],
   setup(props, { expose }) {
     onMounted(() => (mocks.sessionPaneMounts += 1));
     expose({ focusActiveTerminal: mocks.focusActiveTerminal, moveSession: mocks.moveSession });
@@ -2620,6 +2621,32 @@ describe("App UI integration", () => {
       // Asking for it again is what shows whether the destination still remembers its document.
       await wrapper.get('[data-testid="select-checkout-two"]').trigger("click");
       expect((wrapper.get("#main-view-document").element as HTMLElement).style.display).not.toBe("none");
+      wrapper.unmount();
+    });
+  });
+
+  describe("a terminal reordered inside its own worktree", () => {
+    it("reaches the sidebar, because that list is drawn from this order and nothing else", async () => {
+      // The pane is the only place a checkout's terminal order is decided, and it announces every
+      // save. This was the half of the chain that was missing: the event was announced by the pane
+      // and listened for by the app, and stopped in between. So a reorder was persisted to the
+      // layout, correct and invisible — the sidebar kept drawing the order the database hands out,
+      // which is also the order the drop measured its slot against, so a drag moved nothing on the
+      // only screen that draws the result. The same was true in every worktree, the repo root
+      // included, because the event never arrived anywhere.
+      const wrapper = await mountApp(
+        workspaceWith(checkout("checkout:one", [session("session:one", "zsh", "checkout:one")])),
+      );
+      expect(wrapper.get('[data-testid="sidebar-session-order"]').text()).toBe("{}");
+
+      wrapper
+        .getComponent({ name: "SessionPane" })
+        .vm.$emit("sessionOrder", "checkout:one", ["session:two", "session:one"]);
+      await flushPromises();
+
+      expect(JSON.parse(wrapper.get('[data-testid="sidebar-session-order"]').text())).toEqual({
+        "checkout:one": ["session:two", "session:one"],
+      });
       wrapper.unmount();
     });
   });
